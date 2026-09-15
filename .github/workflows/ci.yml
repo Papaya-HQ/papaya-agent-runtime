@@ -22,9 +22,18 @@ permissions:
 
 jobs:
   test:
-    name: test
+    # `pyproject.toml` says >=3.12 and the README tells people 3.12, so 3.12 is a
+    # promise this has to keep. It was not being kept: a Python 3.13-only call
+    # (`PurePosixPath.full_match`) sat inside the migration-collision matcher and
+    # every dispatch advisory swallowed the AttributeError, so on 3.12 the check
+    # silently reported nothing. The floor only stays true if it is run.
+    name: test (py${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -35,12 +44,12 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install ${{ matrix.python }}
 
       # --frozen fails rather than silently re-resolving, so a lockfile that drifted
       # from pyproject.toml is a red build here instead of a surprise on a laptop.
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --python ${{ matrix.python }}
 
       # The suite builds real git repositories in temp directories. They set their
       # own author locally, but a global identity keeps any command that runs
