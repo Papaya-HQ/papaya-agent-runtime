@@ -12,7 +12,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -225,6 +225,16 @@ CREATE TABLE IF NOT EXISTS watermarks (
     watermark TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
     note TEXT
+);
+
+-- Which readiness verdicts the connection owner has already been told about, so a
+-- runtime that cannot work says so once rather than on every wake. Keyed on the set
+-- of problems, not the clock: the same problem tomorrow is not news, a different one
+-- is however soon it appears.
+CREATE TABLE IF NOT EXISTS readiness_reports (
+    fingerprint TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    reported_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS assessment_cycles (

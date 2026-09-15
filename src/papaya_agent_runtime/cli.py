@@ -313,6 +313,36 @@ def _repo_onboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_readiness(args: argparse.Namespace) -> int:
+    """Can this runtime take work, and if not, whose problem is each piece?"""
+    from papaya_agent_runtime import readiness as _readiness
+    from papaya_agent_runtime.state import init_db
+
+    verdict = _readiness.check()
+
+    if args.report:
+        print(_readiness.report(verdict, agent=args.agent or "", where=args.where or ""))
+    elif args.json:
+        data = verdict.as_dict()
+        conn = init_db()
+        data["already_reported"] = _readiness.already_reported(conn, verdict)
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"{verdict.state}: {_readiness.headline(verdict)}")
+        for problem in verdict.problems:
+            mark = "BLOCKS" if problem.blocking else "gap   "
+            who = "you" if problem.owner == _readiness.USER else "me"
+            print(f"  {mark} [{who}] {problem.summary}")
+            print(f"         fix: {problem.fix}")
+
+    if args.mark_reported:
+        _readiness.mark_reported(init_db(), verdict)
+    if args.forget:
+        _readiness.forget_reports(init_db())
+
+    return 1 if verdict.state == _readiness.BLOCKED else 0
+
+
 def _cmd_papaya(args: argparse.Namespace) -> int:
     """The Papaya connection: who this runtime is, and establishing that."""
     from papaya_agent_runtime import papaya
@@ -2010,6 +2040,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     onboard_cmd.add_argument("--json", action="store_true", help="machine-readable output")
     repo.set_defaults(func=_cmd_repo)
+
+    ready = sub.add_parser(
+        "readiness",
+        help="can this runtime take work? one verdict, with who has to fix each gap",
+    )
+    ready.add_argument("--json", action="store_true", help="machine-readable verdict")
+    ready.add_argument(
+        "--report",
+        action="store_true",
+        help="print the message the connection owner should be sent, and nothing else",
+    )
+    ready.add_argument(
+        "--agent",
+        default=None,
+        help="how to name this agent in the report, e.g. @engineering_agent",
+    )
+    ready.add_argument(
+        "--where", default=None, help="where this runtime lives, for a report read away from it"
+    )
+    ready.add_argument(
+        "--mark-reported",
+        dest="mark_reported",
+        action="store_true",
+        help="record that the owner has been told, so an unchanged verdict stays quiet",
+    )
+    ready.add_argument(
+        "--forget",
+        action="store_true",
+        help="clear what has been reported, so the next check speaks again",
+    )
+    ready.set_defaults(func=_cmd_readiness)
 
     papaya_cmd = sub.add_parser(
         "papaya", help="the Papaya connection: who this runtime is, and establishing it"

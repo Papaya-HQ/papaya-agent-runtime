@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 
-from papaya_agent_runtime import papaya
+from papaya_agent_runtime import papaya, readiness
 from papaya_agent_runtime.config import ConfigError, load_config
 from papaya_agent_runtime.paths import config_path, db_path, ppy_home
 from papaya_agent_runtime.providers.capability import LOCAL, record_source, recorded_version
@@ -100,8 +100,10 @@ def collect() -> dict:
         except ConfigError as exc:
             cfg_status["valid"] = False
             cfg_status["error"] = str(exc)
+    verdict = readiness.check()
     return {
         "ppy_home": str(home),
+        "readiness": verdict.as_dict(),
         "papaya": papaya.status(),
         "config": cfg_status,
         "state_db": _schema_status(),
@@ -115,6 +117,9 @@ def collect() -> dict:
 def render_text(data: dict) -> str:
     lines: list[str] = []
     lines.append(f"ppy home:   {data['ppy_home']}")
+    verdict = data.get("readiness")
+    if verdict:
+        lines.append(f"readiness: {verdict['state']} — see `ppy readiness` for what and whose")
     connection = data.get("papaya") or {}
     if connection:
         lines.append(f"papaya:    {_papaya_line(connection)}")

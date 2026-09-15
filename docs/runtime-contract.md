@@ -298,32 +298,56 @@ quietly; do not narrate the steps or report diagnostics.
    pull requests all work without it. Say once, plainly, that you're running without
    the workspace and what that costs (no work items, no channel, no shared memory),
    then get to work. Never block a build on a connection.
-3. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
+3. **Check you can actually work, and tell the owner when you can't.**
+   `ppy readiness`. It answers one question — `ready`, `degraded` (can work, gaps),
+   or `blocked` (cannot) — and for every problem says what closes it and **who has
+   to close it**: you, or a person.
+
+   Anything marked yours, *just do it* in this preflight; that is what the rest of
+   these steps are. Anything marked theirs, and you are connected to Papaya:
+   **DM the person who owns this connection.** That is the only place a blocked
+   runtime becomes visible from the workspace — from Papaya's side a connected
+   agent with a dead runtime looks perfectly healthy: the connection is live, the
+   listener is running, events are being consumed. The first job then starts a
+   harness in a home with no config, produces nothing, and writes a zero-byte log
+   nobody reads. Nobody finds out unless you say so.
+
+   How: `whoami` gives you the connection and its owner; `get_or_create_user_dm`
+   opens the DM; send what `ppy readiness --report --agent @<your handle> --where
+   <host>:<path>` prints — it names the machine, because they are often not at it.
+   Then `ppy readiness --mark-reported`, which is what stops you repeating yourself:
+   reporting is keyed on the *set* of problems, so the same trouble tomorrow is
+   silent and a new one speaks immediately. Never open a work item for this — it is
+   a broken machine, not tracked work.
+
+   If you are *not* connected, there is nobody to tell; carry on and say it to the
+   user in your first reply instead.
+4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single
    thing to install/sign into, plainly, and stop until it's handled.
-4. **Config.** If none exists, configure it yourself (see below). If it exists,
+5. **Config.** If none exists, configure it yourself (see below). If it exists,
    you're ready. `ppy health` also prints the tool profile Claude workers launch
    with (`claude.allowed_tools`); it is persisted config now, so no supervisor
    restart can leave a worker without a shell — but a profile reading `NONE`
    means every Claude dispatch will be refused until `ppy config claude --reset`.
-5. **Companions.** `ppy setup` provisions treehouse/lavish-axi/gh-axi; if a run
+6. **Companions.** `ppy setup` provisions treehouse/lavish-axi/gh-axi; if a run
    later needs one and it's missing, `ppy tools install` it yourself. Never make the
    user do it.
-6. **Load your memory.** Read the per-instance tier (`.ppy/memory/preferences.md`,
+7. **Load your memory.** Read the per-instance tier (`.ppy/memory/preferences.md`,
    `relationships.md`, your `tasks.md` work board, and `improvements.md`) plus the
    per-repo directory (`repos/<name>/`) for any repo in play, so you start smart,
    not blank — see the `durable-memory` skill. Don't relearn or re-ask what's
    already on file. Connected, your Papaya memories are the other half of this: the
    harness injects them, and they are standing instructions, not background reading.
-7. **Know your ground.** `ppy repo list`. If nothing is registered, run
+8. **Know your ground.** `ppy repo list`. If nothing is registered, run
    `ppy repo discover` and have something concrete to offer in your first reply
    rather than an empty question. If a registered repo has never been onboarded,
    `ppy repo onboard <name>` it now — it is cheap, it is offline, and it is the
    difference between a first dispatch that knows the test command and one that
    guesses.
 
-8. **Arm the heartbeat.** Start `./bin/ppy watch` as a background monitor in your
+9. **Arm the heartbeat.** Start `./bin/ppy watch` as a background monitor in your
    harness (it prints one line of team state now and every five minutes: who is
    in flight and alive, which tasks are waiting on you, the *open* pull requests
    your delivered work is sitting in with their CI verdict and mergeability, what
@@ -714,6 +738,7 @@ readable at a glance by someone who just wants to know if it's done.
 
 | Intent | Command |
 | --- | --- |
+| Can I work? | `ppy readiness [--json]` — one verdict (`ready` / `degraded` / `blocked`) with every problem, what closes it, and whether it is yours or the user's. `--report --agent @handle --where host:path` prints the message to DM the connection owner; `--mark-reported` records it so an unchanged verdict stays quiet and a changed one speaks; `--forget` clears that. Exit 1 when blocked |
 | Environment & drift | `ppy doctor` — also reports the Papaya connection: who this machine is connected as, or what would connect it |
 | Papaya connection | `ppy papaya status [--json]` (which agent you are), `ppy papaya connect [--harness claude\|codex\|cursor]` (signs in, pins this machine to an agent, installs the harness plugin — the user's only step is clicking Approve in the browser), `ppy papaya context [--refresh]` (your persona, rules and memories as the client sees them), `ppy papaya link <task> --work-item <id> [--url <url>] [--title "..."]` (records which Papaya work item a dispatched task belongs to, so the pull request body names it). Every state short of connected still builds code |
 | Find repositories | `ppy repo discover [--owner <org>] [--limit N] [--top N] [--include-forks] [--json]` — repositories on the forge that are not registered yet, most recently pushed first. Reads the signed-in account and every organization it belongs to; archived repos never appear (they cannot take a pull request) and forks are skipped unless asked for. It only ever *offers*: registration stays `ppy repo add` |
