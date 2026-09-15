@@ -247,3 +247,43 @@ def test_a_broken_readiness_check_never_takes_the_session_down(ppy_home, monkeyp
 
     monkeypatch.setattr(readiness, "check", boom)
     hooks.session_start_context(init_db())  # must not raise
+
+
+def test_every_session_is_told_it_is_the_runtime(ppy_home, monkeypatch) -> None:
+    """`ppy start` injects the role; a listener-launched session never goes through it.
+
+    On 2026-09-15 three sessions started by the Papaya listener did the work
+    directly in other checkouts — nothing briefed, nothing reviewed at an exact
+    commit, nothing delivered through the gate — because all they had was
+    CLAUDE.md, which a model holding a work item can reasonably deprioritise.
+    """
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    role = hooks.runtime_role_context()
+    assert role is not None
+    assert "YOU ARE THE PAPAYA AGENT RUNTIME" in role
+    assert "ppy dispatch" in role
+    assert "skips every gate" in role
+
+
+def test_a_framework_development_session_is_not_told_it_is_the_runtime(
+    ppy_home, monkeypatch
+) -> None:
+    """PPY_DEV means editing this codebase, not operating it."""
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.setenv("PPY_DEV", "1")
+    assert hooks.runtime_role_context() is None
+
+
+def test_the_role_arrives_even_when_the_runtime_is_perfectly_healthy(ppy_home, monkeypatch) -> None:
+    """The readiness voice goes quiet once set up; the role must not go with it."""
+    from papaya_agent_runtime import hooks
+    from papaya_agent_runtime.state import init_db
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.setattr(readiness, "check", lambda: readiness.Readiness(state=readiness.READY))
+    context = hooks.session_start_context(init_db())
+    assert context is not None
+    assert "YOU ARE THE PAPAYA AGENT RUNTIME" in context

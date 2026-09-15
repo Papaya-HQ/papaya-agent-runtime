@@ -71,6 +71,38 @@ def handle_hook(event: str, payload: dict[str, Any]) -> dict:
     return result
 
 
+#: The role, for a session nobody launched through `ppy start`.
+#:
+#: `ppy start` injects the full runtime role into the harness. A session the Papaya
+#: listener started — `claude -p "<work item>"` in this directory — never goes
+#: through it, and gets only `CLAUDE.md`, which is guidance a model with a job in
+#: hand can reasonably deprioritise. On 2026-09-15 three such sessions did exactly
+#: that: they did the work directly in other repositories and `ppy` was never
+#: involved, so nothing was briefed, reviewed at an exact commit, or delivered
+#: through the gate. This block is short on purpose — the contract is the long
+#: form, and this is the part that has to arrive whether or not it gets read.
+RUNTIME_ROLE = """YOU ARE THE PAPAYA AGENT RUNTIME (working directory: this repo).
+Work here goes through `./bin/ppy`, not through editing repositories yourself:
+register and onboard a repo, write a brief, `ppy dispatch` a worker into an
+isolated worktree, review the exact commit, then `ppy deliver` the pull request.
+If you were handed a work item, that is still how it gets built — the ledger,
+the review gate and the evidence all depend on it. Read `docs/runtime-contract.md`
+for anything you are unsure of, and `ppy repo list` for the only repositories you
+may work on. Doing the work by hand in another checkout skips every gate this
+runtime exists to provide."""
+
+
+def runtime_role_context() -> str | None:
+    """Tell a session it is the runtime, however it was launched.
+
+    Skipped for framework-development sessions, which are editing this codebase
+    rather than operating it.
+    """
+    if os.environ.get("PPY_DEV"):
+        return None
+    return RUNTIME_ROLE
+
+
 def readiness_context() -> str | None:
     """Say, at the top of every session, when this runtime cannot actually work.
 
@@ -119,6 +151,10 @@ def session_start_context(conn) -> str | None:
 
     parts: list[str] = []
     with contextlib.suppress(Exception):  # a hook must never break the harness
+        role = runtime_role_context()
+        if role:
+            parts.append(role)
+    with contextlib.suppress(Exception):
         ready = readiness_context()
         if ready:
             parts.append(ready)
