@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import decisions, repos
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.providers.fake import FakeProvider
@@ -33,7 +34,7 @@ def _config(limit: int = 1, max_reasoning: str = "xhigh") -> None:
 
 
 def _wait_for(predicate, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return

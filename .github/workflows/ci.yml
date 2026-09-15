@@ -1,0 +1,97 @@
+# The gate for this repository. A brief's verification suite should name these
+# commands, not a local approximation of them.
+#
+# Deliberately hermetic: the default pytest selection excludes the `live` marker,
+# so nothing here spawns a real Claude or Codex CLI, reaches a forge, or touches a
+# Papaya workspace. That is what makes it safe to run on every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels the run still checking the commit it replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # `pyproject.toml` says >=3.12 and the README tells people 3.12, so 3.12 is a
+    # promise this has to keep. It was not being kept: a Python 3.13-only call
+    # (`PurePosixPath.full_match`) sat inside the migration-collision matcher and
+    # every dispatch advisory swallowed the AttributeError, so on 3.12 the check
+    # silently reported nothing. The floor only stays true if it is run.
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python }}
+
+      # --frozen fails rather than silently re-resolving, so a lockfile that drifted
+      # from pyproject.toml is a red build here instead of a surprise on a laptop.
+      - name: Install dependencies
+        run: uv sync --frozen --python ${{ matrix.python }}
+
+      # The suite builds real git repositories in temp directories. They set their
+      # own author locally, but a global identity keeps any command that runs
+      # outside one from failing on an unconfigured runner.
+      - name: Configure git
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # PPY_HOME is pinned away from the checkout so a stray default can never make
+      # the suite read or write real instance state next to the source tree.
+      # Every asynchronous assertion in the suite is a poll that returns as soon as
+      # its predicate is true, so a longer deadline costs nothing on a green run —
+      # it only makes a real failure slower to report. A two-core runner is roughly
+      # half the speed of a laptop, which is what failed three unrelated supervisor
+      # tests on the first run here.
+      - name: Test
+        env:
+          PPY_HOME: ${{ runner.temp }}/ppy-home
+          PPY_TEST_TIMEOUT_SCALE: "6"
+        run: uv run pytest -q
+
+  # The single check branch protection points at. Matrix job names carry their
+  # parameters ("test (py3.12)"), so requiring them directly means every change to
+  # the matrix silently breaks the rule that guards main — a required check that no
+  # longer exists is a check that never runs. This one has a stable name and simply
+  # fails unless every matrix job succeeded.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every test job to have succeeded
+        run: |
+          echo "test result: ${{ needs.test.result }}"
+          test "${{ needs.test.result }}" = "success"

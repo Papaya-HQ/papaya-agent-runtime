@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import delivery, repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.state.db import _column_names
@@ -38,7 +39,7 @@ def _git(path, *args: str) -> str:
 
 
 def _wait_terminal(client, task_id, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         status = client.task_status(task_id)["task"]["status"]
         if status in {"worker_done", "blocked", "failed"}:

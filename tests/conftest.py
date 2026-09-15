@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -122,3 +123,20 @@ def make_git_repo(path) -> str:
 @pytest.fixture
 def source_repo(tmp_path):
     return make_git_repo(tmp_path / "source")
+
+
+#: How much longer a poll may wait than it would on a developer's laptop.
+#:
+#: Every asynchronous assertion in this suite is a poll with a deadline: it returns
+#: the instant its predicate is true, so a generous deadline costs nothing on a
+#: green run and only makes a genuine failure slower to report. On a two-core CI
+#: runner the same suite takes roughly twice as long as it does locally, which is
+#: how three unrelated supervisor tests failed on the first CI run — different ones
+#: on each Python version, none of them actually broken. One knob scales every
+#: deadline rather than fifteen hand-tuned numbers drifting apart.
+TIMEOUT_SCALE = float(os.environ.get("PPY_TEST_TIMEOUT_SCALE", "1") or "1")
+
+
+def scale(seconds: float) -> float:
+    """A polling deadline, stretched for slower machines."""
+    return seconds * TIMEOUT_SCALE

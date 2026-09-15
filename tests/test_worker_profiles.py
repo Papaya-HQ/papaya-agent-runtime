@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos, stacks
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.providers.fake import FakeProvider
@@ -34,7 +35,7 @@ def _capture_runs(supervisor: Supervisor, monkeypatch) -> list:
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return

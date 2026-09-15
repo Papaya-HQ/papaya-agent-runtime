@@ -38,7 +38,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from functools import lru_cache
+from pathlib import Path
 
 #: A task in one of these may still put a migration on the graph: a worker is
 #: writing it, or it is written and waiting for review or delivery. ``failed``
@@ -57,8 +58,7 @@ IN_FLIGHT_WINDOW = timedelta(days=7)
 # Where Alembic revisions live in a repository laid out the ordinary way. A repo
 # that keeps them somewhere else sets its own with
 # `ppy repo set <name> --migrations-glob <glob>`; the pattern is matched against
-# the repo-relative path with `PurePosixPath.full_match`, so `**` spans any
-# number of directories.
+# the whole repo-relative path, so `**` spans any number of directories.
 DEFAULT_MIGRATIONS_GLOB = "**/alembic/versions/*.py"
 
 # `down_revision = "abc123"` on one line, for a file too broken to parse.
@@ -96,14 +96,78 @@ def _git(worktree: str, *args: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
+def _segment_regex(part: str) -> str:
+    """One path segment of a glob as a regular expression.
+
+    `*` and `?` stop at a separator, so a pattern cannot silently reach into a
+    subdirectory it did not name. `[...]` classes pass through, with a leading
+    `!` spelled the way a shell spells it.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(part):
+        char = part[index]
+        if char == "*":
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        elif char == "[":
+            close = index + 1
+            if close < len(part) and part[close] in "!^":
+                close += 1
+            if close < len(part) and part[close] == "]":
+                close += 1
+            while close < len(part) and part[close] != "]":
+                close += 1
+            if close >= len(part):  # unterminated class: a literal bracket
+                out.append(re.escape(char))
+            else:
+                body = part[index + 1 : close]
+                if body[:1] in ("!", "^"):
+                    body = "^" + body[1:]
+                out.append("[" + body.replace("\\", "\\\\") + "]")
+                index = close + 1
+                continue
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return "".join(out)
+
+
+@lru_cache(maxsize=256)
+def _glob_regex(glob: str) -> re.Pattern[str] | None:
+    """A glob compiled to a whole-path pattern, or None when it is malformed.
+
+    Hand-rolled rather than `PurePosixPath.full_match`, which only exists on
+    Python 3.13 — this project supports 3.12, and on 3.12 that call raised
+    `AttributeError` from inside a broad `except`, so every migration-collision
+    advisory silently reported nothing instead of failing loudly. One
+    implementation means the version CI runs is the version that ships.
+    """
+    parts = glob.split("/")
+    pieces: list[str] = []
+    for index, part in enumerate(parts):
+        last = index == len(parts) - 1
+        if part == "**":
+            # Zero or more whole segments; the separator is part of the group, so
+            # `**/a` matches a bare `a` as well as `x/y/a`.
+            pieces.append(".*" if last else "(?:[^/]+/)*")
+        else:
+            pieces.append(_segment_regex(part) + ("" if last else "/"))
+    try:
+        return re.compile("".join(pieces) + r"\Z")
+    except re.error:
+        return None
+
+
 def matches(path: str, glob: str) -> bool:
     """Does a repo-relative path match this repo's migrations glob?"""
     if not glob:
         return False
-    try:
-        return PurePosixPath(path).full_match(glob)
-    except ValueError:
+    pattern = _glob_regex(glob)
+    if pattern is None:
         return False
+    return pattern.match(path.lstrip("/")) is not None
 
 
 def glob_for_repo(repo_row) -> str:

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import scale
+
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / ".agents"
@@ -83,7 +85,7 @@ def _run(args, env, cwd):
         cwd=cwd,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=scale(10),
     )
 
 

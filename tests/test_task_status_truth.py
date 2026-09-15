@@ -18,6 +18,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.providers.fake import FakeProvider
 from papaya_agent_runtime.state import init_db, store
@@ -41,7 +42,7 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, wanted, timeout=20.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     last = None
     while time.monotonic() < deadline:
         last = client.task_status(task_id)["task"]["status"]
@@ -60,7 +61,7 @@ def _events(task_id, kind):
 
 
 def _wait_live_runner(task_id, timeout=20.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         conn = init_db()
         rows = store.live_runners_for_task(conn, task_id)
@@ -71,7 +72,7 @@ def _wait_live_runner(task_id, timeout=20.0):
 
 
 def _wait_for(predicate, timeout=20.0, what="condition"):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return True

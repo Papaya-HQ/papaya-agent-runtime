@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.state import init_db, store
@@ -24,7 +25,7 @@ def _bounded_config(limit: int = 1) -> None:
 
 
 def _wait_for(predicate, timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return

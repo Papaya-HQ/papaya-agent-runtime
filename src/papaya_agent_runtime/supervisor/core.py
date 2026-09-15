@@ -29,6 +29,32 @@ from papaya_agent_runtime.supervisor.runner import RunnerGuardian
 from papaya_agent_runtime.worktree import Lease, LeaseError, LeaseManager
 
 
+def _advisory_failed(conn, kind: str, exc: Exception) -> None:
+    """Record that an advisory could not be computed, instead of hiding it.
+
+    A dispatch advisory is a suggestion, so it must never fail a dispatch — but a
+    silent `except` also means a crash inside one looks exactly like "nothing to
+    report". That is how a migration matcher that raised on every call shipped
+    unnoticed: every advisory returned None and every dispatch looked clean. The
+    catch stays; the silence does not.
+    """
+    with contextlib.suppress(Exception):
+        store.append_event(
+            conn,
+            kind="advisory_failed",
+            payload={
+                "advisory": kind,
+                "error": f"{type(exc).__name__}: {exc}",
+                "summary": (
+                    f"the {kind} advisory could not be computed for this dispatch "
+                    f"({type(exc).__name__}: {exc}). The dispatch went ahead — an advisory "
+                    "is a suggestion — but nothing was checked, so treat a clean dispatch "
+                    "as unknown rather than clear until this is fixed."
+                ),
+            },
+        )
+
+
 class SupervisorError(Exception):
     pass
 
@@ -214,8 +240,9 @@ class Supervisor:
             from papaya_agent_runtime import migrations as _migrations
 
             migration_advisory = _migrations.dispatch_advisory(conn, repo_row, stack_on=stack_on)
-        except Exception:  # noqa: BLE001 - an advisory never costs the dispatch
+        except Exception as exc:  # noqa: BLE001 - an advisory never costs the dispatch
             migration_advisory = None
+            _advisory_failed(conn, "migration", exc)
 
         # Whether another task in flight here already touches the files this brief
         # names. Four parallel tasks on one module cost three hand-resolved
@@ -230,8 +257,9 @@ class Supervisor:
             overlap_advisory = _overlap.dispatch_advisory(
                 conn, repo_row, touched, stack_on=stack_on
             )
-        except Exception:  # noqa: BLE001 - an advisory never costs the dispatch
+        except Exception as exc:  # noqa: BLE001 - an advisory never costs the dispatch
             overlap_advisory = None
+            _advisory_failed(conn, "overlap", exc)
 
         # Validate the task packet contract before doing any work.
         packet = {
