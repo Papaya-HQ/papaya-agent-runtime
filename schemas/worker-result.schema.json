@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papaya-agent-runtime.local/schemas/worker-result.schema.json",
+  "title": "Worker result",
+  "description": "The normalized result a runner derives from a worker. Fail-closed: a missing result is a failure, never an assumed success.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status"],
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
+    "summary": {"type": "string"},
+    "session_id": {"type": ["string", "null"]},
+    "question": {"type": ["string", "null"], "description": "set when status == blocked"},
+    "head_sha": {"type": ["string", "null"]},
+    "usage": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"type": "string"},
+        "model": {"type": ["string", "null"]},
+        "reasoning": {"type": ["string", "null"]},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

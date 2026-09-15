@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+/*__ADS_CSS__*/
+</style>
+</head>
+<body>
+<!--
+  Papaya Agent Runtime review surface — Atlassian-style default (see ads.css above).
+  Scaffolded by `lavish-review new`. Replace every section below with the real
+  content; delete what the review does not need. Keep the structure:
+    header  → what this is, for whom, as of when
+    stats   → the three numbers the reader would ask for first
+    message → the verdict or the decision being asked for, in one box
+    cards   → one card per decision, each with its own "Queue answer" form
+    table   → the evidence, scan-friendly
+    details → reference material folded away
+  Rules that keep Lavish happy: native controls (radio, checkbox, textarea,
+  button) are interactive by default; queue ONE prompt per decision from the
+  form's submit, never from a radio change; tables scroll inside .ads-table-wrap.
+  Rule that keeps the reader happy: describe every reference as what it is —
+  never a bare plan label like "1B" or "§5" (a label may follow once, in
+  parentheses). The turn-end hook bounces replies that break this; surfaces
+  are read by the same person.
+-->
+<main class="ads-page">
+
+  <header class="ads-header">
+    <div class="ads-row">
+      <span class="ads-lozenge">repo-name</span>
+      <span class="ads-lozenge ads-lozenge--inprogress">branch or ref</span>
+      <span class="ads-lozenge">2026-01-01</span>
+    </div>
+    <h1>__TITLE__</h1>
+    <p class="ads-lede">One or two sentences: what the reader is looking at, what they are being asked to decide, and what happens next once they answer.</p>
+  </header>
+
+  <section class="ads-stats" aria-label="Key numbers">
+    <div class="ads-stat">
+      <div class="ads-stat__label">Plan says</div>
+      <div class="ads-stat__value">12–16 wk</div>
+      <div class="ads-stat__hint">one engineer, as written</div>
+    </div>
+    <div class="ads-stat ads-stat--warning">
+      <div class="ads-stat__label">Team estimate</div>
+      <div class="ads-stat__value">22–44 wk</div>
+      <div class="ads-stat__hint">≥1.8× the plan</div>
+    </div>
+    <div class="ads-stat ads-stat--success">
+      <div class="ads-stat__label">Verified claims</div>
+      <div class="ads-stat__value">41 / 47</div>
+      <div class="ads-stat__hint">6 wrong or stale</div>
+    </div>
+  </section>
+
+  <section class="ads-message ads-message--warning" role="status">
+    <div class="ads-message__icon" aria-hidden="true">!</div>
+    <div class="ads-message__body">
+      <p class="ads-message__title">Verdict in one line.</p>
+      <ul>
+        <li>The first thing the reader must know.</li>
+        <li>The second. Keep it to three.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="ads-section" id="decisions">
+    <h2>Decisions</h2>
+
+    <article class="ads-card ads-card--warning" id="q1">
+      <div class="ads-row">
+        <span class="ads-lozenge ads-lozenge--moved">#1</span>
+        <span class="ads-lozenge">must be settled before the next PR starts</span>
+      </div>
+      <h3 class="ads-card__title">The question, as a question?</h3>
+      <p>Context the reader needs to answer it — what was found, where, and why it matters. Describe each thing as what it is; a plan or spec label may follow once in parentheses. Cite <code>file:line</code> for evidence.</p>
+      <form class="ads-form" data-lavish-question="q1"
+            onsubmit="event.preventDefault(); const fd = new FormData(event.currentTarget); const choice = fd.get('q1'); const note = (fd.get('note') || '').toString().trim(); if (!choice) { return; } window.lavish.queuePrompt('Q1: ' + choice + (note ? ' — note: ' + note : ''), { tag: 'decision', text: 'Q1: ' + choice, element: event.currentTarget, queueKey: 'q1', data: { question: 'q1', answer: choice, note } }); event.currentTarget.querySelector('.ads-form__status').textContent = 'Queued — press Send to Agent when you are done.';">
+        <label class="ads-choice">
+          <input type="radio" name="q1" value="(a) the default, in one line">
+          <span><span class="ads-choice__label">(a) Default.</span><div class="ads-choice__desc">What it means and what it costs.</div></span>
+        </label>
+        <label class="ads-choice">
+          <input type="radio" name="q1" value="(b) the alternative, in one line">
+          <span><span class="ads-choice__label">(b) Alternative.</span><div class="ads-choice__desc">What it means and what it costs.</div></span>
+        </label>
+        <div class="ads-field">
+          <label class="ads-label" for="q1-note">Note (optional)</label>
+          <textarea class="ads-textarea" id="q1-note" name="note" rows="2" placeholder="Anything the answer alone does not say"></textarea>
+        </div>
+        <div class="ads-form__actions">
+          <button type="submit" class="ads-btn ads-btn--primary">Queue answer to #1</button>
+          <span class="ads-form__status">Selected here stays local until you queue it.</span>
+        </div>
+      </form>
+    </article>
+  </section>
+
+  <section class="ads-section" id="evidence">
+    <h2>Evidence</h2>
+    <div class="ads-table-wrap">
+      <table class="ads-table">
+        <thead>
+          <tr><th>Claim</th><th>Where</th><th>Status</th><th>Note</th></tr>
+        </thead>
+        <tbody>
+          <tr class="ads-table__row--success"><td>The route accepts <code>since</code></td><td><code>read_models.py:479</code></td><td><span class="ads-lozenge ads-lozenge--success">verified</span></td><td>Helper only; the route did not expose it.</td></tr>
+          <tr class="ads-table__row--danger"><td>Importance is constant 1.0</td><td><code>composition.py:587</code></td><td><span class="ads-lozenge ads-lozenge--removed">wrong</span></td><td>Derived from relationship kind since 3f2a1c.</td></tr>
+          <tr><td>Single Alembic head pinned</td><td><code>test_alembic_graph.py:166</code></td><td><span class="ads-lozenge ads-lozenge--inprogress">partial</span></td><td>Pinned, but the pin is updated by hand.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="ads-section" id="reference">
+    <h2>Reference</h2>
+    <details class="ads-details">
+      <summary>Already decided — folded away so it does not compete with the open questions</summary>
+      <dl class="ads-kv">
+        <dt>Order</dt><dd>The small worker-fixes PR may merge before the larger read-contract PR.</dd>
+        <dt>Budget</dt><dd>The badge-count endpoint must answer in under 100 ms (p95); that is a gate.</dd>
+      </dl>
+    </details>
+    <details class="ads-details">
+      <summary>How this was produced</summary>
+      <p class="ads-muted">Who checked what, against which commit, and the commands that prove it.</p>
+    </details>
+  </section>
+
+  <footer class="ads-subtlest ads-small">
+    Queue answers per card, then <em>Send to Agent</em>; or annotate any text directly.
+  </footer>
+</main>
+</body>
+</html>

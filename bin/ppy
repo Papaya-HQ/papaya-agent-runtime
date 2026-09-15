@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# Thin launcher for the ppy control plane. Runs inside the repo's uv environment.
+set -eu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+# Pin the instance to this checkout. Without this, `ppy` resolves `.ppy/` from the
+# caller's working directory, so the same command run from another directory
+# silently targets a different (usually empty) instance. An explicit PPY_HOME
+# still wins, for tests and multi-instance setups.
+export PPY_HOME="${PPY_HOME:-$ROOT/.ppy}"
+exec uv run --project "$ROOT" python -m papaya_agent_runtime "$@"

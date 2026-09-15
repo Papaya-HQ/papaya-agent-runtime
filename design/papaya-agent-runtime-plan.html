@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Papaya Agent Runtime — technical plan</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :where(.grid, .flex, .layout-grid, .layout-flex) > *,
+    :where([style*="display: grid"], [style*="display:grid"], [style*="display: flex"], [style*="display:flex"]) > * { min-width: 0; }
+    :where(p, h1, h2, h3, h4, h5, h6, li, dd, blockquote, figcaption, td, th, .badge, .label, code) { overflow-wrap: anywhere; }
+    :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+    html { scroll-behavior: smooth; }
+    body { min-height: 100vh; background:
+      radial-gradient(circle at 18% -10%, color-mix(in oklab, var(--color-primary) 20%, transparent), transparent 32rem),
+      radial-gradient(circle at 92% 12%, color-mix(in oklab, var(--color-secondary) 13%, transparent), transparent 28rem),
+      var(--color-base-100); }
+    .eyebrow { letter-spacing: .18em; text-transform: uppercase; font-size: .72rem; font-weight: 700; opacity: .62; }
+    .section-anchor { scroll-margin-top: 5rem; }
+    .plan-shell { width: min(1180px, calc(100% - 2rem)); margin-inline: auto; }
+    .glass-panel { background: color-mix(in oklab, var(--color-base-100) 88%, transparent); backdrop-filter: blur(12px); }
+    .decision-form input[type="radio"] { margin-top: .2rem; }
+    .decision-option { transition: transform 140ms ease, border-color 140ms ease, background 140ms ease; }
+    .decision-option:hover { transform: translateY(-1px); border-color: color-mix(in oklab, var(--color-primary) 62%, transparent); }
+    .decision-form:has(input[value="recommended"]:checked) .recommended-option,
+    .decision-form:has(input[value="single"]:checked) .single-option,
+    .decision-form:has(input[value="auto"]:checked) .auto-option,
+    .decision-form:has(input[value="builtins"]:checked) .builtins-option,
+    .decision-form:has(input[value="python"]:checked) .python-option {
+      border-color: var(--color-primary);
+      background: color-mix(in oklab, var(--color-primary) 10%, var(--color-base-200));
+    }
+    .mermaid { display: grid; place-items: center; overflow-x: auto; padding: 1rem; }
+    .command-chip { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .76rem; }
+    .sticky-send { position: sticky; bottom: 1rem; z-index: 20; pointer-events: none; }
+    .sticky-send > * { pointer-events: auto; }
+  </style>
+</head>
+<body class="text-base-content">
+  <header class="navbar glass-panel border-b border-base-content/10 sticky top-0 z-30 px-3 sm:px-6">
+    <div class="navbar-start gap-2">
+      <div class="size-9 rounded-xl bg-primary text-primary-content grid place-items-center font-black">PPY</div>
+      <div>
+        <div class="font-bold leading-tight">Papaya Agent Runtime</div>
+        <div class="text-xs opacity-55">Technical plan · v1</div>
+      </div>
+    </div>
+    <nav class="navbar-end hidden md:flex gap-1">
+      <a class="btn btn-ghost btn-sm" href="#architecture">Architecture</a>
+      <a class="btn btn-ghost btn-sm" href="#routing">Routing</a>
+      <a class="btn btn-ghost btn-sm" href="#artifacts">Lavish</a>
+      <a class="btn btn-ghost btn-sm" href="#delivery">Delivery</a>
+      <a class="btn btn-primary btn-sm" href="#decisions">Decisions</a>
+    </nav>
+  </header>
+
+  <main class="plan-shell py-8 sm:py-12 space-y-16">
+    <section class="hero min-h-[32rem] rounded-box border border-base-content/10 overflow-hidden bg-base-200/60 shadow-2xl">
+      <div class="hero-content w-full flex-col lg:flex-row gap-10 lg:gap-16 p-7 sm:p-12">
+        <div class="max-w-2xl">
+          <div class="badge badge-primary badge-soft mb-5">Recommended v1</div>
+          <p class="eyebrow mb-3">One manager thinks. Small models build.</p>
+          <h1 class="text-4xl sm:text-6xl font-black tracking-tight leading-[.98]">A lightweight command layer for autonomous work across repos.</h1>
+          <p class="mt-6 text-lg sm:text-xl opacity-75 leading-relaxed">The user talks to one high-capability Claude or Codex manager. It delegates bounded repository work to the smallest eligible worker profile, resolves routine uncertainty, aligns cross-repo changes, personally reviews the exact final diff, and opens the PR.</p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a class="btn btn-primary" href="#architecture">Explore the design</a>
+            <a class="btn btn-outline" href="#decisions">View accepted decisions</a>
+          </div>
+        </div>
+        <div class="w-full lg:max-w-sm">
+          <div class="stats stats-vertical shadow-xl bg-base-100 w-full border border-base-content/10">
+            <div class="stat">
+              <div class="stat-title">Provider adapters</div>
+              <div class="stat-value text-primary">2</div>
+              <div class="stat-desc">Claude Code + Codex</div>
+            </div>
+            <div class="stat">
+              <div class="stat-title">Managed companion tools</div>
+              <div class="stat-value">3</div>
+              <div class="stat-desc">Treehouse + gh-axi + Lavish</div>
+            </div>
+            <div class="stat">
+              <div class="stat-title">User interruptions</div>
+              <div class="stat-value text-secondary">Critical</div>
+              <div class="stat-desc">Direction, authority, security, ceilings</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid md:grid-cols-3 gap-5">
+      <article class="card card-border bg-base-100">
+        <div class="card-body">
+          <span class="text-2xl">🧠</span>
+          <h2 class="card-title">Manager stays high-level</h2>
+          <p class="opacity-70">Plans, routes, resolves questions, coordinates dependencies, and reviews. It does not become the default implementation worker.</p>
+        </div>
+      </article>
+      <article class="card card-border bg-base-100">
+        <div class="card-body">
+          <span class="text-2xl">📉</span>
+          <h2 class="card-title">Cost is enforced</h2>
+          <p class="opacity-70">Setup captures a hard worker provider/model/effort ceiling. Every task starts on the smallest eligible profile and records why it escalated.</p>
+        </div>
+      </article>
+      <article class="card card-border bg-base-100">
+        <div class="card-body">
+          <span class="text-2xl">🧾</span>
+          <h2 class="card-title">State survives chat</h2>
+          <p class="opacity-70">Runs, decisions, worker sessions, evidence, usage, and review approvals live on disk. Conversation memory is never the source of truth.</p>
+        </div>
+      </article>
+    </section>
+
+    <section id="reference" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">What changes from Firstmate</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Keep the command philosophy. Remove the fleet machinery.</h2>
+        <p class="opacity-70 mt-3">Firstmate proves the value of a single liaison, worktree isolation, explicit authority, event-driven supervision, and restart-proof records. Papaya Agent Runtime narrows the surface to the exact workflow requested.</p>
+      </div>
+      <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+        <table class="table table-zebra">
+          <thead><tr><th>Keep</th><th>Omit from v1</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td><span class="badge badge-success badge-soft">Single liaison</span></td><td>Second managers and remote homes</td><td>One manager directly supervises declarative repo teams.</td></tr>
+            <tr><td><span class="badge badge-success badge-soft">Treehouse leases</span></td><td>tmux / Zellij / Orca / cmux matrix</td><td>Reusable identity-bound worktrees without multiple session backends.</td></tr>
+            <tr><td><span class="badge badge-success badge-soft">Durable events</span></td><td>Relay, voice, social surfaces</td><td>Local software delivery only.</td></tr>
+            <tr><td><span class="badge badge-success badge-soft">Explicit authority</span></td><td>Multiple forges and arbitrary harnesses</td><td>GitHub, Claude, and Codex define a testable v1.</td></tr>
+            <tr><td><span class="badge badge-success badge-soft">Review before delivery</span></td><td>Large shell protocol surface</td><td>A small typed Python core keeps policy inspectable.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="architecture" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">System topology</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Intelligence at the top; enforcement underneath.</h2>
+        <p class="opacity-70 mt-3">The manager makes judgments. The control plane owns facts and guardrails. Workers never gain forge authority.</p>
+      </div>
+      <div class="card card-border bg-base-100 shadow-xl">
+        <div class="card-body p-3 sm:p-8">
+          <div class="mermaid">
+flowchart TD
+    U["User<br/>objectives + critical decisions"] --> M["Manager agent<br/>Claude or Codex<br/>high-capability profile"]
+    M --> C["ppy control plane<br/>router · supervisor · state · review gate"]
+    C --> T["Bundled Treehouse<br/>durable worktree leases"]
+    C --> H["Bundled gh-axi<br/>token-efficient GitHub operations"]
+    M --> L["Bundled Lavish<br/>visual documents + review feedback"]
+    L --> U
+    L --> C
+    T --> R1["Repo A team<br/>ephemeral workers<br/>isolated leases"]
+    T --> R2["Repo B team<br/>ephemeral workers<br/>isolated leases"]
+    T --> RN["Repo N team<br/>ephemeral workers<br/>isolated leases"]
+    R1 --> Q["Structured results<br/>questions · evidence · usage"]
+    R2 --> Q
+    RN --> Q
+    Q --> M
+    M --> G{"Exact-HEAD<br/>review approved?"}
+    G -- "changes required" --> C
+    G -- "yes" --> H
+    H --> P["Deterministic push + PR open<br/>structured live verification"]
+    P --> U
+          </div>
+        </div>
+      </div>
+      <div class="grid md:grid-cols-2 lg:grid-cols-5 gap-4">
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-primary">1</div><h3 class="font-bold text-lg">Manager agent</h3><p class="text-sm opacity-70">Planning, decomposition, question resolution, cross-repo alignment, final review.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-secondary">2</div><h3 class="font-bold text-lg">Control plane</h3><p class="text-sm opacity-70">SQLite, subprocesses, policy, lease identity, usage, lifecycle events, PR gating.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-accent">3</div><h3 class="font-bold text-lg">Adapters</h3><p class="text-sm opacity-70">Provider-specific commands and event streams behind one contract.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge">4</div><h3 class="font-bold text-lg">Managed tools</h3><p class="text-sm opacity-70">Pinned Treehouse, gh-axi, and Lavish copies with checksums, status, and explicit updates.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge">5</div><h3 class="font-bold text-lg">Repo teams</h3><p class="text-sm opacity-70">Scout, implementer, tester, and reviewer roles; ephemeral sessions, durable facts.</p></div></article>
+      </div>
+    </section>
+
+    <section id="setup" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">First-run experience</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Model economics are the setup—not an advanced setting.</h2>
+        <p class="opacity-70 mt-3">The wizard first discovers installed and authenticated harnesses, then creates a manager profile and hard worker ceiling from viable choices only.</p>
+      </div>
+      <div class="grid lg:grid-cols-[1.1fr_.9fr] gap-6">
+        <div class="mockup-window border border-base-content/15 bg-base-300 shadow-2xl">
+          <div class="bg-base-100 p-5 sm:p-8 space-y-6">
+            <div class="flex items-center justify-between gap-3">
+              <div><div class="eyebrow">ppy setup · 2 of 5</div><h3 class="text-2xl font-bold mt-1">Choose how intelligence is spent</h3></div>
+              <span class="badge badge-primary badge-soft">Required</span>
+            </div>
+            <div class="grid sm:grid-cols-2 gap-4">
+              <fieldset class="fieldset rounded-box bg-base-200 border border-base-content/10 p-4">
+                <legend class="fieldset-legend text-base">Manager profile</legend>
+                <label class="label">Installed harness</label><select class="select w-full"><option>OpenAI / Codex — ready</option><option>Anthropic / Claude — ready</option></select>
+                <label class="label mt-2">Model</label><select class="select w-full"><option>Detected manager models…</option></select>
+                <label class="label mt-2">Reasoning</label><select class="select w-full"><option>High</option><option>Medium</option><option>XHigh</option></select>
+                <p class="label opacity-60">The manager does planning and final review.</p>
+              </fieldset>
+              <fieldset class="fieldset rounded-box bg-base-200 border border-base-content/10 p-4">
+                <legend class="fieldset-legend text-base">Worker ceiling</legend>
+                <label class="label">Installed harness</label><select class="select w-full"><option>Anthropic / Claude — ready</option><option>OpenAI / Codex — ready</option></select>
+                <label class="label mt-2">Maximum model</label><select class="select w-full"><option>Detected worker models…</option></select>
+                <label class="label mt-2">Maximum reasoning</label><select class="select w-full"><option>High</option><option>Medium</option><option>XHigh</option></select>
+                <p class="label opacity-60">The router starts below this ceiling whenever possible.</p>
+              </fieldset>
+            </div>
+            <div class="alert alert-info alert-soft"><span><strong>Runtime guarantee:</strong> no retry, manager command, or worker can launch above this ceiling without changing config.</span></div>
+            <div class="flex justify-end"><button class="btn btn-primary">Save model policy →</button></div>
+          </div>
+        </div>
+        <div class="space-y-4">
+          <article class="card card-border bg-base-100"><div class="card-body"><h3 class="card-title">Environment discovery</h3><ul class="list-disc pl-5 space-y-2 opacity-75"><li>Executable path and CLI version</li><li>Authentication status</li><li>Supported model and effort controls</li><li>Unavailable harnesses shown with repair steps</li></ul><p class="text-sm opacity-60 mt-2">The configured harness never silently falls back to another provider.</p></div></article>
+          <article class="card card-border bg-base-100"><div class="card-body"><h3 class="card-title">Easy to revisit</h3><div class="flex flex-wrap gap-2"><span class="badge command-chip">ppy config models</span><span class="badge command-chip">ppy config authority</span><span class="badge command-chip">ppy tools status</span><span class="badge command-chip">ppy doctor</span></div><p class="opacity-70 mt-3">All setup decisions have focused reconfiguration flows; hand-editing TOML is optional.</p></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section id="tooling" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Install + managed tooling</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">One bootstrap, three pinned companions, no global-version roulette.</h2>
+        <p class="opacity-70 mt-3">The repo ships a deterministic installer and a shared setup skill. The installer owns mechanics; the skill explains failures, requests consent, and resumes safely.</p>
+      </div>
+      <ul class="steps steps-vertical lg:steps-horizontal w-full">
+        <li class="step step-primary">Clone</li>
+        <li class="step step-primary"><span class="command-chip">./bin/install</span></li>
+        <li class="step step-primary"><span class="command-chip">ppy setup</span></li>
+        <li class="step step-primary">Add repo</li>
+        <li class="step">Start manager</li>
+      </ul>
+      <div class="grid md:grid-cols-2 gap-5">
+        <article class="card card-border bg-base-100">
+          <div class="card-body">
+            <div class="flex items-center justify-between gap-3"><span class="text-3xl">🌳</span><span class="badge badge-success badge-soft">Treehouse</span></div>
+            <h3 class="card-title">Durable worktree leases</h3>
+            <p class="opacity-70">Provision a pinned release binary. Acquire with an identity-bound JSON lease, store the lease ID, and release only after landed-work safety is proven.</p>
+            <div class="card-actions"><span class="badge command-chip">get --lease --json</span><span class="badge command-chip">return --if-lease-id</span></div>
+          </div>
+        </article>
+        <article class="card card-border bg-base-100">
+          <div class="card-body">
+            <div class="flex items-center justify-between gap-3"><span class="text-3xl">🐙</span><span class="badge badge-info badge-soft">gh-axi</span></div>
+            <h3 class="card-title">Agent-native GitHub</h3>
+            <p class="opacity-70">Provision a pinned isolated npm package. The manager gets compact GitHub output and recovery hints; the control plane verifies safety-critical outcomes with structured live reads.</p>
+            <div class="card-actions"><span class="badge command-chip">pr create</span><span class="badge command-chip">pr checks</span><span class="badge command-chip">run view</span></div>
+          </div>
+        </article>
+        <article class="card card-border bg-base-100">
+          <div class="card-body">
+            <div class="flex items-center justify-between gap-3"><span class="text-3xl">🖼️</span><span class="badge badge-accent badge-soft">Lavish</span></div>
+            <h3 class="card-title">Documents that talk back</h3>
+            <p class="opacity-70">Provision a pinned isolated npm package. The manager creates rich HTML review surfaces, then receives annotations, document chat, selected text, and whiteboard edits through a durable feedback loop.</p>
+            <div class="card-actions"><span class="badge command-chip">lavish-axi design</span><span class="badge command-chip">lavish-axi poll</span><span class="badge command-chip">ppy artifact status</span></div>
+          </div>
+        </article>
+        <article class="card bg-secondary text-secondary-content shadow-xl">
+          <div class="card-body">
+            <div class="flex items-center justify-between gap-3"><span class="text-3xl">🧰</span><span class="badge">Setup skill</span></div>
+            <h3 class="card-title">Install, repair, resume</h3>
+            <p class="opacity-85">A shared Claude/Codex skill runs structured doctor output, explains missing prerequisites, asks before installs or authentication, and resumes the wizard at the incomplete step.</p>
+            <div class="card-actions"><span class="badge command-chip">ppy doctor</span><span class="badge command-chip">ppy setup --resume</span></div>
+          </div>
+        </article>
+      </div>
+      <div class="grid lg:grid-cols-[.9fr_1.1fr] gap-5">
+        <article class="card card-border bg-base-100"><div class="card-body"><h3 class="card-title">Managed bundle contract</h3><ul class="list-disc pl-5 space-y-2 opacity-75"><li>Checked-in <span class="command-chip">tools.lock</span> pins versions, sources, and checksums</li><li>Local copies live under gitignored <span class="command-chip">.ppy/tools/</span></li><li>Upstream MIT notices are retained</li><li><span class="command-chip">ppy tools status/update</span> makes upgrades explicit</li><li>Advanced path overrides are allowed, never automatic</li></ul></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="flex flex-wrap justify-between gap-3"><h3 class="card-title">README: usable in five minutes</h3><span class="badge badge-primary badge-soft">Above the fold</span></div><div class="grid sm:grid-cols-2 gap-2 text-sm opacity-75"><div>✓ Requirements + supported platforms</div><div>✓ Install and what changes locally</div><div>✓ Choose manager + worker ceiling</div><div>✓ Add a repo + give first objective</div><div>✓ Same-provider and mixed-provider examples</div><div>✓ Progress, restart, and resume</div><div>✓ Review and comment in Lavish</div><div>✓ Doctor, cleanup, and safety boundary</div></div><p class="mt-3 text-sm">Users operate the product from the README. <span class="command-chip">AGENTS.md</span> is the manager's contract, not the user manual.</p></div></article>
+      </div>
+    </section>
+
+    <section id="routing" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Routing policy</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Choose the smallest profile likely to finish—not the cheapest call.</h2>
+        <p class="opacity-70 mt-3">A failed tiny model can cost more than a correctly chosen small model. The manager routes by expected total cost and escalates only on evidence.</p>
+      </div>
+      <div class="card card-border bg-base-100 shadow-xl"><div class="card-body p-3 sm:p-8"><div class="mermaid">
+flowchart LR
+    T["Task packet"] --> K["Classify<br/>shape · risk · ambiguity · breadth"]
+    K --> S["Select smallest<br/>eligible model + effort"]
+    S --> E{"Within worker<br/>ceiling?"}
+    E -- "no" --> D["Split or ask user<br/>to raise ceiling"]
+    E -- "yes" --> W["Run worker"]
+    W --> V{"Evidence meets<br/>contract?"}
+    V -- "yes" --> O["Return normalized result"]
+    V -- "no: task too broad" --> X["Split / re-scope"]
+    V -- "no: capability mismatch" --> A["Escalate one profile<br/>record reason"]
+    X --> S
+    A --> E
+      </div></div></div>
+      <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+        <table class="table table-zebra">
+          <thead><tr><th>Task signal</th><th>Starting posture</th><th>Escalate when</th></tr></thead>
+          <tbody>
+            <tr><td>Read-only lookup, mechanical test, narrow doc edit</td><td><span class="badge badge-success badge-soft">Smallest · low</span></td><td>Evidence is missing or instructions conflict.</td></tr>
+            <tr><td>Localized implementation with known patterns</td><td><span class="badge badge-info badge-soft">Small · medium</span></td><td>Tests expose non-local behavior or two attempts fail.</td></tr>
+            <tr><td>Multi-module change or unfamiliar failure diagnosis</td><td><span class="badge badge-warning badge-soft">Mid · medium/high</span></td><td>Architectural ambiguity cannot be decomposed.</td></tr>
+            <tr><td>Security-sensitive or cross-repo contract reasoning</td><td><span class="badge badge-error badge-soft">Highest eligible · high</span></td><td>Never above the ceiling; manager retains the hard judgment.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="adapters" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Provider boundary</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">One worker protocol; two precise CLI adapters.</h2>
+        <p class="opacity-70 mt-3">Commands and event shapes stay provider-specific. Task packets, results, questions, usage, and lifecycle state do not.</p>
+      </div>
+      <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+        <table class="table">
+          <thead><tr><th>Concern</th><th>Codex adapter</th><th>Claude adapter</th></tr></thead>
+          <tbody>
+            <tr><td>Non-interactive run</td><td><span class="badge command-chip">codex exec</span> with JSONL</td><td><span class="badge command-chip">claude -p</span> with stream JSON</td></tr>
+            <tr><td>Stable final result</td><td>Output JSON Schema + normalized terminal event</td><td>JSON Schema + normalized result event</td></tr>
+            <tr><td>Session continuation</td><td>Persist thread ID; resume that ID</td><td>Persist session ID; resume that ID</td></tr>
+            <tr><td>Model and effort</td><td>Model flag + <span class="command-chip">model_reasoning_effort</span></td><td>Model flag + effort flag</td></tr>
+            <tr><td>Default permissions</td><td>Workspace-write sandbox + automatic review</td><td>Controlled automatic permission mode</td></tr>
+            <tr><td>Manager continuity</td><td>Codex Stop / SessionStart hooks</td><td>Claude Stop / SessionStart hooks</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="alert alert-warning alert-soft"><span>Dangerous bypass modes are not the default. Workers cannot push, open PRs, merge, access other repos, or inherit forge credentials.</span></div>
+    </section>
+
+    <section id="transport" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Agent communication</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Structured subprocesses underneath; no terminal multiplexer in the protocol.</h2>
+        <p class="opacity-70 mt-3">Firstmate benefits from tmux for a broad fleet of interactive agents. Papaya Agent Runtime can exploit Claude and Codex's non-interactive event streams and exact resume IDs, removing an entire layer of terminal state.</p>
+      </div>
+      <div class="card card-border bg-base-100 shadow-xl"><div class="card-body p-3 sm:p-8"><div class="mermaid">
+flowchart LR
+    M["Interactive manager<br/>Claude or Codex"] --> CLI["ppy CLI"]
+    CLI -->|"dispatch · steer · cancel<br/>idempotent operation ID"| S["Local supervisor<br/>Unix socket"]
+    M -->|"ppy wait --until-actionable"| S
+    S --> R1["Task runner guardian<br/>reconnectable socket + spool"]
+    S --> R2["Task runner guardian<br/>reconnectable socket + spool"]
+    R1 --> C["Codex exec<br/>JSONL + thread ID"]
+    R2 --> A["Claude print mode<br/>stream JSON + session ID"]
+    C --> E["Normalized events<br/>question · result · usage"]
+    A --> E
+    E --> DB["SQLite + run files<br/>source of truth"]
+    DB --> S
+    S -->|"compact actionable batch"| M
+    O["Optional tmux observer<br/>logs + worktrees only"] -.-> S
+      </div></div></div>
+      <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-primary badge-soft">Normal path</div><h3 class="font-bold">One blocking wait</h3><p class="text-sm opacity-70">The manager dispatches, then waits on the supervisor. A question or completion wakes the same turn without periodic model calls.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-warning badge-soft">Steering</div><h3 class="font-bold">Checkpoint or interrupt</h3><p class="text-sm opacity-70">Queue guidance for the next safe boundary, or interrupt urgently, reconcile the worktree, and resume the proven-compatible session.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-success badge-soft">Recovery</div><h3 class="font-bold">Runners guard live pipes</h3><p class="text-sm opacity-70">If the manager or supervisor disconnects, task runners continue spooling sequenced events. Reconnection replays only what was not acknowledged.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-ghost">Optional</div><h3 class="font-bold">Tmux for eyes, not truth</h3><p class="text-sm opacity-70">A later observer may arrange logs and worktrees into panes. It never carries messages, identity, or lifecycle state.</p></div></article>
+      </div>
+      <div class="alert alert-info alert-soft"><span><strong>Fail closed on continuity:</strong> if a provider/version cannot prove interrupted-session resume, Papaya Agent Runtime starts a fresh worker with the task packet, worktree diff, last checkpoint, and open obligations. It never claims seamless continuation based on a PID alone.</span></div>
+    </section>
+
+    <section id="questions-flow" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Worker uncertainty</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Questions stop at the manager unless only the user can answer.</h2>
+      </div>
+      <div class="grid lg:grid-cols-3 gap-5">
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-success badge-soft">Resolve</div><h3 class="card-title">Known, still-valid decision</h3><p class="opacity-70">Reuse a scoped prior answer only when its assumptions and context fingerprint still hold. Cite it and resume the same worker session.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-info badge-soft">Assume</div><h3 class="card-title">Reversible uncertainty</h3><p class="opacity-70">Choose a sensible in-scope default, record the assumption, and keep moving.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-error badge-soft">Escalate</div><h3 class="card-title">Critical decision</h3><p class="opacity-70">Ask the user for product direction, new authority, credentials, destructive action, conflicting requirements, or a ceiling increase.</p></div></article>
+      </div>
+      <div class="alert alert-info"><span>When a worker is confused because the task is too broad, that is a routing problem. The manager splits or re-routes it instead of forwarding the confusion to the user.</span></div>
+      <div class="card card-border bg-base-100 shadow-xl"><div class="card-body p-3 sm:p-8"><div class="mermaid">
+flowchart LR
+    E["Critical question<br/>escalated to user"] --> D["Structured decision<br/>scope · rationale · inputs · validity"]
+    D --> R["Resume blocked worker<br/>link answer to task"]
+    D --> F{"Relevant context<br/>still matches?"}
+    F -- "yes" --> U["Reuse without asking<br/>record citation"]
+    F -- "materially changed" --> Q["Mark review required<br/>summarize the delta"]
+    Q --> E
+    E --> S["Supersede old record<br/>preserve history"]
+      </div></div></div>
+      <div class="grid lg:grid-cols-3 gap-4">
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-success badge-soft">Remember</div><h3 class="font-bold">Narrowest justified scope</h3><p class="text-sm opacity-70">Global, repo, product area, run, or task. A one-off answer never silently becomes a permanent preference.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-warning badge-soft">Revalidate</div><h3 class="font-bold">Context fingerprint</h3><p class="text-sm opacity-70">Requirements, dependent decisions, relevant file/contract SHAs, authority, model ceilings, and time-sensitive facts.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-info badge-soft">Re-ask well</div><h3 class="font-bold">Ask only about the delta</h3><p class="text-sm opacity-70">Explain what changed, retain the old rationale, and link the replacement rather than relitigating the full question.</p></div></article>
+      </div>
+    </section>
+
+    <section id="artifacts" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Lavish document loop</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Complex work gets a review surface that talks back.</h2>
+        <p class="opacity-70 mt-3">For architecture, plans, comparisons, release reviews, and connected decisions, the manager creates a portable HTML artifact. Comments inside that document are first-class user input, not a side channel the system forgets.</p>
+      </div>
+      <div class="card card-border bg-base-100 shadow-xl"><div class="card-body p-3 sm:p-8"><div class="mermaid">
+sequenceDiagram
+    participant M as Manager
+    participant PPY as ppy supervisor + state
+    participant L as Bundled Lavish
+    participant U as User
+    M->>L: design + matching playbooks
+    M->>PPY: persist artifact path + session
+    PPY->>L: open; start completion-aware poll
+    L->>U: interactive HTML review surface
+    U->>L: annotations, chat, selections, whiteboard
+    L-->>PPY: structured feedback batch
+    PPY-->>M: wake with compact artifact_feedback event
+    M->>PPY: apply feedback + record linked decisions
+    M->>L: update artifact + agent reply + poll again
+    U->>L: Send & End
+    L-->>PPY: final feedback exactly once
+      </div></div></div>
+      <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-primary badge-soft">Create</span><h3 class="font-bold">Use when visual structure helps</h3><p class="text-sm opacity-70">Plans, diagrams, comparisons, reports, complex decisions. Skip trivial statuses and one-line questions.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-info badge-soft">Listen</span><h3 class="font-bold">Attached poll only</h3><p class="text-sm opacity-70">Foreground or supervisor-owned with a verified wake path. Never detached fire-and-forget.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-warning badge-soft">Normalize</span><h3 class="font-bold">Load the small facts first</h3><p class="text-sm opacity-70">Persist prompts and summaries; fetch large snapshots, attachments, or whiteboard files only when needed.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-success badge-soft">Close</span><h3 class="font-bold">Respect Send & End</h3><p class="text-sm opacity-70">Consume final feedback once. Do not reopen a user-ended review without a new request.</p></div></article>
+      </div>
+      <div class="alert alert-success alert-soft"><span><strong>Durable outcome:</strong> every applied comment links the artifact revision, feedback event, resulting decision or task change, and manager reply. A restart can reconstruct what was requested and what happened next.</span></div>
+    </section>
+
+    <section id="delivery" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Autonomous lifecycle</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">A run is a recoverable state machine, not a long chat.</h2>
+      </div>
+      <div class="card card-border bg-base-100 shadow-xl"><div class="card-body p-3 sm:p-8"><div class="mermaid">
+stateDiagram-v2
+    [*] --> Requested
+    Requested --> Planned
+    Planned --> Ready
+    Ready --> Running
+    Running --> BlockedManager: worker question
+    BlockedManager --> Running: manager answers
+    BlockedManager --> BlockedUser: critical only
+    BlockedUser --> Running: user decides
+    Running --> WorkerDone
+    WorkerDone --> ManagerReview
+    ManagerReview --> Rework: changes required
+    Rework --> Running
+    ManagerReview --> Approved: exact HEAD passes
+    Approved --> PROpen
+    PROpen --> Complete
+    Complete --> [*]
+      </div></div></div>
+      <div class="grid lg:grid-cols-2 gap-5">
+        <article class="card card-border bg-base-100"><div class="card-body"><h3 class="card-title">Manager acts without asking</h3><ul class="list-disc pl-5 space-y-2 opacity-75"><li>Clone/fetch and create worktrees</li><li>Plan and align cross-repo work</li><li>Route, retry, split, and rework below ceilings</li><li>Run validations and make reversible assumptions</li><li>Commit, push, and open an approved PR</li></ul></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><h3 class="card-title">User remains the authority</h3><ul class="list-disc pl-5 space-y-2 opacity-75"><li>Product or direction ambiguity</li><li>Scope expansion or conflicting requirements</li><li>Secrets, access, destructive or production actions</li><li>Worker ceiling or spend increases</li><li>Merging, unless explicitly granted later</li></ul></div></article>
+      </div>
+    </section>
+
+    <section id="review" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Delivery gate</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">The manager reviews the exact commit that will be pushed.</h2>
+      </div>
+      <div class="grid lg:grid-cols-[.85fr_1.15fr] gap-5">
+        <article class="card bg-primary text-primary-content shadow-xl"><div class="card-body"><div class="text-4xl">🔐</div><h3 class="card-title text-2xl">Approval is SHA-bound</h3><p class="opacity-85">The review records its base and head. Any later commit invalidates approval. The PR command refuses to run until the new head is reviewed.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><h3 class="card-title">Review bundle</h3><div class="grid sm:grid-cols-2 gap-2 text-sm opacity-75"><div>✓ Objective + acceptance criteria</div><div>✓ Base/head SHAs</div><div>✓ Diff summary + full diff path</div><div>✓ Test and validation evidence</div><div>✓ Assumptions + open questions</div><div>✓ Cross-repo contracts + rollout order</div><div>✓ Risks and dependency state</div><div>✓ Provider/model/usage ledger</div></div><div class="divider"></div><p class="text-sm">A cheap reviewer may add evidence. Only the configured manager can issue the final approval.</p></div></article>
+      </div>
+    </section>
+
+    <section id="state" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Durable knowledge</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Scoped memory, with provenance and a delete button.</h2>
+      </div>
+      <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+        <table class="table table-zebra">
+          <thead><tr><th>Record</th><th>What belongs there</th><th>How it enters context</th></tr></thead>
+          <tbody>
+            <tr><td><strong>User preferences</strong></td><td>Explicit working style and standing authority</td><td>Only when relevant to the current action</td></tr>
+            <tr><td><strong>Decisions</strong></td><td>Question, answer, rationale, scope, inputs, validity, supersession</td><td>Only after its context fingerprint is revalidated</td></tr>
+            <tr><td><strong>Repo facts</strong></td><td>Tests, conventions, entrypoints, repo relationships</td><td>Invalidated by relevant file/base-SHA changes</td></tr>
+            <tr><td><strong>Run state</strong></td><td>Versioned tasks, dependencies, sessions, runner identities, event acknowledgements, Treehouse leases, reviews</td><td>Compact active-run summary only</td></tr>
+            <tr><td><strong>Artifact feedback</strong></td><td>Lavish session, revision, prompts, applications, replies, end status</td><td>Compact unapplied events; large attachments on demand</td></tr>
+            <tr><td><strong>Tool lock</strong></td><td>Pinned Treehouse/gh-axi/Lavish versions, sources, checksums, licenses</td><td>Doctor and installer; never model context by default</td></tr>
+            <tr><td><strong>Raw evidence</strong></td><td>Events, transcripts, diffs, command output</td><td>On demand; never injected by default</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="alert alert-success alert-soft"><span>Learning means preserving explicit, context-aware decisions and verified facts—not silently inferring a personality from chat or turning a one-off answer into permanent policy. Users can inspect, supersede, review, and forget every durable record.</span></div>
+    </section>
+
+    <section id="phases" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Implementation sequence</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Four increments, each independently provable.</h2>
+      </div>
+      <ul class="steps steps-vertical lg:steps-horizontal w-full">
+        <li class="step step-primary">Kernel</li>
+        <li class="step step-primary">Real workers</li>
+        <li class="step step-primary">Autonomous delivery</li>
+        <li class="step">Hardening</li>
+      </ul>
+      <div class="grid md:grid-cols-2 gap-5">
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-primary">Phase 1</div><h3 class="card-title">Kernel</h3><p class="opacity-70">Installer, setup skill, README, harness discovery, pinned tools, SQLite, supervisor/socket, task runners, Treehouse leases, fake provider, restart/reconcile.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-primary">Phase 2</div><h3 class="card-title">Claude + Codex workers</h3><p class="opacity-70">Adapters, JSON events, schemas, usage, ceilings, steering compatibility, concurrent task DAG, blocked-worker resume.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge badge-primary">Phase 3</div><h3 class="card-title">Autonomous delivery</h3><p class="opacity-70">Supervisor, hooks, question routing, rework, exact-HEAD review, push and PR, cross-repo checks.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><div class="badge">Phase 4</div><h3 class="card-title">Hardening + dogfood</h3><p class="opacity-70">Crash recovery, socket disconnect/event replay, CLI drift fixtures, live opt-in tests, memory controls, doctor, cost reports, concise docs.</p></div></article>
+      </div>
+    </section>
+
+    <section id="estimate" class="section-anchor space-y-6">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Engineering estimate</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">A demo in days; trustworthy autonomy in weeks.</h2>
+        <p class="opacity-70 mt-3">Estimate assumes one experienced engineer working with coding agents, authenticated test accounts, macOS/Linux only, managed tool pins, and no custom TUI.</p>
+      </div>
+      <div class="grid md:grid-cols-3 gap-5">
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-info badge-soft">3–5 working days</span><h3 class="card-title">Working demo</h3><p class="opacity-70">Setup skeleton, one repo, one provider worker, Treehouse lease, durable task state, and manual manager review.</p></div></article>
+        <article class="card bg-primary text-primary-content shadow-xl"><div class="card-body"><span class="badge">10–15 working days</span><h3 class="card-title">Usable alpha</h3><p class="opacity-85">Both providers, routing ceilings, supervisor/runners, multi-repo DAG, reviewed PR delivery, Lavish feedback, normal restart.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-success badge-soft">20–30 working days</span><h3 class="card-title">Hardened v1</h3><p class="opacity-70">In-flight steering, replay/reconciliation, decision invalidation, failure injection, live compatibility tests, and polished docs.</p></div></article>
+      </div>
+      <div class="alert alert-warning alert-soft"><span><strong>Largest uncertainty:</strong> real interrupted-turn and resume behavior across installed Claude/Codex CLI versions. Re-estimate after the first single-provider vertical slice and compatibility probe.</span></div>
+    </section>
+
+    <section id="risks" class="section-anchor space-y-6">
+      <div class="max-w-3xl"><p class="eyebrow">Risks to design around</p><h2 class="text-3xl sm:text-4xl font-bold mt-2">The sharp edges are knowable.</h2></div>
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-warning badge-soft">CLI drift</span><h3 class="font-bold">Flags and events change</h3><p class="text-sm opacity-70">Version probes, pinned companion tools, adapter fixtures, and fail-closed capability checks.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-warning badge-soft">False cheapness</span><h3 class="font-bold">Tiny model, many retries</h3><p class="text-sm opacity-70">Route by expected total cost and use evidence-based escalation.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-warning badge-soft">Continuity</span><h3 class="font-bold">Connections or sessions stop</h3><p class="text-sm opacity-70">Runner spools and disk state are authoritative; sockets and hooks are reconnectable wake paths.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-error badge-soft">Runaway autonomy</span><h3 class="font-bold">Prompt rules get ignored</h3><p class="text-sm opacity-70">Authority, ceilings, retries, and review gates live in runtime code.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-warning badge-soft">Stale memory</span><h3 class="font-bold">Old facts steer new work</h3><p class="text-sm opacity-70">Scope, provenance, SHA validity, and explicit archive/forget flows.</p></div></article>
+        <article class="card card-border bg-base-100"><div class="card-body"><span class="badge badge-warning badge-soft">Supply chain</span><h3 class="font-bold">Managed tools are executable</h3><p class="text-sm opacity-70">Pinned sources, checksums, MIT notices, isolated installs, explicit updates.</p></div></article>
+      </div>
+    </section>
+
+    <section id="decisions" class="section-anchor space-y-8">
+      <div class="max-w-3xl">
+        <p class="eyebrow">Decision record</p>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">All seven recommended defaults are accepted for v1.</h2>
+        <p class="opacity-70 mt-3">Accepted on 2026-08-28. The selected options below remain revisable: queue only the decisions you want to supersede, and the prior rationale will stay in history.</p>
+      </div>
+      <div class="alert alert-success"><span><strong>Resolved:</strong> single worker-provider ceiling; automatic reviewed PRs; built-in roles with overrides; agent-home surface; Python on macOS/Linux; managed companion-tool pins; supervisor/socket transport with optional tmux.</span></div>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="manager-surface" onsubmit="queueDecision(event, 'manager-surface', 'Manager surface')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 1</span><h3 class="card-title text-xl mt-2">How should the user enter Papaya Agent Runtime?</h3></div><span class="badge badge-success badge-soft">Agent home recommended</span></div>
+          <div class="grid md:grid-cols-2 gap-3 mt-2">
+            <label class="decision-option recommended-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="recommended" checked><span><strong>Agent home + <span class="command-chip">ppy start</span></strong><small class="block opacity-65 mt-1">Launch the configured Claude or Codex manager in this repo. Smallest surface and fastest dogfood loop.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="custom-tui"><span><strong>Custom chat/TUI now</strong><small class="block opacity-65 mt-1">More product-like, but adds UI, streaming, terminal, and session work before core autonomy is proven.</small></span></label>
+          </div>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="worker-pool" onsubmit="queueDecision(event, 'worker-pool', 'Worker provider pool')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 2</span><h3 class="card-title text-xl mt-2">One worker provider ceiling or both providers at once?</h3></div><span class="badge badge-success badge-soft">Single ceiling recommended</span></div>
+          <div class="grid md:grid-cols-2 gap-3 mt-2">
+            <label class="decision-option single-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="single" checked><span><strong>One worker provider + ceiling</strong><small class="block opacity-65 mt-1">Manager may be the other provider, so Claude and Codex still work together. Routing and cost policy stay simple.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="dual"><span><strong>Independent ceilings for both</strong><small class="block opacity-65 mt-1">Lets the manager choose provider per task, but setup, catalogs, quota handling, and routing become more complex.</small></span></label>
+          </div>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="pr-authority" onsubmit="queueDecision(event, 'pr-authority', 'PR authority')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 3</span><h3 class="card-title text-xl mt-2">What happens after the manager approves the exact head?</h3></div><span class="badge badge-success badge-soft">Auto-open recommended</span></div>
+          <div class="grid md:grid-cols-2 gap-3 mt-2">
+            <label class="decision-option auto-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="auto" checked><span><strong>Push + open PR automatically</strong><small class="block opacity-65 mt-1">Matches the autonomy goal. Merge still requires explicit user authority.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="confirm"><span><strong>Ask before every PR</strong><small class="block opacity-65 mt-1">Stricter, but turns a routine reversible delivery step into a recurring interruption.</small></span></label>
+          </div>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="repo-roles" onsubmit="queueDecision(event, 'repo-roles', 'Repository roles')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 4</span><h3 class="card-title text-xl mt-2">How are repo-specific teams defined?</h3></div><span class="badge badge-success badge-soft">Built-ins recommended</span></div>
+          <div class="grid md:grid-cols-2 gap-3 mt-2">
+            <label class="decision-option builtins-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="builtins" checked><span><strong>Built-in roles + repo overrides</strong><small class="block opacity-65 mt-1">Scout, implementer, tester, reviewer. Repo onboarding discovers commands and conventions; users customize only when useful.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="custom"><span><strong>User defines every team</strong><small class="block opacity-65 mt-1">Maximum control, but setup becomes heavier before the system can do useful work.</small></span></label>
+          </div>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="runtime-stack" onsubmit="queueDecision(event, 'runtime-stack', 'Runtime stack')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 5</span><h3 class="card-title text-xl mt-2">Is the proposed runtime stack acceptable?</h3></div><span class="badge badge-success badge-soft">Python recommended</span></div>
+          <div class="grid md:grid-cols-3 gap-3 mt-2">
+            <label class="decision-option python-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="python" checked><span><strong>Python 3.12+</strong><small class="block opacity-65 mt-1">Zero Python package dependencies, stdlib SQLite/async subprocesses, plus three pinned companion CLIs.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="typescript"><span><strong>TypeScript / Node</strong><small class="block opacity-65 mt-1">Natural JSON tooling, but durable DB and packaging add dependencies or version constraints.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="no-preference"><span><strong>No preference</strong><small class="block opacity-65 mt-1">Proceed with the recommended Python implementation.</small></span></label>
+          </div>
+          <label class="fieldset mt-2"><span class="fieldset-legend">Anything else that should change?</span><textarea class="textarea w-full" name="notes" placeholder="Optional constraints, preferences, or scope changes"></textarea></label>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="tool-bundling" onsubmit="queueDecision(event, 'tool-bundling', 'Companion tool bundling')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 6</span><h3 class="card-title text-xl mt-2">What should “bundle Treehouse, gh-axi, and Lavish” mean?</h3></div><span class="badge badge-success badge-soft">Managed pins recommended</span></div>
+          <div class="grid md:grid-cols-2 gap-3 mt-2">
+            <label class="decision-option border border-primary bg-primary/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="managed-pins" checked><span><strong>Pinned local provisioning</strong><small class="block opacity-65 mt-1">Commit versions, sources, checksums, and notices. Setup installs isolated local copies. The repo stays lightweight and upgrades stay explicit.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="vendored"><span><strong>Vendor source or binaries</strong><small class="block opacity-65 mt-1">Works offline after clone, but enlarges the repo and creates a heavier upstream-sync and release process.</small></span></label>
+          </div>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <form class="decision-form card card-border bg-base-100" data-lavish-question="worker-transport" onsubmit="queueDecision(event, 'worker-transport', 'Worker communication transport')">
+        <div class="card-body">
+          <div class="flex flex-wrap justify-between gap-3"><div><span class="badge badge-primary badge-soft">Decision 7</span><h3 class="card-title text-xl mt-2">Should tmux be required for worker communication?</h3></div><span class="badge badge-success badge-soft">Supervisor protocol recommended</span></div>
+          <div class="grid md:grid-cols-2 gap-3 mt-2">
+            <label class="decision-option border border-primary bg-primary/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="supervisor" checked><span><strong>Supervisor + socket; tmux optional</strong><small class="block opacity-65 mt-1">Use structured provider streams, exact resume IDs, and a blocking manager wait. Headless, token-efficient, and deterministically recoverable.</small></span></label>
+            <label class="decision-option border border-base-content/10 rounded-box p-4 flex gap-3 cursor-pointer"><input type="radio" class="radio radio-primary" name="answer" value="tmux-required"><span><strong>Tmux as required transport</strong><small class="block opacity-65 mt-1">Makes every worker directly inspectable, but couples core delivery to terminal sessions and adds another message/lifecycle state machine.</small></span></label>
+          </div>
+          <div class="card-actions justify-end"><button class="btn btn-primary btn-sm" type="submit">Queue answer</button></div>
+        </div>
+      </form>
+
+      <div class="sticky-send flex justify-center">
+        <div class="join shadow-2xl border border-base-content/10 rounded-box bg-base-100 p-2">
+          <button class="btn btn-primary join-item" type="button" onclick="window.lavish?.sendQueuedPrompts?.()">Send queued revisions to agent</button>
+          <a class="btn btn-ghost join-item" href="#">Back to top</a>
+        </div>
+      </div>
+    </section>
+
+    <footer class="border-t border-base-content/10 pt-8 pb-4 flex flex-col sm:flex-row gap-3 justify-between text-sm opacity-60">
+      <p>Plan prepared from an empty repository, Firstmate, Treehouse, gh-axi, Lavish, installed Claude/Codex CLIs, and official OpenAI Codex documentation.</p>
+      <p>Design source: DaisyUI/Tailwind fallback; this project has no existing design system.</p>
+    </footer>
+  </main>
+
+  <script>
+    function queueDecision(event, queueKey, label) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const answer = data.get('answer');
+      const notes = String(data.get('notes') || '').trim();
+      if (!answer) return;
+      const message = `Papaya Agent Runtime plan decision — ${label}: ${answer}${notes ? `. Notes: ${notes}` : ''}`;
+      if (window.lavish?.queuePrompt) {
+        window.lavish.queuePrompt(message, {
+          tag: 'decision',
+          text: `${label}: ${answer}`,
+          element: form,
+          queueKey,
+          data: { question: queueKey, answer, notes }
+        });
+      }
+    }
+  </script>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+    const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const paint = document.createElement("canvas").getContext("2d");
+    function toRgba(color) { paint.clearRect(0, 0, 1, 1); paint.fillStyle = "#000"; paint.fillStyle = color; paint.fillRect(0, 0, 1, 1); return paint.getImageData(0, 0, 1, 1).data; }
+    function compositeRgba(foreground, background) { const fa = foreground[3] / 255; const ba = background[3] / 255; const a = fa + ba * (1 - fa); if (a === 0) return [0,0,0,0]; return [(foreground[0]*fa+background[0]*ba*(1-fa))/a,(foreground[1]*fa+background[1]*ba*(1-fa))/a,(foreground[2]*fa+background[2]*ba*(1-fa))/a,a*255]; }
+    function pageIsDark() { const root = document.documentElement; const rb = toRgba(getComputedStyle(root).backgroundColor); const bb = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0,0,0,0]; const [r,g,b,a] = compositeRgba(bb,rb); if (a > 0) return (0.2126*r+0.7152*g+0.0722*b)/255 < .5; const cs = getComputedStyle(root).colorScheme; if (cs.includes("dark") && !cs.includes("light")) return true; if (cs.includes("light") && !cs.includes("dark")) return false; return darkQuery.matches; }
+    const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+    let applied; let rendering = false; let queued = false;
+    function queueRender() { queued = true; if (!rendering) void render(); }
+    async function render() { rendering = true; try { while (queued) { queued = false; const theme = pageIsDark() ? "dark" : "default"; if (theme === applied) continue; mermaid.initialize({ startOnLoad:false, theme, securityLevel:"strict" }); for (const {el,src} of diagrams) { el.removeAttribute("data-processed"); el.textContent = src; } try { await mermaid.run({nodes:diagrams.map(d=>d.el)}); } catch (error) { console.error("Mermaid diagram render failed:", error); return; } applied = theme; } } finally { rendering = false; if (queued) queueRender(); } }
+    if (document.readyState === "complete") queueRender(); else window.addEventListener("load", queueRender, {once:true});
+    const observer = new MutationObserver(queueRender); for (const el of [document.documentElement, document.body]) if (el) observer.observe(el,{attributes:true,attributeFilter:["data-theme","class","style"]});
+    document.addEventListener("change", queueRender, true); darkQuery.addEventListener("change", queueRender);
+  </script>
+</body>
+</html>

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papaya-agent-runtime.local/schemas/provider-capability.schema.json",
+  "title": "Provider capability record",
+  "description": "Fail-closed record of a provider CLI's interrupt/resume behavior at a specific version. Every boolean defaults to false and may be set true only by a passing live probe. Adapters may claim mid-flight interrupt steering only when the matching flags are true; otherwise they must fall back to checkpoint-at-completion steering plus a fresh-session recovery packet.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "provider",
+    "cli_version",
+    "probed_at",
+    "probe_tool_version",
+    "capabilities",
+    "scenarios"
+  ],
+  "properties": {
+    "provider": {
+      "type": "string",
+      "enum": ["claude", "codex"]
+    },
+    "cli_version": {
+      "type": "string",
+      "description": "Exact CLI version string captured at probe time (e.g. '2.1.251')."
+    },
+    "model": {
+      "type": ["string", "null"],
+      "description": "Model used for the probe, or null when the CLI default was used."
+    },
+    "probed_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp when the probe run completed."
+    },
+    "probe_tool_version": {
+      "type": "string",
+      "description": "Version of the Papaya Agent Runtime probe harness that produced this record."
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Derived booleans. Absent proof means false (fail-closed).",
+      "required": [
+        "session_id_in_stream",
+        "usage_in_stream",
+        "resume_after_clean_exit",
+        "session_survives_process_exit",
+        "resume_after_sigint_model_turn",
+        "resume_after_sigint_tool",
+        "resume_after_sigkill",
+        "worktree_resume",
+        "duplicate_resume_ok",
+        "mid_process_steer",
+        "requires_resume_prompt",
+        "orphan_tool_process"
+      ],
+      "properties": {
+        "session_id_in_stream": {
+          "type": "boolean",
+          "description": "A durable session/thread id is emitted in the structured event stream."
+        },
+        "usage_in_stream": {
+          "type": "boolean",
+          "description": "Token/usage accounting appears in the structured event stream."
+        },
+        "resume_after_clean_exit": {
+          "type": "boolean",
+          "description": "A session that completed cleanly can be resumed by its id in a new process."
+        },
+        "session_survives_process_exit": {
+          "type": "boolean",
+          "description": "The session transcript persists on disk after the process exits."
+        },
+        "resume_after_sigint_model_turn": {
+          "type": "boolean",
+          "description": "A session interrupted with SIGINT during a model turn (before any tool) is resumable by id."
+        },
+        "resume_after_sigint_tool": {
+          "type": "boolean",
+          "description": "A session interrupted with SIGINT during a long tool command is resumable by id."
+        },
+        "resume_after_sigkill": {
+          "type": "boolean",
+          "description": "A session whose process group was SIGKILLed is still resumable by id."
+        },
+        "worktree_resume": {
+          "type": "boolean",
+          "description": "A session started in one checkout can be resumed by id from a linked git worktree."
+        },
+        "duplicate_resume_ok": {
+          "type": "boolean",
+          "description": "Resuming the same session id twice succeeds both times (idempotent late/duplicate delivery)."
+        },
+        "mid_process_steer": {
+          "type": "boolean",
+          "description": "The provider accepts a follow-up/steer message into the same running process without exit."
+        },
+        "requires_resume_prompt": {
+          "type": "boolean",
+          "description": "Resume requires a non-empty prompt or stdin; there is no promptless follow mode."
+        },
+        "orphan_tool_process": {
+          "type": "boolean",
+          "description": "A tool child process survives a process-group SIGINT (orphaned work that recovery must reconcile)."
+        }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "description": "Per-scenario evidence used to derive the capabilities.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {
+            "type": "string",
+            "enum": ["proved", "disproved", "inconclusive", "error", "skipped"]
+          },
+          "detail": {"type": "string"},
+          "session_id": {"type": ["string", "null"]},
+          "duration_s": {"type": ["number", "null"]},
+          "evidence_path": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

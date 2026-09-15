@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papaya-agent-runtime.local/schemas/task.schema.json",
+  "title": "Task packet",
+  "description": "A bounded unit of work handed to a worker. The manager fills this; the runtime validates it before dispatch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "repo", "instructions", "provider"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1},
+    "repo": {"type": "string", "minLength": 1, "description": "registered repository name"},
+    "instructions": {"type": "string"},
+    "role": {"type": "string", "enum": ["scout", "implementer", "reviewer", "fixer"]},
+    "provider": {"type": "string", "enum": ["fake", "claude", "codex"]},
+    "model": {"type": ["string", "null"]},
+    "reasoning": {"type": ["string", "null"], "enum": ["low", "medium", "high", "xhigh", null]},
+    "run_id": {"type": ["integer", "null"]},
+    "depends_on": {"type": "array", "items": {"type": "integer"}},
+    "acceptance": {"type": "array", "items": {"type": "string"}}
+  }
+}

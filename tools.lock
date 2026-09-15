@@ -1,0 +1,45 @@
+# Papaya Agent Runtime companion tool lock.
+#
+# "Bundled" means reproducible and locally managed, not vendored source trees.
+# These are real, pinned versions with published integrity metadata. Middle
+# Manager uses a companion when it is on PATH and degrades gracefully otherwise
+# (see `ppy doctor`); fully managed provisioning into .ppy/tools/<tool>/<version>/
+# (download + verify against the checksums below, then activate) is the remaining
+# follow-up. Bumping a pin means updating both the version and its checksum(s).
+#
+# Format: TOML. Each [tool.<name>] table pins a version, source, and integrity.
+
+[tool.treehouse]
+version = "v2.3.0"
+source = "https://github.com/kunchenguid/treehouse"
+install = "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh"
+release = "https://github.com/kunchenguid/treehouse/releases/tag/v2.3.0"
+checksums = "https://github.com/kunchenguid/treehouse/releases/download/v2.3.0/checksums.txt"
+license = "MIT"
+# Per-platform sha256 of the release archives (from the signed checksums.txt).
+sha256_darwin_arm64 = "1cb09bcfa830b4eec5e54beeaa71589adb9c5d828573dda0f5150e2d80cf13d5"
+sha256_darwin_amd64 = "349afcc13c2beb20d846eb560a11b30e1a5cab8e2dfb22988a36aa7f213b5881"
+sha256_linux_amd64 = "94fd2b2c20c35aac1ddc2941317890ad82c9916f5ccecbac4a50cda783eed10f"
+sha256_linux_arm64 = "408589ba72b58d5e942071ed863a83fd96566cfd1e514945daa59defde528bbb"
+interface = "get --lease --json / return <path> --force --if-lease-id <id>"
+notes = "Go release binary. Supplies pre-warmed pooled worktree leases; the git backend is the always-available fallback."
+
+[tool.lavish-axi]
+version = "0.1.62"
+source = "npm:lavish-axi"
+run = "npx -y lavish-axi@0.1.62"
+tarball = "https://registry.npmjs.org/lavish-axi/-/lavish-axi-0.1.62.tgz"
+integrity = "sha512-aP9LhdFHLg5chm0HMh4kfDHID0leL1Ph7A+p33i1v88snaXI2HTEZ+43ReKo/vhIVmcmblgiAnqxpU2S3s3uEg=="
+shasum = "9e2d6d5dc938e72f04e3aaf81cf3907c578827cf"
+license = "MIT"
+notes = "Agent-first AXI; requires Node 22+. Rich HTML review surface. The manager drives it directly (lavish-axi <file> / poll); ppy artifact is the no-Node fallback."
+
+[tool.gh-axi]
+version = "0.1.34"
+source = "npm:gh-axi"
+run = "npx -y gh-axi@0.1.34"
+tarball = "https://registry.npmjs.org/gh-axi/-/gh-axi-0.1.34.tgz"
+integrity = "sha512-4aKtrEXL6imxwmsR89NUTBlrtaQE8ynxu3ED20qOUWbnqKFvQicb94Udtk5h61dcdQe38qt54tTEwjFA4cUgsg=="
+shasum = "aa2c1c2a0cf817e5a3764cbbb2e4cb7e3917da01"
+license = "MIT"
+notes = "Isolated pinned npm package; uses the user's Node and authenticated gh. ppy deliver prefers gh-axi when present."

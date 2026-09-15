@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# lavish-review — drive the rich lavish-axi review surface WITHOUT freezing your turn.
+#
+# `lavish-axi poll <file>` long-polls: it blocks until the user annotates the
+# surface or it times out. Never run it in the foreground — it freezes the whole
+# conversation. This wrapper backgrounds the poll to a sidecar file so you can hand
+# control back immediately and read notes on a later turn.
+#
+#   lavish-review new   <file> [--title T]  # scaffold a surface from the shipped default
+#   lavish-review open  <file>   # open the surface + start a background poller
+#   lavish-review drain <file>   # print feedback collected so far (non-blocking)
+#   lavish-review stop  <file>   # stop the background poller
+#
+# `new` writes a single self-contained HTML file: the Atlassian-style default
+# stylesheet (assets/ads.css) is inlined, so the artifact renders identically with
+# or without lavish-axi running and needs no CDN. Use it whenever the subject
+# project has no design system of its own to match.
+#
+# Sidecars live next to <file> as .<name>.feedback (notes) and .<name>.pid (poller).
+set -euo pipefail
+
+cmd="${1:-}"
+file="${2:-}"
+if [ -z "$cmd" ] || [ -z "$file" ]; then
+  echo "usage: lavish-review new|open|drain|stop <file> [--title T]" >&2
+  exit 2
+fi
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+assets="$here/../assets"
+script="$here/$(basename "${BASH_SOURCE[0]}")"
+
+[ "$cmd" = "new" ] && mkdir -p "$(dirname "$file")"
+dir="$(cd "$(dirname "$file")" && pwd)"
+base="$(basename "$file")"
+fb="$dir/.$base.feedback"
+pidf="$dir/.$base.pid"
+if [ "$cmd" = "__poll" ]; then
+  bin="${3:-}"
+else
+  bin="$(command -v lavish-axi || true)"
+fi
+
+ready_attempts="${LAVISH_REVIEW_READY_ATTEMPTS:-10}"
+poll_attempts="${LAVISH_REVIEW_POLL_ATTEMPTS:-3}"
+retry_delay="${LAVISH_REVIEW_RETRY_DELAY:-0.25}"
+
+poller_alive() { [ -f "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; }
+
+session_ready() {
+  local attempt=1 output
+  output="${fb}.open.$$"
+  while [ "$attempt" -le "$ready_attempts" ]; do
+    : >"$output"
+    if "$bin" "$file" >"$output" 2>&1 \
+      && grep -Eq '^[[:space:]]*status:[[:space:]]*(opened|resumed)[[:space:]]*$' "$output"; then
+      rm -f "$output"
+      return 0
+    fi
+    if [ "$attempt" -lt "$ready_attempts" ]; then
+      sleep "$retry_delay"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "error: lavish-axi did not report a ready session after $ready_attempts attempts" >&2
+  if [ -s "$output" ]; then
+    sed 's/^/error: lavish-axi readiness: /' "$output" >&2
+  fi
+  rm -f "$output"
+  return 1
+}
+
+run_poller() {
+  local attempt=1 poll_child="" poll_output="" poll_start=0 poll_status=0
+
+  cleanup_poller() {
+    if [ -n "$poll_child" ]; then
+      kill "$poll_child" 2>/dev/null || true
+      wait "$poll_child" 2>/dev/null || true
+    fi
+    [ -z "$poll_output" ] || rm -f "$poll_output"
+  }
+  stop_poller() {
+    cleanup_poller
+    trap - EXIT TERM INT
+    exit 0
+  }
+  trap cleanup_poller EXIT
+  trap stop_poller TERM INT
+
+  while [ "$attempt" -le "$poll_attempts" ] && [ -e "$file" ]; do
+    poll_output="${fb}.poll.$$"
+    : >>"$fb"
+    poll_start="$(wc -c <"$fb" | tr -d '[:space:]')"
+    "$bin" poll "$file" >>"$fb" 2>&1 &
+    poll_child=$!
+    if wait "$poll_child"; then
+      poll_status=0
+    else
+      poll_status=$?
+    fi
+    poll_child=""
+    tail -c "+$((poll_start + 1))" "$fb" >"$poll_output"
+
+    if [ "$poll_status" -ne 0 ] && grep -qi 'NOT_FOUND' "$poll_output" && [ -e "$file" ]; then
+      rm -f "$poll_output"
+      poll_output=""
+      if [ "$attempt" -ge "$poll_attempts" ]; then
+        break
+      fi
+      attempt=$((attempt + 1))
+      sleep "$retry_delay"
+      if session_ready 2>>"$fb"; then
+        continue
+      fi
+    fi
+    break
+  done
+
+  trap - EXIT TERM INT
+  cleanup_poller
+}
+
+case "$cmd" in
+  new)
+    title="Review"
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --title) title="${2:-}"; shift 2 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+      esac
+    done
+    if [ -e "$file" ]; then
+      echo "refusing to overwrite existing $file" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$file")"
+    LR_TEMPLATE="$assets/surface.html" LR_CSS="$assets/ads.css" LR_OUT="$file" LR_TITLE="$title" \
+      python3 - <<'PY'
+import html, os
+from pathlib import Path
+tpl = Path(os.environ["LR_TEMPLATE"]).read_text()
+css = Path(os.environ["LR_CSS"]).read_text().rstrip()
+title = html.escape(os.environ["LR_TITLE"])
+out = tpl.replace("/*__ADS_CSS__*/", css).replace("__TITLE__", title)
+Path(os.environ["LR_OUT"]).write_text(out)
+PY
+    echo "scaffolded $file (Atlassian-style default, self-contained); edit it, then 'lavish-review open \"$file\"'"
+    ;;
+  open)
+    if [ -z "$bin" ]; then
+      echo "lavish-axi unavailable; use the local surface (ppy artifact / ppy feedback)" >&2
+      exit 1
+    fi
+    if poller_alive; then
+      echo "surface already polling; feedback collecting at $fb"
+    else
+      # A stale pid never prevents re-arming, but a live one is always reused.
+      rm -f "$pidf"
+      # The viewer command is the non-blocking readiness probe: its structured
+      # `status: opened|resumed` response proves the session exists.
+      if ! session_ready; then
+        exit 1
+      fi
+      # Poller: detached (nohup survives the end of your turn), appends to sidecar.
+      # The wrapper re-establishes a vanished session and retries NOT_FOUND only.
+      nohup bash "$script" __poll "$file" "$bin" >/dev/null 2>&1 </dev/null &
+      echo "$!" >"$pidf"
+      echo "surface open; annotations collecting in the background at $fb"
+    fi
+    echo "hand the turn back to the user; run 'lavish-review drain \"$file\"' later to read notes"
+    ;;
+  drain)
+    has_feedback=0
+    has_errors=0
+    if [ -s "$fb" ] \
+      && grep -Eivq '^[[:space:]]*$|NOT_FOUND|^[[:space:]]*error:' "$fb"; then
+      has_feedback=1
+      echo "feedback:"
+      grep -Eiv '^[[:space:]]*$|NOT_FOUND|^[[:space:]]*error:' "$fb"
+    fi
+    if [ -s "$fb" ] && grep -Eiq 'NOT_FOUND|^[[:space:]]*error:' "$fb"; then
+      has_errors=1
+      echo "poller errors:"
+      grep -Ei 'NOT_FOUND|^[[:space:]]*error:' "$fb"
+    fi
+    if [ "$has_feedback" -eq 0 ] && [ "$has_errors" -eq 0 ]; then
+      echo "no feedback yet"
+    fi
+    if ! poller_alive; then
+      echo "poller is not running; re-arm with \`lavish-review open $file\`"
+    fi
+    ;;
+  stop)
+    if poller_alive; then
+      kill "$(cat "$pidf")" 2>/dev/null || true
+      rm -f "$pidf"
+      echo "poller stopped"
+    else
+      rm -f "$pidf"
+      echo "no poller was running"
+    fi
+    ;;
+  __poll)
+    run_poller
+    ;;
+  *)
+    echo "usage: lavish-review new|open|drain|stop <file> [--title T]" >&2
+    exit 2
+    ;;
+esac

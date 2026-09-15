@@ -1,0 +1,40 @@
+[project]
+name = "papaya-agent-runtime"
+version = "0.0.0"
+description = "A lightweight, local framework for directing autonomous software work across one or more Git repositories."
+readme = "README.md"
+requires-python = ">=3.12"
+# Zero runtime package dependencies by design.
+# The control plane uses only the Python standard library. Treehouse, gh-axi,
+# and lavish-axi are pinned companion CLIs, not Python libraries.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6.0",
+    "pytest>=8.0.0",
+]
+
+[tool.uv]
+# This repository is an agent-home/control-plane, not a distributable wheel.
+# Treat it as a virtual project so `uv run` provisions dev tools without a build.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "live: spawns real Claude/Codex CLIs; opt-in and excluded from the default run",
+    "strict_forge: exercises the real forge-URL rule in `ppy repo add` instead of the fixture default that makes a temp source repo its own forge",
+    "real_provider_default: exercises the real unnamed-provider rule (the configured worker provider) instead of the fixture default that makes a hermetic dispatch fake",
+]
+# Default run stays hermetic (no live network, no provider spawning).
+addopts = "-m 'not live'"
