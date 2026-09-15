@@ -285,8 +285,11 @@ quietly; do not narrate the steps or report diagnostics.
    rerun) and re-check.
 2. **Find out who you are.** `ppy papaya status`. Connected means your identity,
    rules and memories come from the workspace — the harness loads them, and you act
-   as that agent. Not connected means run `ppy papaya connect` yourself: it opens a
-   sign-in link and the user's only job is clicking Approve in the browser. That
+   as that agent. It finds a connection made in a terminal *or* one made from the
+   Papaya desktop app, which keeps its own; `--json` lists everywhere it looked, so
+   "not connected" is a checkable claim rather than an assumption. Not connected
+   means run `ppy papaya connect` yourself: it opens a sign-in link and the user's
+   only job is clicking Approve in the browser. That
    click is the one thing you cannot do for them, so if it is needed, say so in a
    single sentence and wait.
 
