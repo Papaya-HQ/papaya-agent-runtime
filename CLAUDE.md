@@ -21,3 +21,19 @@ is used. Decide which kind of session this is:
 
 If it's genuinely unclear, ask one short question: "Working on the runtime itself, or
 do you want me to get work done on your repos?"
+
+## This file is a router, not a second contract
+
+Everything below the mode choice lives in one of two places, and this file
+deliberately repeats neither:
+
+- [`AGENTS.md`](AGENTS.md) — the **development contract**, read natively by Codex and
+  by any harness that looks for `AGENTS.md`. It is the authority for changing this
+  codebase: authority boundaries, worker routing, delivery, and the operating
+  discipline (skills layout, `uv`, no trackers in the repo).
+- [`docs/runtime-contract.md`](docs/runtime-contract.md) — the **runtime contract**,
+  the authority for a session doing the user's work.
+
+If guidance here ever disagrees with either, they win, and this file is the thing to
+fix. Keeping the substance in one place per audience is what stops Claude and Codex
+sessions operating this repository under quietly different rules.
