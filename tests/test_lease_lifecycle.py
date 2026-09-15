@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import lifecycle, repos, turn_end
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -38,7 +39,7 @@ def server(ppy_home):
 
 
 def _wait_terminal(client, task_id, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     terminal = {"worker_done", "blocked", "failed"}
     while time.monotonic() < deadline:
         status = client.task_status(task_id)["task"]["status"]
@@ -49,7 +50,7 @@ def _wait_terminal(client, task_id, timeout=15.0):
 
 
 def _wait_event(conn, task_id, kind, timeout=5.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         row = conn.execute(
             "SELECT 1 FROM events WHERE task_id = ? AND kind = ?", (task_id, kind)

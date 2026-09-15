@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 
+from conftest import scale
 from papaya_agent_runtime import brief_lint, preflight, repos
 from papaya_agent_runtime.providers.fake import FakeProvider
 from papaya_agent_runtime.state import init_db, store
@@ -40,7 +41,7 @@ No courier integration; no schema change.
 
 
 def _wait_for(predicate, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return

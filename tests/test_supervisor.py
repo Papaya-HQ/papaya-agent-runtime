@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import SupervisorServer
@@ -28,7 +29,7 @@ def server(ppy_home):
 
 
 def _wait_terminal(client, task_id, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     terminal = {"worker_done", "blocked", "failed"}
     while time.monotonic() < deadline:
         status = client.task_status(task_id)["task"]["status"]

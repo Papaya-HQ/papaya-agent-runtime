@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -29,7 +30,7 @@ def _start(server: SupervisorServer) -> SupervisorClient:
 
 
 def _wait_status(client, task_id, want, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if client.task_status(task_id)["task"]["status"] == want:
             return

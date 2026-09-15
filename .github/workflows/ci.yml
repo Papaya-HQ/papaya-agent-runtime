@@ -68,7 +68,13 @@ jobs:
 
       # PPY_HOME is pinned away from the checkout so a stray default can never make
       # the suite read or write real instance state next to the source tree.
+      # Every asynchronous assertion in the suite is a poll that returns as soon as
+      # its predicate is true, so a longer deadline costs nothing on a green run —
+      # it only makes a real failure slower to report. A two-core runner is roughly
+      # half the speed of a laptop, which is what failed three unrelated supervisor
+      # tests on the first run here.
       - name: Test
         env:
           PPY_HOME: ${{ runner.temp }}/ppy-home
+          PPY_TEST_TIMEOUT_SCALE: "6"
         run: uv run pytest -q

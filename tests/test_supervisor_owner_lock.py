@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import papaya_agent_runtime
+from conftest import scale
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import (
@@ -188,7 +189,7 @@ def test_a_crashed_owner_is_replaced_and_its_surviving_child_is_still_counted(
         assert store.get_runner(init_db(), "survivor")["status"] == "running"
         child.kill()
         child.wait(timeout=10)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scale(5)
         while store.get_runner(init_db(), "survivor")["status"] == "running":
             assert time.monotonic() < deadline
             client.reconcile()

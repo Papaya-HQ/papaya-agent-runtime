@@ -12,13 +12,14 @@ import json
 import time
 from pathlib import Path
 
+from conftest import scale
 from papaya_agent_runtime import lifecycle, repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.core import Supervisor
 
 
 def _wait_for(predicate, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return

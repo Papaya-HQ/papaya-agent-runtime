@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -29,7 +30,7 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, wanted, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         status = client.task_status(task_id)["task"]["status"]
         if status in wanted:
@@ -133,7 +134,7 @@ def _hold(client, added, seconds: float = 1.2) -> int:
     task_id = client.dispatch_task(
         repo=added.name, title="long turn", instructions=f"HOLD:{seconds}"
     )["task_id"]
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + scale(10)
     while not store.live_runners_for_task(init_db(), task_id):
         assert time.monotonic() < deadline
         time.sleep(0.05)
@@ -158,7 +159,7 @@ def test_three_additive_messages_are_delivered_together_in_order(server, source_
     ]
 
     _wait_status(client, task_id, {"worker_done"}, timeout=25)
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + scale(10)
     while not _events(task_id, "steer_applied"):
         assert time.monotonic() < deadline
         time.sleep(0.05)
@@ -194,7 +195,7 @@ def test_an_explicit_replacement_supersedes_what_was_queued_before_it(server, so
     ]
 
     _wait_status(client, task_id, {"worker_done"}, timeout=25)
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + scale(10)
     while not _events(task_id, "steer_applied"):
         assert time.monotonic() < deadline
         time.sleep(0.05)
@@ -217,7 +218,7 @@ def test_a_single_queued_message_is_delivered_verbatim(server, source_repo) -> N
     task_id = _hold(client, added, seconds=0.5)
     _queue(client, task_id, "just this")
     _wait_status(client, task_id, {"worker_done"}, timeout=25)
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + scale(10)
     while not _events(task_id, "resumed"):
         assert time.monotonic() < deadline
         time.sleep(0.05)

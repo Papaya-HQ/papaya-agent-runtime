@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.providers.base import TaskSpec
 from papaya_agent_runtime.state import init_db, store
@@ -225,7 +226,7 @@ def test_the_task_event_names_what_the_autocommit_left_out(server, source_repo):
     task_id = client.dispatch_task(repo=added.name, title="ship", instructions="NOCOMMIT")[
         "task_id"
     ]
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + scale(20)
     while time.monotonic() < deadline and not _events(task_id, "worker_done"):
         time.sleep(0.05)
 

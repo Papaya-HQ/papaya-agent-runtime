@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import delivery, repos, stacks
 from papaya_agent_runtime.config import MMConfig, save_config
 from papaya_agent_runtime.review import record_review
@@ -53,7 +54,7 @@ def _commit(path, name: str, message: str) -> str:
 
 
 def _wait_terminal(client, task_id, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         status = client.task_status(task_id)["task"]["status"]
         if status in {"worker_done", "blocked", "failed"}:
