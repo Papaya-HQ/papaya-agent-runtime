@@ -1,0 +1,65 @@
+# The gate for this repository. A brief's verification suite should name these
+# commands, not a local approximation of them.
+#
+# Deliberately hermetic: the default pytest selection excludes the `live` marker,
+# so nothing here spawns a real Claude or Codex CLI, reaches a forge, or touches a
+# Papaya workspace. That is what makes it safe to run on every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels the run still checking the commit it replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # --frozen fails rather than silently re-resolving, so a lockfile that drifted
+      # from pyproject.toml is a red build here instead of a surprise on a laptop.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # The suite builds real git repositories in temp directories. They set their
+      # own author locally, but a global identity keeps any command that runs
+      # outside one from failing on an unconfigured runner.
+      - name: Configure git
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # PPY_HOME is pinned away from the checkout so a stray default can never make
+      # the suite read or write real instance state next to the source tree.
+      - name: Test
+        env:
+          PPY_HOME: ${{ runner.temp }}/ppy-home
+        run: uv run pytest -q
