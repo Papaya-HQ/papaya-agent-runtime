@@ -78,3 +78,20 @@ jobs:
           PPY_HOME: ${{ runner.temp }}/ppy-home
           PPY_TEST_TIMEOUT_SCALE: "6"
         run: uv run pytest -q
+
+  # The single check branch protection points at. Matrix job names carry their
+  # parameters ("test (py3.12)"), so requiring them directly means every change to
+  # the matrix silently breaks the rule that guards main — a required check that no
+  # longer exists is a check that never runs. This one has a stable name and simply
+  # fails unless every matrix job succeeded.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every test job to have succeeded
+        run: |
+          echo "test result: ${{ needs.test.result }}"
+          test "${{ needs.test.result }}" = "success"
