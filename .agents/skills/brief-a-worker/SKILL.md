@@ -34,6 +34,13 @@ something speculative while the product outcome sits unfinished (issue #77).
   authoritative project contract or plan when one exists, with its section. The
   acceptance criteria live here, once; the closeout checklist at the end refers to
   them rather than restating them.
+
+  **If the tracked record this brief serves has no acceptance criteria of its own,
+  write them onto the record before you brief anyone.** A brief is where *you* say
+  what done means; the ticket is where the person who asked gets to correct it, and
+  where the next reader looks to tell whether it finished. Deriving criteria only
+  into the brief means the work is reviewed against a standard nobody outside this
+  session agreed to.
 - **Intent.** Why the task is needed, who benefits, and the problem or experience it
   improves. Separate the *outcome* from any *suggested approach*: "read it from
   `delivery_events`" is a route, "the answer is on the page" is the requirement. A
