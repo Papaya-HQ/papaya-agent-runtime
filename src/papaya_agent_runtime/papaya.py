@@ -12,9 +12,13 @@ The split this module keeps:
 - **Mechanics live here.** Is the client installed? Is this machine connected, and
   as whom? If not, run the connect flow. Which Papaya work item does a local task
   belong to?
-- **Everything else lives in the harness.** Reading work items, posting comments,
+- **Everything else lives in the harness.** Reading work, posting comments,
   proposing memories and searching the workspace are MCP tool calls the agent makes
   directly; shelling out to re-implement them here would be slower and lossier.
+  That includes which *tracker* a workspace uses — Papaya work items, Linear, Notion
+  or anything else. This module knows about the connection, never about the work;
+  `papaya_agent_runtime.tracker` records a task's tracked record without caring where
+  it lives.
 
 The connection is a *preference*, never a prerequisite. A runtime with no Papaya
 reachable still registers repositories, dispatches workers, reviews diffs and opens
@@ -47,11 +51,6 @@ CLIENT_HOME_ENV = "PAPAYA_AGENT_HOME"
 CONNECT_TIMEOUT = 300
 #: Short probes (reading identity, reading context) should never hang a preflight.
 PROBE_TIMEOUT = 30
-
-#: Task-env keys that record which Papaya work item a local task belongs to.
-WORK_ITEM_KEY = "papaya_work_item"
-WORK_ITEM_URL_KEY = "papaya_work_item_url"
-WORK_ITEM_TITLE_KEY = "papaya_work_item_title"
 
 
 def _desktop_home() -> Path | None:
@@ -333,72 +332,12 @@ def context(*, refresh: bool = False) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-# ── Linking local tasks to Papaya work items ────────────────────────────────
-
-
-def link_task(
-    conn,
-    task_id: int,
-    *,
-    work_item: str,
-    url: str = "",
-    title: str = "",
-) -> None:
-    """Record which Papaya work item a dispatched task belongs to.
-
-    Not every task earns a work item — most are a step inside one, and minting an
-    item per step is the noise this runtime exists to avoid. The link exists so the
-    tasks that *do* belong to tracked work carry it into the pull request body and
-    the board, instead of the connection living only in the session's head.
-    """
-    from papaya_agent_runtime.state import store
-
-    store.set_task_env(conn, task_id, WORK_ITEM_KEY, work_item, source="papaya")
-    if url:
-        store.set_task_env(conn, task_id, WORK_ITEM_URL_KEY, url, source="papaya")
-    if title:
-        store.set_task_env(conn, task_id, WORK_ITEM_TITLE_KEY, title, source="papaya")
-
-
-def task_link(conn, task_id: int) -> dict | None:
-    """The Papaya work item a task belongs to, or None when it is unlinked."""
-    from papaya_agent_runtime.state import store
-
-    item = store.get_task_env(conn, task_id, WORK_ITEM_KEY)
-    if not item:
-        return None
-    return {
-        "work_item": item,
-        "url": store.get_task_env(conn, task_id, WORK_ITEM_URL_KEY) or "",
-        "title": store.get_task_env(conn, task_id, WORK_ITEM_TITLE_KEY) or "",
-    }
-
-
-def link_sentence(link: dict | None) -> str:
-    """How a work-item link reads in a pull request body or a report.
-
-    Describes the item rather than citing a bare identifier, because a reader
-    outside this workspace cannot look one up.
-    """
-    if not link:
-        return ""
-    title = link.get("title") or ""
-    url = link.get("url") or ""
-    subject = f'the Papaya work item "{title}"' if title else "its Papaya work item"
-    if url:
-        return f"Tracked in Papaya under {subject} ({url})."
-    return f"Tracked in Papaya under {subject}."
-
-
 __all__ = [
     "BOOTSTRAP",
     "CLI",
     "CLIENT_HOME_ENV",
     "CONNECT_TIMEOUT",
     "HOME_ENV",
-    "WORK_ITEM_KEY",
-    "WORK_ITEM_TITLE_KEY",
-    "WORK_ITEM_URL_KEY",
     "Identity",
     "candidate_homes",
     "client_home",
@@ -408,9 +347,6 @@ __all__ = [
     "context",
     "identity",
     "installed",
-    "link_sentence",
-    "link_task",
     "signed_in",
     "status",
-    "task_link",
 ]

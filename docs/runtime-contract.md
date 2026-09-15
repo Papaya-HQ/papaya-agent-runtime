@@ -420,19 +420,36 @@ That comes with tools (work items, channels, documents, memories, the knowledge
 graph) and with the one judgment call that decides whether the workspace stays
 useful: **what deserves to be written down there.**
 
-**Papaya tracks work, not steps.** A work item is for something a person would want
-to find later: a feature, a bug worth a record, a proposal, a piece of work someone
-is waiting on, an outcome that needs sign-off. The individual tasks you dispatch to
-get there are *yours* — they live in the ledger (`ppy todo`, `ppy board`), and
-minting a work item per task is exactly the noise that makes a workspace worthless.
-Three dispatched workers building one feature is one work item, not four.
+**The tracker tracks work, not steps — and which tracker is not your call.** A
+tracked record is for something a person would want to find later: a feature, a bug
+worth a record, a proposal, a piece of work someone is waiting on, an outcome that
+needs sign-off. The individual tasks you dispatch to get there are *yours* — they
+live in the ledger (`ppy todo`, `ppy board`), and minting a ticket per task is
+exactly the noise that makes a workspace worthless. Three dispatched workers
+building one feature is one record, not four.
+
+**Use the tracker this workspace actually uses.** Papaya work items are the
+out-of-the-box default, not an assumption: a workspace that tracks work in Linear,
+Notion, Jira or anything else has told you so, and that wins. You learn it the same
+way you learn everything else about the workspace — the durable context injected at
+the start of your session, and `list_active_mcp_providers` /
+`list_connected_mcp_tools` for what is actually connected. Read both before you
+create anything. If a workspace has said Linear and you open a Papaya work item, you
+have overridden a stated decision, and the person now has their work in two places.
+The same goes for documents: write where they write.
+
+Nothing enforces this at the tool gate — it is a preference the workspace states and
+you honour, which means honouring it is on you. If you genuinely cannot tell which
+tracker a workspace uses, ask once rather than guessing; the answer is durable and
+nobody should have to give it twice.
 
 - **Keep the items that exist current.** If an item is being worked, its state
   should say so; when it lands, say that, with the pull request. Stale is worse than
   absent.
-- **Link the tasks that belong to one.** `ppy papaya link <task> --work-item <id>
-  --url <url> --title "<title>"` carries the item into the pull request body, so a
-  reviewer with no Papaya access still sees what this was for.
+- **Link the tasks that belong to one.** `ppy track <task> --record <id> --provider
+  <linear|papaya|…> --url <url> --title "<title>"` carries the record into the pull
+  request body, naming its tracker, so a reviewer with no access to that workspace
+  still sees what the work was for and where to find it.
 - **Reply in the thread the item already has.** Never open a new top-level message
   for something that already has one, and always include the ticket URL.
 - **Name people by handle** — `@handle`, not a display name. Handles resolve; display
@@ -446,8 +463,10 @@ Three dispatched workers building one feature is one work item, not four.
   repositories, it is worth telling the workspace which repos you can build in — so
   their teammates can point work at you instead of asking them to.
 
-Everything above is done with the Papaya tools in your harness, directly. `ppy` owns
-only the connection and the task↔item link; it does not proxy the workspace.
+Everything above is done with the tools in your harness, directly — Papaya's, or
+whichever provider this workspace connected. `ppy` owns only the connection and the
+task↔record link; it does not proxy the workspace and has no opinion about where the
+work lives.
 
 ## Turning intent into work
 
@@ -740,7 +759,8 @@ readable at a glance by someone who just wants to know if it's done.
 | --- | --- |
 | Can I work? | `ppy readiness [--json]` — one verdict (`ready` / `degraded` / `blocked`) with every problem, what closes it, and whether it is yours or the user's. `--report --agent @handle --where host:path` prints the message to DM the connection owner; `--mark-reported` records it so an unchanged verdict stays quiet and a changed one speaks; `--forget` clears that. Exit 1 when blocked |
 | Environment & drift | `ppy doctor` — also reports the Papaya connection: who this machine is connected as, or what would connect it |
-| Papaya connection | `ppy papaya status [--json]` (which agent you are), `ppy papaya connect [--harness claude\|codex\|cursor]` (signs in, pins this machine to an agent, installs the harness plugin — the user's only step is clicking Approve in the browser), `ppy papaya context [--refresh]` (your persona, rules and memories as the client sees them), `ppy papaya link <task> --work-item <id> [--url <url>] [--title "..."]` (records which Papaya work item a dispatched task belongs to, so the pull request body names it). Every state short of connected still builds code |
+| Papaya connection | `ppy papaya status [--json]` (which agent you are), `ppy papaya connect [--harness claude\|codex\|cursor]` (signs in, pins this machine to an agent, installs the harness plugin — the user's only step is clicking Approve in the browser), `ppy papaya context [--refresh]` (your persona, rules and memories as the client sees them). Every state short of connected still builds code |
+| Tracked record | `ppy track <task> --record <id> [--provider linear\|papaya\|notion\|...] [--url <url>] [--title "..."]` records which tracker record a dispatched task belongs to, so the pull request body names it and says where to find it; `--show` reads it back. Papaya is the default only when the workspace has not said otherwise — a workspace that tracks work elsewhere wins, and you learn that from its durable context, never from this flag |
 | Find repositories | `ppy repo discover [--owner <org>] [--limit N] [--top N] [--include-forks] [--json]` — repositories on the forge that are not registered yet, most recently pushed first. Reads the signed-in account and every organization it belongs to; archived repos never appear (they cannot take a pull request) and forks are skipped unless asked for. It only ever *offers*: registration stays `ppy repo add` |
 | Learn a repository | `ppy repo onboard <name> [--dry-run] [--json]` — reads the registered base clone and records how it builds, how it tests, the commands its CI workflows actually run, which agent contracts it carries, and whether UI work has a design reference — into that repo's durable notes, between markers so hand-written notes survive a re-run. It names what it could not determine; those unknowns are yours to close before the first dispatch |
 | Configure | `ppy setup --non-interactive ...`, `ppy config show|models|authority|assessments|health|claude` |

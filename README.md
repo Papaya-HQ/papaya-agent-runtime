@@ -69,12 +69,18 @@ never scans your filesystem.
 
 ## Papaya tracks work, not steps
 
-A work item is for something a person would look for later: a feature, a bug worth a
-record, a proposal, something awaiting sign-off. The tasks dispatched to get there
-live in the runtime's own ledger. Minting a work item per task is noise, and the
-runtime is built not to. What it does do is keep the items that exist current, and
-link the tasks that belong to one (`ppy papaya link`) so the pull request body names
-the work it was for.
+A tracked record is for something a person would look for later: a feature, a bug
+worth a record, a proposal, something awaiting sign-off. The tasks dispatched to get
+there live in the runtime's own ledger. Minting a ticket per task is noise, and the
+runtime is built not to. What it does do is keep the records that exist current, and
+link the tasks that belong to one (`ppy track`) so the pull request body names the
+work it was for and where to find it.
+
+**Papaya work items are the default, not the assumption.** A workspace that tracks
+work in Linear, Notion or Jira has said so, and that wins — the agent reads it from
+the workspace's own durable context and from whatever providers are connected, so a
+new machine honours it on its first turn with nothing to configure. The runtime never
+talks to a tracker itself; it records which record a task belongs to and renders it.
 
 ## What works today
 
@@ -169,7 +175,7 @@ ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
 ppy review show <task_id> && ppy review approve <task_id>
 ppy deliver <task_id>                   # refused unless approved at current head
-ppy papaya link <task_id> --work-item PAP-148 --url ... --title "..."
+ppy track <task_id> --record ENG-1183 --provider linear --url ... --title "..."
 ppy answer <task_id> --answer "use /v2/health" --scope run   # recorded + reused
 ppy plan <run_id>                       # cross-repo rollout order
 ppy usage <run_id>                      # model token accounting
