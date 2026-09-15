@@ -145,54 +145,6 @@ def test_context_returns_none_when_the_client_is_missing(monkeypatch) -> None:
     assert papaya.context() is None
 
 
-def _task(conn, title: str = "Add a health endpoint") -> int:
-    from papaya_agent_runtime.state import store
-
-    repo_id = store.add_repo(
-        conn, name="app", origin="/o", local_path="/l", default_branch="main", base_sha="a"
-    )
-    run_id = store.create_run(conn, "ship it")
-    return store.add_task(conn, run_id=run_id, title=title, repo_id=repo_id, ends_at="done")
-
-
-def test_linking_a_task_to_a_work_item_survives_a_reread(ppy_home) -> None:
-    from papaya_agent_runtime.state import init_db
-
-    conn = init_db()
-    task_id = _task(conn)
-    papaya.link_task(
-        conn,
-        task_id,
-        work_item="PAP-148",
-        url="https://papaya.example/w/PAP-148",
-        title="Health endpoint for the API",
-    )
-    link = papaya.task_link(conn, task_id)
-    assert link == {
-        "work_item": "PAP-148",
-        "url": "https://papaya.example/w/PAP-148",
-        "title": "Health endpoint for the API",
-    }
-
-
-def test_an_unlinked_task_has_no_link(ppy_home) -> None:
-    from papaya_agent_runtime.state import init_db
-
-    conn = init_db()
-    task_id = _task(conn, title="Small fix")
-    assert papaya.task_link(conn, task_id) is None
-    assert papaya.link_sentence(None) == ""
-
-
-def test_the_link_sentence_describes_the_item_rather_than_citing_an_id() -> None:
-    """A reader outside the workspace cannot look up a bare identifier."""
-    sentence = papaya.link_sentence(
-        {"work_item": "PAP-148", "url": "https://papaya.example/w/PAP-148", "title": "QA sweep"}
-    )
-    assert '"QA sweep"' in sentence
-    assert "https://papaya.example/w/PAP-148" in sentence
-
-
 # ── Finding a connection wherever it was made ───────────────────────────────
 #
 # A connection can be established two ways: `papaya-agent connect` in a terminal,

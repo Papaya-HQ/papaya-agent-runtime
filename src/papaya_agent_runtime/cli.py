@@ -343,6 +343,31 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
     return 1 if verdict.state == _readiness.BLOCKED else 0
 
 
+def _cmd_track(args: argparse.Namespace) -> int:
+    """Record which tracker record a task belongs to, wherever that tracker is."""
+    from papaya_agent_runtime import tracker
+    from papaya_agent_runtime.state import init_db
+
+    if not args.show and not args.record:
+        print("give --record <id>, or --show to read what is already recorded", file=sys.stderr)
+        return 2
+    conn = init_db()
+    if args.show:
+        link = tracker.task_link(conn, args.task)
+        print(tracker.link_sentence(link) if link else f"task {args.task} is not tracked anywhere")
+        return 0 if link else 1
+    tracker.link_task(
+        conn,
+        args.task,
+        record=args.record,
+        provider=args.provider,
+        url=args.url or "",
+        title=args.title or "",
+    )
+    print(tracker.link_sentence(tracker.task_link(conn, args.task)))
+    return 0
+
+
 def _cmd_papaya(args: argparse.Namespace) -> int:
     """The Papaya connection: who this runtime is, and establishing that."""
     from papaya_agent_runtime import papaya
@@ -373,20 +398,6 @@ def _cmd_papaya(args: argparse.Namespace) -> int:
             print("no Papaya context available; this machine is not connected", file=sys.stderr)
             return 1
         print(json.dumps(payload, indent=2))
-        return 0
-
-    if args.papaya_cmd == "link":
-        from papaya_agent_runtime.state import init_db
-
-        conn = init_db()
-        papaya.link_task(
-            conn,
-            args.task,
-            work_item=args.work_item,
-            url=args.url or "",
-            title=args.title or "",
-        )
-        print(papaya.link_sentence(papaya.task_link(conn, args.task)))
         return 0
 
     print("no papaya subcommand given", file=sys.stderr)
@@ -2093,14 +2104,32 @@ def build_parser() -> argparse.ArgumentParser:
     pcontext.add_argument(
         "--refresh", action="store_true", help="re-fetch instead of reading the cache"
     )
-    plink = psub.add_parser(
-        "link", help="record which Papaya work item a dispatched task belongs to"
-    )
-    plink.add_argument("task", type=int, help="task id")
-    plink.add_argument("--work-item", dest="work_item", required=True, help="Papaya work item id")
-    plink.add_argument("--url", default=None, help="the work item's URL, for anyone reading the PR")
-    plink.add_argument("--title", default=None, help="the work item's title, so copy can name it")
     papaya_cmd.set_defaults(func=_cmd_papaya)
+
+    track = sub.add_parser(
+        "track",
+        help="record which tracker record a task belongs to (Papaya, Linear, Notion, anything)",
+    )
+    track.add_argument("task", type=int, help="task id")
+    track.add_argument(
+        "--record",
+        default=None,
+        help="the record's id as its tracker spells it, e.g. PAP-214 or ENG-1183",
+    )
+    track.add_argument(
+        "--provider",
+        default="papaya",
+        help=(
+            "which tracker holds it — papaya, linear, notion, jira, or any name a "
+            "workspace uses. Defaults to papaya only when nobody has said otherwise"
+        ),
+    )
+    track.add_argument("--url", default=None, help="the record's URL, for anyone reading the PR")
+    track.add_argument("--title", default=None, help="the record's title, so copy can name it")
+    track.add_argument(
+        "--show", action="store_true", help="print what this task is tracked as, and change nothing"
+    )
+    track.set_defaults(func=_cmd_track)
 
     supervisor = sub.add_parser("supervisor", help="run and control the supervisor")
     ssub = supervisor.add_subparsers(dest="supervisor_cmd", required=True)

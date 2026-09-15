@@ -303,7 +303,7 @@ def _footer(task: sqlite3.Row, head: str, conn: sqlite3.Connection | None = None
     footer should name the runtime driving the work, and it now names the Papaya
     agent doing the driving whenever this machine is connected as one.
     """
-    from papaya_agent_runtime import papaya
+    from papaya_agent_runtime import tracker
 
     attribution = (
         f"Driven by {_driver(conn)}: briefed, reviewed at commit `{head[:8]}`, and "
@@ -315,7 +315,7 @@ def _footer(task: sqlite3.Row, head: str, conn: sqlite3.Connection | None = None
         attribution += f" Session: {session}"
     lines = [attribution]
     if conn is not None:
-        tracked = papaya.link_sentence(papaya.task_link(conn, task["id"]))
+        tracked = tracker.link_sentence(tracker.task_link(conn, task["id"]))
         if tracked:
             lines.append(tracked)
     extra = os.environ.get(FOOTER_ENV, "").strip()
