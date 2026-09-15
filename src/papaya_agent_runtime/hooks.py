@@ -71,16 +71,58 @@ def handle_hook(event: str, payload: dict[str, Any]) -> dict:
     return result
 
 
+def readiness_context() -> str | None:
+    """Say, at the top of every session, when this runtime cannot actually work.
+
+    The preflight in the contract only runs if the session reads the contract and
+    chooses to. A session started NON-INTERACTIVELY — the Papaya listener running
+    `claude -p "<work item>"` in this directory — arrives with a job to do and does
+    it, and an unconfigured runtime stays unconfigured while work appears to happen
+    somewhere else entirely. That is exactly what happened on 2026-09-15: three jobs
+    ran in this working directory, none of them touched `ppy`, and nobody found out
+    the runtime had never been set up.
+
+    A hook does not depend on being read. This one fires on every session start and
+    after every compaction, so the verdict is in front of the model whatever it was
+    launched to do.
+    """
+    from papaya_agent_runtime import readiness
+
+    verdict = readiness.check()
+    if verdict.state == readiness.READY:
+        return None
+    lines = [f"RUNTIME READINESS: {verdict.state} — {readiness.headline(verdict)}"]
+    for problem in verdict.problems:
+        who = "yours to fix now" if problem.owner == readiness.RUNTIME else "needs the user"
+        mark = "BLOCKS WORK" if problem.blocking else "gap"
+        lines.append(f"- [{mark}, {who}] {problem.summary} — {problem.fix}")
+    if verdict.state == readiness.BLOCKED:
+        lines.append(
+            "Nothing here is a gate — you can still answer, read and help as you are. But "
+            "`ppy dispatch` has nowhere to run until this is closed, so if the work in "
+            "front of you needs a worker, close it first. Fix your own items as you go. "
+            "For anything needing the user, say so plainly in your reply; if you are "
+            "connected to Papaya, DM the connection owner what `ppy readiness --report` "
+            "prints and then `ppy readiness --mark-reported`, so they hear it once."
+        )
+    return "\n".join(lines)
+
+
 def session_start_context(conn) -> str | None:
     """What a (re)starting manager needs to know before its first reply.
 
     Fires on a fresh session *and* after a compaction, so it carries the durable
-    pickup context: open todos, live work, team health — plus any due assessment.
+    pickup context: open todos, live work, team health — plus any due assessment,
+    and, first, whether this runtime can work at all.
     """
     from papaya_agent_runtime import assessments, handoff
 
     parts: list[str] = []
     with contextlib.suppress(Exception):  # a hook must never break the harness
+        ready = readiness_context()
+        if ready:
+            parts.append(ready)
+    with contextlib.suppress(Exception):
         parts.append(handoff.render_session_context(handoff.collect(conn)))
     assessment = assessments.hook_context(conn)
     if assessment:
