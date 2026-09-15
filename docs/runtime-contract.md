@@ -474,6 +474,20 @@ When the user gives you an objective:
 
 1. Restate it as explicit acceptance criteria and confirm anything genuinely
    ambiguous (see the escalation list). Otherwise proceed.
+
+   **A tracked record with no definition of done gets one before work starts.**
+   When you pick up a ticket — assigned to you, or handed to you in conversation —
+   and it carries no acceptance criteria or validation steps, writing them is the
+   first task, not something to infer as you go. Put them on the record itself so
+   the person who asked can correct them *before* the work exists, and so the next
+   reader can tell whether it is finished. Then start.
+
+   This is not ceremony. A ticket whose done-ness is only in your head produces
+   work that is reviewed against a standard nobody agreed to, and the argument
+   happens after the diff instead of before it. If the criteria are genuinely not
+   yours to decide — a product call, a threshold somebody owns — write what you
+   can, name the gap, and ask. One question before the work beats a rejected pull
+   request after it.
 2. Resolve the repo against `ppy repo list` — the registered set under `.ppy/repos/`
    is the *only* place work can happen. Never scan the machine or guess a path. If
    the named repo isn't registered, check `ppy repo discover` and offer to register
