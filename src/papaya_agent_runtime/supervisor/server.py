@@ -51,6 +51,10 @@ def default_socket_path() -> str:
     return os.path.join(base, f"ppy-{key}.sock")
 
 
+#: How often the serving loop polls worker health and prepares due assessments.
+TICK_SECONDS = 60
+
+
 class SupervisorServer:
     def __init__(self, socket_path: str | None = None) -> None:
         ensure_layout()
@@ -61,8 +65,13 @@ class SupervisorServer:
         self._stop = threading.Event()
         #: The open owner lock; held from a successful :meth:`_bind` to cleanup.
         self._lock_fd: int | None = None
-        self._last_assessment_tick = 0.0
-        self._last_health_tick = 0.0
+        # None means "never ticked", which is not the same as "ticked at zero".
+        # `time.monotonic()` is time since boot on Linux, so a 0.0 sentinel made the
+        # first minute of a machine's uptime look like a tick that had just happened:
+        # on a freshly booted CI runner neither poll ran at all, silently. Found by
+        # CI on 2026-09-15, where it looked like a flaky test.
+        self._last_assessment_tick: float | None = None
+        self._last_health_tick: float | None = None
         self._quiet_flagged: set[int] = set()
         self._plan_flagged: set[int] = set()
 
@@ -161,7 +170,10 @@ class SupervisorServer:
     def _tick_assessments(self) -> None:
         """Prepare due reviews while the supervisor is alive, without a model call."""
         now = time.monotonic()
-        if now - self._last_assessment_tick < 60:
+        if (
+            self._last_assessment_tick is not None
+            and now - self._last_assessment_tick < TICK_SECONDS
+        ):
             return
         self._last_assessment_tick = now
         try:
@@ -174,7 +186,7 @@ class SupervisorServer:
     def _tick_health(self) -> None:
         """Poll in-flight workers; flag the ones we haven't heard from in a while."""
         now = time.monotonic()
-        if now - self._last_health_tick < 60:
+        if self._last_health_tick is not None and now - self._last_health_tick < TICK_SECONDS:
             return
         self._last_health_tick = now
         try:

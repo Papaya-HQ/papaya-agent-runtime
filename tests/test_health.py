@@ -279,3 +279,52 @@ def test_status_prints_usage_only_above_the_task_and_review_ceilings(ppy_home, c
     assert f"task {under}" not in output
     assert f"task {over}" in output and "task ceiling of 100" in output
     assert f"task {review}" in output and "review ceiling of 30" in output
+
+
+def test_the_first_health_tick_runs_however_long_the_machine_has_been_up(
+    ppy_home, monkeypatch
+) -> None:
+    """`time.monotonic()` is time since boot, so a 0.0 sentinel is a live tick at boot.
+
+    With `_last_health_tick = 0.0`, the guard `monotonic() - 0.0 < 60` is true for the
+    first minute of a machine's uptime — so a supervisor started on a freshly booted
+    box silently polled nothing, and prepared no assessments, until the box had been
+    up a minute. It surfaced as a flaky CI test on a fresh runner (2026-09-15).
+    """
+    from papaya_agent_runtime.supervisor import server as server_mod
+
+    monkeypatch.setattr(health, "_pid_alive", lambda pid: True)
+    conn = init_db()
+    task_id = _in_flight_task(conn, heard_ago=timedelta(hours=1))
+    monkeypatch.setattr(server_mod.time, "monotonic", lambda: 0.5)  # boot, near enough
+
+    server = SupervisorServer(socket_path=str(ppy_home / "boot.sock"))
+    server._tick_health()
+
+    kinds = [
+        r["kind"] for r in conn.execute("SELECT kind FROM events WHERE task_id = ?", (task_id,))
+    ]
+    assert "worker_quiet" in kinds
+
+
+def test_a_second_tick_inside_the_interval_is_skipped(ppy_home, monkeypatch) -> None:
+    """The rate limit still has to hold, or every loop iteration re-polls."""
+    from papaya_agent_runtime.supervisor import server as server_mod
+
+    monkeypatch.setattr(health, "_pid_alive", lambda pid: True)
+    conn = init_db()
+    _in_flight_task(conn, heard_ago=timedelta(hours=1))
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(server_mod.time, "monotonic", lambda: clock["now"])
+
+    server = SupervisorServer(socket_path=str(ppy_home / "rate.sock"))
+    server._tick_health()
+    first = server._last_health_tick
+
+    clock["now"] += server_mod.TICK_SECONDS - 1
+    server._tick_health()
+    assert server._last_health_tick == first  # skipped
+
+    clock["now"] += 2
+    server._tick_health()
+    assert server._last_health_tick != first  # ran

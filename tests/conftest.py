@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from papaya_agent_runtime import papaya
 from papaya_agent_runtime.providers import capability
 
 
@@ -95,6 +96,22 @@ def _isolated_capability_record(tmp_path, monkeypatch):
     capability.clear_cache()
     yield
     capability.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
+    """Keep the hermetic suite off this machine's real Papaya connection.
+
+    The runtime discovers a connection wherever one was made — a terminal's
+    `~/.papaya-agent`, or the desktop app's own directory — which means that
+    without this, every test reads whichever agent the developer happens to be
+    connected as. Three pull-request-body tests started asserting against a real
+    handle the moment discovery landed. Point it at an empty directory so a test
+    sees "not connected" unless it says otherwise, and so CI and a laptop agree.
+    """
+    monkeypatch.setenv(
+        papaya.HOME_ENV, str(tmp_path_factory.mktemp("papaya-client-home", numbered=True))
+    )
 
 
 @pytest.fixture

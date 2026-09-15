@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -36,8 +37,12 @@ CLI = "papaya-agent"
 #: How to reach the client when it is not installed yet. The npm package is a shim
 #: that finds or downloads `uv` and then installs the Python client for good.
 BOOTSTRAP = ("npx", "--yes", "papaya-agent")
-#: Overridable for tests; the client itself hard-codes `~/.papaya-agent`.
+#: Overridable for tests, and the last word when set.
 HOME_ENV = "PPY_PAPAYA_HOME"
+#: The Papaya client's own override. The desktop app sets this for the process it
+#: launches, which is why a connection made there is invisible to a shell that did
+#: not inherit it — hence the discovery below.
+CLIENT_HOME_ENV = "PAPAYA_AGENT_HOME"
 #: How long a connect flow may sit waiting for the person to click Approve.
 CONNECT_TIMEOUT = 300
 #: Short probes (reading identity, reading context) should never hang a preflight.
@@ -49,10 +54,61 @@ WORK_ITEM_URL_KEY = "papaya_work_item_url"
 WORK_ITEM_TITLE_KEY = "papaya_work_item_title"
 
 
-def client_home() -> Path:
-    """Where the Papaya client keeps its config and tokens."""
+def _desktop_home() -> Path | None:
+    """Where the Papaya desktop app's bundled client keeps its connection.
+
+    The app runs the client as a child process with `PAPAYA_AGENT_HOME` pointed
+    here, so the connection is real but invisible to any shell that did not inherit
+    that variable — which is every shell the user opens themselves. Looking here is
+    what makes "connect from the desktop app" and "connect from the CLI" the same
+    thing to this runtime.
+    """
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        base = Path(appdata)
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "Papaya" / "agent-host" / "client"
+
+
+def candidate_homes() -> list[Path]:
+    """Every place a Papaya connection could have been established, best first.
+
+    An explicit `PPY_PAPAYA_HOME` is the whole list: it exists so a test can say
+    precisely what the world looks like.
+    """
     override = os.environ.get(HOME_ENV)
-    return Path(override) if override else Path.home() / ".papaya-agent"
+    if override:
+        return [Path(override)]
+    homes: list[Path] = []
+    client_override = os.environ.get(CLIENT_HOME_ENV)
+    if client_override:
+        homes.append(Path(client_override))
+    homes.append(Path.home() / ".papaya-agent")
+    desktop = _desktop_home()
+    if desktop is not None:
+        homes.append(desktop)
+    seen: list[Path] = []
+    for home in homes:
+        if home not in seen:
+            seen.append(home)
+    return seen
+
+
+def client_home() -> Path:
+    """The home this machine's connection actually lives in.
+
+    The one carrying a pinned agent, or the first candidate when none does — so an
+    unconnected machine still reports a sensible path to look at.
+    """
+    found = _best()
+    if found is not None:
+        return found[1]
+    return candidate_homes()[0]
 
 
 def config_path() -> Path:
@@ -90,8 +146,8 @@ def installed() -> str | None:
     return shutil.which(CLI)
 
 
-def _read_config() -> dict:
-    path = config_path()
+def _read_config(home: Path) -> dict:
+    path = home / "config.json"
     if not path.is_file():
         return {}
     try:
@@ -101,44 +157,69 @@ def _read_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def identity() -> Identity | None:
-    """The agent this machine is pinned to, or None when nothing is connected.
+def _identity_in(config: dict) -> tuple[Identity, str] | None:
+    """The pinned agent in one config, with when it was pinned.
 
     `papaya-agent connect` writes the pinned agent under `connect.agent_id` and the
     full entry under `agents[<id>]`. A config carrying agents but no `connect` block
     is an older client, so the single agent entry is used when there is exactly one
-    — guessing between several would connect the runtime as the wrong identity.
+    — guessing between several would act in the workspace as the wrong agent.
     """
-    config = _read_config()
     agents = config.get("agents")
     if not isinstance(agents, dict) or not agents:
         return None
-    connect = config.get("connect")
-    entry: dict | None = None
-    if isinstance(connect, dict):
-        entry = agents.get(str(connect.get("agent_id") or ""))
+    connect = config.get("connect") if isinstance(config.get("connect"), dict) else {}
+    entry: dict | None = agents.get(str(connect.get("agent_id") or "")) if connect else None
     if entry is None and len(agents) == 1:
         entry = next(iter(agents.values()))
     if not isinstance(entry, dict):
         return None
-    harness = ""
-    if isinstance(connect, dict):
-        harness = str(connect.get("harness") or "")
-    return Identity(
+    found = Identity(
         agent_id=str(entry.get("agent_id") or ""),
         name=str(entry.get("agent_name") or ""),
         handle=str(entry.get("agent_handle") or ""),
         role_label=str(entry.get("agent_role_label") or ""),
         workspace_id=str(entry.get("workspace_id") or ""),
         connection_id=str(entry.get("connection_id") or ""),
-        harness=harness,
+        harness=str(connect.get("harness") or ""),
     )
+    return found, str(connect.get("updated_at") or "")
+
+
+def _best() -> tuple[Identity, Path] | None:
+    """The connection to act as, across every place one could have been made.
+
+    A machine can hold a CLI connection and a desktop-app connection at once. The
+    most recently pinned one wins, because that is the one the person last chose;
+    an ISO-8601 timestamp sorts correctly as a string, and a config too old to carry
+    one loses to any that does.
+    """
+    found: list[tuple[str, Identity, Path]] = []
+    for home in candidate_homes():
+        result = _identity_in(_read_config(home))
+        if result is not None:
+            who, updated_at = result
+            found.append((updated_at, who, home))
+    if not found:
+        return None
+    found.sort(key=lambda item: item[0], reverse=True)
+    _, who, home = found[0]
+    return who, home
+
+
+def identity() -> Identity | None:
+    """The agent this machine is pinned to, or None when nothing is connected."""
+    found = _best()
+    return found[0] if found is not None else None
 
 
 def signed_in() -> bool:
-    """Is there a user session, even if no agent has been pinned yet?"""
-    session = _read_config().get("session")
-    return isinstance(session, dict) and bool(session.get("refresh_token"))
+    """Is any candidate home authenticated, even with no agent pinned yet?"""
+    for home in candidate_homes():
+        session = _read_config(home).get("session")
+        if isinstance(session, dict) and session.get("refresh_token"):
+            return True
+    return False
 
 
 def status() -> dict:
@@ -165,6 +246,7 @@ def status() -> dict:
         "state": state,
         "cli": path,
         "config": str(config_path()),
+        "searched": [str(home) for home in candidate_homes()],
         "identity": asdict(who) if who else None,
         "addressed": who.addressed if who else None,
     }
@@ -311,12 +393,14 @@ def link_sentence(link: dict | None) -> str:
 __all__ = [
     "BOOTSTRAP",
     "CLI",
+    "CLIENT_HOME_ENV",
     "CONNECT_TIMEOUT",
     "HOME_ENV",
     "WORK_ITEM_KEY",
     "WORK_ITEM_TITLE_KEY",
     "WORK_ITEM_URL_KEY",
     "Identity",
+    "candidate_homes",
     "client_home",
     "config_path",
     "connect",

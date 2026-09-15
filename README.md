@@ -36,8 +36,10 @@ The contract it runs on is [`docs/runtime-contract.md`](docs/runtime-contract.md
 
 ## Identity comes from Papaya
 
-The runtime has **no persona of its own**. `papaya-agent connect` pins this machine
-to one of your workspace's agents, and from then on the session *is* that agent:
+The runtime has **no persona of its own**. Connecting pins this machine to one of
+your workspace's agents — either from the Papaya desktop app or with
+`papaya-agent connect` in a terminal; the runtime finds either one. From then on
+the session *is* that agent:
 persona, objective, rules and memories are loaded from Papaya and treated as
 standing instructions. `ppy papaya status` says who you're connected as.
 
@@ -190,7 +192,10 @@ All working state is under `.ppy/` (gitignored):
 - `tools/`, `worktree-pools/`, `run/` — companions, task worktrees, supervisor sockets.
 - `probes/` — raw provider-probe evidence.
 
-The Papaya connection itself lives in `~/.papaya-agent/`, owned by the client.
+The Papaya connection itself is owned by the client, not by this runtime:
+`~/.papaya-agent/` for a terminal connection, or the desktop app's own
+application-support directory. `ppy papaya status` says which one it found, and
+`--json` lists everywhere it looked.
 
 ## Model routing
 
