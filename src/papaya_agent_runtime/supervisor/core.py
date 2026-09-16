@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from papaya_agent_runtime import decisions, lifecycle
 from papaya_agent_runtime.config import ConfigError, load_config
@@ -100,6 +101,71 @@ def _pid_alive(pid: int | None) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _record_runner_crash(conn, runner_id: str | None, spec: TaskSpec, exc: Exception) -> None:
+    """Atomically expose a crashed runner, without overwriting a newer session.
+
+    ``result_recorded`` is the reconciliation boundary: once true, a dead runner
+    is no longer eligible for recovery. Keep it in the same transaction as the
+    task failure and actionable error so a failed write leaves the runner visibly
+    unreconciled rather than silently stranding the task in progress.
+    """
+    with contextlib.suppress(Exception):
+        conn.rollback()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        runner_row = store.get_runner(conn, runner_id) if runner_id is not None else None
+        current_session = runner_row is None or not runner_row["superseded_at"]
+        if current_session:
+            newer_live = conn.execute(
+                """
+                SELECT 1 FROM runners
+                WHERE task_id = ? AND id IS NOT ?
+                  AND status IN ('starting', 'running')
+                  AND superseded_at IS NULL
+                LIMIT 1
+                """,
+                (spec.task_id, runner_id),
+            ).fetchone()
+            current_session = newer_live is None
+
+        if current_session:
+            now = datetime.now(UTC).isoformat()
+            seq = store.next_seq(conn, spec.run_id)
+            payload = json.dumps(
+                {
+                    "task_id": spec.task_id,
+                    "runner": runner_id,
+                    "summary": f"runner crashed: {exc!r}",
+                }
+            )
+            conn.execute(
+                """
+                INSERT INTO events (run_id, task_id, seq, kind, payload, created_at)
+                VALUES (?, ?, ?, 'error', ?, ?)
+                """,
+                (spec.run_id, spec.task_id, seq, payload, now),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'failed', updated_at = ? WHERE id = ?",
+                (now, spec.task_id),
+            )
+
+        if runner_row is not None and runner_row["status"] in ("starting", "running"):
+            conn.execute(
+                """
+                UPDATE runners
+                SET status = 'failed', exit_code = -1, result_recorded = 1
+                WHERE id = ?
+                """,
+                (runner_id,),
+            )
+        conn.commit()
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        raise
 
 
 def _start_from_branch(
@@ -1317,30 +1383,23 @@ class Supervisor:
                 # released by identity: this execution's, never "the task's".
                 self._release(execution)
         except Exception as exc:  # noqa: BLE001 - record, never crash the supervisor
-            conn = init_db()
             runner.interrupt()
-            if runner.runner_id is not None:
-                row = store.get_runner(conn, runner.runner_id)
-                if row is not None and row["status"] in ("starting", "running"):
-                    store.update_runner(
-                        conn,
-                        runner.runner_id,
-                        status="failed",
-                        exit_code=-1,
-                        result_recorded=1,
-                    )
-            # Only stamp the task when this runner is still the task's session; a
-            # crash in a session that a resume already replaced says nothing about
-            # the worker now running.
-            if not store.live_runners_for_task(conn, spec.task_id):
-                store.set_task_status(conn, spec.task_id, "failed")
-            store.append_event(
-                conn,
-                kind="error",
-                payload={"task_id": spec.task_id, "summary": f"runner crashed: {exc!r}"},
-                run_id=spec.run_id,
-                task_id=spec.task_id,
-            )
+            # A lock error here may be the reason ``runner.run`` escaped. Retry
+            # once through a fresh connection. If both attempts fail, the atomic
+            # recorder leaves result_recorded false, so dead-runner reconciliation
+            # can turn the durable runner row into needs_recovery plus an error.
+            for _attempt in range(2):
+                conn = None
+                try:
+                    conn = init_db()
+                    _record_runner_crash(conn, runner.runner_id, spec, exc)
+                    break
+                except Exception:  # noqa: BLE001 - reconciliation owns a double failure
+                    pass
+                finally:
+                    if conn is not None:
+                        with contextlib.suppress(Exception):
+                            conn.close()
         else:
             if runner.superseded:
                 # A retired session's ending is not this task's checkpoint.
