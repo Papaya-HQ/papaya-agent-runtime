@@ -732,6 +732,8 @@ def _start_failure_problems(problems: list[Problem]) -> None:
 FORGE_UNAUTHENTICATED = "forge_unauthenticated"
 GH_MISSING = "gh_missing"
 REPO_UNREACHABLE = "repo_unreachable"
+#: A base clone fetches from a local checkout, not its forge, and the start could not fix it.
+REPO_ORIGIN_IS_LOCAL = "repo_origin_is_local"
 NODE_MISSING = "node_missing"
 UV_MISSING = "uv_missing"
 DOCKER_NOT_RUNNING = "docker_not_running"
@@ -930,6 +932,51 @@ def _forge_problems(problems: list[Problem], registered: list[dict]) -> None:
             )
 
 
+def _origin_problems(problems: list[Problem], registered: list[dict]) -> None:
+    """A base clone whose `origin` is a local checkout rather than its forge.
+
+    `ppy serve`'s start and `ppy repo sync` rewrite such an `origin` whenever the
+    forge answers, so one still standing means the forge could not be reached. Work
+    there would branch from whatever the checkout had fetched — on 2026-09-16, a
+    person's feature branch — so the repository is refused until it is fixed.
+    """
+    from papaya_agent_runtime import repos
+
+    stranded: list[tuple[str, str, str, str]] = []
+    for row in registered:
+        forge, path = row.get("forge_url"), str(row.get("local_path") or "")
+        if not forge or not path:
+            continue
+        code, out = machine.run(["git", "-C", path, "config", "--get", "remote.origin.url"])
+        origin = out.strip() if code == 0 else ""
+        if origin and repos.is_local_remote(origin) and origin.rstrip("/") != forge.rstrip("/"):
+            stranded.append((str(row["name"]), path, origin, forge))
+    if not stranded:
+        return
+    name, path, origin, forge = stranded[0]
+    names = tuple(sorted(s[0] for s in stranded))
+    problems.append(
+        Problem(
+            code=REPO_ORIGIN_IS_LOCAL,
+            summary=(
+                f"{', '.join(names)} fetch from a local checkout instead of the forge "
+                f"({name}: {origin}), and the forge could not be reached to fix it"
+            ),
+            fix=f"make the forge reachable, then `ppy repo sync {name}`",
+            owner=USER,
+            blocking=False,
+            title="A repository's base clone fetches from a local checkout, not its forge",
+            steps=(
+                f"git ls-remote --symref {forge} HEAD",
+                "if that fails: gh auth login --hostname github.com --git-protocol https --web",
+                f"ppy repo sync {name}",
+                AFTER,
+            ),
+            repos=names,
+        )
+    )
+
+
 def _toolchain_problems(problems: list[Problem], registered: list[dict]) -> None:
     """Node, uv and Docker, for the repositories that need them."""
     from papaya_agent_runtime import memory
@@ -1021,6 +1068,7 @@ def _machine_problems(problems: list[Problem]) -> None:
         registered = []
     for probe in (
         lambda: _forge_problems(problems, registered),
+        lambda: _origin_problems(problems, registered),
         lambda: _toolchain_problems(problems, registered),
         lambda: _disk_problems(problems),
     ):

@@ -318,6 +318,9 @@ class SupervisorPolicy:
     # Seconds a stopping supervisor waits for its workers to be recorded stopped
     # (their sessions stay resumable) before it exits anyway.
     stop_timeout: int = 30
+    # Seconds a runner row may sit with no process behind it before it is closed as
+    # dead; a row whose recorded pid is gone is dead at once.
+    dead_after: int = 600
 
 
 @dataclass
@@ -481,6 +484,9 @@ class MMConfig:
         stop_timeout = self.supervisor.stop_timeout
         if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int) or stop_timeout < 1:
             raise ConfigError("supervisor.stop_timeout must be a positive number of seconds")
+        dead_after = self.supervisor.dead_after
+        if isinstance(dead_after, bool) or not isinstance(dead_after, int) or dead_after < 1:
+            raise ConfigError("supervisor.dead_after must be a positive number of seconds")
         idle = self.sweep.idle_claim_minutes
         if isinstance(idle, bool) or not isinstance(idle, int) or idle < 1:
             raise ConfigError("sweep.idle_claim_minutes must be a positive number of minutes")

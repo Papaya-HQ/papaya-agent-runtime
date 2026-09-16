@@ -80,6 +80,8 @@ class SupervisorServer:
         self.supervisor = Supervisor()
         #: Pids a crashed holder left in the lock file, found when this one took it.
         self.took_over_from: list[int] = []
+        #: Runner rows this start closed because no process was behind them.
+        self.closed_at_start: list = []
         #: Called (from a connection thread) when a client asks this supervisor to
         #: shut down, so the process that owns it can stop too: `serve` stops its listener.
         self.on_shutdown: Callable[[], None] | None = None
@@ -109,12 +111,25 @@ class SupervisorServer:
 
     def start_background(self) -> None:
         self._bind()
+        self._close_dead_runners()
         self._thread = threading.Thread(target=self._serve_loop, daemon=True)
         self._thread.start()
 
     def serve_forever(self) -> None:
         self._bind()
+        self._close_dead_runners()
         self._serve_loop()
+
+    def _close_dead_runners(self) -> None:
+        """A start owns every runner row: one whose process is gone gives its slot back now.
+
+        Nothing else would close it — the previous supervisor is gone, and the rounds
+        only run once `serve` is listening — so admission would count it until then.
+        """
+        try:
+            self.closed_at_start = self.supervisor.close_dead_runners(source="supervisor start")
+        except Exception:  # noqa: BLE001 - a start must not fail on its own bookkeeping
+            self.closed_at_start = []
 
     def _acquire_owner_lock(self) -> None:
         """Become the one supervisor for this ``PPY_HOME``, or refuse having touched nothing."""

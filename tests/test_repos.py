@@ -213,24 +213,61 @@ def test_only_a_plain_path_counts_as_a_local_remote() -> None:
         assert not repos.is_local_remote(elsewhere), elsewhere
 
 
-@pytest.mark.strict_forge
-def test_add_from_a_path_takes_the_forge_from_that_path_s_origin(tmp_path, ppy_home) -> None:
-    source = _make_source_repo(tmp_path / "source")
-    subprocess.run(["git", "-C", source, "remote", "add", "origin", GITHUB_URL], check=True)
+def fake_forge(monkeypatch, url: str, path: str) -> None:
+    """Every git command reaching for ``url`` reaches the repository at ``path`` instead.
 
-    added = repos.add_repo(source)
+    `url.<base>.insteadOf` through the environment, so clone, fetch and ls-remote all
+    go there, while the URL each clone records as its `origin` is still ``url``.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{path}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", url)
+
+
+def _forge_with_a_feature_branch(tmp_path) -> str:
+    """A forge whose HEAD is `main`, and which also has `feature/x` one commit ahead."""
+    forge = _make_source_repo(tmp_path / "forge")
+    _git(forge, "checkout", "-q", "-b", "feature/x")
+    _commit_on_origin(forge, "feature work")
+    _git(forge, "checkout", "-q", "main")
+    return forge
+
+
+def _checkout_of(forge: str, path, *, branch: str, origin: str) -> str:
+    """A person's checkout of the forge, on ``branch``, whose origin names the forge's URL."""
+    subprocess.run(["git", "clone", "-q", forge, str(path)], check=True, capture_output=True)
+    _git(path, "checkout", "-q", branch)
+    _git(path, "remote", "set-url", "origin", origin)
+    return str(path)
+
+
+@pytest.mark.strict_forge
+def test_add_from_a_path_clones_the_forge_and_follows_its_head_not_the_checkout(
+    tmp_path, ppy_home, monkeypatch
+) -> None:
+    """The backend incident: registered from a checkout on a feature branch."""
+    forge = _forge_with_a_feature_branch(tmp_path)
+    fake_forge(monkeypatch, GITHUB_URL, forge)
+    checkout = _checkout_of(forge, tmp_path / "papaya-infra", branch="feature/x", origin=GITHUB_URL)
+
+    added = repos.add_repo(checkout)
+
     assert added.forge_url == GITHUB_URL
-    assert repos.list_repos()[0]["forge_url"] == GITHUB_URL
-    # The base clone's own origin is the local path, so the forge is reachable
-    # through a second remote that worktrees inherit.
-    assert repos.remote_url(added.local_path) == source
-    assert repos.remote_url(added.local_path, repos.FORGE_REMOTE) == GITHUB_URL
-    assert repos.upstream_remote(repos.list_repos()[0]) == repos.FORGE_REMOTE
+    assert added.default_branch == "main"
+    assert repos.list_repos()[0]["default_branch"] == "main"
+    # The clone's origin is the forge itself, and it sits on the forge's HEAD.
+    assert repos.remote_url(added.local_path) == GITHUB_URL
+    assert repos.remote_url(added.local_path, repos.FORGE_REMOTE) is None
+    assert repos.upstream_remote(repos.list_repos()[0]) == "origin"
+    assert _git(added.local_path, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert added.base_sha == _git(forge, "rev-parse", "main")
+    (note,) = added.notes
+    assert "feature/x" in note and "main" in note
 
 
 @pytest.mark.strict_forge
 def test_add_from_a_path_with_a_local_origin_refuses_until_a_forge_is_named(
-    tmp_path, ppy_home
+    tmp_path, ppy_home, monkeypatch
 ) -> None:
     upstream = _make_source_repo(tmp_path / "upstream")
     source = _make_source_repo(tmp_path / "source")
@@ -243,8 +280,10 @@ def test_add_from_a_path_with_a_local_origin_refuses_until_a_forge_is_named(
     assert upstream in message  # the refusal names what it found instead of a forge
     assert repos.list_repos() == []
 
+    fake_forge(monkeypatch, GITHUB_URL, upstream)
     added = repos.add_repo(source, forge_url=GITHUB_URL)
     assert added.forge_url == GITHUB_URL
+    assert repos.remote_url(added.local_path) == GITHUB_URL
 
 
 @pytest.mark.strict_forge
@@ -257,27 +296,26 @@ def test_add_from_a_path_with_no_origin_at_all_refuses(tmp_path, ppy_home) -> No
 
 @pytest.mark.strict_forge
 def test_add_from_a_url_records_that_url_as_the_forge(tmp_path, ppy_home, monkeypatch) -> None:
-    """A repo registered by URL is its own forge; only the clone needs the network."""
+    """A repo registered by URL is its own forge."""
     source = _make_source_repo(tmp_path / "source")
-    real_git = repos._git
-
-    def fake_git(args, cwd=None):
-        if args[:2] == ["clone", "--quiet"]:
-            return real_git(["clone", "--quiet", source, args[-1]], cwd=cwd)
-        return real_git(args, cwd=cwd)
-
-    monkeypatch.setattr(repos, "_git", fake_git)
+    fake_forge(monkeypatch, GITHUB_URL, source)
     added = repos.add_repo(GITHUB_URL)
     assert added.name == "papaya-infra"
     assert added.forge_url == GITHUB_URL
+    assert added.default_branch == "main"
+    assert added.notes == []
 
 
 @pytest.mark.strict_forge
-def test_repo_list_and_doctor_surface_a_repo_with_no_forge(tmp_path, ppy_home, capsys) -> None:
+def test_repo_list_and_doctor_surface_a_repo_with_no_forge(
+    tmp_path, ppy_home, capsys, monkeypatch, machine
+) -> None:
+    from papaya_agent_runtime import readiness
     from papaya_agent_runtime.cli import main
     from papaya_agent_runtime.setup.doctor import render_text
 
     source = _make_source_repo(tmp_path / "source")
+    fake_forge(monkeypatch, GITHUB_URL, source)
     assert main(["repo", "add", source, "--forge-url", GITHUB_URL]) == 0
     assert GITHUB_URL in capsys.readouterr().out
 
@@ -293,6 +331,18 @@ def test_repo_list_and_doctor_surface_a_repo_with_no_forge(tmp_path, ppy_home, c
     rendered = render_text({**_doctor_stub(), "repos": [{"name": "source", "forge_url": None}]})
     assert "NO FORGE" in rendered
     assert "--forge-url" in rendered
+
+    # With no forge there is nothing to rewrite and nothing to block: a local origin
+    # stays, sync still works from it, the start remedy is silent, readiness only warns.
+    clone = repos.list_repos()[0]["local_path"]
+    _git(clone, "remote", "set-url", "origin", source)
+    assert main(["repo", "sync", "source"]) == 0
+    assert repos.remote_url(clone) == source
+    assert repos.keep_base_clones_right() == []
+    machine.answers[("git", "-C", clone, "config", "--get", "remote.origin.url")] = source
+    codes = {p.code for p in readiness.check().problems}
+    assert "repo_without_forge" in codes
+    assert readiness.REPO_ORIGIN_IS_LOCAL not in codes
 
 
 def _doctor_stub() -> dict:
@@ -320,6 +370,109 @@ def test_repo_sync_cli_reports_the_fast_forward(tmp_path, ppy_home, capsys) -> N
 
 
 # --------------------------------------------------------------------------- #
+# The base branch and the fetch source are the forge's (2026-09-16)
+# --------------------------------------------------------------------------- #
+
+
+def _wrong_default_branch(tmp_path) -> tuple[str, repos.AddedRepo]:
+    """A clone registered back when the checkout's branch became the default."""
+    from papaya_agent_runtime.state import init_db, store
+
+    forge = _forge_with_a_feature_branch(tmp_path)
+    added = repos.add_repo(forge)
+    _git(added.local_path, "checkout", "-q", "-b", "feature/x", "--track", "origin/feature/x")
+    store.update_repo_fields(init_db(), added.name, default_branch="feature/x")
+    return forge, added
+
+
+def test_sync_corrects_a_wrong_stored_default_branch_and_logs_it(
+    tmp_path, ppy_home, caplog, capsys
+) -> None:
+    from papaya_agent_runtime.cli import main
+
+    forge, added = _wrong_default_branch(tmp_path)
+
+    with caplog.at_level("INFO", logger="papaya_agent_runtime.repos"):
+        assert main(["repo", "sync", added.name]) == 0
+
+    row = repos.list_repos()[0]
+    assert row["default_branch"] == "main"
+    assert row["base_sha"] == _git(forge, "rev-parse", "main")
+    assert _git(added.local_path, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    line = "default branch was feature/x; it is now main, the forge's HEAD"
+    assert line in capsys.readouterr().out
+    assert any(line in record.getMessage() for record in caplog.records)
+
+
+def test_a_pinned_default_branch_is_kept_over_the_forge_until_unpinned(
+    tmp_path, ppy_home, capsys
+) -> None:
+    from papaya_agent_runtime.cli import main
+
+    _forge, added = _wrong_default_branch(tmp_path)
+    assert main(["repo", "set", added.name, "--default-branch", "feature/x"]) == 0
+    assert "pinned to feature/x" in capsys.readouterr().out
+
+    res = repos.sync_repo(added.name)
+    assert res.default_branch == "feature/x"
+    assert res.default_branch_was is None
+    assert repos.keep_base_clones_right() == []
+
+    assert main(["repo", "set", added.name, "--default-branch", ""]) == 0
+    assert repos.list_repos()[0]["default_branch"] == "main"
+
+
+@pytest.mark.strict_forge
+def test_sync_and_the_start_remedy_make_a_local_path_origin_the_forge(
+    tmp_path, ppy_home, monkeypatch
+) -> None:
+    """The backend clone fetched from Shane's checkout; `set-head -a` followed their branch."""
+    forge = _forge_with_a_feature_branch(tmp_path)
+    fake_forge(monkeypatch, GITHUB_URL, forge)
+    added = repos.add_repo(GITHUB_URL)
+    checkout = _checkout_of(forge, tmp_path / "checkout", branch="feature/x", origin=GITHUB_URL)
+    _git(added.local_path, "remote", "set-url", "origin", checkout)
+
+    (line,) = repos.keep_base_clones_right()
+
+    assert line.startswith("repaired papaya-infra's base clone: ")
+    assert f"origin was the local path {checkout}" in line
+    assert repos.remote_url(added.local_path) == GITHUB_URL
+    assert _git(added.local_path, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert repos.keep_base_clones_right() == []
+
+
+@pytest.mark.strict_forge
+def test_a_local_path_origin_the_forge_cannot_repair_is_refused_and_is_a_blocker(
+    tmp_path, ppy_home, monkeypatch, machine
+) -> None:
+    from papaya_agent_runtime import readiness
+
+    forge = _make_source_repo(tmp_path / "forge")
+    fake_forge(monkeypatch, GITHUB_URL, forge)
+    added = repos.add_repo(GITHUB_URL)
+    checkout = str(tmp_path / "checkout")
+    _git(added.local_path, "remote", "set-url", "origin", checkout)
+    fake_forge(monkeypatch, GITHUB_URL, str(tmp_path / "nowhere"))  # the forge is unreachable
+
+    with pytest.raises(repos.RepoError, match="cannot be reached"):
+        repos.sync_repo(added.name)
+    assert repos.remote_url(added.local_path) == checkout
+    (line,) = repos.keep_base_clones_right()
+    assert line.startswith("could not put papaya-infra's base clone back on its forge")
+
+    machine.answers[("git", "-C", added.local_path, "config", "--get", "remote.origin.url")] = (
+        checkout
+    )
+    problem = next(
+        p for p in readiness.check().problems if p.code == readiness.REPO_ORIGIN_IS_LOCAL
+    )
+    assert problem.repos == ("papaya-infra",)
+    assert "ppy repo sync papaya-infra" in problem.steps
+    assert readiness.setup_blocker(readiness.check(), "papaya-infra") is not None
+
+
+# --------------------------------------------------------------------------- #
 # Delivery follows the forge, not the base clone's local origin
 # --------------------------------------------------------------------------- #
 
@@ -335,6 +488,7 @@ def test_delivery_pushes_and_opens_the_pr_on_the_registered_forge(
     from papaya_agent_runtime.state import init_db, store
 
     source = _make_source_repo(tmp_path / "papaya-infra")
+    fake_forge(monkeypatch, GITHUB_URL, source)
     added = repos.add_repo(source, forge_url=GITHUB_URL)
 
     conn = init_db()
@@ -356,7 +510,7 @@ def test_delivery_pushes_and_opens_the_pr_on_the_registered_forge(
 
     delivery.deliver(task_id)
     push_argv = next(a for a in calls if a[:2] == ["git", "push"])
-    assert push_argv[2] == repos.FORGE_REMOTE
+    assert push_argv[2] == "origin"  # the base clone's origin is the forge
     pr_argv = next(a for a in calls if a[:3] == ["gh", "pr", "create"])
     assert pr_argv[pr_argv.index("--repo") + 1] == "Papaya-HQ/papaya-infra"
 

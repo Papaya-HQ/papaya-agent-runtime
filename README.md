@@ -386,6 +386,26 @@ they started and never `serve`), and a small watcher process — the lifeline �
 whatever is still running if `serve` itself dies without running another line (an app
 crash, `kill -9`), so no orphan is left holding a worktree.
 
+**A runner row is truth or it is closed.** Worker slots are counted from the runner rows
+that say `starting` or `running`. A row whose process is gone — its pid is not alive, or
+it never had one and has not been heard from for `supervisor.dead_after` (default 600s)
+— is closed at every supervisor start (fresh, adopted or retired), at every `serve`
+start, and on every manager round whatever its ticket's state: the row becomes
+`exited`, its slot comes back, and a task still in flight is recorded `worker_stopped`
+with the cause and its session kept for a resume. One line per row.
+
+**A base clone is its forge's.** `ppy repo add` clones from the forge even when given a
+local path (the path only says where the forge is, through its own `origin`, and seeds
+memory), so the clone's `origin` is the forge. The default branch is the forge's HEAD
+(`git ls-remote --symref`), never the branch a checkout happens to be on, and the clone
+is checked out on it; a path registration whose checkout is on another branch says so.
+`ppy repo sync` rewrites an `origin` that points at a local path to the forge and
+corrects a stored default branch that differs from the forge's HEAD, saying each change;
+`ppy repo set <repo> --default-branch <branch>` pins one over the forge (an empty value
+unpins it). Each `serve` start makes both repairs, one line per repository repaired. A
+clone whose `origin` is still a local path because the forge could not be reached is
+refused work and reported as the `repo_origin_is_local` blocker, with its steps.
+
 A start on a checkout that has never been set up sets it up first — the same
 non-interactive path `ppy setup` runs, with the providers taken from the
 connection's harness — and says so in one line on stderr. It then checks whether it

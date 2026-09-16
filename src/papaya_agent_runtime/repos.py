@@ -1,9 +1,17 @@
 """Repository registration (`ppy repo add|list|sync`).
 
-Registers repositories as read-only base clones under ``.ppy/repos/``. A remote
-URL is cloned; an existing local path is cloned locally so the base clone stays
-isolated from the user's working checkout. Task worktrees (M2) branch from these
-bases via the worktree lease manager.
+Registers repositories as read-only base clones under ``.ppy/repos/``. Every base
+clone is cloned from its forge, and its ``origin`` is the forge. A local path is
+only evidence: it names the forge (through its own ``origin``) and seeds memory,
+and is never fetched from. Task worktrees (M2) branch from these bases via the
+worktree lease manager.
+
+The base branch is the forge's too (2026-09-16): a backend repository registered
+from a person's checkout recorded the branch that checkout happened to be on, its
+base clone's ``origin`` was that checkout, and every backend worker for days
+branched from their feature branch. Registration and sync now read the forge's ``HEAD``
+(``git ls-remote --symref``), sync rewrites a local-path ``origin`` to the forge, and
+only ``ppy repo set --default-branch`` overrides the forge, as a lock.
 
 ``sync`` is the command that keeps a base clone honest. It used to fetch and then
 record the base clone's *local* ``HEAD``, which never moved — so a base clone that
@@ -17,6 +25,7 @@ hand.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -27,6 +36,11 @@ from pathlib import Path
 from papaya_agent_runtime.memory import seed_repo_memory
 from papaya_agent_runtime.paths import ensure_layout, repos_dir
 from papaya_agent_runtime.state import init_db, store
+
+log = logging.getLogger("papaya_agent_runtime.repos")
+
+#: How long one question to the forge (`ls-remote`, a fetch for `set-head`) may take.
+FORGE_TIMEOUT_SECONDS = 60.0
 
 # A base clone is not a workspace, but `ppy`'s own state directory can end up
 # inside one: ``ppy_home()`` falls back to ``<cwd>/.ppy`` when ``PPY_HOME`` is unset,
@@ -54,12 +68,11 @@ _FORGE_URL_PATTERNS = (
     re.compile(r"^ssh://git@github\.com/(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$"),
 )
 
-# The second remote a base clone gets when its own `origin` is not the forge.
-# Rewriting `origin` would break the clone's relationship with the local checkout
-# it was cloned from (and every worktree already leased off it), so the forge is
-# added alongside it under a name nothing else uses. Worktrees share the base
-# clone's remote configuration, so a worker's worktree can fetch and push there
-# without any extra setup.
+# The second remote an older base clone got when its own `origin` was a local
+# checkout. Clones are now made from the forge and `sync` rewrites such an
+# `origin`, so this remote only exists on a clone that has not been repaired yet
+# (the forge could not be reached); worktrees share the base clone's remote
+# configuration, so a worker can still push there meanwhile.
 FORGE_REMOTE = "forge"
 
 
@@ -112,6 +125,8 @@ class AddedRepo:
     default_branch: str | None
     base_sha: str | None
     forge_url: str | None = None
+    #: One line each for anything worth saying, e.g. a checkout on another branch.
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -128,6 +143,10 @@ class SyncResult:
     stray_ppy: bool = False
     stray_ppy_removed: bool = False
     notes: list[str] = field(default_factory=list)
+    #: The stored default branch this sync replaced with the forge's HEAD, if it did.
+    default_branch_was: str | None = None
+    #: The local path `origin` pointed at before this sync made it the forge, if it did.
+    origin_was: str | None = None
 
 
 def _git(args: list[str], cwd: str | None = None) -> str:
@@ -162,24 +181,112 @@ def _resolve_source(url_or_path: str) -> str:
 
 
 def remote_url(path: str, remote: str = "origin") -> str | None:
-    """A git repository's URL for ``remote``, or None when it has none."""
-    rc, out, _err = _git_ok(["remote", "get-url", remote], cwd=path)
+    """A git repository's configured URL for ``remote``, or None when it has none.
+
+    The configured value, not `git remote get-url`'s: that one expands
+    ``url.<base>.insteadOf``, and whether ``origin`` is a local path is a question
+    about what the clone was told, not where git would end up fetching.
+    """
+    rc, out, _err = _git_ok(["config", "--get", f"remote.{remote}.url"], cwd=path)
     return out or None if rc == 0 else None
+
+
+def _same_url(left: str | None, right: str | None) -> bool:
+    return bool(left and right) and left.strip().rstrip("/") == right.strip().rstrip("/")
+
+
+def _forge_git(args: list[str], cwd: str | None = None) -> tuple[int, str, str]:
+    """A git command that talks to a forge: never prompts, and gives up after a minute."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=FORGE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out after {FORGE_TIMEOUT_SECONDS:g}s"
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def forge_head(forge_url: str | None) -> str | None:
+    """The forge's default branch, from `git ls-remote --symref <forge> HEAD`; None if unread."""
+    if not forge_url:
+        return None
+    rc, out, _err = _forge_git(["ls-remote", "--symref", forge_url, "HEAD"])
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        ref, _, target = line.partition("\t")
+        if target.strip() == "HEAD" and ref.startswith("ref: refs/heads/"):
+            return ref[len("ref: refs/heads/") :].strip() or None
+    return None
+
+
+def default_branch_from_forge(local_path: str, forge_url: str | None) -> str | None:
+    """Which branch the forge calls its default, never which one a checkout is on.
+
+    The forge's ``HEAD`` by ``ls-remote``; failing that, the clone's
+    ``origin/HEAD`` (after asking the forge for it) when ``origin`` is the forge;
+    failing that, ``main`` or ``master`` if the clone has one from ``origin``.
+    """
+    head = forge_head(forge_url)
+    if head:
+        return head
+    origin = remote_url(local_path)
+    if forge_url and _same_url(origin, forge_url):
+        for attempt in range(2):
+            rc, out, _err = _git_ok(
+                ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=local_path
+            )
+            if rc == 0 and out:
+                return out.split("/", 1)[-1]
+            if attempt == 0:
+                _forge_git(["remote", "set-head", "origin", "--auto"], cwd=local_path)
+    for candidate in ("main", "master"):
+        rc, _out, _err = _git_ok(
+            ["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{candidate}"],
+            cwd=local_path,
+        )
+        if rc == 0:
+            return candidate
+    return None
+
+
+def current_branch(path: str) -> str | None:
+    """The branch a checkout is on, or None (detached, or not a repository)."""
+    rc, out, _err = _git_ok(["rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
+    return out if rc == 0 and out and out != "HEAD" else None
+
+
+def check_out(local_path: str, branch: str) -> None:
+    """Put the base clone on ``branch``, creating it from ``origin/<branch>`` if it is new."""
+    if current_branch(local_path) == branch:
+        return
+    rc, _out, _err = _git_ok(
+        ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], local_path
+    )
+    if rc == 0:
+        _git(["checkout", "--quiet", branch], cwd=local_path)
+    else:
+        _git(["checkout", "--quiet", "-b", branch, "--track", f"origin/{branch}"], cwd=local_path)
 
 
 def ensure_forge_remote(local_path: str, forge_url: str | None) -> str:
     """Make the forge reachable from the base clone, and name the remote to use.
 
-    When the clone's own ``origin`` is already the forge, that is the remote —
-    nothing to add. Otherwise the forge is added as a *second* remote
-    (``forge``), because rewriting ``origin`` would cut the clone off from the
-    local checkout it was cloned from. Returns the remote name to fetch and push
-    with.
+    When the clone's own ``origin`` is the forge — every clone made or repaired
+    since 2026-09-16 — that is the remote. A clone whose ``origin`` has not been
+    repaired yet (see :func:`repair_origin`) gets the forge as a *second* remote
+    (``forge``) meanwhile. Returns the remote name to fetch and push with.
     """
     if not forge_url:
         return "origin"
-    origin = remote_url(local_path)
-    if origin and origin.rstrip("/") == forge_url.rstrip("/"):
+    if _same_url(remote_url(local_path), forge_url):
         return "origin"
     existing = remote_url(local_path, FORGE_REMOTE)
     if existing is None:
@@ -235,14 +342,29 @@ def add_repo(url_or_path: str, name: str | None = None, forge_url: str | None = 
     if dest.exists():
         raise RepoError(f"destination {dest} already exists")
 
-    _git(["clone", "--quiet", source, str(dest)])
-    ensure_forge_remote(str(dest), resolved_forge)
-
-    default_branch: str | None
+    # The clone comes from the forge, so its `origin` is the forge. A local path
+    # only told us where that is; its branches and unpushed commits are not ours.
     try:
-        default_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=str(dest))
-    except RepoError:
-        default_branch = None
+        _git(["clone", "--quiet", resolved_forge, str(dest)])
+    except RepoError as exc:
+        raise RepoError(
+            f"could not clone {repo_name} from its forge {resolved_forge}: {exc}. A base "
+            "clone is always made from the forge, never from a local checkout; check "
+            "that this machine can reach it (`gh auth status`), then register again."
+        ) from exc
+
+    notes: list[str] = []
+    default_branch = default_branch_from_forge(str(dest), resolved_forge) or current_branch(
+        str(dest)
+    )
+    if default_branch:
+        check_out(str(dest), default_branch)
+    checkout_branch = current_branch(source) if os.path.isdir(source) else None
+    if checkout_branch and default_branch and checkout_branch != default_branch:
+        notes.append(
+            f"{source} is checked out on {checkout_branch}; the base clone follows the "
+            f"forge's default branch, {default_branch}"
+        )
     try:
         base_sha = _git(["rev-parse", "HEAD"], cwd=str(dest))
     except RepoError:
@@ -259,7 +381,9 @@ def add_repo(url_or_path: str, name: str | None = None, forge_url: str | None = 
     )
     # Seed per-repo memory so learnings about this repo persist across sessions.
     seed_repo_memory(repo_name, origin=source, default_branch=default_branch)
-    return AddedRepo(repo_name, source, str(dest), default_branch, base_sha, resolved_forge)
+    return AddedRepo(
+        repo_name, source, str(dest), default_branch, base_sha, resolved_forge, notes=notes
+    )
 
 
 def list_repos() -> list[dict]:
@@ -523,22 +647,80 @@ def stray_ppy_dir(local_path: str) -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
+def _cell(row, key: str):
+    return row[key] if key in row.keys() else None  # noqa: SIM118 - sqlite3.Row
+
+
+def is_default_branch_locked(row) -> bool:
+    return bool(_cell(row, "default_branch_locked"))
+
+
 def _default_branch(row, remote: str) -> str:
+    """The branch sync follows: a locked one as stored, else the forge's, else the record."""
     recorded = row["default_branch"]
+    if recorded and is_default_branch_locked(row):
+        return str(recorded)
+    forge = _cell(row, "forge_url")
+    if remote == "origin":
+        found = default_branch_from_forge(row["local_path"], forge)
+    else:
+        found = forge_head(forge)
+    if found:
+        return found
     if recorded:
         return str(recorded)
-    rc, out, _err = _git_ok(
-        ["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"], cwd=row["local_path"]
-    )
-    if rc == 0 and out:
-        return out.split("/", 1)[-1]
-    rc, out, _err = _git_ok(["rev-parse", "--abbrev-ref", "HEAD"], cwd=row["local_path"])
-    if rc == 0 and out and out != "HEAD":
-        return out
     raise RepoError(
-        f"repo {row['name']!r} has no default branch on record and none could be read "
-        "from the clone; re-register it or set one"
+        f"repo {row['name']!r} has no default branch on record and the forge's could not "
+        f"be read; `ppy repo set {row['name']} --default-branch <branch>`"
     )
+
+
+def repair_origin(name: str) -> str | None:
+    """Make a base clone's ``origin`` its forge when it points at a local path.
+
+    Returns the local path it replaced, or None when there was nothing to repair.
+    Raises when ``origin`` is a local path and the forge cannot be reached: fetching
+    from the checkout instead is how a feature branch became a base branch
+    (2026-09-16), so that is refused, and readiness says `repo_origin_is_local`.
+    """
+    conn = init_db()
+    row = store.get_repo(conn, name)
+    if row is None:
+        raise RepoError(f"repo {name!r} is not registered")
+    forge = _cell(row, "forge_url")
+    local_path = row["local_path"]
+    origin = remote_url(local_path)
+    if not forge or _same_url(origin, forge) or not is_local_remote(origin):
+        return None
+    rc, _out, err = _forge_git(["ls-remote", "--symref", forge, "HEAD"])
+    if rc != 0:
+        raise RepoError(
+            f"{name}'s base clone fetches from the local path {origin}, not its forge "
+            f"{forge}, and the forge cannot be reached to repair it ({err or 'no answer'})"
+        )
+    _git(["remote", "set-url", "origin", forge], cwd=local_path)
+    log.info(
+        "[repos] %s: origin was the local path %s; it is now the forge %s", name, origin, forge
+    )
+    return origin
+
+
+def set_default_branch(name: str, branch: str) -> str | None:
+    """Pin ``name``'s default branch over the forge's, or unpin it with an empty branch.
+
+    Returns the branch now on record (for an unpin, the forge's when it can be read).
+    """
+    conn, row = _require_repo(name)
+    branch = branch.strip()
+    if branch:
+        store.update_repo_fields(conn, name, default_branch=branch, default_branch_locked=1)
+        return branch
+    found = default_branch_from_forge(row["local_path"], _cell(row, "forge_url"))
+    fields: dict[str, object] = {"default_branch_locked": None}
+    if found:
+        fields["default_branch"] = found
+    store.update_repo_fields(conn, name, **fields)
+    return found or row["default_branch"]
 
 
 def _fast_forward(local_path: str, branch: str, remote: str) -> tuple[str, bool]:
@@ -581,6 +763,40 @@ def _fast_forward(local_path: str, branch: str, remote: str) -> tuple[str, bool]
     return after, after != before
 
 
+def keep_base_clones_right() -> list[str]:
+    """`ppy serve`'s start remedy: every base clone back on its forge. One line per repair.
+
+    A clone needs one when its ``origin`` is a local path, when its stored default
+    branch is not the forge's HEAD (and was not pinned), or when it is checked out
+    on some other branch. The repair is :func:`sync_repo`, which says what it
+    changed; a clone that cannot be repaired (dirty, diverged, forge unreachable)
+    gets one line saying why and is left as it was. A clone with nothing wrong costs
+    one `ls-remote` and says nothing.
+    """
+    lines: list[str] = []
+    for row in list_repos():
+        name, local_path, forge = row["name"], row.get("local_path"), row.get("forge_url")
+        if not forge or not local_path or not Path(local_path).is_dir():
+            continue
+        origin = remote_url(local_path)
+        stored = row.get("default_branch")
+        wrong_origin = is_local_remote(origin) and not _same_url(origin, forge)
+        head = None if row.get("default_branch_locked") or wrong_origin else forge_head(forge)
+        wrong_branch = bool(head and head != stored)
+        want = head or stored
+        off_branch = bool(want and current_branch(local_path) not in (None, want))
+        if not (wrong_origin or wrong_branch or off_branch):
+            continue
+        try:
+            result = sync_repo(name)
+        except RepoError as exc:
+            lines.append(f"could not put {name}'s base clone back on its forge: {exc}")
+            continue
+        said = "; ".join(result.notes) or f"checked out {result.default_branch}"
+        lines.append(f"repaired {name}'s base clone: {said}")
+    return lines
+
+
 def sync_repo(name: str, *, clean_stray_ppy: bool = False) -> SyncResult:
     """Fetch, fast-forward the base clone's default branch, and record that commit.
 
@@ -605,12 +821,17 @@ def sync_repo(name: str, *, clean_stray_ppy: bool = False) -> SyncResult:
             "remove these, then sync again."
         )
 
+    origin_was = repair_origin(name)
+    row = store.get_repo(conn, name)
     remote = upstream_remote(row)
     _git(["fetch", "--quiet", "--prune", remote], cwd=local_path)
     branch = _default_branch(row, remote)
     base_sha, moved = _fast_forward(local_path, branch, remote)
+    if remote == "origin":
+        check_out(local_path, branch)
     store.update_repo_base_sha(conn, name, base_sha)
-    if row["default_branch"] != branch:
+    recorded = row["default_branch"]
+    if recorded != branch:
         store.update_repo_fields(conn, name, default_branch=branch)
 
     result = SyncResult(
@@ -621,7 +842,17 @@ def sync_repo(name: str, *, clean_stray_ppy: bool = False) -> SyncResult:
         fast_forwarded=moved,
         remote=remote,
         already_current=not moved,
+        origin_was=origin_was,
+        default_branch_was=recorded if recorded and recorded != branch else None,
     )
+    if origin_was:
+        result.notes.append(f"origin was the local path {origin_was}; it is now the forge")
+    if result.default_branch_was:
+        line = (
+            f"default branch was {result.default_branch_was}; it is now {branch}, the forge's HEAD"
+        )
+        log.info("[repos] %s: %s", name, line)
+        result.notes.append(line)
 
     stray = stray_ppy_dir(local_path)
     if stray is not None:

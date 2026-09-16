@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS repos (
     origin TEXT NOT NULL,
     local_path TEXT NOT NULL,
     default_branch TEXT,
+    -- Set by `ppy repo set --default-branch`: the forge's HEAD no longer decides.
+    default_branch_locked INTEGER,
     base_sha TEXT,
     forge_url TEXT,
     -- Opt-in, per repo: a command to run in a fresh worktree before the worker
@@ -441,6 +443,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("needs_elevated_localhost", "INTEGER"),
         ("auto_merge", "INTEGER"),
         ("merge_method", "TEXT"),
+        ("default_branch_locked", "INTEGER"),
     ):
         # The per-repo environment block (issue #60). Unset means the default, so
         # every already-registered repo gets the evidence-directory and local/CI
