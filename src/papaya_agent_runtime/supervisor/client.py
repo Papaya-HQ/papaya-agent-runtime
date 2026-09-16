@@ -128,5 +128,8 @@ class SupervisorClient:
     def reconcile(self) -> dict:
         return self._call({"cmd": "reconcile"})
 
+    def sweep(self, include_declined: bool = False, timeout: float = 130.0) -> dict:
+        return self._call({"cmd": "sweep", "include_declined": include_declined}, timeout=timeout)
+
     def shutdown(self) -> dict:
         return self._call({"cmd": "shutdown"})

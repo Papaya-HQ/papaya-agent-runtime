@@ -190,6 +190,7 @@ ppy repo add https://github.com/you/your-repo
 ppy repo onboard your-repo              # learn what it is, its build, tests, CI gate
 ppy repo locate "hover card"            # which registered repos contain these strings
 ppy serve                               # the always-on manager: supervisor + Papaya loop
+ppy sweep                               # ask the running serve to look for assigned work now
 ppy supervisor serve                    # per-task runners, durable state
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
@@ -320,6 +321,24 @@ A ticket this machine cannot take at all — a repository the item names that ca
 registered, or a runtime that is not ready to work — is declined before any of that, so
 a peer may take it. An item that names no repository is *not* declined: choosing one
 is the brief turn's job, and nothing ever falls back to this checkout.
+
+The manager also **looks for work** instead of only waiting for it. An event can be
+missed — the machine was off, every slot was busy, an older client aged it out — so on
+start, and then every five minutes, `serve` asks Papaya which work items are assigned
+to this agent and still open (`todo`, `in_progress`, `blocked`, `changes_requested`).
+It offers each one that has no live task here to the client's loop
+(`ListenerLoop.offer`). An offered ticket goes through the same reservation,
+supervised approval and runner as an event does. A ticket whose earlier task was
+handed back, declined, released or closed counts as not live, so it is offered again.
+One held by another session is skipped quietly until the next sweep. A full pool ends
+the round early. A ticket this runtime *declined* leaves no task, so the decline is
+remembered in `.ppy/sweep-declined.json` along with the ticket's `updated_at`. The
+sweep leaves that ticket alone until someone changes it (an edit or a comment moves
+`updated_at`) or a person runs `ppy sweep --include-declined`. Without this, the app
+would ask about the same unplaceable ticket every five minutes. Each sweep writes one line on stderr: `sweep found N, offered M,
+skipped K`, plus `, D declined earlier` when any were skipped for that reason. Set the cadence with `--sweep-interval SECONDS` or `PPY_SWEEP_INTERVAL`
+(`0` sweeps once, at start), and run `ppy sweep` to have the running `serve` sweep
+now and print that line.
 
 ## Where state lives
 
