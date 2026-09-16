@@ -9,9 +9,17 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
 
 1. **Pull requests.** For each delivered worker whose ticket is not held: a merged
    pull request moves the ticket to `done` with one comment (and its worktree is
-   cleaned up at once); red CI or a review asking for changes is recorded on the
-   worker as `pr_attention` and the ticket goes back to `dispatched`, so step 2
-   takes it up and the review turn steers the worker with the failure attached.
+   cleaned up at once). Otherwise its reasons (:mod:`papaya_agent_runtime.reconcile`:
+   conflicts, a branch behind a base that requires up-to-date branches, red CI, CI
+   pending past the repository's CI budget, a review asking for changes, reviewer
+   threads and comments since the last push) and its head make a fingerprint. A new
+   fingerprint is queued for the reserved reconcile lane and started while the lane has
+   room, closest to merging first: recorded on the worker as `pr_attention` and the
+   ticket back to `dispatched`, so step 2 takes it up and the review turn steers the
+   worker with the facts attached. The same fingerprint is not raised again unless the
+   lane's attempt failed; two failures mark the ticket `needs_a_person` with one
+   comment. A pull request green and unmerged past `delivery.merge_after_hours` is said
+   once, or merged on a repository with `auto_merge`.
 2. **Reclaim.** Every ticket this runtime was working and is not holding — after a
    restart, all of them — is offered to the client's loop again, under the
    persisted session id, and the runner resumes it on its own task from its
@@ -631,20 +639,6 @@ def declined_for_a_missed_turn(tickets: list[Ticket]) -> list[Ticket]:
         conn.close()
 
 
-def pr_attention_since_delivery(worker_task_id: int) -> bool:
-    """Has this worker's pull request already been flagged since it was last delivered?"""
-    conn = db.init_db()
-    try:
-        row = conn.execute(
-            "SELECT MAX(CASE WHEN kind = 'delivered' THEN id END) AS delivered, "
-            "MAX(CASE WHEN kind = ? THEN id END) AS flagged FROM events WHERE task_id = ?",
-            (serve.PR_ATTENTION, worker_task_id),
-        ).fetchone()
-        return bool(row["flagged"]) and int(row["flagged"]) > int(row["delivered"] or 0)
-    finally:
-        conn.close()
-
-
 def observe_ci(worker_task_id: int, seconds: float, outcome: str) -> None:
     """Keep a delivered pull request's CI wall time once, however many rounds see it."""
     from papaya_agent_runtime import budgets
@@ -659,14 +653,17 @@ def observe_ci(worker_task_id: int, seconds: float, outcome: str) -> None:
         conn.close()
 
 
-def record_pr_attention(worker_task_id: int, summary: str, reasons: list[str]) -> None:
+def record_pr_attention(
+    worker_task_id: int, summary: str, reasons: list[str], **facts: Any
+) -> None:
+    """What the review turn reads, and a reconciler's brief is built from."""
     conn = db.init_db()
     try:
         task = store.get_task(conn, worker_task_id)
         store.append_event(
             conn,
             kind=serve.PR_ATTENTION,
-            payload={"task_id": worker_task_id, "summary": summary, "reasons": reasons},
+            payload={"task_id": worker_task_id, "summary": summary, "reasons": reasons, **facts},
             run_id=int(task["run_id"]) if task is not None else None,
             task_id=worker_task_id,
         )
@@ -814,6 +811,8 @@ class Rounds:
         gate_verdict: Callable[[int], Any] | None = None,
         pushed: Callable[[int], PushState | None] | None = None,
         runtime_repo: Callable[[], str | None] | None = None,
+        pr_details: Callable[[int, dict[str, Any]], dict[str, Any]] | None = None,
+        merge: Callable[[int, dict[str, Any], str], Any] | None = None,
     ) -> None:
         self._built = built
         self._runner = runner
@@ -832,6 +831,8 @@ class Rounds:
         self._pushed = pushed or push_state
         #: The runtime's own GitHub repository (`owner/name`), whose red CI is a deficiency.
         self._runtime_repo = runtime_repo or deficiencies.runtime_repo
+        self._pr_details = pr_details or _default_pr_details
+        self._merge = merge or _default_merge
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
         self._watched: Any = None
@@ -1267,7 +1268,12 @@ class Rounds:
         except Exception as exc:  # noqa: BLE001 - an unreadable forge is a quiet round
             log.warning("[rounds] Could not read pull requests: %s", exc)
             return []
-        parts: list[str] = []
+        by_worker = {int(e["task_id"]): e for e in entries if e.get("known") and e.get("pr")}
+        # One line per pull request this round changed, keyed by worker.
+        said: dict[int, str] = {}
+        await self._finish_attempts(by_worker, now)
+        #: Worker -> the fingerprint its pull request has this round, for the lane.
+        current: dict[int, str] = {}
         for entry in entries:
             if not entry.get("known") or entry.get("pr") is None:
                 continue
@@ -1283,32 +1289,282 @@ class Rounds:
                 continue
             if ticket.phase in (serve.PHASE_DONE, serve.PHASE_HANDED_OVER):
                 continue
-            pr = f"PR #{entry['pr']}"
             if entry.get("merged") is True or entry.get("state") == "MERGED":
-                parts += await self._merged(ticket, worker_id, entry, now)
+                said[worker_id] = "; ".join(await self._merged(ticket, worker_id, entry, now))
                 continue
             if entry.get("state") != "OPEN":
                 continue
-            reasons: list[str] = []
-            if entry.get("ci") == "fail":
-                failing = ", ".join(entry.get("failing") or []) or "a check"
-                reasons.append(f"CI failing on {pr}: {failing}")
-            if entry.get("review") == "CHANGES_REQUESTED":
-                reasons.append(f"a review requested changes on {pr}")
-            if not reasons or await asyncio.to_thread(pr_attention_since_delivery, worker_id):
+            line = await self._follow(ticket, worker_id, entry, now, current)
+            if line:
+                said[worker_id] = line
+        for worker_id, line in (
+            await self._start_attempts(tickets, by_worker, current, now)
+        ).items():
+            said[worker_id] = line
+        return [line for line in said.values() if line]
+
+    async def _follow(
+        self,
+        ticket: Ticket,
+        worker_id: int,
+        entry: dict[str, Any],
+        now: datetime,
+        current: dict[int, str],
+    ) -> str | None:
+        """Decide what one open, delivered pull request needs this round.
+
+        Its reasons and head make a fingerprint. A new fingerprint is queued for the
+        reconcile lane; the same one is not raised again, unless the lane's attempt
+        at it failed, once. Two failures at one fingerprint are a person's. No reasons
+        at all is the green-and-unmerged clock.
+        """
+        from papaya_agent_runtime import reconcile
+
+        past = await asyncio.to_thread(reconcile.history, worker_id)
+        if past.open_attempt() is not None:
+            return None
+        budget = await asyncio.to_thread(reconcile.ci_budget_seconds, worker_id)
+        reasons = reconcile.reasons_for(
+            entry,
+            requires_up_to_date=past.requires_up_to_date,
+            ci_budget_seconds=budget,
+            now=now,
+        )
+        if not reasons:
+            return await self._green(ticket, worker_id, entry, now)
+        fp = reconcile.fingerprint(reasons, entry.get("head"))
+        current[worker_id] = fp
+        decision = past.decide(fp)
+        summary = "; ".join(r.text for r in reasons)
+        if decision == reconcile.NEEDS_A_PERSON:
+            await asyncio.to_thread(
+                reconcile.record,
+                worker_id,
+                reconcile.NEEDS_A_PERSON,
+                fingerprint=fp,
+                head=entry.get("head"),
+                reasons=[r.text for r in reasons],
+                at=now.isoformat(),
+            )
+            where = entry.get("url") or f"PR #{entry['pr']}"
+            await asyncio.to_thread(
+                _set_phase,
+                ticket.task_id,
+                serve.PHASE_NEEDS_A_PERSON,
+                f"The reconcile lane could not fix {where} twice at the same head: {summary}",
+            )
+            head = str(entry.get("head") or "")[:8] or "its head"
+            await self._post(
+                ticket,
+                f"{where} needs a person: the runtime tried to fix it twice at {head} and it "
+                "still needs attention:\n" + "\n".join(f"- {r.text}" for r in reasons),
+            )
+            return f"worker task {worker_id}'s pull request needs a person: {summary}"
+        if decision != "queue":
+            return None
+        if entry.get("ci") == "fail":
+            # Raised when the attention is, not when the lane gets to it.
+            await asyncio.to_thread(self._runtime_ci_red, worker_id, ticket, entry)
+        await asyncio.to_thread(
+            reconcile.record,
+            worker_id,
+            reconcile.QUEUED,
+            fingerprint=fp,
+            head=entry.get("head"),
+            rank=reconcile.rank_of(reasons),
+            keys=[r.key for r in reasons],
+            reasons=[r.text for r in reasons],
+            summary=summary,
+            pr=entry.get("pr"),
+            url=entry.get("url"),
+            base=entry.get("base"),
+            created_at=entry.get("created_at"),
+            ticket_task_id=ticket.task_id,
+            threads=list(entry.get("threads") or []),
+            comments=list(entry.get("comments") or []),
+            at=now.isoformat(),
+        )
+        return f"worker task {worker_id}: {summary} (queued for the reconcile lane)"
+
+    async def _start_attempts(
+        self,
+        tickets: dict[int, Ticket],
+        by_worker: dict[int, dict[str, Any]],
+        current: dict[int, str],
+        now: datetime,
+    ) -> dict[int, str]:
+        """Start queued pull requests while the reconcile lane has room, closest to merging first.
+
+        Starting is the path attention always took: `pr_attention` on the worker, the
+        ticket back to `dispatched`, and the reclaim later in this round offers it, so
+        the review turn composes the steer. The steer's resume is admitted in the
+        lane (the supervisor knows a delivered task's run is a reconciliation).
+        """
+        from papaya_agent_runtime import reconcile
+
+        lines: dict[int, str] = {}
+        busy = len(await asyncio.to_thread(reconcile.open_lane))
+        room = await asyncio.to_thread(reconcile.reconcile_slots) - busy
+        queue = reconcile.merge_readiness_order(await asyncio.to_thread(reconcile.pending_queue))
+        for _event_id, queued in queue:
+            worker_id = int(queued.get("task_id") or 0)
+            # Only what this round saw still needs it: a newer push or a green run since
+            # the queueing means that entry is stale, and a held ticket waits its turn.
+            if current.get(worker_id) != queued.get("fingerprint"):
                 continue
-            summary = "; ".join(reasons)
-            await asyncio.to_thread(record_pr_attention, worker_id, summary, reasons)
-            if entry.get("ci") == "fail":
-                await asyncio.to_thread(self._runtime_ci_red, worker_id, ticket, entry)
+            ticket = next(
+                (t for t in tickets.values() if t.task_id == queued.get("ticket_task_id")), None
+            )
+            if ticket is None:
+                continue
+            if room <= 0:
+                where = queued.get("url") or f"PR #{queued.get('pr')}"
+                lines.setdefault(
+                    worker_id,
+                    f"worker task {worker_id}: {queued.get('summary')} "
+                    f"(queued for the reconcile lane; {where} waits its turn)",
+                )
+                continue
+            room -= 1
+            entry = by_worker.get(worker_id, {})
+            try:
+                details = await asyncio.to_thread(self._pr_details, worker_id, entry)
+            except Exception as exc:  # noqa: BLE001 - details are a help, never a blocker
+                log.warning("[rounds] Could not read details for task %d: %s", worker_id, exc)
+                details = {}
+            summary = str(queued.get("summary") or "")
+            reasons = list(queued.get("reasons") or [])
+            await asyncio.to_thread(
+                record_pr_attention,
+                worker_id,
+                summary,
+                reasons,
+                fingerprint=queued.get("fingerprint"),
+                head=queued.get("head"),
+                pr=queued.get("pr"),
+                url=queued.get("url"),
+                base=queued.get("base"),
+                threads=queued.get("threads") or [],
+                comments=queued.get("comments") or [],
+                **details,
+            )
+            await asyncio.to_thread(
+                reconcile.record,
+                worker_id,
+                reconcile.STARTED,
+                fingerprint=queued.get("fingerprint"),
+                head=queued.get("head"),
+                pr=queued.get("pr"),
+                url=queued.get("url"),
+                ticket_task_id=ticket.task_id,
+                at=now.isoformat(),
+            )
             await asyncio.to_thread(
                 _set_phase,
                 ticket.task_id,
                 serve.PHASE_DISPATCHED,
                 f"Worker task {worker_id}'s pull request needs attention: {summary}",
             )
-            parts.append(f"worker task {worker_id}: {summary}")
-        return parts
+            lines[worker_id] = f"worker task {worker_id}: {summary}"
+        return lines
+
+    async def _finish_attempts(self, by_worker: dict[int, dict[str, Any]], now: datetime) -> None:
+        """Close every lane attempt that has stopped running, with how it ended."""
+        from papaya_agent_runtime import reconcile
+
+        for attempt in await asyncio.to_thread(reconcile.open_lane):
+            over = await asyncio.to_thread(reconcile.attempt_over, attempt)
+            if over is None:
+                continue
+            entry = by_worker.get(attempt.worker_task_id)
+            if over == reconcile.OUTCOME_MERGED or (
+                entry is not None
+                and (entry.get("merged") is True or entry.get("state") == "MERGED")
+            ):
+                outcome = reconcile.OUTCOME_MERGED
+            elif entry is None or not entry.get("head"):
+                continue  # the forge cannot say where the branch is; judge next round
+            elif entry.get("head") != attempt.payload.get("head"):
+                outcome = reconcile.OUTCOME_FIXED
+            else:
+                outcome = reconcile.OUTCOME_FAILED
+            await asyncio.to_thread(
+                reconcile.record,
+                attempt.worker_task_id,
+                reconcile.FINISHED,
+                started_event_id=attempt.started_event_id,
+                fingerprint=attempt.payload.get("fingerprint"),
+                head=attempt.payload.get("head"),
+                outcome=outcome,
+                at=now.isoformat(),
+            )
+
+    async def _green(
+        self, ticket: Ticket, worker_id: int, entry: dict[str, Any], now: datetime
+    ) -> str | None:
+        """Green, mergeable, nobody asking for changes, and nobody merging: also a state.
+
+        The clock starts the first round that sees it green at its head. Past
+        `delivery.merge_after_hours`, the ticket says so once, or — on a repository
+        that opted into `auto_merge` — the runtime merges and the ticket is done.
+        """
+        from papaya_agent_runtime import reconcile
+
+        mergeable = entry.get("mergeable") != "CONFLICTING" and entry.get("merge_state") != "DIRTY"
+        if entry.get("ci") != "pass" or not mergeable:
+            return None
+        records = await asyncio.to_thread(round_records, ticket.task_id)
+        head = entry.get("head")
+        since = next(
+            (
+                _parse(p.get("at"))
+                for _id, p in records
+                if p.get("action") == "green"
+                and p.get("worker_task_id") == worker_id
+                and p.get("head") == head
+            ),
+            None,
+        )
+        if since is None:
+            await asyncio.to_thread(
+                record_round,
+                ticket.task_id,
+                "green",
+                worker_task_id=worker_id,
+                head=head,
+                at=now.isoformat(),
+            )
+            return None
+        hours = await asyncio.to_thread(reconcile.merge_after_hours)
+        if (now - since).total_seconds() < hours * 3600:
+            return None
+        where = entry.get("url") or f"PR #{entry['pr']}"
+        auto, method = await asyncio.to_thread(reconcile.merge_policy, worker_id)
+        if auto and not _done_before(records, "merge_failed", worker_task_id=worker_id, head=head):
+            result = await asyncio.to_thread(self._merge, worker_id, entry, method)
+            if getattr(result, "merged", False):
+                return "; ".join(await self._merged(ticket, worker_id, entry, now))
+            await asyncio.to_thread(
+                record_round,
+                ticket.task_id,
+                "merge_failed",
+                worker_task_id=worker_id,
+                head=head,
+                detail=getattr(result, "detail", ""),
+            )
+            return (
+                f"worker task {worker_id}: could not merge {where}: {getattr(result, 'detail', '')}"
+            )
+        if _done_before(records, "green_unmerged", worker_task_id=worker_id):
+            return None
+        await asyncio.to_thread(
+            record_round, ticket.task_id, "green_unmerged", worker_task_id=worker_id
+        )
+        span = "a day" if hours == 24 else f"{hours} hours"
+        await self._post(
+            ticket, f"PR {entry['pr']} has been green and unmerged for {span}: {where}"
+        )
+        return f"worker task {worker_id}'s {where} has been green and unmerged for {span}: said so"
 
     def _runtime_ci_red(self, worker_id: int, ticket: Ticket, entry: dict[str, Any]) -> None:
         """Red CI on a pull request the runtime delivered to its own repository."""
@@ -1544,10 +1800,24 @@ def _default_gate_verdict(task_id: int) -> Any:
     return gate.verdict(task_id)
 
 
+def _default_pr_details(worker_task_id: int, entry: dict[str, Any]) -> dict[str, Any]:
+    from papaya_agent_runtime import reconcile
+
+    return reconcile.pr_details(worker_task_id, entry)
+
+
+def _default_merge(worker_task_id: int, entry: dict[str, Any], method: str) -> Any:
+    from papaya_agent_runtime import delivery
+
+    return delivery.merge_pull_request(
+        worker_task_id, str(entry.get("url") or entry.get("pr")), method
+    )
+
+
 def _default_forge(conn: Any) -> list[dict[str, Any]]:
     from papaya_agent_runtime import watch
 
-    return watch.pr_states(conn)
+    return watch.pr_states(conn, conversation=True)
 
 
 __all__ = [

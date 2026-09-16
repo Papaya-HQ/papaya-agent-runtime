@@ -1145,6 +1145,7 @@ def test_every_way_a_hold_ends_has_a_phase() -> None:
         serve.PHASE_DECLINED,
         serve.PHASE_HANDED_OVER,
         serve.PHASE_DONE,
+        serve.PHASE_NEEDS_A_PERSON,
     )
 
 

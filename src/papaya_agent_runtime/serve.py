@@ -171,6 +171,9 @@ PHASE_DECLINED = "declined"
 #: by somebody else now, or its pull request merged.
 PHASE_HANDED_OVER = "handed_over"
 PHASE_DONE = "done"
+#: The reconcile lane failed to fix the ticket's pull request twice at one head
+#: (`reconcile.py`); nothing retries it until its head or its reasons change.
+PHASE_NEEDS_A_PERSON = "needs_a_person"
 
 #: The phases a ticket can be resumed from: work was under way and nobody gave it
 #: away. `released` is not here, but the working phase before it is, which is

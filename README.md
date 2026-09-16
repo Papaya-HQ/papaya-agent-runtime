@@ -485,10 +485,9 @@ request turns red after delivery. So `serve` also **does rounds**: every
 the config; 300 by default) it walks the board on the same event loop. It holds the
 sweep's lock, so a round and a sweep never overlap. In order, a round:
 
-1. **Reads the forge** for delivered tickets. A merged pull request moves the ticket
-   to `done` with one comment and cleans up its worktree at once. If CI goes red or a
-   review requests changes, the ticket goes back to `dispatched`, and the review turn
-   gets the failure and steers the worker.
+1. **Reads the forge** for delivered tickets, and follows each pull request until it
+   merges (below). A merged pull request moves the ticket to `done` with one comment
+   and cleans up its worktree at once.
 2. **Takes back what it was working and no longer holds.** On start, and after a lost
    lease, every ticket in a working phase is re-reserved under the persisted session
    id and resumed from its recorded phase. A worker that is still running is watched,
@@ -604,6 +603,53 @@ addresses are removed.
   still below their threshold.
 - `ppy doctor` shows how many self-reported issues are open.
 - `serve` prints one line at start when some are waiting to open.
+
+### A pull request is followed until it merges
+
+Delivery is not the end of a worker's pull request. Every brief, every worker's
+environment block and the Claude command rules say so, word for word
+(`prompts.PR_FOLLOW_RULE`): the pull request is the worker's until it merges, it will be
+steered back for red CI, conflicts, a behind branch or reviewer comments, it is fixed on
+the same branch, never with a second pull request, and never force-pushed over a
+reviewer's view without saying so.
+
+Each round reads every open delivered pull request's **reasons**:
+
+| Reason | When | What the worker is told |
+| --- | --- | --- |
+| Conflicts | `mergeable` is `CONFLICTING` or the merge state is `DIRTY` | rebase onto the base and resolve conflicts |
+| Behind | merge state `BEHIND`, and delivery recorded that the base requires up-to-date branches (its ruleset or protection), or a merge was refused for it | update the branch |
+| Red CI | a check failed | the failing checks, and their log tail |
+| Stuck CI | a check pending longer than the repository's learned CI budget | CI stuck: rerun or look |
+| Reviewers | changes requested; unresolved review threads and comments from a person since the last push (authors ending in `[bot]` are skipped) | the thread's file, line and first line |
+
+The reasons and the pull request's head make a **fingerprint**. The same reasons at the
+same head are raised once; a new push, a new failing check, a new conflict or a new
+comment is new. A raise sends the ticket back to `dispatched`, the review turn gets the
+facts and composes the steer, the worker fixes and pushes to the same branch, and
+delivery records the new head.
+
+PR fixes have their own capacity, the **reconcile lane** (`worker.reconcile_slots`,
+default 1). The supervisor admits a run of any task that was ever delivered only in the
+lane, never in a ticket slot (`worker.max_concurrent`), and never admits a first dispatch
+there. So a fix starts with every ticket slot busy, and new tickets never wait behind
+fixes. The lane takes one pull request at a time. The queue is ordered by how close
+each is to merging (behind only, then conflicts, then CI, then reviewers) and then by
+age. If the session that delivered the pull request can be resumed and its worktree
+still exists, that session is resumed with the steer. Otherwise a fresh **reconciler**
+session starts on the same task and branch from `prompts/reconcile.md`, a brief scoped
+to that one pull request: its link, the base, the log tail, the conflicting files, the
+open threads, the gate policy and the rules. If the lane fails twice at one head (the
+attempt ended and the head did not move), the ticket is marked `needs_a_person` with one
+comment and the reasons. It is not retried until its head or its reasons change.
+`ppy status` prints the lane: `idle`, or which pull request it is fixing and for how
+long, and how many are queued.
+
+A pull request that is green, mergeable and has no changes requested is a state too.
+After `delivery.merge_after_hours` (24) at one head, the ticket gets one comment: "PR
+<n> has been green and unmerged for a day". On a repository with
+`ppy repo set <repo> --auto-merge` (off by default; `--merge-method squash|merge|rebase`),
+the runtime merges it instead, and the ticket goes to `done` the way any merge does.
 
 ## Where state lives
 

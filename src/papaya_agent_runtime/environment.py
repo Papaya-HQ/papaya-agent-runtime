@@ -71,7 +71,13 @@ REPO_COLUMNS = (
     "test_db_url_template",
     "source_line_ceiling",
     "needs_elevated_localhost",
+    "auto_merge",
+    "merge_method",
 )
+
+#: How `gh pr merge` may merge a pull request on a repo that opted into `auto_merge`.
+MERGE_METHODS = ("squash", "merge", "rebase")
+DEFAULT_MERGE_METHOD = "squash"
 
 MAX_PORT = 65535
 MIN_PORT_BASE = 1024
@@ -201,6 +207,8 @@ class RepoEnvironment:
     test_db_url_template: str | None = None
     source_line_ceiling: int | None = None
     needs_elevated_localhost: bool = False
+    auto_merge: bool = False
+    merge_method: str = DEFAULT_MERGE_METHOD
 
     @property
     def compose_file(self) -> str | None:
@@ -240,6 +248,13 @@ class RepoEnvironment:
             f"source line ceiling: {self.source_line_ceiling or 'not set'}",
             "elevated localhost path: "
             + ("needed" if self.needs_elevated_localhost else "not set"),
+            "auto merge: "
+            + (
+                f"yes ({self.merge_method}, once green and unmerged past "
+                "delivery.merge_after_hours)"
+                if self.auto_merge
+                else "no"
+            ),
         ]
 
 
@@ -269,6 +284,8 @@ def for_repo(row) -> RepoEnvironment:
         test_db_url_template=test_db_url_template or None,
         source_line_ceiling=int(source_line_ceiling) if source_line_ceiling else None,
         needs_elevated_localhost=bool(_cell(row, "needs_elevated_localhost")),
+        auto_merge=bool(_cell(row, "auto_merge")),
+        merge_method=str(_cell(row, "merge_method") or "").strip() or DEFAULT_MERGE_METHOD,
     )
 
 
@@ -286,9 +303,16 @@ def set_fields(conn: sqlite3.Connection, name: str, **values) -> None:
             fields[key] = parse_port_base(value)
         elif key == "source_line_ceiling":
             fields[key] = parse_source_line_ceiling(value)
-        elif key in ("push_hook_runs_full_suite", "needs_elevated_localhost"):
+        elif key in ("push_hook_runs_full_suite", "needs_elevated_localhost", "auto_merge"):
             parsed = parse_bool(value)
             fields[key] = 1 if parsed else None
+        elif key == "merge_method":
+            method = str(value).strip().lower()
+            if method and method not in MERGE_METHODS:
+                raise RepoEnvironmentError(
+                    f"--merge-method must be one of {', '.join(MERGE_METHODS)}, got {value!r}"
+                )
+            fields[key] = method or None
         elif key in ("db_url_template", "test_db_url_template"):
             fields[key] = parse_url_template(value, "--" + key.replace("_", "-"))
         elif key == "evidence_dir":
@@ -533,6 +557,7 @@ def render(
         f"A restart strands whatever is only in this worktree; the lease branch{push_to} is "
         "what survives it, and what the reviewer reads."
     )
+    lines.append(f"- **After delivery:** {prompts.PR_FOLLOW_RULE}")
     resolved = process_env or _resolved_variables(
         env, task_id=task_id, compose_project=compose_project, db_port=db_port
     )

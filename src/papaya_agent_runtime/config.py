@@ -52,6 +52,19 @@ class WorkerCeiling:
     default_model: str | None = None
     default_reasoning: str | None = None
     max_concurrent: int = 2
+    # Capacity admitted only to fix a delivered pull request (red CI, conflicts, a branch
+    # behind its base, reviewer comments): never a ticket's first dispatch, and never
+    # taken out of `max_concurrent`, so PR fixes and new tickets never wait on each other.
+    reconcile_slots: int = 1
+
+
+@dataclass
+class DeliveryPolicy:
+    """What happens to a delivered pull request while nobody merges it."""
+
+    # Hours a pull request may sit green, mergeable and unrequested before the ticket
+    # says so once (or, on a repo with `auto_merge`, the runtime merges it).
+    merge_after_hours: int = 24
 
 
 @dataclass
@@ -322,6 +335,7 @@ class MMConfig:
     claude: ClaudeProfile = field(default_factory=ClaudeProfile)
     self_report: SelfReportPolicy = field(default_factory=SelfReportPolicy)
     forge: ForgePolicy = field(default_factory=ForgePolicy)
+    delivery: DeliveryPolicy = field(default_factory=DeliveryPolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -353,6 +367,18 @@ class MMConfig:
             or self.worker.max_concurrent < 1
         ):
             raise ConfigError("worker.max_concurrent must be a positive integer")
+        if (
+            isinstance(self.worker.reconcile_slots, bool)
+            or not isinstance(self.worker.reconcile_slots, int)
+            or self.worker.reconcile_slots < 1
+        ):
+            raise ConfigError("worker.reconcile_slots must be a positive integer")
+        if (
+            isinstance(self.delivery.merge_after_hours, bool)
+            or not isinstance(self.delivery.merge_after_hours, int)
+            or self.delivery.merge_after_hours < 1
+        ):
+            raise ConfigError("delivery.merge_after_hours must be a positive integer")
         # Import locally to keep config serialization independent while using the
         # router's one authoritative model/reasoning comparison.
         from papaya_agent_runtime.router import CeilingError, WorkerProfile, enforce_ceiling
@@ -440,6 +466,7 @@ class MMConfig:
             "claude": claude,
             "self_report": asdict(self.self_report),
             "forge": asdict(self.forge),
+            "delivery": asdict(self.delivery),
         }
 
 
@@ -471,6 +498,7 @@ def _from_dict(data: dict) -> MMConfig:
         claude=ClaudeProfile(**data.get("claude", {})),
         self_report=SelfReportPolicy(**data.get("self_report", {})),
         forge=ForgePolicy(**data.get("forge", {})),
+        delivery=DeliveryPolicy(**data.get("delivery", {})),
     )
     return cfg
 

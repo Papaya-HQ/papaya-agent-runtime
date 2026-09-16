@@ -157,6 +157,7 @@ TASK_PHASES = (
     "declined",
     "handed_over",
     "done",
+    "needs_a_person",
 )
 
 #: The event kind every phase change is also written as, so the order a ticket
