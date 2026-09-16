@@ -29,11 +29,13 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    a last progress note that asks one) gets the answer turn; a `worker_stopped`
    worker with a branch ahead of base and nothing in flight gets the stopped-short
    path; a live worker silent past its repository's silence budget, still planning
-   past its plan budget, or first running for half its worker-session budget
+   past its plan budget, first running for half its worker-session budget
    (:mod:`papaya_agent_runtime.budgets`; with no history, `health.quiet_minutes`,
-   `health.plan_minutes` and `health.checkin_after`) gets the **check-in turn**; a
-   person-wait older than fifteen minutes is said on the ticket once ("waiting on
-   you: …") and the ticket is `blocked`.
+   `health.plan_minutes` and `health.checkin_after`), or running
+   `health.push_by_minutes` with nothing new on its remote branch (again every as
+   many minutes until something lands) gets the **check-in turn**; a person-wait
+   older than fifteen minutes is said on the ticket once ("waiting on you: …") and
+   the ticket is `blocked`.
 4. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
    (only terminal tasks, clean, every commit on a remote, base clone under
    `.ppy/repos`), then `git worktree prune` and `git fetch --prune` on the base
@@ -77,6 +79,9 @@ ROUNDS_INTERVAL_ENV = "PPY_ROUNDS_INTERVAL"
 
 #: How long a question may wait on a person before the ticket says so.
 PERSON_WAIT_SECONDS = 15 * 60.0
+
+#: How long a worker may run with nothing new on its remote branch: `health.push_by_minutes`.
+DEFAULT_PUSH_BY_MINUTES = 45
 
 #: How long a worker with no live session must have been silent before it is dead
 #: rather than between a runner exiting and its result being recorded.
@@ -159,6 +164,16 @@ def worker_budgets(repo: str | None) -> WorkerBudgets:
         midpoint_seconds=session.seconds / 2,
         sources=(quiet.source, plan.source, session.source),
     )
+
+
+def _push_by_seconds() -> float:
+    """`health.push_by_minutes` in seconds; the default when there is no config yet."""
+    try:
+        from papaya_agent_runtime.config import load_config
+
+        return float(load_config().health.push_by_minutes) * 60
+    except Exception:  # noqa: BLE001 - rounds run before setup too
+        return DEFAULT_PUSH_BY_MINUTES * 60.0
 
 
 # ── reading the ledger for a round ──────────────────────────────────────────
@@ -467,6 +482,59 @@ def branch_ahead_of_base(worker_task_id: int) -> bool | None:
     return int(out) > 0 if proc.returncode == 0 and out.isdigit() else None
 
 
+@dataclass(frozen=True)
+class PushState:
+    """What of a worker's work is on its remote lease branch."""
+
+    #: The remote branch's tip, or ``None`` when nothing was ever pushed to it.
+    remote_sha: str | None
+    #: When that tip was committed; the nearest the record has to "last pushed".
+    remote_at: datetime | None
+    #: Commits or files in the worktree that the remote branch does not have.
+    unpushed: bool
+
+
+def _git_out(cwd: str, *args: str) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, *args], capture_output=True, text=True, check=False, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def push_state(worker_task_id: int) -> PushState | None:
+    """Read the worker's lease branch against `origin`, or ``None`` if it cannot be read.
+
+    The remote side is the worktree's own `refs/remotes/origin/<branch>`, which a
+    `git push origin HEAD:<branch>` updates as it lands, so a round asks no network.
+    Unpushed is a head the remote tip does not match, or any uncommitted file.
+    """
+    conn = db.init_db()
+    try:
+        row = conn.execute(
+            "SELECT branch, worktree_path FROM tasks WHERE id = ?", (worker_task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["branch"] or not row["worktree_path"]:
+        return None
+    cwd = str(row["worktree_path"])
+    if not os.path.isdir(cwd):
+        return None
+    head = _git_out(cwd, "rev-parse", "HEAD")
+    dirty = serve.uncommitted_files(worker_task_id)
+    if head is None or dirty is None:
+        return None
+    ref = f"refs/remotes/origin/{row['branch']}"
+    remote = _git_out(cwd, "rev-parse", "--verify", "--quiet", ref)
+    if not remote:
+        return PushState(None, None, True)
+    stamp = _git_out(cwd, "log", "-1", "--format=%cI", remote)
+    return PushState(remote, _parse(stamp), remote != head or bool(dirty))
+
+
 # ── the tickets a round can act on without holding them ─────────────────────
 
 
@@ -722,7 +790,8 @@ class Rounds:
     Every collaborator with an outside world is a keyword seam: ``sleep`` (the
     timer), ``clock`` (wall time, as an aware ``datetime``), ``forge`` (pull
     request states, :func:`watch.pr_states` by default), ``prune`` and ``git``
-    (hygiene), ``branch_ahead`` and ``papaya_env`` (the credentials a comment
+    (hygiene), ``branch_ahead``, ``pushed`` (what of a worker's work is on its
+    remote branch, :func:`push_state`) and ``papaya_env`` (the credentials a comment
     outside a held job is posted with).
     """
 
@@ -743,6 +812,7 @@ class Rounds:
         papaya_env: Callable[[], dict[str, str]] | None = None,
         gate: Callable[[int], GateState] | None = None,
         gate_verdict: Callable[[int], Any] | None = None,
+        pushed: Callable[[int], PushState | None] | None = None,
     ) -> None:
         self._built = built
         self._runner = runner
@@ -758,6 +828,7 @@ class Rounds:
         self._papaya_env = papaya_env or self._env_from_connection
         self._gate = gate or gate_state
         self._gate_verdict = gate_verdict or _default_gate_verdict
+        self._pushed = pushed or push_state
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
         self._watched: Any = None
@@ -1005,7 +1076,10 @@ class Rounds:
 
         if look.status != "in_progress" or look.verdict is None or "checkin" in queued:
             return parts
-        due = self._checkins_due(look, now, records, waits)
+        push = None
+        if look.running_seconds(now) >= _push_by_seconds():
+            push = await asyncio.to_thread(self._pushed, worker.task_id)
+        due = self._checkins_due(look, now, records, waits, push)
         if not due:
             return parts
         reason = "; ".join(why for _trigger, why in due)
@@ -1019,6 +1093,13 @@ class Rounds:
             )
         )
         for trigger, why in due:
+            # A push check-in remembers the remote tip it saw and when, so the next one
+            # waits another `push_by_minutes` unless something lands meanwhile.
+            pushed = (
+                {"at": now.isoformat(), "remote_sha": push.remote_sha}
+                if trigger == "push" and push is not None
+                else {}
+            )
             await asyncio.to_thread(
                 record_round,
                 task_id,
@@ -1027,6 +1108,7 @@ class Rounds:
                 trigger=trigger,
                 reason=why,
                 after_event_id=look.last_event_id,
+                **pushed,
             )
         parts.append(f"checking in on worker task {worker.task_id} ({reason})")
         return parts
@@ -1065,6 +1147,7 @@ class Rounds:
         now: datetime,
         records: list[tuple[int, dict[str, Any]]],
         waits: WorkerBudgets | None = None,
+        push: PushState | None = None,
     ) -> list[tuple[str, str]]:
         waits = waits or worker_budgets(None)
         due: list[tuple[str, str]] = []
@@ -1108,6 +1191,17 @@ class Rounds:
                     "heading where the brief asked",
                 )
             )
+        if push is not None and push.unpushed and look.created_at is not None:
+            # Nothing pushed since the session started or the remote tip was committed.
+            pushed_at = max(look.created_at, push.remote_at or look.created_at)
+            since = pushed_at
+            for p in mine:
+                at = _parse(p.get("at"))
+                if p.get("trigger") == "push" and p.get("remote_sha") == push.remote_sha and at:
+                    since = max(since, at)
+            if (now - since).total_seconds() >= _push_by_seconds():
+                minutes = int((now - pushed_at).total_seconds() // 60)
+                due.append(("push", f"nothing pushed in {minutes} minutes"))
         return due
 
     @staticmethod

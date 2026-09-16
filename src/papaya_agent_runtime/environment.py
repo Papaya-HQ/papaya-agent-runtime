@@ -527,6 +527,12 @@ def render(
             f"- **How long gates take here:** {gate_timing}. Plan your waits around that, "
             "and use `ppy gate run` for anything near or past ten minutes."
         )
+    push_to = f" (`{branch}`)" if branch else ""
+    lines.append(
+        f"- **Your work reaches the remote as you go:** {prompts.PUSH_MILESTONE_RULE} "
+        f"A restart strands whatever is only in this worktree; the lease branch{push_to} is "
+        "what survives it, and what the reviewer reads."
+    )
     resolved = process_env or _resolved_variables(
         env, task_id=task_id, compose_project=compose_project, db_port=db_port
     )

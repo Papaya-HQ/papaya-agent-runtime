@@ -40,6 +40,7 @@ These are not style preferences — anything else is denied before it runs.
   ends, so a suite you left running in the background never finished and its
   result is worthless. A tool call is capped at ten minutes and anything longer is moved to
   the background for you: {ten_minute_rule}
+- {push_milestone_rule}
 - Push with exactly `git push origin HEAD:{branch}`.
 - **Do not try to open a pull request.** You have no `gh` and no forge
   credentials. Push your branch and stop; the manager opens the PR from it.
@@ -73,6 +74,8 @@ def command_rules(provider: str, branch: str | None = None, environment: str | N
     if provider != "claude":
         return f"{block}\n" if block else ""
     rules = _CLAUDE_RULES.format(
-        branch=branch or "<your task branch>", ten_minute_rule=prompts.TEN_MINUTE_RULE
+        branch=branch or "<your task branch>",
+        ten_minute_rule=prompts.TEN_MINUTE_RULE,
+        push_milestone_rule=prompts.PUSH_MILESTONE_RULE,
     )
     return f"{rules}\n{block}\n" if block else rules

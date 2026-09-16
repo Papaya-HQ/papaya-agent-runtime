@@ -20,6 +20,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -30,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from conftest import scale, timed_out
+from conftest import make_git_repo, scale, timed_out
 from papaya_agent_runtime import (
     gate,
     papaya,
@@ -566,12 +567,14 @@ def _runner(
     steer=_no_steer,
     gate_verdict=None,
     gate_state=None,
+    uncommitted=lambda _task_id: [],
 ) -> serve.TicketRunner:
     from papaya_agent_runtime import rounds
 
     return serve.TicketRunner(
         # No supervisor answers in these tests; a liveness check never asks the socket.
         gate_state=gate_state or (lambda _task_id: rounds.GateState(False, "no gate running")),
+        uncommitted=uncommitted,
         run_turn=turns,
         config=_manager_config,
         opener=papaya_api,
@@ -2022,6 +2025,63 @@ def test_a_review_turn_that_never_reports_gets_the_runners_fallback_line(
         (phase, detail) for _s, phase, detail in progress_lines
     ]
     assert history()[-2:] == [serve.PHASE_REPORTED, serve.PHASE_RELEASED]
+
+
+def test_a_review_at_a_head_with_a_dirty_worktree_reports_the_count_and_steers(
+    ppy_home, client_home, ready, registered_repo, tmp_path, progress_lines
+) -> None:
+    """PAP-219: the reviewer reads the branch; a worktree full of changes is not on it."""
+    worktree = Path(make_git_repo(tmp_path / "worker-worktree"))
+    papaya_api = FakePapaya()
+    steers: list[tuple[int, str]] = []
+    reviews: list[str] = []
+
+    def brief(turn: Turn) -> None:
+        worker = dispatch_worker(turn.run_id)
+        conn = init_db()
+        try:
+            store.update_task_fields(conn, worker, worktree_path=str(worktree))
+        finally:
+            conn.close()
+        (worktree / "README.md").write_text("# changed\n")
+        (worktree / "endpoint.py").write_text("def things(): ...\n")
+        (worktree / "test_endpoint.py").write_text("def test_things(): ...\n")
+        worker_event(worker, "worker_done", status="worker_done", summary="done, not committed")
+
+    def steer(task_id: int, message: str) -> None:
+        steers.append((task_id, message))
+        # What the steered worker does: commit it all and say done again.
+        for args in (["add", "-A"], ["commit", "-qm", "Goal 1: the endpoint"]):
+            subprocess.run(["git", "-C", str(worktree), *args], check=True, capture_output=True)
+        worker_event(task_id, "worker_done", status="worker_done", summary="done at its head")
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            brief(turn)
+        elif turn.name == prompts.REVIEW:
+            reviews.append(turn.prompt)
+            _deliver(turn)
+
+    turns = FakeTurns(act)
+    runner = _runner(turns, papaya_api, steer=steer, uncommitted=serve.uncommitted_files)
+
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, runner) == 0
+
+    ((worker, message),) = steers
+    assert "uncommitted work in the worktree: 3 files" in message
+    assert "`endpoint.py`" in message and f"git push origin HEAD:ppy/task-{worker}" in message
+    assert "commit" in message and "discard" in message
+    # Reviewed only once the worktree was clean, and the finding was not carried into it.
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    assert "uncommitted work" not in reviews[0].split("## This ticket")[1]
+    phases = history()
+    reviewing = phases.index(serve.PHASE_REVIEWING)
+    assert phases[reviewing + 1 : reviewing + 3] == [serve.PHASE_DISPATCHED, serve.PHASE_REVIEWING]
+    assert any("uncommitted work in the worktree: 3 files" in d for _s, _p, d in progress_lines)
+    # The review prompt says the same, for a turn that sees the finding itself.
+    review_prompt = " ".join(prompts.load(prompts.REVIEW).split())
+    assert "uncommitted work in the worktree: <n> files" in review_prompt
+    assert "Review the remote branch, never the worktree." in review_prompt
 
 
 # ── waiting on a gate ───────────────────────────────────────────────────────

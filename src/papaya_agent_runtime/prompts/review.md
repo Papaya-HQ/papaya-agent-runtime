@@ -17,6 +17,12 @@ against the brief's Goals, not against what you would have built.
 - Read the **full** progress log before the final report: `ppy task show <worker task
   id>` and `ppy memory show --repo <repo>`.
 - Review the exact head: `ppy review show <worker task id>`.
+- **Review the remote branch, never the worktree.** What ships is what the worker pushed
+  to its lease branch. A worktree with uncommitted changes at review time is a finding,
+  stated as "uncommitted work in the worktree: <n> files", and the worker is steered to
+  commit and push it or discard it; what is not on the branch is not reviewed, and is
+  never approved on the worker's word. The runtime sends a worker back for this itself
+  first; if the facts below carry the finding, that did not work, so steer with it.
 - Run the brief's verification gate at that head yourself: `ppy gate run --task <worker
   task id>` (add `--full` for the full suite). A worker's pasted summary is not a gate.
   The worker ran it first and its result is on the record; your run is a re-check, and

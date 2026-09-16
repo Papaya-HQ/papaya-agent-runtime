@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import os
+import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Any
 import pytest
 
 import test_serve
-from conftest import scale
+from conftest import make_git_repo, scale
 from papaya_agent_runtime import (
     gate,
     papaya_events,
@@ -133,6 +134,7 @@ def _seams(
         "branch_ahead": lambda _task_id: True,
         "gate": lambda _task_id: rounds.GateState(False, "no gate result recorded for this worker"),
         "gate_verdict": lambda _task_id: gate.Verdict(gate.NONE),
+        "pushed": lambda _task_id: rounds.PushState("abc123", None, False),
     }
 
 
@@ -298,6 +300,114 @@ def test_a_continue_line_records_the_check_and_nothing_else(
     (record,) = checkins()
     assert (record["decision"], record["message"], record["error"]) == ("continue", "", "")
     assert not any("Checked in on" in detail for _s, _p, detail in progress_lines)
+
+
+class FakeRemote:
+    """The worker's remote lease branch: empty until a test pushes to it."""
+
+    def __init__(self) -> None:
+        self.tips: dict[int, str] = {}
+
+    def push(self, task_id: int, sha: str) -> None:
+        self.tips[task_id] = sha
+
+    def __call__(self, task_id: int) -> rounds.PushState:
+        tip = self.tips.get(task_id)
+        # Pushed means the remote tip is the worker's head: nothing left to push.
+        return rounds.PushState(tip, None, tip is None)
+
+
+@pytest.mark.parametrize("pushed", [False, True], ids=["nothing-pushed", "pushed"])
+def test_a_long_session_with_nothing_on_the_remote_gets_a_push_checkin_and_a_pushed_one_none(
+    ppy_home, client_home, ready, registered_repo, assigned, pruned, pushed
+) -> None:
+    """PAP-219: 123 minutes, twelve files in the worktree, and no branch on the remote."""
+    remote = FakeRemote()
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            worker = working_worker(turn.run_id, note="Implementing goal 1.")
+            if pushed:
+                remote.push(worker, "abc123")
+        elif turn.name == prompts.CHECKIN:
+            return "CHECK-IN: continue"
+        return None
+
+    turns, timer, clock = FakeTurns(act), Timer(), WallClock()
+    harness = Harness(FakeEvents([EVENT]))
+    seams = {**_seams(timer, clock, pruned), "pushed": remote}
+
+    def push_rounds() -> list[dict[str, Any]]:
+        return [
+            p
+            for p in events_of(int(ticket_task()["id"]), rounds.ROUND_EVENT)
+            if p.get("trigger") == "push"
+        ]
+
+    async def scenario() -> None:
+        task = _serve(harness, client_home, _runner(turns, FakePapaya()), seams)
+        await _dispatched(timer)
+        clock.advance(minutes=50)
+        await timer.round()
+        await _until(lambda: len(checkins()) == 1, what="the 50-minute check-in")
+        # Twenty more minutes with nothing pushed is not another `push_by_minutes`.
+        clock.advance(minutes=20)
+        await timer.round()
+        await asyncio.sleep(scale(0.2))
+        assert len(push_rounds()) == (0 if pushed else 1)
+        # Past another 45 minutes since the last push check-in, it is said again.
+        clock.advance(minutes=26)
+        await timer.round()
+        if not pushed:
+            await _until(lambda: len(checkins()) == 2, what="the repeated push check-in")
+        await asyncio.sleep(scale(0.2))
+        harness.loop.request_stop()
+        assert await task == 0
+
+    asyncio.run(scenario())
+
+    records = push_rounds()
+    if pushed:
+        assert records == []
+        assert all("push" not in c["trigger"] for c in checkins())
+        return
+    first, second = records
+    assert first["reason"] in ("nothing pushed in 49 minutes", "nothing pushed in 50 minutes")
+    assert first["remote_sha"] is None
+    assert second["reason"].startswith("nothing pushed in 9")
+    push_checkins = [c for c in checkins() if "push" in c["trigger"].split(",")]
+    assert len(push_checkins) == 2
+    assert "nothing pushed in" in push_checkins[0]["reason"]
+    assert "commit what is green and push" in turns.calls[1].prompt
+
+
+def test_push_state_reads_the_lease_branch_against_origin(ppy_home, tmp_path) -> None:
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    worktree = Path(make_git_repo(tmp_path / "wt"))
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(worktree), *args], check=True, capture_output=True)
+
+    git("remote", "add", "origin", str(origin))
+    conn = init_db()
+    try:
+        run_id = store.create_run(conn, "push")
+        task_id = store.add_task(conn, run_id=run_id, title="worker")
+        store.update_task_fields(conn, task_id, branch="ppy/task-1", worktree_path=str(worktree))
+    finally:
+        conn.close()
+
+    assert rounds.push_state(task_id) == rounds.PushState(None, None, True)
+    git("push", "-q", "origin", "HEAD:ppy/task-1")
+    state = rounds.push_state(task_id)
+    assert state is not None and state.remote_sha and state.remote_at is not None
+    assert not state.unpushed
+    (worktree / "new.py").write_text("x = 1\n")
+    assert rounds.push_state(task_id).unpushed
+    git("add", "-A")
+    git("commit", "-qm", "goal 1")
+    assert rounds.push_state(task_id).unpushed
 
 
 def test_a_dead_session_with_no_done_note_takes_the_worker_stopped_path_in_one_round(

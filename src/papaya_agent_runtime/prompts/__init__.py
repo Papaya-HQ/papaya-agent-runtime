@@ -60,6 +60,18 @@ TEN_MINUTE_RULE = (
     "use `ppy gate run`, or push and let the hook run it. Never background a gate and wait."
 )
 
+#: The rule every brief, environment block and command-rules block gives a worker
+#: about when its work reaches the remote. A worker once held two hours of finished
+#: work in its worktree for one commit after a green full suite, and a restart would
+#: have stranded all of it (PAP-219). Carried verbatim next to the ten-minute rule;
+#: a test holds all three to it.
+PUSH_MILESTONE_RULE = (
+    "Commit and push at milestones, not once at the end: after each goal in the brief lands "
+    "and its scoped gate is green, and in any case before starting a run that may exceed ten "
+    "minutes (a full suite, `make verify`, a build). The commit message says which goal; the "
+    "push goes to your task's lease branch."
+)
+
 #: How a check-in turn says what it decided: its last line starts with this, then
 #: one of the three decisions below (the steer and stop ones carry the message).
 CHECKIN_PREFIX = "CHECK-IN:"
@@ -121,6 +133,7 @@ __all__ = [
     "CHECKIN_STEER",
     "CHECKIN_STOP",
     "REVIEW",
+    "PUSH_MILESTONE_RULE",
     "REVIEW_SKILL",
     "RUNTIME_DIR",
     "TEN_MINUTE_RULE",

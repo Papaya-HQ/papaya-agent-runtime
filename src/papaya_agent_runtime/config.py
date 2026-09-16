@@ -269,6 +269,9 @@ class HealthPolicy:
     max_stale_stacks: int = 4
     # Minutes a worker runs before `ppy serve`'s rounds check it is still on course.
     checkin_after: int = 20
+    # Minutes a worker may run with nothing new on its remote branch before the rounds
+    # check in to have it commit what is green and push; again every as many minutes.
+    push_by_minutes: int = 45
     # Seconds between `ppy serve`'s rounds, when neither the flag nor the env says.
     rounds_interval: int = 300
     # Minutes, at most, between `ppy serve`'s liveness lines for a held ticket whose
@@ -362,6 +365,8 @@ class MMConfig:
             raise ConfigError("health.plan_minutes must be at least 1")
         if self.health.checkin_after < 1:
             raise ConfigError("health.checkin_after must be at least 1")
+        if self.health.push_by_minutes < 1:
+            raise ConfigError("health.push_by_minutes must be at least 1")
         if self.health.rounds_interval < 0:
             raise ConfigError("health.rounds_interval must be zero or greater")
         if self.health.liveness_minutes < 1:
