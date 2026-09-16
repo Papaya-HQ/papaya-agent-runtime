@@ -62,7 +62,24 @@ workspace, not the ability to ship.
   for agents, whether UI work has a design reference to match — and writes that into
   the repository's durable notes, where the next brief and the next worker both read
   it. It names what it couldn't determine, so the unknown gets asked about instead of
-  guessed at.
+  guessed at. It also records the repository's **gate policy**: whether its pre-push
+  hook runs the suite, a scoped local gate from its own quicker targets (`make
+  test-unit`, a `test:unit` script, else its test command; `--local-gate` to choose
+  one yourself), its full suite, and who owns that (CI, the hook, or the supervisor).
+  A repository with neither a local gate nor a hook is a readiness warning.
+
+## Gates longer than a tool call
+
+A harness caps a tool call at ten minutes and moves anything longer to the background,
+where it dies with the session. So **a command that may run longer than ten minutes
+is never run as a tool call.** `ppy gate run [<repo>] [--task <id>] [--full]` asks the
+supervisor to run the gate as its own process, with no timeout; the call prints a
+progress line every minute and answers within nine, exiting 0 (green), 1 (red) or 75
+(still running; the same command again attaches to it). Every result is recorded on
+the task against the head commit it ran at, with the command, duration, summary line
+and exit code, and `ppy serve` decides on that record: a worker with a green gate at
+its head is reviewed, a red one is steered with the summary, and one that stopped with
+none is steered to run `ppy gate run`.
 
 Work itself only ever happens inside repositories registered under `.ppy/repos/`. It
 never scans your filesystem.
@@ -187,7 +204,8 @@ ppy papaya status                       # which Papaya agent this machine is
 ppy papaya connect                      # sign in and pin this machine to an agent
 ppy repo discover                       # repos on the forge that aren't registered yet
 ppy repo add https://github.com/you/your-repo
-ppy repo onboard your-repo              # learn what it is, its build, tests, CI gate
+ppy repo onboard your-repo              # learn what it is, its build, tests, gate policy
+ppy gate run --task <task_id>           # a gate under the supervisor, past any tool timeout
 ppy repo locate "hover card"            # which registered repos contain these strings
 ppy serve                               # the always-on manager: supervisor + Papaya loop
 ppy sweep                               # ask the running serve to look for assigned work now

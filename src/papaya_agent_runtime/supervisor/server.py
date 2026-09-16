@@ -30,6 +30,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from papaya_agent_runtime.gate import Gates
 from papaya_agent_runtime.paths import ensure_layout, ppy_home, run_dir
 from papaya_agent_runtime.supervisor.core import Supervisor, SupervisorError
 from papaya_agent_runtime.supervisor.protocol import encode, read_request
@@ -79,6 +80,8 @@ class SupervisorServer:
         #: answered as a dict (`include_declined=` is its one keyword). None in a
         #: bare `ppy supervisor serve`, which has no listener to offer anything to.
         self.sweep_handler: Callable[..., dict] | None = None
+        #: The gates `ppy gate run` asked this supervisor to run (`gate.py`).
+        self.gates = Gates()
 
     def start_background(self) -> None:
         self._bind()
@@ -314,6 +317,29 @@ class SupervisorServer:
                         "serving": True,
                         "error": f"the sweep did not finish: {reason}",
                     }
+            if cmd == "gate_start":
+                # The gate runs in this process, not in the session that asked, so it
+                # outlives a harness tool call (PAP-213).
+                from papaya_agent_runtime import gate
+
+                raw_task = request.get("task_id")
+                try:
+                    spec = gate.resolve(
+                        task_id=int(raw_task) if raw_task is not None else None,
+                        repo=request.get("repo") or None,
+                        full=bool(request.get("full")),
+                    )
+                except gate.GateError as exc:
+                    return {"ok": False, "error": str(exc)}
+                return {"ok": True, **self.gates.start(spec)}
+            if cmd == "gate_wait":
+                from papaya_agent_runtime import gate
+
+                timeout = min(float(request.get("timeout", 60.0)), gate.PROGRESS_SECONDS)
+                try:
+                    return {"ok": True, **self.gates.wait(str(request["key"]), timeout)}
+                except gate.GateError as exc:
+                    return {"ok": False, "error": str(exc)}
             if cmd == "shutdown":
                 sup.shutdown()
                 self._stop.set()
@@ -329,6 +355,7 @@ class SupervisorServer:
         self._cleanup()
 
     def _cleanup(self) -> None:
+        self.gates.close()
         if self._sock is not None:
             with contextlib.suppress(OSError):
                 self._sock.close()

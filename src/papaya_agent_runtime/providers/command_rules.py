@@ -16,6 +16,8 @@ nothing.
 
 from __future__ import annotations
 
+from papaya_agent_runtime import prompts
+
 HEADING = "Command rules for this environment"
 
 _CLAUDE_RULES = """\
@@ -33,10 +35,11 @@ These are not style preferences — anything else is denied before it runs.
 - No redirection (`>`, `>>`, `<`, `2>&1`). To write a file, use the file-writing
   tool, not a shell redirect.
 - `cd` is its own call. Never prefix another command with it.
-- Run the authoritative verification suite **in the foreground**, with a timeout of
-  at least 20 minutes (1200000 ms) — never as a background task. A backgrounded
-  command is killed when your turn ends, so a suite you left running in the
-  background never finished and its result is worthless.
+- Run the authoritative verification suite **in the foreground** —
+  never as a background task. A backgrounded command is killed when your turn
+  ends, so a suite you left running in the background never finished and its
+  result is worthless. A tool call is capped at ten minutes and anything longer is moved to
+  the background for you: {ten_minute_rule}
 - Push with exactly `git push origin HEAD:{branch}`.
 - **Do not try to open a pull request.** You have no `gh` and no forge
   credentials. Push your branch and stop; the manager opens the PR from it.
@@ -69,5 +72,7 @@ def command_rules(provider: str, branch: str | None = None, environment: str | N
     block = (environment or "").strip()
     if provider != "claude":
         return f"{block}\n" if block else ""
-    rules = _CLAUDE_RULES.format(branch=branch or "<your task branch>")
+    rules = _CLAUDE_RULES.format(
+        branch=branch or "<your task branch>", ten_minute_rule=prompts.TEN_MINUTE_RULE
+    )
     return f"{rules}\n{block}\n" if block else rules

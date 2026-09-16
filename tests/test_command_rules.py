@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from papaya_agent_runtime import repos
+from papaya_agent_runtime import prompts, repos
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.providers.base import TaskSpec
 from papaya_agent_runtime.providers.claude import ClaudeAdapter
@@ -58,8 +58,11 @@ def test_the_block_tells_the_worker_to_run_the_suite_in_the_foreground():
     """A backgrounded suite dies with the session — task 103 lost a whole turn to it."""
     text = command_rules("claude", "ppy/task-7-abc")
     assert "in the foreground" in text
-    assert "20 minutes" in text
     assert "never as a background task" in text
+    # A 20-minute tool timeout was never achievable: the harness caps a call at ten
+    # minutes and backgrounds the rest (PAP-213), so the rule names `ppy gate run`.
+    assert "20 minutes" not in text
+    assert " ".join(prompts.TEN_MINUTE_RULE.split()) in " ".join(text.split())
 
 
 def test_the_block_falls_back_to_a_readable_branch_placeholder():

@@ -38,7 +38,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from papaya_agent_runtime import compose
+from papaya_agent_runtime import compose, prompts
 from papaya_agent_runtime.paths import cache_dir, uv_cache_dir
 from papaya_agent_runtime.state import store
 
@@ -65,6 +65,7 @@ REPO_COLUMNS = (
     "push_hook_runs_full_suite",
     "local_gate",
     "full_suite_owner",
+    "full_suite_command",
     "evidence_dir",
     "db_url_template",
     "test_db_url_template",
@@ -194,6 +195,7 @@ class RepoEnvironment:
     push_hook_runs_full_suite: bool = False
     local_gate: str | None = None
     full_suite_owner: str = DEFAULT_FULL_SUITE_OWNER
+    full_suite_command: str | None = None
     evidence_dir: str = DEFAULT_EVIDENCE_DIR
     db_url_template: str | None = None
     test_db_url_template: str | None = None
@@ -227,7 +229,8 @@ class RepoEnvironment:
                 else "no"
             ),
             f"local gate: {self.local_gate or 'not set (the brief names the suite)'}; "
-            f"full suite owner: {self.full_suite_owner}",
+            f"full suite owner: {self.full_suite_owner}; "
+            f"full suite: {self.full_suite_command or 'not set'}",
             f"evidence directory: {self.evidence_dir} (inside each worktree, excluded from git)",
             "database URL templates: "
             + (
@@ -260,6 +263,7 @@ def for_repo(row) -> RepoEnvironment:
         push_hook_runs_full_suite=bool(_cell(row, "push_hook_runs_full_suite")),
         local_gate=gate or None,
         full_suite_owner=owner or DEFAULT_FULL_SUITE_OWNER,
+        full_suite_command=str(_cell(row, "full_suite_command") or "").strip() or None,
         evidence_dir=evidence.strip("/") or DEFAULT_EVIDENCE_DIR,
         db_url_template=db_url_template or None,
         test_db_url_template=test_db_url_template or None,
@@ -501,6 +505,14 @@ def render(
         "session and its result is lost. The full "
         f"suite belongs to {owner}; do not run it here — a run that outlasts your tool "
         "timeout is killed part-way and leaves the database poisoned for the next run."
+    )
+    lines.append(
+        f"- **Gates longer than a tool call:** {prompts.TEN_MINUTE_RULE} "
+        f"`ppy gate run --task {task_id}` runs the local gate (`--full` for the full suite) "
+        "as the supervisor's own process, prints a progress line every minute, and records "
+        "the result against your head commit; the manager reads that record, not your note. "
+        "If it answers that the gate is still running, run the same command again: it "
+        "attaches to the run already going rather than starting another."
     )
     resolved = process_env or _resolved_variables(
         env, task_id=task_id, compose_project=compose_project, db_port=db_port

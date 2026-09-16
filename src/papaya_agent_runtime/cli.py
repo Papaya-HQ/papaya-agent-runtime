@@ -363,16 +363,21 @@ def _repo_onboard(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(render_notes(inspect(args.name)), end="")
             return 0
-        report, path = onboard(args.name)
+        report, path = onboard(args.name, local_gate=args.local_gate)
     except SolicitError as exc:
         print(f"onboarding failed: {exc}", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps({**report.__dict__, "notes_path": str(path)}, indent=2))
+        payload = {**report.__dict__, "notes_path": str(path)}
+        payload["gate"] = report.gate.__dict__ if report.gate is not None else None
+        print(json.dumps(payload, indent=2))
         return 0
     stack = ", ".join(report.stacks) or "stack not recognised"
     verified = report.commands.get("test") or "no test command found"
     print(f"onboarded {report.name}: {stack}; verify with `{verified}`")
+    if report.gate is not None:
+        for line in report.gate.describe():
+            print(f"  gate policy: {line}")
     if report.ci_commands:
         print(f"  CI runs {len(report.ci_commands)} command(s); the gate is in {path}")
     for unknown in report.unknowns:
@@ -1565,6 +1570,30 @@ def _cmd_progress(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_gate(args: argparse.Namespace) -> int:
+    """Run a gate where no tool timeout can cut it short, and record what it said."""
+    from papaya_agent_runtime import gate
+
+    if args.gate_cmd != "run":
+        print("no gate subcommand given (try `ppy gate run`)", file=sys.stderr)
+        return 2
+
+    def out(line: str) -> None:
+        print(line, flush=True)
+
+    try:
+        return gate.run_from_cli(
+            task_id=args.task_id,
+            repo=args.repo,
+            full=args.full,
+            wait_seconds=gate.WAIT_SECONDS if args.wait_seconds is None else args.wait_seconds,
+            out=out,
+        )
+    except gate.GateError as exc:
+        print(f"gate: {exc}", file=sys.stderr)
+        return 2
+
+
 def _cmd_receipt(args: argparse.Namespace) -> int:
     """Run one command with a task's environment and retain its output and result."""
     from papaya_agent_runtime import receipt
@@ -2133,6 +2162,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="who runs the full suite (default ci); empty string restores the default",
     )
     rset.add_argument(
+        "--full-suite-command",
+        dest="full_suite_command",
+        default=None,
+        metavar="COMMAND",
+        help='the command `ppy gate run --full` runs, e.g. "make verify"; empty string clears it',
+    )
+    rset.add_argument(
         "--evidence-dir",
         dest="evidence_dir",
         default=None,
@@ -2175,6 +2211,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         action="store_true",
         help="print what would be recorded without writing it",
+    )
+    onboard_cmd.add_argument(
+        "--local-gate",
+        dest="local_gate",
+        default=None,
+        metavar="COMMAND",
+        help="record this as the scoped local gate instead of the one derived from the repo",
     )
     onboard_cmd.add_argument("--json", action="store_true", help="machine-readable output")
     ensure_cmd = rsub.add_parser(
@@ -2700,6 +2743,41 @@ def build_parser() -> argparse.ArgumentParser:
     receipt.add_argument("task_id", type=int)
     receipt.add_argument("command", nargs=argparse.REMAINDER, help="command to run after --")
     receipt.set_defaults(func=_cmd_receipt)
+
+    gate_parser = sub.add_parser(
+        "gate",
+        help="run a repository's gate under the supervisor, outside any tool call's timeout",
+    )
+    gate_sub = gate_parser.add_subparsers(dest="gate_cmd")
+    gate_run = gate_sub.add_parser(
+        "run",
+        help=(
+            "run the local gate (or --full suite) as the supervisor's own process, print a "
+            "progress line every minute, and record the result against the head commit; "
+            "exits 0 green, 1 red, 75 still running (run it again to keep waiting)"
+        ),
+    )
+    gate_run.add_argument(
+        "repo",
+        nargs="?",
+        default=None,
+        help="the repository; without --task the gate runs in its base clone",
+    )
+    gate_run.add_argument(
+        "--task", dest="task_id", type=int, default=None, help="run in this task's worktree"
+    )
+    gate_run.add_argument(
+        "--full", action="store_true", help="run the repository's full suite, not its local gate"
+    )
+    gate_run.add_argument(
+        "--wait",
+        dest="wait_seconds",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="how long this call waits before answering 'still running' (default 540)",
+    )
+    gate_parser.set_defaults(func=_cmd_gate)
 
     refl = sub.add_parser(
         "reflect",

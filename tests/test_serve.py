@@ -31,7 +31,16 @@ from typing import Any
 import pytest
 
 from conftest import scale, timed_out
-from papaya_agent_runtime import papaya, papaya_events, progress, prompts, readiness, serve, solicit
+from papaya_agent_runtime import (
+    gate,
+    papaya,
+    papaya_events,
+    progress,
+    prompts,
+    readiness,
+    serve,
+    solicit,
+)
 from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling
 from papaya_agent_runtime.manager.launch import TurnResult, TurnTools, repo_root
 from papaya_agent_runtime.state import store
@@ -555,6 +564,7 @@ def _runner(
     turn_tools=_no_tools,
     clock=None,
     steer=_no_steer,
+    gate_verdict=None,
 ) -> serve.TicketRunner:
     return serve.TicketRunner(
         run_turn=turns,
@@ -565,6 +575,7 @@ def _runner(
         turn_tools=turn_tools,
         clock=clock,
         steer=steer,
+        gate_verdict=gate_verdict,
     )
 
 
@@ -2153,6 +2164,131 @@ def test_a_refused_gate_steer_gives_the_review_turn_the_failure(
     assert "worker_stopped: cut short" in turns.calls[1].prompt
 
 
+# ── the recorded gate decides ───────────────────────────────────────────────
+
+
+def _recorded(exit_code: int, summary: str) -> gate.Verdict:
+    result = gate.GateResult(
+        repo="runtime",
+        command="make test",
+        full=False,
+        exit_code=exit_code,
+        duration_seconds=720.0,
+        summary=summary,
+        head_sha="c0ffee" * 6 + "abcd",
+        output_path="/wt/.ppy-evidence/gate-local-c0ffeec0.txt",
+        started_at="2026-09-16T10:00:00+00:00",
+        finished_at="2026-09-16T10:12:00+00:00",
+    )
+    return gate.Verdict(gate.GREEN if exit_code == 0 else gate.RED, result.head_sha, result)
+
+
+def test_a_stopped_worker_whose_head_has_a_green_gate_goes_to_review(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """The gate outlived the session under the supervisor, and its record is the gate."""
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+    runner = _runner(
+        turns,
+        FakePapaya(),
+        steer=_no_steer,
+        gate_verdict=lambda _task_id: _recorded(0, "900 passed in 712.00s"),
+    )
+
+    async def scenario() -> int:
+        task = _serve_ticket(harness, client_home, runner)
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(worker, "worker_stopped", status="worker_stopped", summary="cut short")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    review = turns.calls[1].prompt
+    assert "900 passed in 712.00s" in review
+    # Reviewed as finished work, not as a failure to steer on.
+    assert "what stopped the worker" not in review
+    assert any("its local gate green" in d for _s, _p, d in progress_lines)
+
+
+def test_a_worker_whose_head_has_a_red_gate_is_steered_with_the_summary(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    steers: list[tuple[int, str]] = []
+    verdicts = [_recorded(2, "3 failed, 897 passed in 700.10s")]
+
+    def steer(task_id: int, message: str) -> None:
+        steers.append((task_id, message))
+        verdicts.append(_recorded(0, "900 passed in 705.00s"))
+        worker_event(task_id, "resumed", status="in_progress", message=message)
+
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+    runner = _runner(turns, FakePapaya(), steer=steer, gate_verdict=lambda _id: verdicts[-1])
+
+    async def scenario() -> int:
+        task = _serve_ticket(harness, client_home, runner)
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        # Said done, but the gate on the record at its head is red.
+        worker_event(worker, "worker_done", status="worker_done", summary="all good")
+        await _until(lambda: steers, what="the runner to steer the red gate")
+        await asyncio.sleep(scale(0.1))
+        assert turns.names() == [prompts.BRIEF], "reviewed a red gate"
+        worker_event(worker, "worker_done", status="worker_done", summary="fixed")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    ((_steered, message),) = steers
+    assert "3 failed, 897 passed in 700.10s" in message
+    assert "`ppy gate run --task" in message
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+
+
+def test_a_stopped_worker_with_no_recorded_gate_is_steered_to_run_ppy_gate_run(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    steers: list[tuple[int, str]] = []
+
+    def steer(task_id: int, message: str) -> None:
+        steers.append((task_id, message))
+        worker_event(task_id, "resumed", status="in_progress", message=message)
+
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+    runner = _runner(
+        turns, FakePapaya(), steer=steer, gate_verdict=lambda _id: gate.Verdict(gate.NONE)
+    )
+
+    async def scenario() -> int:
+        task = _serve_ticket(harness, client_home, runner)
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(worker, "worker_stopped", status="worker_stopped", summary="cut short")
+        await _until(lambda: steers, what="the runner to send the worker to its gate")
+        worker_event(worker, "worker_done", status="worker_done", summary="gate: 900 passed")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    ((worker, message),) = steers
+    assert f"`ppy gate run --task {worker}`" in message
+    assert "no gate result is recorded at your head" in message
+    assert " ".join(prompts.TEN_MINUTE_RULE.split()) in " ".join(message.split())
+
+
 @pytest.mark.parametrize(
     ("transcript", "reason"),
     [
@@ -2187,6 +2323,27 @@ def test_turns_and_workers_are_told_to_run_gates_in_the_foreground_and_say_waiti
     skill = flat((Path(serve.__file__).parents[2] / prompts.BRIEF_SKILL).read_text("utf-8"))
     assert "run the gate in the foreground" in skill
     assert "never end the session with it still running" in skill
+
+
+def test_every_prompt_carries_the_ten_minute_rule_and_the_review_rechecks_with_ppy_gate_run() -> (
+    None
+):
+    """PAP-213: no wording makes a twelve-minute suite finish inside a ten-minute tool call."""
+    from papaya_agent_runtime.providers.command_rules import command_rules
+
+    def flat(text: str) -> str:
+        return " ".join(text.split())
+
+    rule = flat(prompts.TEN_MINUTE_RULE)
+    assert rule == (
+        "A command that may run longer than ten minutes must not be run as a tool call; use "
+        "`ppy gate run`, or push and let the hook run it. Never background a gate and wait."
+    )
+    for turn in (prompts.BRIEF, prompts.REVIEW):
+        assert rule in flat(prompts.load(turn)), turn
+    assert "`ppy gate run --task <worker task id>`" in flat(prompts.load(prompts.REVIEW))
+    assert rule in flat(command_rules("claude", "ppy/task-7"))
+    assert rule in flat(serve.gate_steer_message("cut short", 7))
 
 
 def test_the_turn_prompts_instruct_and_never_template_a_brief() -> None:

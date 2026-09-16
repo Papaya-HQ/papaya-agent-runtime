@@ -222,6 +222,39 @@ class Onboarding:
     contracts: list[str] = field(default_factory=list)
     design: list[str] = field(default_factory=list)
     unknowns: list[str] = field(default_factory=list)
+    #: The gate policy read from the repository; None when the clone is missing.
+    gate: GatePolicy | None = None
+
+
+@dataclass
+class GatePolicy:
+    """Who runs which gate for a repository: what the environment block tells a worker.
+
+    Until 2026-09-16 nothing filled these in for a repository the runtime registered
+    itself, so every worker was told "local gate: not set" and ran whatever the brief
+    named as a tool call — including a backend suite longer than the call (PAP-213).
+    """
+
+    local_gate: str | None = None
+    push_hook_runs_full_suite: bool = False
+    full_suite_owner: str | None = None
+    full_suite_command: str | None = None
+    #: Where each fact came from, one line each, so the notes can be checked.
+    evidence: list[str] = field(default_factory=list)
+
+    @property
+    def empty(self) -> bool:
+        return not self.local_gate and not self.push_hook_runs_full_suite
+
+    def describe(self) -> list[str]:
+        local = f"`{self.local_gate}`" if self.local_gate else "none found"
+        full = f"`{self.full_suite_command}`" if self.full_suite_command else "none found"
+        return [
+            f"local gate: {local}",
+            "pre-push hook runs the full suite: "
+            + ("yes" if self.push_hook_runs_full_suite else "no"),
+            f"full suite: {full} (owner: {self.full_suite_owner or 'nobody'})",
+        ]
 
 
 #: Marker file → the stack it proves, and where its task commands live.
@@ -302,6 +335,7 @@ def inspect(name: str) -> Onboarding:
 
     report.contracts = [f for f in _CONTRACT_FILES if (root / f).exists()]
     report.design = [m for m in _DESIGN_MARKERS if (root / m).exists()]
+    report.gate = derive_gate_policy(root, report)
 
     if not report.purpose:
         report.unknowns.append(
@@ -489,6 +523,201 @@ def _ci(root: Path) -> tuple[list[str], list[str]]:
     return names, commands[:MAX_CI_COMMANDS]
 
 
+# ── Gate policy ─────────────────────────────────────────────────────────────
+
+#: Make targets and package scripts that name a quicker slice of the tests, best first.
+_FAST_MAKE_TARGETS = ("test-fast", "fast-test", "test-unit", "unit-test", "unit", "test-quick")
+_FAST_SCRIPTS = ("test:unit", "test:fast", "test:quick")
+#: Make targets that run everything a merge would, best first.
+_FULL_MAKE_TARGETS = ("verify", "test")
+
+#: A command that runs a test suite, as a hook or a workflow spells it.
+_SUITE_COMMAND = re.compile(
+    r"\bpytest\b|\bmake\s+(?:test|verify)[\w-]*|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b"
+    r"|\bgo\s+test\b|\bcargo\s+test\b|\bvitest\b|\bjest\b|\btox\b|\bnox\b"
+)
+
+_MAKE_TARGET = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)", re.MULTILINE)
+
+
+def _make_target_names(root: Path) -> set[str]:
+    try:
+        text = (root / "Makefile").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    return set(_MAKE_TARGET.findall(text))
+
+
+def _package_script_names(root: Path) -> set[str]:
+    try:
+        data = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    return {str(key) for key in scripts} if isinstance(scripts, dict) else set()
+
+
+def _section(text: str, key: str) -> str:
+    """The lines under a top-level YAML key, by line scan (no YAML parser here)."""
+    lines = text.splitlines()
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if re.match(rf"^{re.escape(key)}\s*:", line):
+            inside = True
+            continue
+        if inside and line and not line[0].isspace() and not line.startswith("#"):
+            break
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _pre_commit_pre_push(text: str) -> str:
+    """The hooks of a pre-commit config that run at pre-push."""
+    if re.search(r"^default_stages:.*pre-push", text, re.MULTILINE):
+        return text
+    chunks = re.split(r"^\s*-\s+id:", text, flags=re.MULTILINE)
+    return "\n".join(chunk for chunk in chunks[1:] if "pre-push" in chunk)
+
+
+def _pre_push_hooks(root: Path) -> list[tuple[str, str]]:
+    """Every pre-push hook this clone runs or ships, as (where, what it runs)."""
+    found: list[tuple[str, str]] = []
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--git-path", "hooks/pre-push"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    installed = proc.stdout.strip() if proc.returncode == 0 else ""
+    candidates: list[tuple[str, Path]] = []
+    if installed:
+        path = Path(installed)
+        candidates.append((installed, path if path.is_absolute() else root / path))
+    candidates.extend((name, root / name) for name in (".husky/pre-push", ".githooks/pre-push"))
+    seen: set[Path] = set()
+    for label, path in candidates:
+        try:
+            resolved = path.resolve()
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            found.append((label, path.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    for name in ("lefthook.yml", "lefthook.yaml", ".lefthook.yml"):
+        try:
+            text = (root / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        section = _section(text, "pre-push")
+        if section.strip():
+            found.append((f"{name} pre-push", section))
+    try:
+        text = (root / ".pre-commit-config.yaml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    hooks = _pre_commit_pre_push(text) if text else ""
+    if hooks.strip():
+        found.append((".pre-commit-config.yaml pre-push stage", hooks))
+    return found
+
+
+def derive_gate_policy(root: Path, report: Onboarding) -> GatePolicy:
+    """Read a repository's gate policy from its own files.
+
+    - **Hook:** a pre-push hook (the one git runs here, honouring ``core.hooksPath``, or
+      one the repository ships through husky, ``.githooks``, lefthook or pre-commit)
+      whose text runs a test suite sets the hook flag.
+    - **Local gate:** the repository's own quicker target (``make test-fast``/
+      ``test-unit``, a ``test:unit`` script) when it has one, else its test command.
+    - **Full suite:** ``make verify``, else ``make test``, else the test command.
+    - **Owner:** CI when a workflow runs a suite, else the hook, else the supervisor
+      through ``ppy gate run --full``.
+    """
+    policy = GatePolicy()
+    for where, text in _pre_push_hooks(root):
+        match = _SUITE_COMMAND.search(text)
+        if match:
+            policy.push_hook_runs_full_suite = True
+            policy.evidence.append(f"pre-push hook {where} runs `{match.group(0)}`")
+            break
+
+    targets = _make_target_names(root) if (root / "Makefile").is_file() else set()
+    scripts = _package_script_names(root)
+    fast = next((t for t in _FAST_MAKE_TARGETS if t in targets), None)
+    script = next((s for s in _FAST_SCRIPTS if s in scripts), None)
+    if fast:
+        policy.local_gate = f"make {fast}"
+        policy.evidence.append(f"local gate from the Makefile's quicker target `{fast}`")
+    elif script:
+        runner = _node_runner(root)
+        policy.local_gate = f"{runner} {script}"
+        policy.evidence.append(f"local gate from package.json's quicker script `{script}`")
+    elif report.commands.get("test"):
+        policy.local_gate = report.commands["test"]
+        policy.evidence.append("local gate is the repository's test command; no quicker target")
+
+    full = next((t for t in _FULL_MAKE_TARGETS if t in targets), None)
+    policy.full_suite_command = f"make {full}" if full else report.commands.get("test")
+
+    ci_suite = next((c for c in report.ci_commands if _SUITE_COMMAND.search(c)), None)
+    if ci_suite:
+        policy.full_suite_owner = "ci"
+        policy.evidence.append(f"CI runs the suite: `{ci_suite}`")
+    elif policy.push_hook_runs_full_suite:
+        policy.full_suite_owner = "pre-push hook"
+    elif policy.full_suite_command:
+        policy.full_suite_owner = "supervisor (`ppy gate run --full`)"
+    return policy
+
+
+def has_gate_policy(row) -> bool:
+    """Does a registered repository say how its work is gated at all?"""
+    return bool(str(row.get("local_gate") or "").strip() or row.get("push_hook_runs_full_suite"))
+
+
+def apply_gate_policy(
+    name: str, policy: GatePolicy, *, local_gate: str | None = None
+) -> GatePolicy:
+    """Store ``policy`` for ``name`` where nothing is set yet, and return what is stored.
+
+    A value somebody set with ``ppy repo set`` is theirs and is never replaced by a
+    derivation; an explicit ``local_gate`` (``ppy repo onboard --local-gate``) always is.
+    """
+    from papaya_agent_runtime import environment
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        row = store.get_repo(conn, name)
+        if row is None:
+            raise SolicitError(f"repo {name!r} is not registered")
+        fields: dict[str, object] = {}
+        if local_gate and local_gate.strip():
+            fields["local_gate"] = local_gate.strip()
+        elif not row["local_gate"] and policy.local_gate:
+            fields["local_gate"] = policy.local_gate
+        if not row["push_hook_runs_full_suite"] and policy.push_hook_runs_full_suite:
+            fields["push_hook_runs_full_suite"] = "yes"
+        if not row["full_suite_owner"] and policy.full_suite_owner:
+            fields["full_suite_owner"] = policy.full_suite_owner
+        if not row["full_suite_command"] and policy.full_suite_command:
+            fields["full_suite_command"] = policy.full_suite_command
+        environment.set_fields(conn, name, **fields)
+        stored = environment.for_repo(store.get_repo(conn, name))
+    finally:
+        conn.close()
+    return GatePolicy(
+        local_gate=stored.local_gate,
+        push_hook_runs_full_suite=stored.push_hook_runs_full_suite,
+        full_suite_owner=stored.full_suite_owner,
+        full_suite_command=stored.full_suite_command,
+        evidence=list(policy.evidence),
+    )
+
+
 def render_notes(report: Onboarding) -> str:
     """The durable repository notes an onboarding produces.
 
@@ -545,6 +774,17 @@ def render_notes(report: Onboarding) -> str:
     else:
         lines.append("- No workflow commands found. A green local run is not proof of a gate.")
     lines.append("")
+
+    if report.gate is not None:
+        lines.append("## Gate policy")
+        lines.append("")
+        lines.extend(f"- {line}" for line in report.gate.describe())
+        lines.extend(f"- {line}" for line in report.gate.evidence)
+        lines.append(
+            "- A gate that may run longer than ten minutes runs through `ppy gate run`, "
+            "never as a tool call."
+        )
+        lines.append("")
 
     lines.append("## Conventions and contracts")
     lines.append("")
@@ -613,10 +853,25 @@ def write_notes(report: Onboarding) -> Path:
     return path
 
 
-def onboard(name: str) -> tuple[Onboarding, Path]:
-    """Read a registered repository and record what was learned. The whole step."""
+def onboard(name: str, *, local_gate: str | None = None) -> tuple[Onboarding, Path]:
+    """Read a registered repository and record what was learned. The whole step.
+
+    That includes its gate policy, stored on the repository where nothing is set yet,
+    so the environment block a worker is handed says the true thing.
+    """
     report = inspect(name)
+    if report.gate is not None or local_gate:
+        report.gate = apply_gate_policy(name, report.gate or GatePolicy(), local_gate=local_gate)
     return report, write_notes(report)
+
+
+def _fill_gate_policy(row) -> None:
+    """Give a registered repository with no gate policy the one its files imply."""
+    if has_gate_policy(row) or not Path(str(row.get("local_path") or "")).is_dir():
+        return
+    report = inspect(str(row["name"]))
+    if report.gate is not None:
+        apply_gate_policy(report.name, report.gate)
 
 
 # ── Registering on demand ───────────────────────────────────────────────────
@@ -697,6 +952,9 @@ def ensure(spec: str, *, allow_outside: bool = False) -> Ensured:
         name = str(existing["name"])
         slug = forge_slug_of(existing)
         if _is_onboarded(name):
+            # Onboarded before gate policies were derived (every repository registered
+            # before 2026-09-16): fill the policy in, and leave everything else alone.
+            _fill_gate_policy(existing)
             return Ensured(name=name, slug=slug, registered=False, onboarded=False)
         _, path = onboard(name)
         return Ensured(name=name, slug=slug, registered=False, onboarded=True, notes_path=str(path))
