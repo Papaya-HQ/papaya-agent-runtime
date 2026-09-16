@@ -450,6 +450,8 @@ def prepare(
     ensure_excluded(worktree, env.evidence_dir)
     evidence_path = str(Path(worktree) / env.evidence_dir)
     process_env = _resolved_variables(env, task_id=task_id, compose_project=project, db_port=port)
+    from papaya_agent_runtime import budgets
+
     block = render(
         env,
         task_id=task_id,
@@ -459,6 +461,7 @@ def prepare(
         branch=branch,
         ends_at=ends_at,
         process_env=process_env,
+        gate_timing=budgets.gate_timing_line(env.repo, conn=conn),
     )
     return PreparedEnvironment(
         block=block,
@@ -484,8 +487,13 @@ def render(
     branch: str | None = None,
     ends_at: str = "done",
     process_env: dict[str, str] | None = None,
+    gate_timing: str | None = None,
 ) -> str:
-    """The block itself. Markdown, one bullet per fact, no prose to drift."""
+    """The block itself. Markdown, one bullet per fact, no prose to drift.
+
+    ``gate_timing`` is how long this repository's gates have actually taken
+    (:func:`budgets.gate_timing_line`), said only when there is history behind it.
+    """
     lines = [f"## {HEADING}", ""]
     lines.append(
         f"- **Evidence directory: `{evidence_path}/`** — inside your worktree and excluded "
@@ -514,6 +522,11 @@ def render(
         "If it answers that the gate is still running, run the same command again: it "
         "attaches to the run already going rather than starting another."
     )
+    if gate_timing:
+        lines.append(
+            f"- **How long gates take here:** {gate_timing}. Plan your waits around that, "
+            "and use `ppy gate run` for anything near or past ten minutes."
+        )
     resolved = process_env or _resolved_variables(
         env, task_id=task_id, compose_project=compose_project, db_port=db_port
     )

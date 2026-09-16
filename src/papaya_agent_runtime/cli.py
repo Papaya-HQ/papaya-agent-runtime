@@ -211,13 +211,18 @@ def _cmd_repo(args: argparse.Namespace) -> int:
             asked = args.migrations_glob is not None or any(
                 value is not None for value in changes.values()
             )
+            budget_changes = getattr(args, "budget", None) or []
+            if budget_changes and not asked:
+                return _repo_set_budgets(args.name, budget_changes)
             settings = (
                 set_settings(args.name, migrations_glob=args.migrations_glob, **changes)
                 if asked
                 else get_settings(args.name)
             )
             print(settings.describe())
-            return 0
+            return _repo_set_budgets(args.name, budget_changes) if budget_changes else 0
+        if args.repo_cmd == "budgets":
+            return _repo_budgets(args.name)
         if args.repo_cmd == "provision":
             asked = args.clear or args.command is not None or args.reuse_venv is not None
             settings = (
@@ -283,6 +288,55 @@ def _cmd_repo(args: argparse.Namespace) -> int:
         return 1
     print("no repo subcommand given", file=sys.stderr)
     return 2
+
+
+def _repo_budgets(name: str | None) -> int:
+    """`ppy repo budgets [<repo>]`: each kind's observations, p90, budget, and its source."""
+    from papaya_agent_runtime import budgets
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        names = [name] if name else [str(r["name"]) for r in store.list_repos(conn)]
+        if name and store.get_repo(conn, name) is None:
+            print(f"repo error: repo {name!r} is not registered", file=sys.stderr)
+            return 1
+        if not names:
+            print("no repositories registered")
+            return 0
+        print(
+            "budget = p90 of the newest "
+            f"{budgets.WINDOW_COUNT} observations within {budgets.WINDOW_DAYS} days "
+            f"x {budgets.FACTOR:g}, floored at the default and capped; stalls and kills "
+            "left out; an override wins"
+        )
+        for repo in names:
+            print(budgets.render(repo, budgets.all_budgets(repo, conn=conn)))
+    finally:
+        conn.close()
+    return 0
+
+
+def _repo_set_budgets(name: str, values: list[str]) -> int:
+    """`ppy repo set <name> --budget <kind>=<seconds>`: a person's word wins over the history."""
+    from papaya_agent_runtime import budgets
+    from papaya_agent_runtime.state import init_db, store
+
+    try:
+        parsed = [budgets.parse_override(value) for value in values]
+    except budgets.BudgetError as exc:
+        print(f"repo error: {exc}", file=sys.stderr)
+        return 1
+    conn = init_db()
+    try:
+        if store.get_repo(conn, name) is None:
+            print(f"repo error: repo {name!r} is not registered", file=sys.stderr)
+            return 1
+        for kind, seconds in parsed:
+            budgets.set_override(conn, name, kind, seconds)
+    finally:
+        conn.close()
+    return _repo_budgets(name)
 
 
 def _repo_ensure(args: argparse.Namespace) -> int:
@@ -2023,6 +2077,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.add_argument("--name", default=None, help="override the derived name")
     rsub.add_parser("list", help="list registered repositories")
+    rbudgets = rsub.add_parser(
+        "budgets",
+        help=(
+            "how long each kind of wait has taken per repo, and the budget derived from it "
+            "(derived, default, or override)"
+        ),
+    )
+    rbudgets.add_argument("name", nargs="?", default=None, help="one registered repository")
     sync = rsub.add_parser(
         "sync",
         help="fetch, fast-forward the base clone's default branch, and record that commit",
@@ -2061,6 +2123,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="per-repo settings (no flags: show what is configured)",
     )
     rset.add_argument("name", help="registered repository name")
+    rset.add_argument(
+        "--budget",
+        action="append",
+        default=None,
+        metavar="KIND=SECONDS",
+        help=(
+            "override how long the runtime waits for KIND in this repo (gate, full_suite, "
+            "worker_session, plan, silence, brief_turn, review_turn, ci); it wins over the "
+            "budget derived from observations; 0 clears it; repeatable"
+        ),
+    )
     rset.add_argument(
         "--migrations-glob",
         dest="migrations_glob",
