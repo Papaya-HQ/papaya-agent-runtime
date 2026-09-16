@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import json
 import os
+import sys
 
 #: The name the client matches on. Fixed, never derived from anything.
 RUNTIME = "papaya-agent-runtime"
@@ -196,6 +198,36 @@ def client_behind_host() -> tuple[str, str] | None:
     return (embedded, host) if host_release > embedded_release else None
 
 
+# ── answering before there is an environment to answer from ─────────────────
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Print the capabilities object. The whole of `ppy capabilities`.
+
+    This module is also an entry point of its own — ``python -m
+    papaya_agent_runtime.capabilities`` — and that is not a convenience. The
+    launcher runs every other command through ``uv run``, which *builds the
+    environment* on first use: on a machine with no uv cache that is a download
+    of sixty-odd packages, and the client's connect-time probe gives the answer
+    ten seconds to arrive. A checkout nobody has synced yet would therefore
+    time out on the one question that has to be answerable before anything is
+    installed.
+
+    So `bin/ppy` answers this one command from the standard library alone when
+    the project environment does not exist yet. Nothing here imports the client,
+    reads the database or touches the network, so the same code produces the
+    same document either way — and on a checkout with no environment
+    ``client_version: null`` is not a stub, it is the truth.
+
+    `cli._cmd_capabilities` calls this too, so the two roads cannot print
+    different things.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    data = collect()
+    print(json.dumps(data) if "--json" in args else render_text(data))
+    return 0
+
+
 __all__ = [
     "DEFAULT_PROTOCOL",
     "HOST_CLIENT_VERSION_ENV",
@@ -206,6 +238,11 @@ __all__ = [
     "client_version",
     "collect",
     "host_client_version",
+    "main",
     "protocol",
     "render_text",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -13,11 +13,19 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import json
+import os
+import shutil
+import subprocess
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import capabilities, cli
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _BlockClient:
@@ -135,6 +143,74 @@ def test_it_reads_local_state_only_and_never_opens_the_database(ppy_home, capsys
     _json_output(capsys)
 
     assert not ppy_home.exists(), "capabilities created instance state just to answer"
+
+
+def test_the_probe_answers_before_the_environment_has_been_built(tmp_path) -> None:
+    """The one command that has to work on a checkout nobody has synced yet.
+
+    `bin/ppy` runs everything through `uv run`, which *builds* the environment on
+    first use — sixty-odd packages on a machine with no uv cache. The client gives
+    this probe ten seconds when it connects a machine, so a fresh clone (exactly
+    the machine somebody has just pointed the desktop app at) would time out on
+    the only question asked before anything is installed.
+    """
+    if shutil.which("python3") is None:
+        pytest.skip("no python3 on PATH to answer without the project environment")
+
+    env = {
+        **os.environ,
+        # An environment that does not exist and is not this checkout's, so the
+        # launcher is in exactly the state a fresh clone is in.
+        "UV_PROJECT_ENVIRONMENT": str(tmp_path / "never-built"),
+        "PPY_HOME": str(tmp_path / ".ppy"),
+    }
+    started = time.monotonic()
+    proc = subprocess.run(
+        [str(ROOT / "bin" / "ppy"), "capabilities", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=scale(60),
+        env=env,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert set(data) == {"runtime", "version", "client_version", "protocol", "modes"}
+    assert data["runtime"] == "papaya-agent-runtime"
+    assert data["modes"] == list(capabilities.MODES)
+    assert elapsed < scale(2.0), f"the cold probe took {elapsed:.1f}s"
+    assert not (tmp_path / ".ppy").exists(), "the cold probe created instance state"
+    assert not (tmp_path / "never-built").exists(), "the cold probe built an environment"
+
+
+def test_a_built_checkout_still_answers_from_its_own_environment(tmp_path) -> None:
+    """The cold path must not hijack a checkout that has an environment.
+
+    `client_version` is the whole reason: answered from the standard library it
+    is `null`, which is the truth before anything is installed and a lie
+    afterwards. So the shortcut is conditional on the environment being absent,
+    and this is the other half of that condition.
+    """
+    if not (ROOT / ".venv").is_dir():
+        pytest.skip("this checkout has no built environment to answer from")
+
+    env = {**os.environ, "PPY_HOME": str(tmp_path / ".ppy")}
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
+    proc = subprocess.run(
+        [str(ROOT / "bin" / "ppy"), "capabilities", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=scale(120),
+        env=env,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["client_version"] == importlib.metadata.version(
+        "papaya-agent-client"
+    )
 
 
 def test_the_release_comparison_ignores_pre_release_suffixes() -> None:

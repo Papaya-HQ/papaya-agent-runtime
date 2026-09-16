@@ -44,14 +44,27 @@ def test_an_unconfigured_runtime_is_blocked_and_says_it_is_its_own_job(
     assert no_config[0].owner == readiness.RUNTIME
 
 
-def test_no_registered_repositories_blocks_and_needs_the_user(ppy_home, monkeypatch) -> None:
-    """Registering is the user's call, so the runtime must not pretend it can."""
+def test_no_registered_repositories_is_a_gap_not_a_block(ppy_home, monkeypatch) -> None:
+    """A ticket brings its own repository, so an empty list cannot be fatal.
+
+    `papaya_events.ensure_repository` registers the runtime-owned clone from the
+    work item's repository URL the moment the work is picked up. Treating an empty
+    list as blocking made a machine that was about to be handed exactly that
+    refuse the work — on the first morning of every connection.
+    """
     monkeypatch.setattr(readiness, "_harness_problems", lambda problems: None)
     monkeypatch.setattr(readiness, "_papaya_problems", lambda problems: None)
     monkeypatch.setattr(readiness, "_config_problems", lambda problems: None)
     verdict = readiness.check()
-    assert [p.code for p in verdict.blockers] == ["no_repos"]
-    assert verdict.blockers[0].owner == readiness.USER
+    assert verdict.state == readiness.DEGRADED
+    assert verdict.blockers == []
+    no_repos = next(p for p in verdict.problems if p.code == "no_repos")
+    assert no_repos.blocking is False
+    # Registering one *ahead of time* is still the user's call, and the fix says
+    # both halves: the ticket does it, or they can.
+    assert no_repos.owner == readiness.USER
+    assert "a work item naming a repository registers it" in no_repos.fix
+    assert "`ppy repo add`" in no_repos.fix
 
 
 def test_a_missing_papaya_connection_is_never_blocking(ppy_home, monkeypatch) -> None:

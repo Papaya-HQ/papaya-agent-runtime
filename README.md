@@ -159,6 +159,23 @@ ppy  ◂ PR up: returns 200, JSON body, no auth. I read the diff. CI green. One 
 > can force a provider: `./bin/ppy start --provider claude "add a health endpoint"`.
 > Optional. Opening your harness is enough.
 
+### Clone, point, connect
+
+The other front door is the Papaya desktop app, and it has no setup step at all:
+clone this repository, point the app's working folder at it, and connect. That's
+the procedure. The client execs `ppy serve`, and `serve` **configures the checkout
+itself** before it starts listening — the `.ppy` layout, the state database and the
+memory tree are created and the config is written, with the driver *and* the
+workers on the harness you chose when you connected. (Both on the same one: the
+runtime doesn't mix agents behind your back. `ppy config models` changes either.)
+
+Anything left that needs *you* — signing a harness in, most often — arrives once as
+a direct message from your agent, naming what closes it. Once, not on every
+restart: an unchanged situation stays quiet, and a new one speaks however soon it
+appears. Having no repositories registered isn't one of those things and never
+stops it working: a work item that names a repository registers it on pick-up, and
+`ppy repo add` is for getting ahead of that.
+
 ### The control plane, if you want to look
 
 You don't type these — the runtime does — but nothing is hidden:
@@ -191,7 +208,10 @@ delegate here; this prints one JSON object — `runtime`, `version`, `client_ver
 supervised-protocol version that client speaks) and `modes` (the launch modes this
 runtime can serve — today `supervised` and `terminal`, both of them `ppy serve`) —
 from local state only, so it answers instantly, offline, and on a machine that has
-never been set up. It never fails: a checkout where the client cannot be imported
+never been set up — including one where `uv sync` has never run. `bin/ppy` answers
+this one command from the standard library when the project environment does not
+exist yet, so the client's ten-second probe never waits on a first-time install of
+sixty-odd packages. It never fails: a checkout where the client cannot be imported
 reports `client_version: null` and still exits 0. `ppy doctor` and `ppy readiness`
 show the same embedded client version, and readiness warns — without blocking — when
 the client that launched this runtime is newer than the one in the checkout.
@@ -220,6 +240,16 @@ machine running the manager from one running a bare harness.
 Run it yourself with `./bin/ppy serve` (add `--working-directory <path>` if the
 connection has no directory stored). Only one `serve` or `supervisor serve` may own a
 `PPY_HOME`; a second start refuses and changes nothing.
+
+A start on a checkout that has never been set up sets it up first — the same
+non-interactive path `ppy setup` runs, with the providers taken from the
+connection's harness — and says so in one line on stderr. It then checks whether it
+can actually work and, if anything is blocked or missing, sends the owner one
+direct message saying what needs them; the message is keyed on *which* problems
+there are, so restarting doesn't repeat it. A blocked runtime still starts and
+still listens: it declines the tickets it cannot place so a peer can take them,
+which is a far better failure than a manager that would not come up until somebody
+signed a harness in.
 
 The lease identity survives restarts. Papaya's reservation is acquire-or-extend and is
 keyed on a session id, so `ppy serve` stores one id per Papaya connection in

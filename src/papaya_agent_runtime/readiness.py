@@ -188,7 +188,7 @@ def _config_problems(problems: list[Problem]) -> None:
                 summary=(
                     "this runtime has never been set up: no driver profile and no worker ceiling"
                 ),
-                fix="`ppy setup` — the runtime does this itself on its first turn",
+                fix="`ppy setup` — `ppy serve` does this itself before it starts listening",
             )
         )
         return
@@ -224,15 +224,22 @@ def _repo_problems(problems: list[Problem]) -> None:
     except Exception:  # noqa: BLE001 - an unreadable state db is already reported elsewhere
         return
     if not registered:
+        # Not blocking, and that is a correction rather than a relaxation. A ticket
+        # brings its own repository: `papaya_events.ensure_repository` registers the
+        # runtime-owned clone from the work item's repository URL the moment the
+        # work is picked up. So an empty list means "nothing registered *ahead of
+        # time*", which is the normal state of a machine somebody just connected —
+        # and blocking on it made a runtime that could take work refuse to.
         problems.append(
             Problem(
                 code="no_repos",
-                summary="no repositories are registered, so there is nowhere to do work",
+                summary="no repositories are registered ahead of time",
                 fix=(
-                    "`ppy repo discover` lists what is available; "
-                    "registering one is the user's call"
+                    "a work item naming a repository registers it; "
+                    "`ppy repo add` to register one ahead of time"
                 ),
                 owner=USER,
+                blocking=False,
             )
         )
         return

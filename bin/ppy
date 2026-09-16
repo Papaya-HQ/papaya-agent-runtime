@@ -8,4 +8,29 @@ export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 # silently targets a different (usually empty) instance. An explicit PPY_HOME
 # still wins, for tests and multi-instance setups.
 export PPY_HOME="${PPY_HOME:-$ROOT/.ppy}"
+
+# `capabilities` on a checkout nobody has synced yet.
+#
+# Every other command goes through `uv run`, which *builds* the environment the
+# first time it is used: on a machine with no uv cache that is a download of
+# sixty-odd packages. The Papaya client's connect-time probe asks this one
+# question and gives the answer ten seconds, so a fresh clone — exactly the
+# machine somebody has just pointed the desktop app at — would time out on it.
+#
+# So when the project environment does not exist yet, this one command is
+# answered by the runtime's own module under a bare interpreter: no uv, no
+# network, no client import, no state. It is the same `capabilities.collect()`
+# the full CLI prints, so there is no second document to drift, and
+# `client_version: null` is the honest answer on a checkout with nothing
+# installed in it. Anything unexpected (no python3, an interpreter too old to
+# import the module) falls through to `uv run` and simply takes as long as it
+# takes.
+if [ "${1:-}" = "capabilities" ] && [ ! -d "${UV_PROJECT_ENVIRONMENT:-$ROOT/.venv}" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        shift
+        python3 -m papaya_agent_runtime.capabilities "$@" && exit 0
+        set -- capabilities "$@"
+    fi
+fi
+
 exec uv run --project "$ROOT" python -m papaya_agent_runtime "$@"
