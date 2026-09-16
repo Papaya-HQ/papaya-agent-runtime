@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 
 from papaya_agent_runtime import capabilities, papaya, readiness
 from papaya_agent_runtime.config import ConfigError, load_config
@@ -87,6 +89,48 @@ def _repo_forges() -> list[dict]:
         return []
 
 
+def venv_interpreter(venv: Path | None = None, pin: Path | None = None) -> dict:
+    """The project environment's interpreter against the series `.python-version` pins.
+
+    `bin/ppy` asks uv for the pinned series, but an environment built before that,
+    or by an invoker that could not honour it, can still hold another one — and
+    `uv run --no-sync` then runs on it rather than rebuilding under a live `serve`.
+    So the mismatch is reported here, as a warning, instead of being fixed silently.
+    """
+    from papaya_agent_runtime.setup.provision import repo_root
+
+    root = repo_root()
+    if venv is None:
+        venv = Path(os.environ.get("UV_PROJECT_ENVIRONMENT") or root / ".venv")
+    pin = root / ".python-version" if pin is None else pin
+    expected = pin.read_text(encoding="utf-8").strip() if pin.is_file() else None
+    status: dict = {"path": str(venv), "version": None, "expected": expected, "warning": None}
+    cfg = venv / "pyvenv.cfg"
+    if not cfg.is_file():
+        status["warning"] = "no project environment — the next `ppy` command builds it"
+        return status
+    for line in cfg.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() in ("version_info", "version"):
+            status["version"] = value.strip()
+            break
+    version = status["version"]
+    if expected and version != expected and not (version or "").startswith(expected + "."):
+        status["warning"] = (
+            f"the environment runs Python {version or 'unknown'} but .python-version "
+            f"pins {expected}; stop `ppy serve`, then `ppy env sync` rebuilds it"
+        )
+    return status
+
+
+def _venv_line(venv: dict) -> str:
+    version = venv.get("version") or "?"
+    pinned = f" (.python-version {venv['expected']})" if venv.get("expected") else ""
+    if venv.get("warning"):
+        return f"venv:      {version}{pinned} WARNING — {venv['warning']}"
+    return f"venv:      {version}{pinned} [ok]"
+
+
 def collect() -> dict:
     report = discover()
     home = ppy_home()
@@ -106,6 +150,7 @@ def collect() -> dict:
         "readiness": verdict.as_dict(),
         "capabilities": capabilities.collect(),
         "papaya": papaya.status(),
+        "venv": venv_interpreter(),
         "config": cfg_status,
         "state_db": _schema_status(),
         "environment": report,
@@ -125,6 +170,8 @@ def render_text(data: dict) -> str:
     connection = data.get("papaya") or {}
     if connection:
         lines.append(f"papaya:    {_papaya_line(connection)}")
+    if data.get("venv"):
+        lines.append(_venv_line(data["venv"]))
     cfg = data["config"]
     if cfg["present"]:
         state = "valid" if cfg.get("valid") else f"INVALID ({cfg.get('error')})"
