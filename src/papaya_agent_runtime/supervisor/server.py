@@ -16,6 +16,13 @@ until the server stops. The loser sees ``EWOULDBLOCK`` and refuses without
 having touched the socket or the pid file. A crashed owner's lock dies with
 its process, so its stale files are replaceable by the next start — which is
 also the only start allowed to remove them.
+
+The owner also writes ``<PPY_HOME>/run/supervisor.json``: its pid, role (`serve`
+or a bare `supervisor`), socket and the build it runs (git head and package
+version). That is what lets a later `ppy serve` adopt a supervisor of its own build
+and retire one of another (:mod:`papaya_agent_runtime.takeover`) rather than refuse.
+The lock file's pid is cleared on an orderly stop, so a pid left in it names a
+holder that crashed.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from papaya_agent_runtime import takeover
 from papaya_agent_runtime.gate import Gates
 from papaya_agent_runtime.paths import ensure_layout, ppy_home, run_dir
 from papaya_agent_runtime.supervisor.core import Supervisor, SupervisorError
@@ -57,11 +65,27 @@ def default_socket_path() -> str:
 TICK_SECONDS = 60
 
 
+def checkout_root() -> str:
+    """The runtime checkout this code runs from: the build a supervisor records."""
+    import papaya_agent_runtime
+
+    return os.path.dirname(os.path.dirname(os.path.dirname(papaya_agent_runtime.__file__)))
+
+
 class SupervisorServer:
-    def __init__(self, socket_path: str | None = None) -> None:
+    def __init__(self, socket_path: str | None = None, *, role: str = "supervisor") -> None:
         ensure_layout()
         self.socket_path = socket_path or default_socket_path()
+        self.role = role
         self.supervisor = Supervisor()
+        #: Pids a crashed holder left in the lock file, found when this one took it.
+        self.took_over_from: list[int] = []
+        #: Called (from a connection thread) when a client asks this supervisor to
+        #: shut down, so the process that owns it can stop too: `serve` stops its listener.
+        self.on_shutdown: Callable[[], None] | None = None
+        #: How long a shutdown waits for workers to be recorded stopped.
+        self.stop_timeout = takeover.stop_timeout(str(ppy_home().resolve()))
+        self._shutting_down: threading.Thread | None = None
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -107,9 +131,17 @@ class SupervisorServer:
                 + (f" (pid {owner})" if owner else "")
                 + "; one supervisor per PPY_HOME is supported — stop that one first"
             ) from exc
-        # The lock is ours; the pid inside is advisory, for the loser's message.
+        # The lock is ours. A pid still in it is a holder that never stopped in order.
+        previous = os.pread(fd, 32, 0).decode("utf-8", "replace").strip()
+        if (
+            previous.isdigit()
+            and int(previous) != os.getpid()
+            and not takeover.pid_alive(int(previous))
+        ):
+            self.took_over_from = [int(previous)]
+        # The pid inside is advisory, for the loser's message.
         os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode())
+        os.pwrite(fd, str(os.getpid()).encode(), 0)
         self._lock_fd = fd
 
     @staticmethod
@@ -154,6 +186,13 @@ class SupervisorServer:
         # Persist the listening pid for `ppy supervisor status` / reconcile.
         with open(run_dir() / "supervisor.pid", "w", encoding="utf-8") as fh:
             fh.write(str(os.getpid()))
+        takeover.write_record(
+            str(ppy_home().resolve()),
+            pid=os.getpid(),
+            role=self.role,
+            socket_path=self.socket_path,
+            build=takeover.checkout_build(checkout_root()),
+        )
 
     def _release_owner_lock(self) -> None:
         fd, self._lock_fd = self._lock_fd, None
@@ -341,12 +380,42 @@ class SupervisorServer:
                 except gate.GateError as exc:
                     return {"ok": False, "error": str(exc)}
             if cmd == "shutdown":
-                sup.shutdown()
-                self._stop.set()
-                return {"ok": True, "shutdown": True}
+                # Answered at once; the workers are stopped (and recorded stopped, their
+                # sessions intact) behind the answer, and only then does the lock go.
+                self.request_shutdown()
+                return {"ok": True, "shutdown": True, "stop_timeout": self.stop_timeout}
             return {"ok": False, "error": f"unknown command {cmd!r}"}
         except (SupervisorError, KeyError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
+
+    def request_shutdown(self) -> None:
+        """What `ppy supervisor stop` asks for: stop workers, then stop serving."""
+        with contextlib.suppress(Exception):
+            if self.on_shutdown is not None:
+                self.on_shutdown()
+        if self._shutting_down is not None:
+            return
+
+        def shut_down() -> None:
+            self.stop_workers(self.stop_timeout)
+            self._stop.set()
+
+        self._shutting_down = threading.Thread(target=shut_down, daemon=True)
+        self._shutting_down.start()
+
+    def stop_workers(self, timeout: float) -> list[threading.Thread]:
+        """Stop every worker and wait up to ``timeout`` for each to be recorded stopped.
+
+        Returns the worker threads still running at the deadline. Admission is
+        refused from here on, so nothing new starts while the supervisor goes.
+        """
+        return self.supervisor.close(timeout)
+
+    def shutdown(self, timeout: float | None = None) -> list[threading.Thread]:
+        """The orderly end of an owned supervisor: its workers first, then the lock."""
+        left = self.stop_workers(self.stop_timeout if timeout is None else timeout)
+        self.stop()
+        return left
 
     def stop(self) -> None:
         self._stop.set()
@@ -367,4 +436,8 @@ class SupervisorServer:
                 if os.path.exists(path):
                     with contextlib.suppress(OSError):
                         os.unlink(path)
+            takeover.remove_record(str(ppy_home().resolve()), os.getpid())
+            # An orderly stop leaves no pid in the lock: one found there later is a crash.
+            with contextlib.suppress(OSError):
+                os.ftruncate(self._lock_fd, 0)
         self._release_owner_lock()

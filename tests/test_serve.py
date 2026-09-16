@@ -1107,18 +1107,31 @@ def test_a_bad_argument_under_supervision_is_carried_to_the_protocol() -> None:
 # ── one manager per PPY_HOME ────────────────────────────────────────────────
 
 
-def test_it_refuses_to_start_when_another_process_owns_this_home(ppy_home) -> None:
+def test_it_refuses_to_start_when_a_supervisor_will_not_let_go(ppy_home) -> None:
+    """Adopting and retiring are `tests/test_serve_takeover.py`; this is the last resort."""
+    from papaya_agent_runtime import takeover
     from papaya_agent_runtime.supervisor.server import SupervisorServer
 
     owner = SupervisorServer()
     owner.start_background()
+    # A holder from no recorded build that ignores `shutdown` and cannot be signalled.
+    owner.request_shutdown = lambda: None  # type: ignore[method-assign]
+    takeover.remove_record(str(ppy_home.resolve()), os.getpid())
     stderr = io.StringIO()
     try:
-        assert serve.serve([], stderr=stderr) == 1
+        status = serve.serve(
+            [],
+            stderr=stderr,
+            takeover_seams={"grace": 0.2, "shutdown": lambda _path: False},
+        )
     finally:
         owner.stop()
 
-    assert "one supervisor per PPY_HOME is supported" in stderr.getvalue()
+    assert status == takeover.EXIT_CANNOT_START
+    (line,) = [line for line in stderr.getvalue().splitlines() if line.strip()]
+    assert line.startswith("ppy serve: cannot start:") and "still holds" in line
+    record = takeover.start_failure(str(ppy_home.resolve()))
+    assert record is not None and record["line"] in line
 
 
 # ── phases ──────────────────────────────────────────────────────────────────

@@ -312,6 +312,15 @@ class SelfReportPolicy:
 
 
 @dataclass
+class SupervisorPolicy:
+    """How the supervisor `ppy serve` owns is stopped."""
+
+    # Seconds a stopping supervisor waits for its workers to be recorded stopped
+    # (their sessions stay resumable) before it exits anyway.
+    stop_timeout: int = 30
+
+
+@dataclass
 class ForgePolicy:
     """How this runtime reaches the forge on a person's behalf."""
 
@@ -336,6 +345,7 @@ class MMConfig:
     self_report: SelfReportPolicy = field(default_factory=SelfReportPolicy)
     forge: ForgePolicy = field(default_factory=ForgePolicy)
     delivery: DeliveryPolicy = field(default_factory=DeliveryPolicy)
+    supervisor: SupervisorPolicy = field(default_factory=SupervisorPolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -448,6 +458,9 @@ class MMConfig:
             raise ConfigError("self_report.enabled must be true or false")
         if not isinstance(self.self_report.repo, str):
             raise ConfigError("self_report.repo must be a string such as 'owner/name'")
+        stop_timeout = self.supervisor.stop_timeout
+        if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int) or stop_timeout < 1:
+            raise ConfigError("supervisor.stop_timeout must be a positive number of seconds")
 
     def to_dict(self) -> dict:
         """Every setting, resolved — what the runtime runs with, not what is stored."""
@@ -467,6 +480,7 @@ class MMConfig:
             "self_report": asdict(self.self_report),
             "forge": asdict(self.forge),
             "delivery": asdict(self.delivery),
+            "supervisor": asdict(self.supervisor),
         }
 
 
@@ -499,6 +513,7 @@ def _from_dict(data: dict) -> MMConfig:
         self_report=SelfReportPolicy(**data.get("self_report", {})),
         forge=ForgePolicy(**data.get("forge", {})),
         delivery=DeliveryPolicy(**data.get("delivery", {})),
+        supervisor=SupervisorPolicy(**data.get("supervisor", {})),
     )
     return cfg
 

@@ -21,7 +21,7 @@ from pathlib import Path
 from papaya_agent_runtime import budgets
 from papaya_agent_runtime.providers.base import ProviderAdapter, TaskSpec, WorkerResult
 from papaya_agent_runtime.state import init_db, store
-from papaya_agent_runtime.supervisor import autocommit
+from papaya_agent_runtime.supervisor import autocommit, lifeline
 from papaya_agent_runtime.supervisor.spool import EventSpool
 
 
@@ -131,9 +131,14 @@ class RunnerGuardian:
         # Set when this runner's session was retired mid-flight (a resume or a
         # steer's interrupt started a newer session for the same task).
         self.superseded = False
+        # Set when the supervisor itself is shutting down: the worker was not done,
+        # it was stopped, and its session is to be resumed rather than failed.
+        self.stopping = False
 
-    def interrupt(self) -> None:
+    def interrupt(self, *, shutdown: bool = False) -> None:
         """Request a cooperative stop of the running worker."""
+        if shutdown:
+            self.stopping = True
         self._interrupt.set()
         proc = self._proc
         if proc and proc.poll() is None:
@@ -171,6 +176,9 @@ class RunnerGuardian:
             bufsize=1,
             start_new_session=True,
         )
+        # Its own group, so an interrupt reaches the tools it started and never the
+        # supervisor; the lifeline takes that group down if the supervisor dies abruptly.
+        lifeline.watch_group(self._proc.pid)
         if self._interrupt.is_set():
             # Stopped between being asked to start and starting: honour it now.
             self.interrupt()
@@ -207,6 +215,7 @@ class RunnerGuardian:
 
         stderr = self._proc.stderr.read() if self._proc.stderr else ""
         self._proc.wait()
+        lifeline.release_group(self._proc.pid)
         exit_code = self._proc.returncode
         session_seconds = time.monotonic() - session_started
         if self._on_exit is not None:
@@ -288,6 +297,15 @@ class RunnerGuardian:
         verdict = turn_end.StopVerdict()
         if result.status == "completed":
             verdict = turn_end.why_stopped(conn, spec.task_id)
+        elif self.stopping and result.status == "failed":
+            # Not a failure: the supervisor stopped it. Recorded the way a turn that
+            # ended short is, with its session, so the rounds resume it from there.
+            task = store.get_task(conn, spec.task_id)
+            verdict = turn_end.StopVerdict(
+                stopped=True,
+                reasons=["the supervisor shut down while this session was running"],
+                expected_phase=(task["ends_at"] if task is not None else None) or "done",
+            )
 
         # For a completed task, guarantee a reviewable commit and record head.
         finalized = None
@@ -380,7 +398,9 @@ class RunnerGuardian:
             payload=payload,
             exit_code=exit_code if exit_code is not None else -1,
         )
-        if verdict.stopped:
+        if self.stopping and verdict.stopped:
+            outcome = budgets.KILL
+        elif verdict.stopped:
             outcome = budgets.STALL
         elif exit_code is not None and exit_code < 0:
             outcome = budgets.KILL

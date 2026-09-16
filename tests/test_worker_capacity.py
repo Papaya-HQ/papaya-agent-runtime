@@ -57,7 +57,7 @@ class _CrashingRunner:
     def run(self, spec) -> None:
         raise RuntimeError("worker bookkeeping exploded")
 
-    def interrupt(self) -> None:
+    def interrupt(self, *, shutdown: bool = False) -> None:
         self.interrupted = True
 
 

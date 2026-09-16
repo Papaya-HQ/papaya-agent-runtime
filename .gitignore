@@ -4,7 +4,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-.venv/
+# `.venv` is a symlink to the environment the last sync built (`.venv.env-*`).
+.venv
+.venv.*
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

@@ -315,6 +315,15 @@ def _record(spec: GateSpec, kind: str, payload: dict[str, Any]) -> None:
         conn.close()
 
 
+def _lifeline(action: str, proc: Any) -> None:
+    """A gate is its own process group; the supervisor's lifeline answers for it."""
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int):
+        from papaya_agent_runtime.supervisor import lifeline
+
+        getattr(lifeline, action)(pid)
+
+
 def run(
     spec: GateSpec,
     *,
@@ -368,6 +377,7 @@ def run(
             proc = None
         if proc is not None:
             on_process(proc)
+            _lifeline("watch_group", proc)
             last_progress = started
             overdue = False
             while proc.poll() is None:
@@ -380,6 +390,7 @@ def run(
                     last_progress = now
                     output.flush()
                     on_progress(progress_line(spec.label, now - started, _last_line(output_path)))
+            _lifeline("release_group", proc)
     exit_code = proc.returncode if proc is not None else 127
     try:
         text = output_path.read_text(encoding="utf-8", errors="replace")

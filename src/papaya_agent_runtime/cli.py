@@ -654,6 +654,9 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.supervisor.server import SupervisorServer, default_socket_path
 
     if args.supervisor_cmd == "serve":
+        import signal
+
+        from papaya_agent_runtime.supervisor import lifeline
         from papaya_agent_runtime.supervisor.server import SupervisorOwned
 
         server = SupervisorServer()
@@ -662,12 +665,23 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
         except SupervisorOwned as exc:
             print(f"refusing to start: {exc}", file=sys.stderr)
             return 1
+        lifeline.start()
+
+        def terminated(_signum, _frame) -> None:
+            raise KeyboardInterrupt
+
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, terminated)
         print(f"supervisor listening on {server.socket_path} (Ctrl-C to stop)")
         try:
             server._serve_loop()
         except KeyboardInterrupt:
-            server.stop()
-            print("supervisor stopped")
+            print("supervisor stopping: waiting for workers to be recorded stopped")
+        finally:
+            # Stopped by a signal or by `ppy supervisor stop`: what it started goes with it.
+            server.shutdown()
+            lifeline.stop()
+        print("supervisor stopped")
         return 0
 
     client = SupervisorClient()
@@ -677,8 +691,16 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
             print(f"supervisor up (pid {resp.get('pid')}) at {default_socket_path()}")
             return 0
         if args.supervisor_cmd == "stop":
-            client.shutdown()
-            print("supervisor shutdown requested")
+            answer = client.shutdown()
+            wait = answer.get("stop_timeout")
+            print(
+                "supervisor shutdown requested"
+                + (
+                    f"; it stops its workers (up to {wait:g}s, sessions kept) and exits"
+                    if isinstance(wait, int | float)
+                    else ""
+                )
+            )
             return 0
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)

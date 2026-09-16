@@ -300,12 +300,24 @@ when there are any) and `ppy doctor` print them locally.
 **The environment is built once, never under a running `serve`.** `bin/ppy` runs every
 command with `uv run --no-sync`, so typing `ppy status` in a terminal cannot rebuild
 `.venv` out from under the manager the desktop app started. Only three things sync:
-`ppy serve` as it starts, an explicit `ppy env sync`, and the first command on a
-checkout with no environment. Each takes the supervisor's lock
-(`.ppy/run/supervisor.lock`) for the length of the sync and refuses, naming the pid,
-while a `serve` or `supervisor serve` holds it. The launcher also passes `--python`
-from `.python-version`, so the app's uv and a shell's uv ask for the same interpreter
-series; `ppy doctor` warns when the environment's `pyvenv.cfg` disagrees with it.
+`ppy serve` as it starts (only when the environment was built from another lockfile or
+does not import), an explicit `ppy env sync`, and the first command on a checkout with
+no environment. Each takes the supervisor's lock (`.ppy/run/supervisor.lock`) for the
+length of the sync and refuses, naming the pid, while a `serve` or `supervisor serve`
+holds it; a lock file naming a pid that is no longer running is taken, with one line
+saying so. A sync never touches the environment in use: it builds a fresh
+`.venv.env-<stamp>` beside it, checks the Papaya client imports from it, and swaps the
+`.venv` symlink over in one rename, so a refused, failed or interrupted sync leaves the
+previous environment importable. `ppy readiness` reports `environment_broken` when the
+client is missing from it, and the next `ppy serve` start rebuilds it before anything
+else. The launcher also passes `--python` from `.python-version`, so the app's uv and a
+shell's uv ask for the same interpreter series; `ppy doctor` warns when the
+environment's `pyvenv.cfg` disagrees with it.
+
+`ppy supervisor stop`, `ppy supervisor status`, `ppy version`, `ppy doctor` and
+`ppy blockers` never sync: they run from the environment when it imports and from the
+source tree (under uv's interpreter for the pinned series) when it does not, so the
+command that clears a supervisor in the way always works.
 
 ## Running as the Papaya manager
 
@@ -330,7 +342,27 @@ machine running the manager from one running a bare harness.
 
 Run it yourself with `./bin/ppy serve` (add `--working-directory <path>` if the
 connection has no directory stored). Only one `serve` or `supervisor serve` may own a
-`PPY_HOME`; a second start refuses and changes nothing.
+`PPY_HOME`, and a new `serve` takes over from whatever holds it without a person. The
+owner records its build in `.ppy/run/supervisor.json` (git head, package version, start
+time). A new start that finds a live supervisor **of this checkout's build adopts it**:
+it connects and carries on, and its workers keep running. One **of another build** (the
+checkout was pulled), or one that recorded no build, **is retired**: it is asked to shut
+down, given `supervisor.stop_timeout` for its workers, then sent SIGTERM and SIGKILL if
+it will not go; a fresh supervisor starts, and the rounds' reclaim resumes each stopped
+worker from its session in its worktree. The launcher does this *before* it syncs, so a
+sync is only ever refused for a supervisor the start chose to keep. One stderr line says
+what happened and which tasks resume. If a start still cannot go on, it prints one
+sentence naming the cause and what it needs, exits 1 (never 75), and records it for the
+blockers ledger; the next start that succeeds reports it to the owner once.
+
+**Stopping `serve` stops what it started.** On SIGTERM, SIGINT, SIGHUP, the client's
+`shutdown` or `ppy supervisor stop`, `serve` stops listening, asks its supervisor to shut
+down, and waits up to `supervisor.stop_timeout` (default 30s) for every worker to be
+recorded `worker_stopped` with its session kept for a resume, then exits. Workers, gates
+and manager turns keep process groups of their own (so an interrupt reaches the tools
+they started and never `serve`), and a small watcher process — the lifeline — kills
+whatever is still running if `serve` itself dies without running another line (an app
+crash, `kill -9`), so no orphan is left holding a worktree.
 
 A start on a checkout that has never been set up sets it up first — the same
 non-interactive path `ppy setup` runs, with the providers taken from the

@@ -344,6 +344,17 @@ quietly; do not narrate the steps or report diagnostics.
    only: never a token, a home path, an email address, or repository contents. A
    signed-out forge does not stop the sweep or work on other forges; it stops pickup
    and delivery for that forge's repositories.
+
+   **A `serve` that will not start, or a supervisor in the way.** Never kill a
+   supervisor by hand and never run the launcher's sync yourself to get past one. A
+   new `ppy serve` adopts a live supervisor of this checkout's build and retires one of
+   any other build (asks it to stop, waits `supervisor.stop_timeout` for its workers to
+   be recorded stopped, then signals it); the rounds resume those workers from their
+   sessions. `serve_cannot_start` in `ppy blockers` is the one sentence a start that
+   could not go on left, with its steps; `environment_broken` in `ppy readiness` is
+   repaired by the next `ppy serve` start (or `ppy env sync` now). `ppy supervisor stop`,
+   `status`, `version`, `doctor` and `blockers` work even when the environment is
+   broken or a sync would be refused.
 4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single
