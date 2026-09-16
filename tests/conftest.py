@@ -32,6 +32,19 @@ def _force_git_lease_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _git_never_leaves_the_machine(monkeypatch):
+    """Git in the suite may only reach local repositories.
+
+    Registration clones from the forge (task 280). A test that named a GitHub URL
+    without faking it cloned the real repository on a developer machine whose git
+    could reach it, and failed only on CI, which cannot. Refusing every protocol but
+    `file` (local paths count as `file`) makes that fail everywhere.
+    `tests/test_repos.py::fake_forge` points a GitHub URL at a local repository.
+    """
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+
+
+@pytest.fixture(autouse=True)
 def _fixture_repos_are_their_own_forge(request, monkeypatch):
     """A hermetic fixture repo's forge is the local source repo it was cloned from.
 

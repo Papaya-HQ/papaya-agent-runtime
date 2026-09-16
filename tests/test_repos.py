@@ -307,11 +307,15 @@ def test_add_from_a_url_records_that_url_as_the_forge(tmp_path, ppy_home, monkey
 
 
 @pytest.mark.strict_forge
-def test_repo_list_and_doctor_surface_a_repo_with_no_forge(tmp_path, ppy_home, capsys) -> None:
+def test_repo_list_and_doctor_surface_a_repo_with_no_forge(
+    tmp_path, ppy_home, capsys, monkeypatch, machine
+) -> None:
+    from papaya_agent_runtime import readiness
     from papaya_agent_runtime.cli import main
     from papaya_agent_runtime.setup.doctor import render_text
 
     source = _make_source_repo(tmp_path / "source")
+    fake_forge(monkeypatch, GITHUB_URL, source)
     assert main(["repo", "add", source, "--forge-url", GITHUB_URL]) == 0
     assert GITHUB_URL in capsys.readouterr().out
 
@@ -327,6 +331,18 @@ def test_repo_list_and_doctor_surface_a_repo_with_no_forge(tmp_path, ppy_home, c
     rendered = render_text({**_doctor_stub(), "repos": [{"name": "source", "forge_url": None}]})
     assert "NO FORGE" in rendered
     assert "--forge-url" in rendered
+
+    # With no forge there is nothing to rewrite and nothing to block: a local origin
+    # stays, sync still works from it, the start remedy is silent, readiness only warns.
+    clone = repos.list_repos()[0]["local_path"]
+    _git(clone, "remote", "set-url", "origin", source)
+    assert main(["repo", "sync", "source"]) == 0
+    assert repos.remote_url(clone) == source
+    assert repos.keep_base_clones_right() == []
+    machine.answers[("git", "-C", clone, "config", "--get", "remote.origin.url")] = source
+    codes = {p.code for p in readiness.check().problems}
+    assert "repo_without_forge" in codes
+    assert readiness.REPO_ORIGIN_IS_LOCAL not in codes
 
 
 def _doctor_stub() -> dict:
