@@ -565,8 +565,13 @@ def _runner(
     clock=None,
     steer=_no_steer,
     gate_verdict=None,
+    gate_state=None,
 ) -> serve.TicketRunner:
+    from papaya_agent_runtime import rounds
+
     return serve.TicketRunner(
+        # No supervisor answers in these tests; a liveness check never asks the socket.
+        gate_state=gate_state or (lambda _task_id: rounds.GateState(False, "no gate running")),
         run_turn=turns,
         config=_manager_config,
         opener=papaya_api,

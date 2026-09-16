@@ -189,6 +189,11 @@ POLL_SECONDS = 2.0
 #: bounds how late a person's reply on the ticket is heard.
 COMMENT_POLL_SECONDS = 60.0
 
+#: How often, at most, a held ticket whose worker or gate is active says so as a
+#: progress line (`health.liveness_minutes`). The client's stall clock hears only
+#: progress lines and a harness's own output, and a manager's worker is neither.
+LIVENESS_SECONDS = 5 * 60.0
+
 #: The event kind, on the ticket's own task, that records the newest comment on
 #: the work item already handled. The newest such event is the record.
 COMMENT_HANDLED_EVENT = "ticket_comment_handled"
@@ -472,8 +477,13 @@ def runtime_descriptor() -> dict[str, str]:
     return {"name": capabilities.RUNTIME, "version": __version__}
 
 
-def protocol_writer(stream: Any) -> Any:
+def protocol_writer(stream: Any, *, on_stalled: Any = None) -> Any:
     """A `ProtocolWriter` whose `hello` also names the runtime behind the client.
+
+    It is also where this process hears the client call a job stalled: the stall
+    observation is a `job.stalled` message and nothing else, so ``on_stalled`` is
+    called with its job id once the host has been sent it. What the runtime then
+    knows about the job's worker is the runner's to say (:meth:`TicketRunner.stalled`).
 
     The client's `hello` describes the *client*: its protocol version, its own
     version, the home and the working directory. A host that exec'd a runtime
@@ -494,7 +504,13 @@ def protocol_writer(stream: Any) -> Any:
         def send(self, message_type: str, **fields: Any) -> dict[str, Any]:
             if message_type == "hello":
                 fields.setdefault("runtime", runtime_descriptor())
-            return super().send(message_type, **fields)
+            message = super().send(message_type, **fields)
+            if message_type == "job.stalled" and on_stalled is not None:
+                try:
+                    on_stalled(str(fields.get("job_id") or ""))
+                except Exception as exc:  # noqa: BLE001 - the protocol must outlive the answer
+                    log.warning("[serve] Could not answer a stall: %s", exc)
+            return message
 
     return _RuntimeWriter(stream)
 
@@ -602,6 +618,10 @@ class Ticket:
     nudges: list[Nudge] = field(default_factory=list)
     #: The turn running for this ticket right now, if one is.
     turn_running: str | None = None
+    #: When the last liveness check ran, on the runner's clock; ``None`` before the first.
+    liveness_at: float | None = None
+    #: The newest worker event a liveness line has already accounted for.
+    liveness_cursor: int = 0
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -897,6 +917,8 @@ class TicketRunner:
         steer=None,
         gate_verdict=None,
         stop_and_resume=None,
+        gate_state=None,
+        liveness_seconds: float | None = None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -921,6 +943,13 @@ class TicketRunner:
         self._gate_verdict = gate_verdict or gate.verdict
         #: How a check-in turn's "stop and resume with" reaches the worker.
         self._stop_and_resume = stop_and_resume or stop_and_resume_worker
+        #: `rounds.gate_state`'s seam: whether a worker's gate runs under the supervisor.
+        self._gate_state = gate_state or default_gate_state
+        #: Seconds between liveness lines; ``None`` reads `health.liveness_minutes`.
+        self._liveness_seconds = liveness_seconds
+        #: The event loop the holds run on, for a stall heard from the protocol writer.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._answering: set[asyncio.Task[Any]] = set()
         #: Every ticket held right now, by its task id: what the rounds walk.
         self.held: dict[int, Ticket] = {}
         #: Work item id -> the task the rounds re-offered it for, so the offer
@@ -950,12 +979,104 @@ class TicketRunner:
 
         held = outcome
         ticket = Ticket(held=held, job=job)
+        self._loop = asyncio.get_running_loop()
         self.held[held.task_id] = ticket
+        alive = asyncio.create_task(self._keep_alive(ticket))
         try:
             return await self._hold(ticket)
         finally:
+            alive.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await alive
             if self.held.get(held.task_id) is ticket:
                 del self.held[held.task_id]
+
+    # -- liveness: the worker's activity is the ticket's -------------------------
+
+    def stalled(self, job_id: str) -> None:
+        """The client called ``job_id`` stalled: say at once what its worker is doing.
+
+        Called from the protocol writer, on whichever thread sent `job.stalled`. A
+        progress line is activity to the client, so an active worker's line ends the
+        stall before its grace runs out; a worker that really is quiet gets nothing,
+        and the client's hand-back goes ahead.
+        """
+        ticket = next((t for t in self.held.values() if t.job.job_id == job_id), None)
+        loop = self._loop
+        if ticket is None or loop is None or loop.is_closed():
+            return
+        log.info("[serve] %s was reported stalled; looking at its worker", job_id)
+        loop.call_soon_threadsafe(self._answer_stall, ticket)
+
+    def _answer_stall(self, ticket: Ticket) -> None:
+        answering = asyncio.ensure_future(self._say_alive(ticket, stalled=True))
+        self._answering.add(answering)
+        answering.add_done_callback(self._answering.discard)
+
+    async def _keep_alive(self, ticket: Ticket) -> None:
+        """Say what the worker is doing, at most once a liveness interval, while it does it.
+
+        The runtime records a worker's every tool call and a heartbeat for a long one,
+        but none of that is activity to the client, which watches progress lines. So
+        while the ticket's worker session is live, or its gate runs under the
+        supervisor, one line of that record goes out per interval. A check that finds
+        no new worker event and no running gate says nothing: silence stays silence,
+        so the client's stall observation still fires for a worker that truly went
+        quiet, and what quiet means for a repository is still the rounds' budget.
+        """
+        interval = await asyncio.to_thread(self._liveness_interval)
+        ticket.liveness_cursor = max(ticket.liveness_cursor, await asyncio.to_thread(_max_event_id))
+        ticket.liveness_at = self._clock()
+        while not ticket.should_stop():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ticket.job.stop.wait(), timeout=self._poll_seconds)
+            if ticket.should_stop() or self._clock() - ticket.liveness_at < interval:
+                continue
+            ticket.liveness_at = self._clock()
+            await self._say_alive(ticket)
+
+    async def _say_alive(self, ticket: Ticket, *, stalled: bool = False) -> bool:
+        """One liveness line for this ticket, if its worker or gate is active. Never fatal."""
+        try:
+            line = await asyncio.to_thread(self._activity_line, ticket)
+        except Exception as exc:  # noqa: BLE001 - liveness must never end a hold
+            log.warning("[serve] Could not read %s's worker activity: %s", ticket.job.subject, exc)
+            return False
+        if line is None:
+            if stalled:
+                log.info(
+                    "[serve] %s shows no worker activity; leaving the stall", ticket.job.job_id
+                )
+            return False
+        ticket.liveness_at = self._clock()
+        _report_progress(ticket.job, ticket.phase, line)
+        return True
+
+    def _activity_line(self, ticket: Ticket) -> str | None:
+        """What the ticket's worker and gate are doing since the last line, or ``None``."""
+        worker = ticket.worker
+        if worker is None:
+            return None
+        activity = worker_activity(worker.task_id, ticket.liveness_cursor)
+        if activity is not None:
+            ticket.liveness_cursor = activity.last_event_id
+        try:
+            gate_now = self._gate_state(worker.task_id)
+        except Exception as exc:  # noqa: BLE001 - an unreadable gate is not a running one
+            log.warning("[serve] Could not read worker task %d's gate: %s", worker.task_id, exc)
+            gate_now = None
+        running = gate_now if gate_now is not None and gate_now.running else None
+        if activity is not None and (running is not None or worker_session_live(worker.task_id)):
+            said = activity.line(worker.task_id)
+            return f"{said}; {gate_line(running)}" if running is not None else said
+        return gate_line(running) if running is not None else None
+
+    def _liveness_interval(self) -> float:
+        if self._liveness_seconds is not None:
+            return float(self._liveness_seconds)
+        config = self._config() if self._config is not None else _load_config()
+        minutes = getattr(getattr(config, "health", None), "liveness_minutes", None)
+        return float(minutes) * 60 if minutes else LIVENESS_SECONDS
 
     async def _hold(self, ticket: Ticket) -> dict[str, Any]:
         held, job = ticket.held, ticket.job
@@ -1918,10 +2039,30 @@ class TicketRunner:
         return _result(job, _declined_exit_code(), reason)
 
     async def _stopped(self, ticket: Ticket) -> dict[str, Any]:
-        """The client ended the hold. Record why; a stall is a hand-back of ours."""
+        """The client ended the hold. Record why; a stall is a hand-back of ours.
+
+        Unless the ticket's worker's work goes on — its session is live, it said done,
+        or it stopped with its branch ahead of base: then only the hold stalled. The
+        worker is left as it is under the supervisor, nothing is said on the item, and
+        the phase `stalled` is what the rounds' reclaim reads to offer the ticket again
+        and resume it from there (:func:`stalled_resume_phase`).
+        """
         held, job = ticket.held, ticket.job
         phase = phase_for_stop(job.stop.reason)
-        await asyncio.to_thread(self._record_phase, held.task_id, phase)
+        if phase == PHASE_STALLED:
+            await asyncio.to_thread(self._record_phase, held.task_id, phase)
+            resume = await asyncio.to_thread(_stalled_resume, held.task_id)
+            if resume is not None:
+                log.info(
+                    "[serve] Released %s for task %d (stalled); its worker's work goes on, "
+                    "and the rounds resume it from %s",
+                    job.subject,
+                    held.task_id,
+                    resume,
+                )
+                return _result(job, 0, f"task {held.task_id} {phase}")
+        else:
+            await asyncio.to_thread(self._record_phase, held.task_id, phase)
         if phase == PHASE_STALLED:
             # The client hands a stalled subject back itself; the item still says
             # `in_progress` and nobody has said why unless the runner does.
@@ -2159,18 +2300,53 @@ def resumable_phase(conn, task_id: int) -> str | None:
 
     A ticket mid-work resumes. So does one whose hold ended as `released` — a lost
     lease or this process shutting down — from the working phase before it, since
-    nobody gave that work away. A ticket that was handed back, stalled, declined,
-    or finished starts over.
+    nobody gave that work away. So does one whose hold `stalled` while its worker's
+    work went on (:func:`stalled_resume_phase`): the client gave the lease back, not
+    the work, so it resumes from the phase the worker's state implies. A ticket that
+    was handed back, stalled with nothing left of its worker, declined, or finished
+    starts over.
     """
     phase = store.task_phase(conn, task_id)
     if phase in WORKING_PHASES:
         return phase
+    if phase == PHASE_STALLED:
+        return stalled_resume_phase(conn, task_id)
     if phase != PHASE_RELEASED:
         return None
     for earlier in reversed(phase_history(conn, task_id)):
-        if earlier == PHASE_RELEASED:
+        if earlier in (PHASE_RELEASED, PHASE_STALLED):
             continue
         return earlier if earlier in WORKING_PHASES else None
+    return None
+
+
+def stalled_resume_phase(conn, ticket_task_id: int) -> str | None:
+    """Where a ticket whose hold stalled picks up again, by its worker's state, or ``None``.
+
+    The client's stall is about the lease, and a worker under the supervisor does not
+    stop with it (PAP-219). So a worker whose session is still live is watched again
+    (`dispatched`); one that said done is reviewed (`reviewing`); one that stopped with
+    its branch ahead of base is watched too, where its `worker_stopped` takes the gate
+    steer. None of those is a new brief or a new dispatch. Anything else starts over.
+    """
+    task = store.get_task(conn, ticket_task_id)
+    if task is None:
+        return None
+    row = conn.execute(
+        "SELECT id, status FROM tasks WHERE run_id = ? AND id != ? ORDER BY id DESC LIMIT 1",
+        (task["run_id"], ticket_task_id),
+    ).fetchone()
+    if row is None:
+        return None
+    from papaya_agent_runtime import health, rounds
+
+    worker_id, status = int(row["id"]), str(row["status"])
+    if health.session_alive(conn, worker_id):
+        return PHASE_DISPATCHED
+    if status == "worker_done":
+        return PHASE_REVIEWING
+    if status == WORKER_STOPPED and rounds.branch_ahead_of_base(worker_id):
+        return PHASE_DISPATCHED
     return None
 
 
@@ -2295,6 +2471,211 @@ def worker_status(task_id: int) -> str | None:
         return str(task["status"]) if task is not None else None
     finally:
         conn.close()
+
+
+def worker_session_live(task_id: int) -> bool:
+    """Is this worker's session process still running?"""
+    from papaya_agent_runtime import health
+
+    conn = db.init_db()
+    try:
+        return health.session_alive(conn, task_id)
+    finally:
+        conn.close()
+
+
+def _stalled_resume(ticket_task_id: int) -> str | None:
+    conn = db.init_db()
+    try:
+        return stalled_resume_phase(conn, ticket_task_id)
+    finally:
+        conn.close()
+
+
+def default_gate_state(worker_task_id: int) -> Any:
+    """`rounds.gate_state`: the worker's gate as the supervisor has it now."""
+    from papaya_agent_runtime import rounds
+
+    return rounds.gate_state(worker_task_id)
+
+
+# ── liveness lines ──────────────────────────────────────────────────────────
+
+_ORDINALS = {2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
+
+
+def _ordinal(n: int) -> str:
+    if n in _ORDINALS:
+        return _ORDINALS[n]
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _duration(seconds: float) -> str:
+    return f"{int(seconds)} s" if seconds < 90 else f"{int(seconds // 60)} min"
+
+
+def _clipped(text: str, limit: int = 100) -> str:
+    line = _one_line(text)
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
+@dataclass(frozen=True)
+class WorkerActivity:
+    """What a worker's session recorded since the last liveness line."""
+
+    #: The newest worker event read.
+    last_event_id: int
+    #: How many worker events there were.
+    events: int
+    #: The tool running most recently, and what it runs (a shell command, say).
+    tool: str = ""
+    command: str = ""
+    #: How long that tool has been running, when a heartbeat said.
+    elapsed_seconds: float | None = None
+    #: How many times this worker has run that same command.
+    runs: int = 0
+    #: The worker's latest words, when it said something and ran nothing.
+    said: str = ""
+
+    def line(self, worker_id: int) -> str:
+        head = f"Worker task {worker_id} active: "
+        if self.command or self.tool:
+            parts = [f"`{_clipped(self.command)}`" if self.command else self.tool]
+            if self.elapsed_seconds is not None:
+                parts.append(f"{_duration(self.elapsed_seconds)} in")
+            if self.runs >= 2:
+                parts.append(f"{_ordinal(self.runs)} run")
+            return head + ", ".join(parts)
+        if self.said:
+            return head + f'said "{_clipped(self.said)}"'
+        return head + f"{self.events} event{'s' if self.events != 1 else ''} since the last line"
+
+
+def _tool_uses(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    message = payload.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+def _assistant_text(payload: dict[str, Any]) -> str:
+    message = payload.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return ""
+    texts = [str(b.get("text") or "") for b in content if isinstance(b, dict)]
+    return " ".join(t for t in texts if t.strip())
+
+
+def _tool_command(block: dict[str, Any]) -> str:
+    """What a tool call runs, in the words a person recognises: its command, else its target."""
+    arguments = block.get("input")
+    if not isinstance(arguments, dict):
+        return ""
+    for key in ("command", "description", "file_path", "pattern", "url"):
+        if str(arguments.get(key) or "").strip():
+            return str(arguments[key]).strip()
+    return ""
+
+
+def worker_activity(worker_id: int, after_event_id: int) -> WorkerActivity | None:
+    """The worker's session events after ``after_event_id``, summarised, or ``None`` if none.
+
+    Read from what the supervisor already records for a worker (`worker_<provider
+    event type>`): Claude's `tool_progress` heartbeat names the running tool call
+    and its elapsed time, its `assistant` messages carry the call's command and the
+    worker's words, and Codex's `item.started` carries a command execution. Whatever
+    a provider says that none of those describe still counts, as a number of events.
+    """
+    conn = db.init_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, kind, payload FROM events WHERE task_id = ? AND id > ? "
+            "AND kind LIKE 'worker\\_%' ESCAPE '\\' ORDER BY id",
+            (worker_id, after_event_id),
+        ).fetchall()
+        if not rows:
+            return None
+        tool = command = said = ""
+        elapsed: float | None = None
+        for row in rows:
+            kind, payload = str(row["kind"]), _payload(row)
+            if kind == "worker_tool_progress":
+                tool = str(payload.get("tool_name") or "")
+                command = _tool_command_by_id(
+                    conn, worker_id, str(payload.get("tool_use_id") or "")
+                )
+                try:
+                    elapsed = float(payload.get("elapsed_time_seconds"))
+                except (TypeError, ValueError):
+                    elapsed = None
+            elif kind == "worker_assistant":
+                uses = _tool_uses(payload)
+                if uses:
+                    tool, command, elapsed = (
+                        str(uses[-1].get("name") or ""),
+                        _tool_command(uses[-1]),
+                        None,
+                    )
+                elif text := _assistant_text(payload):
+                    said = text
+            elif kind == "worker_item.started":
+                item = payload.get("item")
+                if isinstance(item, dict) and item.get("command"):
+                    tool, command, elapsed = "shell", str(item["command"]), None
+        runs = _command_runs(conn, worker_id, command) if command else 0
+        return WorkerActivity(
+            last_event_id=int(rows[-1]["id"]),
+            events=len(rows),
+            tool=tool,
+            command=command,
+            elapsed_seconds=elapsed,
+            runs=runs,
+            said=said,
+        )
+    finally:
+        conn.close()
+
+
+def _tool_command_by_id(conn, worker_id: int, tool_use_id: str) -> str:
+    """The command of the tool call a heartbeat is about, from the message that made it."""
+    if not tool_use_id:
+        return ""
+    row = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = 'worker_assistant' "
+        "AND instr(payload, ?) > 0 ORDER BY id DESC LIMIT 1",
+        (worker_id, tool_use_id),
+    ).fetchone()
+    if row is None:
+        return ""
+    for block in _tool_uses(_payload(row)):
+        if str(block.get("id") or "") == tool_use_id:
+            return _tool_command(block)
+    return ""
+
+
+def _command_runs(conn, worker_id: int, command: str) -> int:
+    """How many tool calls this worker has made with exactly ``command``."""
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = 'worker_assistant' "
+        "AND instr(payload, 'tool_use') > 0",
+        (worker_id,),
+    ).fetchall()
+    return sum(
+        1 for row in rows for block in _tool_uses(_payload(row)) if _tool_command(block) == command
+    )
+
+
+def gate_line(state: Any) -> str:
+    """The liveness line for a gate running under the supervisor."""
+    command = str(getattr(state, "command", "") or "")
+    if not command:
+        return f"Gate {getattr(state, 'line', 'running under the supervisor')}"
+    scope = "full suite" if getattr(state, "full", False) else "local gate"
+    elapsed = _duration(float(getattr(state, "elapsed_seconds", 0.0) or 0.0))
+    return f"Gate running under the supervisor: {scope} `{_clipped(command)}`, {elapsed}"
 
 
 @dataclass(frozen=True)
@@ -2667,7 +3048,8 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         "approval_timeout": float(timeout),
         "invalid_arguments": options.invalid_arguments,
     }
-    return await build_supervised_listener(protocol_writer(stdout), **{**supervised, **extra})
+    writer = protocol_writer(stdout, on_stalled=getattr(runner, "stalled", None))
+    return await build_supervised_listener(writer, **{**supervised, **extra})
 
 
 def _stdin_fd() -> int | None:
@@ -3020,6 +3402,7 @@ __all__ = [
     "PHASE_REVIEWING",
     "PHASE_STALLED",
     "GATE_STEERS",
+    "LIVENESS_SECONDS",
     "RUNTIME_NOT_READY",
     "SENT_BACK_LINE",
     "WAIT_FIRST_SECONDS",
@@ -3036,6 +3419,7 @@ __all__ = [
     "default_worker_capacity",
     "dm_channel_id",
     "find_worker",
+    "gate_line",
     "gate_steer_message",
     "parse_args",
     "phase_for_stop",
@@ -3052,9 +3436,12 @@ __all__ = [
     "sent_back_before",
     "serve",
     "session_id_for",
+    "stalled_resume_phase",
     "steer_worker",
     "stored_session_ids",
     "turn_environment",
     "turn_transcript_path",
     "waiting_reason",
+    "worker_activity",
+    "worker_session_live",
 ]

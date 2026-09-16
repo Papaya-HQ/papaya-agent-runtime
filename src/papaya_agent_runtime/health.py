@@ -280,6 +280,12 @@ def _latest_runner(conn: sqlite3.Connection, task_id: int) -> sqlite3.Row | None
     ).fetchone()
 
 
+def session_alive(conn: sqlite3.Connection, task_id: int) -> bool:
+    """Is this task's newest runner process still running? `check`'s not-`dead`, alone."""
+    runner = _latest_runner(conn, task_id)
+    return _pid_alive(runner["pid"] if runner else None)
+
+
 def check(
     conn: sqlite3.Connection | None = None,
     *,
