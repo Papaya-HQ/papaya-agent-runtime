@@ -671,6 +671,14 @@ def record_pr_attention(
         conn.close()
 
 
+def workers_of(conn: Any, ticket: Ticket) -> set[int]:
+    """Every other task in the ticket's run: its workers."""
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE run_id = ? AND id != ?", (ticket.run_id, ticket.task_id)
+    ).fetchall()
+    return {int(row["id"]) for row in rows}
+
+
 def _set_phase(task_id: int, phase: str, detail: str = "") -> None:
     conn = db.init_db()
     try:
@@ -869,7 +877,7 @@ class Rounds:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a bad round must not end serve
-                log.warning("[rounds] Round failed: %s", exc)
+                log.exception("[rounds] Round failed: %s", exc)
                 parts = [f"the round failed: {exc}"]
                 await asyncio.to_thread(deficiencies.record_exception, "a manager round", exc)
         # A deficiency another process recorded (a `ppy` command, a worker) is
@@ -1639,17 +1647,7 @@ class Rounds:
             entries = await asyncio.to_thread(self._forge_states)
         except Exception:  # noqa: BLE001 - unknown is not merged
             return []
-        conn = await asyncio.to_thread(db.init_db)
-        try:
-            workers = {
-                int(row["id"])
-                for row in conn.execute(
-                    "SELECT id FROM tasks WHERE run_id = ? AND id != ?",
-                    (ticket.run_id, ticket.task_id),
-                ).fetchall()
-            }
-        finally:
-            conn.close()
+        workers = await store.run_in_thread(workers_of, ticket)
         parts: list[str] = []
         for entry in entries:
             if int(entry.get("task_id") or 0) in workers and (

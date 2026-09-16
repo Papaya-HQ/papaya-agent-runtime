@@ -9,10 +9,12 @@ and the wall clock a round reads silence and age on, moved by hand.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -30,6 +32,7 @@ from papaya_agent_runtime import (
     preflight,
     progress,
     prompts,
+    reconcile,
     repos,
     rounds,
     serve,
@@ -956,3 +959,316 @@ def test_the_checkin_prompt_names_its_three_endings_and_both_skills() -> None:
     for ending in ("CHECK-IN: continue", "CHECK-IN: steer <", "CHECK-IN: stop and resume with <"):
         assert ending in text
     assert prompts.BRIEF_SKILL in text and prompts.REVIEW_SKILL in text
+
+
+# ── a round over every shape of state, on real threads ──────────────────────
+
+#: The modules whose coroutines run the rounds, the reclaim and liveness.
+THREADED_MODULES = (rounds, reconcile, serve)
+_OPENERS = {"init_db", "connect"}
+
+
+def _called_name(node: ast.expr) -> str:
+    """`db.init_db` -> "init_db", `self._forge_states` -> "_forge_states", `f` -> "f"."""
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _requires_conn(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """A parameter that is a connection and has no default: the caller must hand one over.
+
+    An optional one (`conn=None`, the function opens its own) is only a crossing when
+    a connection is actually passed, which the argument check catches.
+    """
+    positional = [*fn.args.posonlyargs, *fn.args.args]
+    defaults = [None] * (len(positional) - len(fn.args.defaults)) + list(fn.args.defaults)
+    params = [
+        *zip(positional, defaults, strict=True),
+        *zip(fn.args.kwonlyargs, fn.args.kw_defaults, strict=True),
+    ]
+    return any(
+        default is None
+        and (p.arg == "conn" or "Connection" in ast.unparse(p.annotation or ast.Constant("")))
+        for p, default in params
+    )
+
+
+def _definitions(module: Any) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    tree = ast.parse(Path(module.__file__).read_text())
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def connection_crossings(module: Any, others: tuple[Any, ...] = ()) -> list[str]:
+    """Every place a coroutine in ``module`` could use a connection from another thread.
+
+    - a `to_thread` target that opens a connection (it comes back to the loop thread);
+    - a `to_thread` target whose definition requires a `conn`: one in ``module`` by
+      name, or `other.name` in one of ``others`` (`reconcile.history`);
+    - a `to_thread` argument that is a connection (`conn`, `*.conn`);
+    - a connection opened in a coroutine's own body (it would be handed on, or block).
+    """
+    tree = ast.parse(Path(module.__file__).read_text())
+    defined = _definitions(module)
+    elsewhere = {
+        f"{other.__name__.rsplit('.', 1)[-1]}.{name}": node
+        for other in others
+        for name, node in _definitions(other).items()
+    }
+    where = Path(module.__file__).name
+    found: list[str] = []
+
+    def coroutine_body(fn: ast.AsyncFunctionDef):
+        stack = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+                continue  # a nested def runs wherever it is called; judged at its call
+            yield node
+            stack.extend(ast.iter_child_nodes(node))
+
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)):
+        for node in coroutine_body(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _called_name(node.func)
+            at = f"{where}:{node.lineno} in {fn.name}"
+            if name in _OPENERS and ast.unparse(node.func) != "asyncio.to_thread":
+                found.append(f"{at}: opens a connection on the loop thread")
+            if ast.unparse(node.func) != "asyncio.to_thread" or not node.args:
+                continue
+            target, *args = node.args
+            target_name = _called_name(target)
+            definition = elsewhere.get(ast.unparse(target)) or (
+                defined.get(target_name)
+                if isinstance(target, ast.Name) or ast.unparse(target).startswith("self.")
+                else None
+            )
+            if target_name in _OPENERS:
+                found.append(f"{at}: to_thread({ast.unparse(target)}) returns a connection")
+            elif definition is not None and _requires_conn(definition):
+                found.append(f"{at}: to_thread({ast.unparse(target)}) takes a conn from the caller")
+            for arg in [*args, *(k.value for k in node.keywords)]:
+                if _called_name(arg) == "conn":
+                    found.append(f"{at}: passes {ast.unparse(arg)} into to_thread")
+    return found
+
+
+@pytest.mark.parametrize("module", THREADED_MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
+def test_no_connection_crosses_a_to_thread_boundary(module) -> None:
+    """Database steps from a coroutine go through `store.run_in_thread`, which opens in-thread."""
+    others = tuple(m for m in THREADED_MODULES if m is not module)
+    assert connection_crossings(module, others) == []
+
+
+def test_the_crossing_check_catches_the_shape_that_killed_the_first_round(tmp_path) -> None:
+    source = tmp_path / "bad.py"
+    source.write_text(
+        "import asyncio\n"
+        "from papaya_agent_runtime.state import db\n\n"
+        "def rows(conn, run_id):\n"
+        "    return conn.execute('SELECT 1').fetchall()\n\n"
+        "async def clean(run_id):\n"
+        "    conn = await asyncio.to_thread(db.init_db)\n"
+        "    await asyncio.to_thread(rows, conn, run_id)\n"
+        "    other = db.init_db()\n"
+    )
+    assert sorted(connection_crossings(SimpleNamespace(__file__=str(source)))) == [
+        "bad.py:10 in clean: opens a connection on the loop thread",
+        "bad.py:8 in clean: to_thread(db.init_db) returns a connection",
+        "bad.py:9 in clean: passes conn into to_thread",
+        "bad.py:9 in clean: to_thread(rows) takes a conn from the caller",
+    ]
+
+
+def test_the_crossing_check_follows_a_target_into_the_reconcile_lane(tmp_path) -> None:
+    lane = tmp_path / "lane.py"
+    lane.write_text(
+        "def needs(worker_id, conn):\n    pass\n\n"
+        "def opens_its_own(worker_id, conn=None):\n    pass\n"
+    )
+    caller = tmp_path / "caller.py"
+    caller.write_text(
+        "import asyncio\n\n"
+        "async def follow(worker_id):\n"
+        "    await asyncio.to_thread(lane.needs, worker_id)\n"
+        "    await asyncio.to_thread(lane.opens_its_own, worker_id)\n"
+    )
+    others = (SimpleNamespace(__file__=str(lane), __name__="papaya_agent_runtime.lane"),)
+    assert connection_crossings(SimpleNamespace(__file__=str(caller)), others) == [
+        "caller.py:4 in follow: to_thread(lane.needs) takes a conn from the caller"
+    ]
+
+
+def test_a_failed_round_logs_its_traceback_records_a_deficiency_and_the_next_round_runs(
+    ppy_home, caplog
+) -> None:
+    from papaya_agent_runtime import deficiencies
+
+    class Runner:
+        failures = 1
+
+        @property
+        def held(self) -> dict[int, Any]:
+            if Runner.failures:
+                Runner.failures -= 1
+                raise RuntimeError("the runner's holds could not be read")
+            return {}
+
+    pruned: list[int | None] = []
+    stderr, clock = io.StringIO(), WallClock()
+    walker = rounds.Rounds(
+        SimpleNamespace(loop=None, agent_config={}),
+        Runner(),
+        stderr=stderr,
+        clock=clock,
+        forge=lambda _conn: [],
+        prune=lambda task_id: pruned.append(task_id) or {"removed": [], "skipped": []},
+        git=lambda *_a, **_k: 0,
+    )
+    caplog.set_level("WARNING", logger=rounds.log.name)
+
+    asyncio.run(walker.round_once())
+    asyncio.run(walker.round_once())
+
+    (failed,) = [r for r in caplog.records if "Round failed" in r.getMessage()]
+    assert failed.exc_info is not None and failed.exc_info[0] is RuntimeError
+    (row,) = deficiencies.ledger()
+    assert row.kind == deficiencies.UNHANDLED_EXCEPTION
+    assert row.detail.startswith("a manager round: RuntimeError")
+    assert "Traceback" in row.evidence[0]["error"]
+    assert "round: the round failed: the runner's holds could not be read" in stderr.getvalue()
+    # The next round ran to its end: the hourly hygiene the failed one never reached.
+    assert pruned == [None]
+
+
+def test_run_in_thread_opens_uses_and_closes_the_connection_in_one_worker_thread(ppy_home) -> None:
+    seen: dict[str, Any] = {}
+
+    def step(conn: Any, value: int, *, plus: int) -> int:
+        seen["thread"] = threading.get_ident()
+        seen["conn"] = conn
+        return int(conn.execute("SELECT ? + ?", (value, plus)).fetchone()[0])
+
+    assert asyncio.run(store.run_in_thread(step, 2, plus=3)) == 5
+    assert seen["thread"] != threading.get_ident()
+    with pytest.raises(sqlite3.ProgrammingError):
+        seen["conn"].execute("SELECT 1")
+
+
+def _seed(
+    item: str, event_id: int, phases: list[str], worker_status: str | None
+) -> tuple[int, int]:
+    """A ticket task for ``item`` at ``phases``, and its worker at ``worker_status`` (0: none)."""
+    conn = init_db()
+    try:
+        run_id = store.create_run(conn, f"Ticket {item}")
+        ticket = store.add_task(conn, run_id=run_id, title=f"Ticket {item}")
+        event = papaya_events.PapayaEvent(
+            id=str(event_id),
+            kind="work_item.assigned",
+            subject=f"work_item:{item}",
+            payload={},
+            work_item_id=item,
+        )
+        papaya_events.record_task(conn, ticket, event)
+        for phase in phases:
+            serve.record_phase(conn, ticket, phase)
+    finally:
+        conn.close()
+    if worker_status is None:
+        return ticket, 0
+    worker = dispatch_worker(run_id)
+    worker_event(worker, "worker_progress", status=worker_status, phase="implement", note="Going.")
+    return ticket, worker
+
+
+def test_one_round_over_a_ticket_in_every_phase_completes_on_real_threads(
+    ppy_home, client_home, ready, registered_repo, assigned, pruned, monkeypatch, caplog
+) -> None:
+    """PAP-219's first start: a round died on a connection opened in another thread.
+
+    The state is the shape Shane's `.ppy/state.db` had — a stalled ticket whose worker
+    is done, a handed-over one, a dispatched one with a live worker, a delivered one
+    with an open pull request — plus every other phase and worker status. The round
+    runs with the real `asyncio.to_thread` and SQLite's own `check_same_thread`.
+    """
+    from papaya_agent_runtime.state import db
+
+    real_connect = db.sqlite3.connect
+
+    def same_thread_only(*args: Any, **kwargs: Any) -> Any:
+        kwargs["check_same_thread"] = True
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(db.sqlite3, "connect", same_thread_only)
+
+    pickup = [serve.PHASE_PICKED_UP, serve.PHASE_BRIEFING, serve.PHASE_DISPATCHED]
+    finished = [*pickup, serve.PHASE_REVIEWING, serve.PHASE_DELIVERING, serve.PHASE_REPORTED]
+    stalled, stalled_worker = _seed("item-8", 8, [*pickup, serve.PHASE_STALLED], "worker_done")
+    _seed("item-11", 11, [*finished, serve.PHASE_RELEASED], "closed")
+    released, delivered = _seed("item-12", 12, [*finished, serve.PHASE_RELEASED], "delivered")
+    worker_event(delivered, "delivered", status="delivered", pr_url=PR_URL)
+    _seed("item-13", 13, [serve.PHASE_PICKED_UP, serve.PHASE_DECLINED], "cancelled")
+    _seed("item-14", 14, [*pickup, serve.PHASE_HANDED_OVER], "worker_stopped")
+    elsewhere, _blocked = _seed("item-15", 15, pickup, "blocked")
+    live, live_worker = _seed("item-16", 16, pickup, "in_progress")
+    live_session(live_worker)
+    _seed("item-17", 17, [serve.PHASE_PICKED_UP, serve.PHASE_HANDED_BACK], None)
+    _seed("item-18", 18, [*pickup, serve.PHASE_DONE], "needs_recovery")
+    # A delivered pull request gone red: the round queues it and starts the reconcile lane.
+    _red, red_worker = _seed("item-19", 19, [*finished, serve.PHASE_RELEASED], "delivered")
+    worker_event(red_worker, "delivered", status="delivered", pr_url=f"{PR_URL}8")
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.REVIEW and turn.item() == "item-8":
+            worker_event(stalled_worker, "reviewed", verdict="approved")
+
+    turns, timer, clock, stderr = FakeTurns(act), Timer(), WallClock(), io.StringIO()
+    harness = Harness(FakeEvents([]))
+    harness.events.held.add("work_item:item-15")
+    forge = [
+        _pr(delivered),
+        _pr(red_worker, pr=78, url=f"{PR_URL}8", ci="fail", failing=["unit tests"]),
+    ]
+    seams = {
+        **_seams(timer, clock, pruned, forge=forge),
+        "pr_details": lambda _worker, _entry: {},
+    }
+    caplog.set_level("WARNING", logger=rounds.log.name)
+
+    async def scenario() -> int:
+        task = _serve(harness, client_home, _runner(turns, FakePapaya()), seams, stderr)
+        await _until(lambda: timer.waiting, what="the start's reclaim to finish")
+        await _until(lambda: prompts.REVIEW in turns.names(), what="the stalled ticket's review")
+        clock.advance(minutes=1)
+        await timer.round()
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+
+    failures = [r.getMessage() for r in caplog.records if "Round failed" in r.getMessage()]
+    assert failures == []
+    rounds_said = [line for line in stderr.getvalue().splitlines() if "round:" in line]
+    assert not any("failed" in line for line in rounds_said), rounds_said
+    start = next(line for line in rounds_said if "took ticket task" in line)
+    assert f"took ticket task {stalled} back up (item-8)" in start
+    assert f"took ticket task {live} back up (item-16)" in start
+    assert f"ticket task {elsewhere} is held by" in start
+    assert store.task_phase(init_db(), elsewhere) == serve.PHASE_HANDED_OVER
+    # The stalled ticket with a done worker resumed at review, not at a new brief.
+    assert turns.calls[0].item() == "item-8" and turns.names()[0] == prompts.REVIEW
+    assert prompts.BRIEF not in turns.names()
+    assert serve.PHASE_REVIEWING in history(8)
+    # The round after the start got to its last step: the hourly hygiene run.
+    assert pruned == [None]
+    assert store.task_phase(init_db(), released) == serve.PHASE_RELEASED
+    # The red pull request went through the reconcile lane's to_thread steps in the round.
+    assert events_of(red_worker, reconcile.STARTED)
+    assert events_of(red_worker, serve.PR_ATTENTION)
+    assert serve.PHASE_DISPATCHED in history(19)[len(finished) + 1 :]
