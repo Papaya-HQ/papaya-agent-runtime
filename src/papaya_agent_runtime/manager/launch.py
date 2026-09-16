@@ -247,8 +247,16 @@ def build_launch(
     objective: str | None = None,
     root: str | None = None,
     base_env: dict[str, str] | None = None,
+    turn: str | None = None,
 ) -> Launch:
-    """Construct the interactive harness invocation (pure; no process spawn)."""
+    """Construct the manager harness invocation (pure; no process spawn).
+
+    Interactive by default, which is `ppy start`. With ``turn`` — a whole prompt —
+    the same manager is built for one headless turn instead (`claude -p`,
+    `codex exec`): same role, same PATH, same provider resolution, and the prompt
+    in place of the conversational seed. That is how `ppy serve` runs its brief,
+    answer and review turns without a second, drifting harness launcher.
+    """
     root = root or repo_root()
     env = dict(base_env if base_env is not None else os.environ)
     bin_dir = os.path.join(root, "bin")
@@ -261,19 +269,26 @@ def build_launch(
     env["PPY_MANAGER_SESSION"] = "1"
 
     prov, mdl, rsn = resolve_profile(config, provider, model, reasoning)
-    seed = _seed_prompt(objective, configured=config is not None)
+    seed = turn if turn is not None else _seed_prompt(objective, configured=config is not None)
 
     if prov == "claude":
         argv = ["claude"]
+        if turn is not None:
+            # The prompt goes straight after `-p`, not last: `--allowedTools` is
+            # variadic, and a positional after it can be read as one more tool.
+            argv += ["-p", seed]
         if mdl:
             argv += ["--model", mdl]
         argv += ["--append-system-prompt", _ROLE]
         # Let the manager drive the control plane without a prompt per call; `ppy`
         # itself is the authority gate, so allowing the wrapper is safe.
         argv += ["--allowedTools", "Bash(ppy:*)", "Bash(./bin/ppy:*)"]
-        argv += [seed]
+        if turn is None:
+            argv += [seed]
     else:  # codex
         argv = ["codex"]
+        if turn is not None:
+            argv += ["exec"]
         if mdl:
             argv += ["--model", mdl]
         if rsn:
@@ -289,6 +304,75 @@ def build_launch(
         reasoning=rsn,
         seed_prompt=seed,
     )
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """How one headless manager turn ended, and what it said."""
+
+    exit_code: int
+    transcript: str
+    #: True when the turn was ended from outside (the ticket's hold stopped).
+    stopped: bool = False
+
+    def tail(self, chars: int = 4000) -> str:
+        """The end of the transcript, which is where a turn says what it did last."""
+        return self.transcript[-chars:]
+
+
+#: How often a running turn checks whether it has been told to stop.
+TURN_STOP_POLL_SECONDS = 1.0
+
+
+def run_turn(launch: Launch, *, should_stop=None) -> TurnResult:
+    """Run a headless turn built by :func:`build_launch` to completion. Blocking.
+
+    The counterpart of :func:`start` for a turn: `start` replaces this process
+    with an interactive manager, and this runs one alongside it and waits. Output
+    is captured whole, because the next attempt at a turn that missed its job is
+    given the previous transcript's tail. ``should_stop`` is polled while the
+    turn runs; when it answers true the harness is terminated, so a ticket that is
+    handed back does not leave a manager working on it.
+    """
+    import subprocess
+    import tempfile
+
+    from papaya_agent_runtime.paths import ensure_layout
+
+    ensure_layout()
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output:
+        try:
+            proc = subprocess.Popen(
+                launch.argv,
+                cwd=launch.cwd,
+                env=launch.env,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise ManagerLaunchError(
+                f"{launch.provider} CLI not found on PATH; install it and sign in "
+                "(`ppy doctor` shows harness status)"
+            ) from exc
+        stopped = False
+        while True:
+            try:
+                code = proc.wait(timeout=TURN_STOP_POLL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                if should_stop is not None and should_stop():
+                    stopped = True
+                    proc.terminate()
+                    try:
+                        code = proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        code = proc.wait()
+                    break
+        output.seek(0)
+        return TurnResult(exit_code=int(code), transcript=output.read(), stopped=stopped)
 
 
 def start(launch: Launch) -> None:

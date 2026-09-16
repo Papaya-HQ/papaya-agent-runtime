@@ -274,6 +274,8 @@ def _cmd_repo(args: argparse.Namespace) -> int:
             return _repo_onboard(args)
         if args.repo_cmd == "ensure":
             return _repo_ensure(args)
+        if args.repo_cmd == "locate":
+            return _repo_locate(args)
     except RepoError as exc:
         print(f"repo error: {exc}", file=sys.stderr)
         return 1
@@ -322,6 +324,32 @@ def _repo_discover(args: argparse.Namespace) -> int:
     remaining = len(found) - min(len(found), args.top)
     if remaining > 0:
         print(f"... and {remaining} more")
+    return 0
+
+
+def _repo_locate(args: argparse.Namespace) -> int:
+    """Which registered clones contain a ticket's distinctive strings. No judgment."""
+    from papaya_agent_runtime.repos import locate
+
+    hits = locate(list(args.terms))
+    if args.json:
+        print(json.dumps([{**hit.__dict__, "found": hit.found} for hit in hits], indent=2))
+        return 0
+    if not hits:
+        print("no repositories registered, so there is nowhere to look")
+        return 0
+    for hit in hits:
+        if hit.note:
+            print(f"{hit.repo}: not searched — {hit.note}")
+            continue
+        if not hit.found:
+            print(f"{hit.repo}: no hits")
+            continue
+        print(f"{hit.repo}: {hit.matches} hit(s) in {hit.file_count} file(s)")
+        for name in hit.files:
+            print(f"  {name}")
+        if hit.file_count > len(hit.files):
+            print(f"  ... and {hit.file_count - len(hit.files)} more")
     return 0
 
 
@@ -545,6 +573,19 @@ def _cmd_brief(args: argparse.Namespace) -> int:
     return 1
 
 
+def _ticket_run_id() -> int | None:
+    """The run of the ticket this shell's manager turn is holding, if it is one.
+
+    `ppy serve` exports it into every manager turn, and a worker dispatched into
+    that run is how the runner sees the turn did its job. Defaulting to it here
+    means the link does not rest on a turn remembering a flag.
+    """
+    from papaya_agent_runtime.papaya_events import TICKET_RUN_ENV
+
+    raw = (os.environ.get(TICKET_RUN_ENV) or "").strip()
+    return int(raw) if raw.isdigit() else None
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     from papaya_agent_runtime import brief_lint, health, preflight
     from papaya_agent_runtime.config import default_worker_provider
@@ -615,6 +656,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 "pass --provider claude or --provider codex for real work"
             )
 
+    run_id = args.run_id if args.run_id is not None else _ticket_run_id()
+
     client = SupervisorClient()
     try:
         resp = client.dispatch_task(
@@ -624,7 +667,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             provider=provider,
             model=args.model,
             reasoning=args.reasoning,
-            run_id=args.run_id,
+            run_id=run_id,
             base=args.base,
             stack_on=args.stack_on,
             ends_at=args.ends_at,
@@ -2124,6 +2167,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ensure_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+    locate_cmd = rsub.add_parser(
+        "locate",
+        help=(
+            "which registered clones contain these strings (literal, case-insensitive, "
+            "every term in the same file), with hits per repository and the top files"
+        ),
+    )
+    locate_cmd.add_argument(
+        "terms", nargs="+", help='distinctive strings from the ticket, e.g. "hover card"'
+    )
+    locate_cmd.add_argument("--json", action="store_true", help="machine-readable output")
     repo.set_defaults(func=_cmd_repo)
 
     ready = sub.add_parser(

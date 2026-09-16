@@ -170,7 +170,8 @@ ppy papaya status                       # which Papaya agent this machine is
 ppy papaya connect                      # sign in and pin this machine to an agent
 ppy repo discover                       # repos on the forge that aren't registered yet
 ppy repo add https://github.com/you/your-repo
-ppy repo onboard your-repo              # learn its build, tests, CI gate, conventions
+ppy repo onboard your-repo              # learn what it is, its build, tests, CI gate
+ppy repo locate "hover card"            # which registered repos contain these strings
 ppy serve                               # the always-on manager: supervisor + Papaya loop
 ppy supervisor serve                    # per-task runners, durable state
 ppy dispatch --repo your-repo --brief brief.md --provider claude
@@ -227,15 +228,68 @@ keyed on a session id, so `ppy serve` stores one id per Papaya connection in
 leases this machine already holds instead of racing them. Delete that file and the
 next start mints a fresh identity, which means waiting out the leases of the last one.
 
-What a picked-up ticket does today is deliberately small. The manager records the work
-item as a task, writes the phase `picked_up`, says so through the client's
-`Job.report_progress` (a `job.progress` message to a supervised host, a log line to a
-terminal one), and then **holds the lease** until the
-client stops the run — a hand-back from the app, a lease a person released, the stall
-grace expiring, or this process shutting down — at which point it records why
-(`handed_back`, `stalled`, `released`). A ticket it cannot place, because no repository
-resolves or the runtime is not ready to work, is declined so a peer may take it. The
-turns that brief, dispatch, review and deliver come next.
+### A ticket, from pickup to pull request
+
+A picked-up ticket is **worked**, not just held. The process that holds its lease
+sequences it through these phases, and writes each one on the task row, as a
+`ticket_phase` event (so the order survives), and as a `Job.report_progress` line (a
+`job.progress` message to a supervised host, a log line to a terminal one):
+
+```
+picked_up -> briefing -> dispatched -> reviewing -> delivering -> reported -> released
+                 |         |    ^  ^         |
+                 |         v    |  +- steer -+
+                 |        blocked
+                 |   (answer turn, or a person's reply)
+                 |
+                 +-> declined   (any turn that misses its job twice hands the ticket back)
+```
+
+| Phase | What moves it on | Who acts |
+|---|---|---|
+| `picked_up` | the job is approved and the ticket recorded | runner |
+| `briefing` | a worker task appears in the ticket's run | **brief turn** |
+| `dispatched` | a worker's `worker_done`, question, stop or failure | the worker |
+| `blocked` | an answer or steer on the worker, or a person's reply | **answer turn** |
+| `reviewing` | a delivery (on to `delivering`) or a steer (back to `dispatched`) | **review turn** |
+| `delivering`, `reported` | the pull request is open and the result posted | runner |
+| `released` | the hold ends: done, lease lost, or shut down | client |
+| `handed_back`, `stalled`, `declined` | the app took it back, nothing happened for too long, or a turn missed twice | client / runner |
+
+**Judgment lives in the turns, never in the runner.** A turn is a headless session of
+the configured manager harness, built by the same launcher as `ppy start`, run in this
+directory with the client's job environment (persona and memories, the plugin, the
+activity stamp) and a write boundary of this directory alone, so it can register and
+dispatch but never edit a repository by hand. Its prompt is reviewed text under
+`src/papaya_agent_runtime/prompts/` and points at the skills it follows:
+
+- **brief** reads the work item, **chooses the repository** — the item names it; the
+  agent already knows (memories, and each repository's "What it is" notes, which
+  `ppy repo onboard` now fills); the code says (`ppy repo locate "hover card"`);
+  `ppy repo discover` and register; ask on the item and wait; then record the mapping —
+  writes acceptance criteria onto the record if it has none, and dispatches a brief
+  written to `brief-a-worker` with `ppy dispatch --brief --strict`;
+- **answer** unblocks a worker's question with `ppy answer` or `ppy steer`, or takes it
+  to the person who can answer;
+- **review** follows `review-a-worker`, runs the gate at head, then approves and
+  delivers or steers with every finding, and posts the result on the work item.
+
+The runner knows a turn did its job from the ledger alone — a worker in the ticket's
+run, or an answer, steer or delivery event since the turn began — and retries a turn
+that did not once, with the tail of its transcript, before handing the ticket back.
+A worker pool that is full is not a miss: the ticket waits in `dispatched` and is never
+handed back for it. A restarted `serve` given a ticket it was already working picks it
+up from its last working phase rather than briefing it again.
+
+The work item's **status** is state, so the runner sets it: `in_progress` on pickup,
+`review` when the pull request is open, `blocked` while a question waits on a person,
+and `todo` on hand-back, with the one comment the runner ever writes —
+`handed back: <reason>; branch <name> kept`. Everything said in words is a turn's.
+
+A ticket this machine cannot take at all — a repository the item names that cannot be
+registered, or a runtime that is not ready to work — is declined before any of that, so
+a peer may take it. An item that names no repository is *not* declined: choosing one
+is the brief turn's job, and nothing ever falls back to this checkout.
 
 ## Where state lives
 
