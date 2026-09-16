@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import delivery, repos
 from papaya_agent_runtime.delivery import deliver, extract_pr_url
 from papaya_agent_runtime.review import record_review
@@ -55,7 +56,7 @@ def approved_task(server, source_repo) -> int:
     _srv, client = server
     added = repos.add_repo(source_repo)
     resp = client.dispatch_task(repo=added.name, title="do work", instructions="")
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + scale(15)
     while client.task_status(resp["task_id"])["task"]["status"] != "worker_done":
         assert time.monotonic() < deadline
         time.sleep(0.1)
