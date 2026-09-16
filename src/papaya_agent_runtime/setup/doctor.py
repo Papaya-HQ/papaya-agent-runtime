@@ -152,7 +152,10 @@ def collect() -> dict:
         changes = config_changes.history(limit=10) if config_path().exists() else []
     except Exception:  # noqa: BLE001 - diagnostics must not crash
         changes = []
+    from papaya_agent_runtime import deficiencies
+
     return {
+        "self_report": deficiencies.summary(),
         "ppy_home": str(home),
         "readiness": verdict.as_dict(),
         "capabilities": capabilities.collect(),
@@ -185,6 +188,12 @@ def render_text(data: dict) -> str:
         lines.append(f"papaya:    {_papaya_line(connection)}")
     if data.get("venv"):
         lines.append(_venv_line(data["venv"]))
+    reported = data.get("self_report")
+    if reported:
+        lines.append(
+            f"self-report: {reported['open_issues']} open self-reported issue(s), "
+            f"{reported['waiting']} waiting to open — `ppy deficiency list`"
+        )
     cfg = data["config"]
     if cfg["present"]:
         state = "valid" if cfg.get("valid") else f"INVALID ({cfg.get('error')})"

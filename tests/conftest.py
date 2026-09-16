@@ -130,6 +130,24 @@ def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_self_reports(monkeypatch):
+    """Keep the hermetic suite from opening issues on the runtime's real repository.
+
+    `ppy serve` opens a GitHub issue for every deficiency it records, through `gh`,
+    on the origin of this checkout — which, in a developer's clone, is the runtime's
+    real repository. A test that trips a signal must not file it there. So `gh`
+    answers every call with a failure and the origin reads as not GitHub; a test of
+    self-reporting hands its `Reporter` a fake `gh` and an origin of its own.
+    """
+    from papaya_agent_runtime import deficiencies
+
+    monkeypatch.setattr(
+        deficiencies, "run_gh", lambda args, stdin=None: (1, "", "no gh in the hermetic suite")
+    )
+    monkeypatch.setattr(deficiencies, "origin_url", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_supervisor_outlives_its_test(monkeypatch):
     """Stop every supervisor a test created before the test's environment is undone.
 

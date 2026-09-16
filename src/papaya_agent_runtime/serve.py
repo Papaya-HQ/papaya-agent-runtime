@@ -129,6 +129,7 @@ from typing import Any
 
 from papaya_agent_runtime import (
     capabilities,
+    deficiencies,
     gate,
     papaya,
     papaya_events,
@@ -553,6 +554,8 @@ class HandBack:
     """The work on a held ticket cannot go on here, and why."""
 
     reason: str
+    #: The job a manager turn missed twice, when that is why: a deficiency of the runtime.
+    missed: str = ""
 
 
 @dataclass(frozen=True)
@@ -627,6 +630,8 @@ class Ticket:
     liveness_at: float | None = None
     #: The newest worker event a liveness line has already accounted for.
     liveness_cursor: int = 0
+    #: Where the last turn's transcript is, for the evidence of a self-report.
+    last_transcript: str = ""
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -756,6 +761,69 @@ def known_gate_budget(repo: str | None) -> float | None:
 
     found = budgets.longest_gate(repo)
     return found.seconds if found is not None else None
+
+
+def runtime_report(result: object) -> str | None:
+    """What a turn said the runtime got in its way with, or ``None`` if it said nothing.
+
+    The contract is the `RUNTIME:` rule every turn prompt carries: a line of its
+    own, at the end of the turn's last message. The last such line in the tail
+    counts; one that only repeats the prompt's placeholder is not a report.
+    """
+    text = result.tail() if hasattr(result, "tail") else str(result or "")
+    for line in reversed(text.splitlines()):
+        stripped = line.strip().lstrip("*_`> ").strip()
+        if not stripped.startswith(prompts.RUNTIME_PREFIX):
+            continue
+        said = stripped.removeprefix(prompts.RUNTIME_PREFIX).strip().rstrip("*_`").strip()
+        if not said or said.startswith("<"):
+            return None
+        return said
+    return None
+
+
+def ticket_key(event: papaya_events.PapayaEvent) -> str:
+    """The ticket's key (`PAP-213`), or its work item id: what a self-report may name."""
+    item = event.payload.get("work_item")
+    if isinstance(item, dict):
+        for name in ("key", "identifier", "ticket_key"):
+            if str(item.get(name) or "").strip():
+                return str(item[name]).strip()
+    return str(event.work_item_id or event.subject or "")
+
+
+def private_strings(event: papaya_events.PapayaEvent) -> list[str]:
+    """What a self-report must never carry about this ticket: its text and its people.
+
+    The title, description and acceptance criteria, and every string under a key
+    that names a person (a name, a handle, an email), however deep in the item.
+    """
+    found: list[str] = []
+
+    def walk(value: object, key: str = "") -> None:
+        if isinstance(value, dict):
+            for name, inner in value.items():
+                walk(inner, str(name).lower())
+        elif isinstance(value, list):
+            for inner in value:
+                walk(inner, key)
+        elif (
+            isinstance(value, str)
+            and value.strip()
+            and (
+                key in ("title", "description", "acceptance_criteria", "body")
+                or any(part in key for part in ("name", "handle", "email", "author", "assignee"))
+            )
+        ):
+            found.append(value)
+
+    walk(event.payload.get("work_item"))
+    who = papaya.identity()
+    for attr in ("agent_name", "agent_handle", "addressed"):
+        value = getattr(who, attr, None) if who is not None else None
+        if isinstance(value, str) and value.strip():
+            found.append(value)
+    return found
 
 
 def gate_steer_message(
@@ -1024,7 +1092,12 @@ class TicketRunner:
         self._reclaiming.pop(str(work_item_id), None)
 
     async def __call__(self, job: Any) -> dict[str, Any]:
-        outcome = await asyncio.to_thread(self.take, job)
+        try:
+            outcome = await asyncio.to_thread(self.take, job)
+        except Exception as exc:
+            log.exception("[serve] Taking %s failed", job.job_id)
+            await asyncio.to_thread(deficiencies.record_exception, "a ticket's pickup", exc)
+            raise
         if isinstance(outcome, Declined):
             log.info("[serve] Declining %s: %s", job.job_id, outcome.reason)
             job.decline(outcome.reason)
@@ -1037,6 +1110,16 @@ class TicketRunner:
         alive = asyncio.create_task(self._keep_alive(ticket))
         try:
             return await self._hold(ticket)
+        except Exception as exc:
+            log.exception("[serve] Holding task %d failed", held.task_id)
+            await asyncio.to_thread(
+                deficiencies.record_exception,
+                "a ticket's hold",
+                exc,
+                scrub=private_strings(held.event),
+                **self._evidence(ticket),
+            )
+            raise
         finally:
             alive.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1131,6 +1214,34 @@ class TicketRunner:
         minutes = getattr(getattr(config, "health", None), "liveness_minutes", None)
         return float(minutes) * 60 if minutes else LIVENESS_SECONDS
 
+    # -- self-reports: what this ticket showed about the runtime ------------------
+
+    def _evidence(self, ticket: Ticket, **extra: Any) -> dict[str, Any]:
+        """The facts a self-report about this ticket may carry: ids, never text."""
+        worker = ticket.worker
+        return {
+            "phase": ticket.phase,
+            "repo": ticket.held.repo or (worker.repo if worker is not None else None),
+            "ticket": ticket_key(ticket.held.event),
+            "task_id": ticket.held.task_id,
+            "run_id": ticket.held.run_id,
+            "worker_task_id": worker.task_id if worker is not None else None,
+            "transcript": ticket.last_transcript,
+            **extra,
+        }
+
+    def _deficiency(
+        self, ticket: Ticket, kind: str, detail: str, *, scope: str | None = None, **extra: Any
+    ) -> None:
+        """Record a deficiency about this ticket's handling, with its ids. Blocking: on a thread."""
+        try:
+            evidence = {**self._evidence(ticket, **extra), "event_id": _max_event_id()}
+            scrub = private_strings(ticket.held.event)
+        except Exception as exc:  # noqa: BLE001 - reporting the runtime must never break a hold
+            log.warning("[serve] Could not gather a self-report's evidence: %s", exc)
+            return
+        deficiencies.record(kind, detail, evidence=evidence, scope=scope, scrub=scrub)
+
     async def _hold(self, ticket: Ticket) -> dict[str, Any]:
         held, job = ticket.held, ticket.job
         where = f" in {held.repo}" if held.repo else ""
@@ -1165,6 +1276,10 @@ class TicketRunner:
             ending = None
 
         if isinstance(ending, HandBack):
+            if ending.missed:
+                await asyncio.to_thread(
+                    self._deficiency, ticket, deficiencies.MISSED_TURN, ending.missed
+                )
             return await self._hand_back(ticket, ending.reason)
         if ending is None:
             return await self._stopped(ticket)
@@ -1407,6 +1522,17 @@ class TicketRunner:
             message=message,
             error=error,
         )
+        if choice == prompts.CHECKIN_STEER and not error:
+            # Once is judgment; the same reason again on one ticket is the check-in
+            # not being able to move the worker, which is the runtime's to look at.
+            await asyncio.to_thread(
+                self._deficiency,
+                ticket,
+                deficiencies.REPEATED_STEER,
+                nudge.trigger or nudge.reason,
+                scope=f"ticket:{ticket_key(ticket.held.event)}",
+                trigger=nudge.trigger or nudge.reason,
+            )
         if choice == prompts.CHECKIN_CONTINUE:
             return
         if choice == "none":
@@ -1883,7 +2009,10 @@ class TicketRunner:
         detail = f"The turn ended without {job_of_turn} (attempt {attempt} of {TURN_ATTEMPTS})."
         _report_progress(ticket.job, ticket.phase, detail)
         if attempt >= TURN_ATTEMPTS:
-            return HandBack(f"the manager turn ended {attempt} times without {job_of_turn}")
+            return HandBack(
+                f"the manager turn ended {attempt} times without {job_of_turn}",
+                missed=job_of_turn,
+            )
         return result.tail() if hasattr(result, "tail") else str(result or "")
 
     async def _rerun_later(self, ticket: Ticket, turn: str, result: Any, waits: int) -> str | None:
@@ -1933,6 +2062,7 @@ class TicketRunner:
             **turn_environment(ticket.job.env, root=root, run_id=ticket.held.run_id),
         }
         transcript = turn_transcript_path(ticket.held.run_id, turn)
+        ticket.last_transcript = str(transcript)
         # Named before the turn starts, so a turn still running can be watched.
         _report_progress(ticket.job, ticket.phase, f"The {turn} turn's transcript: {transcript}")
         try:
@@ -1967,6 +2097,14 @@ class TicketRunner:
             # Whatever was said while the turn ran is read as soon as it ends.
             ticket.comments_read_at = None
         await self._observe_turn(ticket, turn, self._clock() - started, result)
+        said = runtime_report(result)
+        if said is not None:
+            _report_progress(
+                ticket.job, ticket.phase, f"The {turn} turn reported a runtime problem."
+            )
+            await asyncio.to_thread(
+                self._deficiency, ticket, deficiencies.TURN_REPORT, said, turn=turn
+            )
         self._check_stop(ticket)
         return result
 
@@ -2152,6 +2290,17 @@ class TicketRunner:
         phase = phase_for_stop(job.stop.reason)
         if phase == PHASE_STALLED:
             await asyncio.to_thread(self._record_phase, held.task_id, phase)
+            # A stall while the worker is demonstrably working is the runtime's problem,
+            # not the ticket's: the stall check read activity the work never touched.
+            worker = ticket.worker or await asyncio.to_thread(find_worker, held)
+            if worker is not None and await asyncio.to_thread(worker_session_live, worker.task_id):
+                ticket.worker = worker
+                await asyncio.to_thread(
+                    self._deficiency,
+                    ticket,
+                    deficiencies.STALL_WHILE_LIVE,
+                    "the worker session was live when the hold stalled",
+                )
             resume = await asyncio.to_thread(_stalled_resume, held.task_id)
             if resume is not None:
                 log.info(
@@ -3385,6 +3534,7 @@ async def run(
     server: Any = None,
     sweep_sleep: Any = None,
     rounds_seams: dict[str, Any] | None = None,
+    self_report: deficiencies.Reporter | None = None,
 ) -> int:
     """Set this checkout up, build the listener, report once, sweep, run until stopped.
 
@@ -3395,8 +3545,67 @@ async def run(
     reaches the sweeper through it. `sweep_sleep` is the sweep timer's seam for
     tests, the way `renew_sleep` is the loop's. `rounds_seams` are keyword seams for
     the manager's rounds (:class:`~papaya_agent_runtime.rounds.Rounds`): its timer,
-    clock, forge and worktree hygiene.
+    clock, forge and worktree hygiene. `self_report` is the reporter that opens GitHub
+    issues about the runtime's own deficiencies; a test hands in one with a fake `gh`.
     """
+    reporter = self_report or deficiencies.Reporter()
+    deficiencies.add_listener(reporter.flush_soon)
+    try:
+        return await _run(
+            options,
+            stdout=stdout,
+            stderr=stderr,
+            extra=extra,
+            runner=runner,
+            server=server,
+            sweep_sleep=sweep_sleep,
+            rounds_seams=rounds_seams,
+        )
+    finally:
+        deficiencies.remove_listener(reporter.flush_soon)
+        await asyncio.to_thread(reporter.wait, 30.0)
+
+
+def announce_deficiencies(*, stderr) -> None:
+    """One line at start when self-reported deficiencies are waiting to open as issues."""
+    counts = deficiencies.summary()
+    waiting = counts["waiting"]
+    if not waiting:
+        return
+    enabled = deficiencies.settings().enabled
+    line = (
+        f"{waiting} self-reported deficienc{'y is' if waiting == 1 else 'ies are'} waiting "
+        + ("to open as issues" if enabled else "in the ledger (self_report.enabled = false)")
+        + " — `ppy deficiency list`"
+    )
+    log.info("[serve] %s", line)
+    print(f"ppy serve: {line}", file=stderr)
+
+
+def unremedied_readiness(verdict: readiness.Readiness) -> list[readiness.Problem]:
+    """Blocking findings the runtime owns that its start-up remedies left standing.
+
+    `serve` runs first-run setup before it checks; a finding the runtime calls its
+    own that is still blocking afterwards has no remedy in code. When a person's
+    blocking finding stands beside it, the runtime's may be downstream of theirs
+    (setup cannot finish with no signed-in harness), so nothing is recorded then.
+    """
+    if any(p.blocking and p.owner == readiness.USER for p in verdict.problems):
+        return []
+    return [p for p in verdict.problems if p.blocking and p.owner == readiness.RUNTIME]
+
+
+async def _run(
+    options: ServeOptions,
+    *,
+    stdout,
+    stderr,
+    extra: dict[str, Any],
+    runner: TicketRunner | None,
+    server: Any,
+    sweep_sleep: Any,
+    rounds_seams: dict[str, Any] | None,
+) -> int:
     from papaya_agent_client.embed import ListenerSetupError
 
     from papaya_agent_runtime import rounds
@@ -3405,6 +3614,8 @@ async def run(
     # configured is the silent failure this whole sequence exists to end.
     await asyncio.to_thread(self_setup, stderr=stderr)
     await asyncio.to_thread(keep_config_right, stderr=stderr)
+    await asyncio.to_thread(announce_deficiencies, stderr=stderr)
+    deficiencies.notify()
     runner = runner or TicketRunner()
     try:
         built = await _build(options, runner, stdout=stdout, extra=extra)
@@ -3418,6 +3629,13 @@ async def run(
         return exc.status
 
     verdict = readiness.check()
+    for problem in unremedied_readiness(verdict):
+        await asyncio.to_thread(
+            deficiencies.record,
+            deficiencies.READINESS_UNREMEDIED,
+            problem.code,
+            evidence={"code": problem.code, "error": problem.summary},
+        )
     _announce_readiness(verdict, built, stderr=stderr)
     await report_readiness(verdict, built)
 
@@ -3513,6 +3731,13 @@ def serve(argv: list[str] | None = None, *, stdout=None, stderr=None, **extra: A
         return asyncio.run(run(options, stdout=stdout, stderr=stderr, extra=extra, server=server))
     except KeyboardInterrupt:
         return 0
+    except Exception as exc:
+        # Caught at the very top: said, recorded with its traceback, and an exit
+        # status rather than a stack trace down a supervised host's pipe.
+        log.exception("[serve] Stopped on an unhandled exception")
+        print(f"ppy serve: stopped on an unhandled exception: {exc}", file=stderr)
+        deficiencies.record_exception("ppy serve", exc)
+        return 1
     finally:
         # The listener has already stopped by the time `run` returns (its own
         # `shutdown` releases every subject it holds), so the supervisor is the

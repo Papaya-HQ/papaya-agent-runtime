@@ -704,6 +704,31 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     return 1 if result.get("error") else 0
 
 
+def _cmd_deficiency(args: argparse.Namespace) -> int:
+    """The runtime's own deficiencies, and the issues `ppy serve` opened about them."""
+    from dataclasses import asdict
+
+    from papaya_agent_runtime import deficiencies
+
+    rows = deficiencies.ledger(include_all=bool(args.all))
+    if args.json:
+        print(json.dumps([asdict(row) for row in rows], indent=2))
+        return 0
+    if not rows:
+        print(
+            "no deficiencies recorded"
+            + ("" if args.all else " at or past their threshold (`--all` shows every one)")
+        )
+        return 0
+    for row in rows:
+        where = row.issue_url or (
+            "waiting to open" if row.status == deficiencies.PENDING else "below threshold"
+        )
+        print(f"{row.status:<9} {row.count:>3}x  {row.last_seen}  {row.title}")
+        print(f"{'':<16}{row.kind} {row.fingerprint} — {where}")
+    return 0
+
+
 def _registered_repo_origin(repo: str) -> str | None:
     """The base clone's ``origin`` URL for a registered repo, or None if unknowable.
 
@@ -2545,6 +2570,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep_cmd.add_argument("--json", action="store_true", help="machine-readable output")
     sweep_cmd.set_defaults(func=_cmd_sweep)
+
+    deficiency = sub.add_parser(
+        "deficiency", help="structural deficiencies the runtime found in itself"
+    )
+    dsub = deficiency.add_subparsers(dest="deficiency_cmd", required=True)
+    dlist = dsub.add_parser(
+        "list", help="the ledger, with the GitHub issue `ppy serve` opened for each"
+    )
+    dlist.add_argument(
+        "--all", action="store_true", help="include deficiencies still below their threshold"
+    )
+    dlist.add_argument("--json", action="store_true", help="machine-readable output")
+    deficiency.set_defaults(func=_cmd_deficiency)
 
     supervisor = sub.add_parser("supervisor", help="run and control the supervisor")
     ssub = supervisor.add_subparsers(dest="supervisor_cmd", required=True)

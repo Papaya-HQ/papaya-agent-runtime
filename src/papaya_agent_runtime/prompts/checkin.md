@@ -41,7 +41,12 @@ Judge the direction against both.
 Do not run `ppy steer` or `ppy resume` yourself: the runtime does what your last line
 says, exactly once.
 
-## 3. End with exactly one of these lines, and nothing after it
+## 3. When the runtime got in the way
+
+If the runtime itself got in the way of this turn (not the repository and not the work, but a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true), say so in one line of its own: `RUNTIME: <what got in the way>`. Name ids, never people, and quote no code or ticket text. Leave it out when nothing did.
+Put it on the line just before your `CHECK-IN:` line.
+
+## 4. End with exactly one of these lines, and nothing after it
 
     CHECK-IN: continue
     CHECK-IN: steer <the message for the worker>

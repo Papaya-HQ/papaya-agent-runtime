@@ -1508,6 +1508,11 @@ class Supervisor:
                     if conn is not None:
                         with contextlib.suppress(Exception):
                             conn.close()
+            from papaya_agent_runtime import deficiencies
+
+            deficiencies.record_exception(
+                "the supervisor's worker thread", exc, task_id=spec.task_id, run_id=spec.run_id
+            )
         else:
             if runner.superseded:
                 # A retired session's ending is not this task's checkpoint.

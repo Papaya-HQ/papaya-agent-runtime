@@ -546,6 +546,9 @@ class Sweeper:
             except Exception as exc:  # noqa: BLE001 - a bad sweep must not end serve
                 log.warning("[sweep] Sweep failed: %s", exc)
                 result = SweepResult(error=str(exc) or exc.__class__.__name__)
+                from papaya_agent_runtime import deficiencies
+
+                await asyncio.to_thread(deficiencies.record_exception, "the sweep", exc)
             previous = self.results[-1] if self.results else None
             self.results.append(result)
             line = self._line(result, previous, by_hand=by_hand)

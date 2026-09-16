@@ -54,3 +54,8 @@ person who asked, not as a build log.
 End the turn once you have delivered and reported, or steered, or with `WAITING:` as
 above. A turn that ends with none of those is a miss, and a second miss hands the
 ticket back.
+
+## When the runtime got in the way
+
+If the runtime itself got in the way of this turn (not the repository and not the work, but a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true), say so in one line of its own: `RUNTIME: <what got in the way>`. Name ids, never people, and quote no code or ticket text. Leave it out when nothing did.
+Put it at the very end of your last message.
