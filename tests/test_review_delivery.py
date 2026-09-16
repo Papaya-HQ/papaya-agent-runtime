@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.delivery import DeliveryError, deliver
 from papaya_agent_runtime.review import build_bundle, is_approved_at_head, record_review
@@ -30,7 +31,7 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, want, timeout=15.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scale(timeout)
     while time.monotonic() < deadline:
         if client.task_status(task_id)["task"]["status"] == want:
             return
