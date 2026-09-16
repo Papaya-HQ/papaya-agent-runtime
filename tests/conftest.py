@@ -239,9 +239,18 @@ def wait_until(predicate, timeout: float, *, what: str = "condition", interval: 
         if time.monotonic() >= deadline:
             break
         time.sleep(interval)
+    raise timed_out(what)
+
+
+def timed_out(what: str) -> AssertionError:
+    """The failure for an expired wait: the state dump, written and in the message.
+
+    For a poll that cannot use :func:`wait_until` — an async one must await its sleep,
+    or it stalls the event loop it is waiting on.
+    """
     report = state_dump(what)
     path = _write_dump(what, report)
-    raise AssertionError(f"timed out waiting for {what} (dump: {path})\n{report}")
+    return AssertionError(f"timed out waiting for {what} (dump: {path})\n{report}")
 
 
 def state_dump(what: str) -> str:
