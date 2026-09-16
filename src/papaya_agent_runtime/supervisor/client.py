@@ -2,14 +2,67 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 
+from papaya_agent_runtime.paths import ensure_layout, run_dir
 from papaya_agent_runtime.supervisor.protocol import send_request
 from papaya_agent_runtime.supervisor.server import default_socket_path
 
 
 class SupervisorUnavailable(Exception):
     pass
+
+
+def ensure_supervisor(*, timeout: float = 5.0) -> tuple[SupervisorClient, bool]:
+    """Return a live client, starting the instance supervisor when necessary.
+
+    Intake is deliberately short-lived: it records a task and exits while the
+    supervisor owns the worker.  Starting the daemon here closes the otherwise
+    silent failure mode where dispatch succeeds only on machines whose owner
+    happened to start ``ppy supervisor serve`` first.
+
+    ``bool`` is true only when this call had to launch a process.  A concurrent
+    starter may win the owner lock; polling the socket, rather than trusting the
+    child process, makes that race harmless.
+    """
+    client = SupervisorClient()
+    try:
+        client.ping()
+    except SupervisorUnavailable:
+        pass
+    else:
+        return client, False
+
+    ensure_layout()
+    log_path = run_dir() / "supervisor.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log:
+        subprocess.Popen(  # noqa: S603 - fixed interpreter/module argv
+            [sys.executable, "-m", "papaya_agent_runtime", "supervisor", "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=dict(os.environ),
+            start_new_session=True,
+            close_fds=True,
+        )
+
+    deadline = time.monotonic() + max(timeout, 0.1)
+    while time.monotonic() < deadline:
+        try:
+            client.ping()
+        except SupervisorUnavailable:
+            time.sleep(0.05)
+            continue
+        return client, True
+    raise SupervisorUnavailable(
+        f"could not start the supervisor within {timeout:g}s; see {Path(log_path)}"
+    )
 
 
 class SupervisorClient:

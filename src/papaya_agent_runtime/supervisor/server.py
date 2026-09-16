@@ -243,6 +243,8 @@ class SupervisorServer:
                         base=request.get("base"),
                         stack_on=request.get("stack_on"),
                         ends_at=request.get("ends_at") or "done",
+                        intake_event_key=request.get("intake_event_key"),
+                        intake_event_metadata=request.get("intake_event_metadata"),
                     ),
                 }
             if cmd == "task_status":

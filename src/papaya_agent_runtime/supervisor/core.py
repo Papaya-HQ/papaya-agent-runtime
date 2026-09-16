@@ -174,6 +174,10 @@ class Supervisor:
         self._leases: dict[int, object] = {}
         #: Every admitted execution, pending or bound, by token.
         self._executions: dict[str, _Execution] = {}
+        # Event identities currently crossing the task-row creation boundary.
+        # The durable copy lives in task_env; this in-memory claim closes the
+        # smaller same-supervisor race before that row exists.
+        self._intake_claims: set[str] = set()
         # Question fingerprints already auto-answered per task; a fingerprint that
         # reappears after its stored answer is escalated instead of looping.
         self._auto_answered: dict[int, set[str]] = {}
@@ -194,6 +198,77 @@ class Supervisor:
         base: str | None = None,
         stack_on: int | None = None,
         ends_at: str = "done",
+        intake_event_key: str | None = None,
+        intake_event_metadata: str | None = None,
+    ) -> dict:
+        if not intake_event_key:
+            return self._dispatch_task_once(
+                repo=repo,
+                title=title,
+                instructions=instructions,
+                provider=provider,
+                run_id=run_id,
+                model=model,
+                reasoning=reasoning,
+                base=base,
+                stack_on=stack_on,
+                ends_at=ends_at,
+            )
+
+        from papaya_agent_runtime import intake
+
+        with self._lock:
+            existing = intake.find_existing_task(init_db(), intake_event_key)
+            if existing is not None:
+                return {
+                    "run_id": existing["run_id"],
+                    "task_id": existing["id"],
+                    "lease_id": existing["lease_id"],
+                    "branch": existing["branch"],
+                    "worktree_path": existing["worktree_path"],
+                    "ends_at": existing["ends_at"],
+                    "deduplicated": True,
+                }
+            if intake_event_key in self._intake_claims:
+                raise SupervisorError(
+                    "this Papaya event is already being dispatched; retry intake in a moment"
+                )
+            self._intake_claims.add(intake_event_key)
+
+        try:
+            return self._dispatch_task_once(
+                repo=repo,
+                title=title,
+                instructions=instructions,
+                provider=provider,
+                run_id=run_id,
+                model=model,
+                reasoning=reasoning,
+                base=base,
+                stack_on=stack_on,
+                ends_at=ends_at,
+                intake_event_key=intake_event_key,
+                intake_event_metadata=intake_event_metadata,
+            )
+        finally:
+            with self._lock:
+                self._intake_claims.discard(intake_event_key)
+
+    def _dispatch_task_once(
+        self,
+        *,
+        repo: str,
+        title: str,
+        instructions: str = "",
+        provider: str | None = None,
+        run_id: int | None = None,
+        model: str | None = None,
+        reasoning: str | None = None,
+        base: str | None = None,
+        stack_on: int | None = None,
+        ends_at: str = "done",
+        intake_event_key: str | None = None,
+        intake_event_metadata: str | None = None,
     ) -> dict:
         # A caller that names no provider gets the configured worker provider. It
         # used to get `fake`, which on 2026-09-04 sent a real task to a stub worker
@@ -311,6 +386,8 @@ class Supervisor:
                 migration_advisory=migration_advisory,
                 overlap_advisory=overlap_advisory,
                 ends_at=ends_at,
+                intake_event_key=intake_event_key,
+                intake_event_metadata=intake_event_metadata,
             )
         except BaseException:
             # Whatever failed — the lease, the branch, provisioning, the adapter's
@@ -337,6 +414,8 @@ class Supervisor:
         migration_advisory: str | None,
         overlap_advisory: str | None,
         ends_at: str,
+        intake_event_key: str | None,
+        intake_event_metadata: str | None,
     ) -> dict:
         if run_id is None:
             run_id = store.create_run(conn, title)
@@ -352,6 +431,18 @@ class Supervisor:
             reasoning=reasoning,
             ends_at=ends_at,
         )
+        if intake_event_key:
+            from papaya_agent_runtime.intake import INTAKE_EVENT_KEY, INTAKE_EVENT_METADATA
+
+            store.set_task_env(conn, task_id, INTAKE_EVENT_KEY, intake_event_key, source="intake")
+            if intake_event_metadata:
+                store.set_task_env(
+                    conn,
+                    task_id,
+                    INTAKE_EVENT_METADATA,
+                    intake_event_metadata,
+                    source="intake",
+                )
 
         # The task row exists first because the lease's branch name carries the
         # task id. If no worktree can be leased, the row must not linger as a

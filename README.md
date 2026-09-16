@@ -171,6 +171,7 @@ ppy repo discover                       # repos on the forge that aren't registe
 ppy repo add https://github.com/you/your-repo
 ppy repo onboard your-repo              # learn its build, tests, CI gate, conventions
 ppy supervisor serve                    # per-task runners, durable state
+ppy intake event.json                   # event -> registered repo -> dispatched task
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
 ppy review show <task_id> && ppy review approve <task_id>

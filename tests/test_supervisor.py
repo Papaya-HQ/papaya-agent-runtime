@@ -8,6 +8,7 @@ import pytest
 
 from conftest import scale
 from papaya_agent_runtime import repos
+from papaya_agent_runtime.state import init_db
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import SupervisorServer
 
@@ -57,6 +58,34 @@ def test_dispatch_completes_via_socket(server, source_repo) -> None:
     assert rs["usage"]["input_tokens"] == 250
     kinds = [a["kind"] for a in rs["actionable"]]
     assert "worker_done" in kinds
+
+
+def test_dispatch_deduplicates_one_intake_event_at_the_supervisor_boundary(
+    server, source_repo
+) -> None:
+    _srv, client = server
+    added = repos.add_repo(source_repo)
+    key = "papaya:event:event-17"
+
+    first = client.dispatch_task(
+        repo=added.name,
+        title="take it once",
+        intake_event_key=key,
+        intake_event_metadata='{"id":"event-17"}',
+    )
+    second = client.dispatch_task(
+        repo=added.name,
+        title="take it once",
+        intake_event_key=key,
+        intake_event_metadata='{"id":"event-17"}',
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["deduplicated"] is True
+    assert second["task_id"] == first["task_id"]
+    count = init_db().execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+    assert count == 1
 
 
 def test_dispatch_wires_repo_memory_into_worker(server, source_repo, monkeypatch) -> None:

@@ -629,6 +629,123 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _intake_blocker_line(problem) -> str:
+    """Render readiness in the same owner vocabulary as ``ppy readiness``."""
+    owner = "you" if problem.owner == "user" else "runtime"
+    return f"intake blocked [{owner}]: {problem.summary}; fix: {problem.fix}"
+
+
+def _cmd_intake(args: argparse.Namespace) -> int:
+    """Turn one listener event into dispatched work, then exit."""
+    from papaya_agent_runtime import brief_lint, health, intake, preflight, readiness, tracker
+    from papaya_agent_runtime.config import ConfigError, config_path, default_worker_provider
+    from papaya_agent_runtime.setup.wizard import run_setup
+    from papaya_agent_runtime.state import init_db
+    from papaya_agent_runtime.supervisor.client import SupervisorUnavailable, ensure_supervisor
+
+    try:
+        if args.event_file == "-":
+            event = intake.parse_event(stdin_text=sys.stdin.read())
+        elif args.event_file:
+            event = intake.parse_event(args.event_file)
+        elif os.environ.get("PAPAYA_EVENT_FILE"):
+            event = intake.parse_event()
+        elif not sys.stdin.isatty():
+            event = intake.parse_event(stdin_text=sys.stdin.read())
+        else:
+            event = intake.parse_event()
+
+        # The tracked record is authoritative. Listener envelopes are summaries,
+        # so hydrate it and write acceptance criteria before repository work.
+        event, wrote_done = intake.ensure_definition_of_done(event)
+        key = intake.event_key(event)
+
+        client, started_supervisor = ensure_supervisor()
+        existing = intake.find_existing_task(init_db(), key)
+        if existing is not None:
+            started = "started supervisor; " if started_supervisor else ""
+            print(
+                f"intake: {started}event already dispatched as task {existing['id']} "
+                f"in run {existing['run_id']}"
+            )
+            return 0
+
+        ensured = intake.ensure_repository(event)
+
+        # A missing config is explicitly runtime-owned in readiness. Repair only
+        # that case; invalid or human-owned state remains a one-line refusal.
+        if not config_path().exists():
+            run_setup(non_interactive=True, overrides={})
+        ready = readiness.check()
+        if ready.blockers:
+            print(_intake_blocker_line(ready.blockers[0]), file=sys.stderr)
+            return 1
+
+        brief = intake.render_brief(event)
+        findings = brief_lint.lint_brief(brief, ends_at="done")
+        if findings:
+            raise intake.IntakeError(
+                f"generated brief failed its contract ({len(findings)} finding(s)); "
+                "run `ppy brief lint` after reporting this runtime defect"
+            )
+        health.require_dispatch_capacity(ensured.name)
+        preflight.check_disk()
+        title = preflight.title_from_brief(brief)
+        if not title:
+            raise intake.IntakeError("generated brief has no objective heading")
+
+        response = client.dispatch_task(
+            repo=ensured.name,
+            title=title,
+            instructions=brief,
+            provider=default_worker_provider(),
+            ends_at="done",
+            intake_event_key=key,
+            intake_event_metadata=json.dumps(
+                intake.event_metadata(event), sort_keys=True, separators=(",", ":")
+            ),
+        )
+        if not response.get("ok"):
+            raise intake.IntakeError(str(response.get("error") or "dispatch failed"))
+
+        task_id = int(response["task_id"])
+        work_item = event.payload.get("work_item")
+        if event.work_item_id and isinstance(work_item, dict):
+            tracker.link_task(
+                init_db(),
+                task_id,
+                record=event.work_item_id,
+                url=str(work_item.get("url") or ""),
+                title=str(work_item.get("title") or title),
+            )
+        preflight.archive_brief(ensured.name, task_id, brief)
+
+        actions = []
+        if wrote_done:
+            actions.append("wrote definition of done")
+        if started_supervisor:
+            actions.append("started supervisor")
+        if ensured.registered:
+            actions.append(f"registered {ensured.slug}")
+        if ensured.onboarded:
+            actions.append(f"onboarded {ensured.name}")
+        if response.get("deduplicated"):
+            actions.append(f"event already dispatched as task {task_id}")
+        else:
+            actions.append(f"dispatched task {task_id} in run {response['run_id']}")
+        print(f"intake: {'; '.join(actions)}")
+        return 0
+    except (
+        intake.IntakeError,
+        SupervisorUnavailable,
+        ConfigError,
+        health.DispatchHealthError,
+        preflight.PreflightError,
+    ) as exc:
+        print(f"intake blocked: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+
+
 def _cmd_worktree(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.worktree.reclaim import human_bytes, list_worktrees, prune
 
@@ -2245,6 +2362,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     dispatch.set_defaults(func=_cmd_dispatch)
+
+    intake = sub.add_parser(
+        "intake",
+        help="turn one Papaya event into dispatched work without opening a harness session",
+    )
+    intake.add_argument(
+        "event_file",
+        nargs="?",
+        default=None,
+        help=("event JSON file (default: PAPAYA_EVENT_FILE, then stdin); pass - to read stdin"),
+    )
+    intake.set_defaults(func=_cmd_intake)
 
     brief = sub.add_parser("brief", help="check a task brief before dispatching it")
     bsub = brief.add_subparsers(dest="brief_cmd", required=True)
