@@ -1585,8 +1585,10 @@ def test_a_start_sweep_offers_every_open_assigned_item_nothing_has_picked_up(
         runner = await _serving(harness, client_home, stderr)
         await _until(lambda: len(harness.jobs) == 3, what="three swept jobs")
         await _until(
-            lambda: len(_ticket_histories()) == 3
-            and all(h and h[0] == serve.PHASE_PICKED_UP for h in _ticket_histories().values()),
+            lambda: (
+                len(_ticket_histories()) == 3
+                and all(h and h[0] == serve.PHASE_PICKED_UP for h in _ticket_histories().values())
+            ),
             what="three tasks picked up",
         )
         harness.loop.request_stop()
@@ -1884,3 +1886,40 @@ def test_ppy_sweep_with_nothing_serving_says_so(ppy_home, capsys) -> None:
     finally:
         server.stop()
     assert "nothing is serving" in capsys.readouterr().err
+
+
+def test_a_ticket_handed_back_by_its_turns_is_not_swept_into_them_again(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    """A `declined` task row is not live, so without the memory the turns would rerun."""
+    from papaya_agent_runtime import sweep
+
+    assigned.items = [{**_item(1), "updated_at": "2026-01-01T00:00:00Z"}]
+    turns = FakeTurns()  # every brief turn ends without dispatching
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    clock = Ticks()
+
+    async def scenario() -> int:
+        runner = await _serving(
+            harness,
+            client_home,
+            stderr,
+            sweep_sleep=clock.sleep,
+            runner=_runner(turns, FakePapaya()),
+        )
+        await _until(lambda: harness.results, what="the ticket to be handed back")
+        await _until(lambda: not harness.loop.running_subjects, what="the hand-back to finish")
+
+        clock.tick()
+        await _until(lambda: len(_summaries(stderr)) == 2, what="the next sweep")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.BRIEF], "the turns ran again"
+    assert "without dispatching" in sweep.declined_items()["item-1"]["reason"]
+    assert _summaries(stderr)[1] == (
+        "ppy serve: sweep found 1, offered 0, skipped 1, 1 declined earlier"
+    )

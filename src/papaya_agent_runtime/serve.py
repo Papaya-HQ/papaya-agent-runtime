@@ -95,6 +95,7 @@ import os
 import signal
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -939,6 +940,27 @@ class TicketRunner:
         job.decline(reason)
         await self._status(ticket, papaya_events.STATUS_TODO)
         await self._comment(ticket, reason)
+        # Remembered for the sweep like a first-pickup decline: the task row now reads
+        # `declined`, which the sweep treats as ended, so without this the brief turns
+        # would run again every sweep. The status and the comment just written move
+        # the item's `updated_at` themselves, so the stamp is taken after them — only
+        # a change somebody makes later reads as newer. Never earlier than the item's
+        # own `updated_at`, so a clock behind Papaya's cannot make it read as changed.
+        if held.event.work_item_id:
+            work_item = held.event.payload.get("work_item")
+            known = work_item.get("updated_at") if isinstance(work_item, dict) else None
+            stamp = datetime.now(UTC).isoformat()
+            if known and sweep.declined_earlier({"updated_at": stamp}, {"updated_at": known}):
+                stamp = str(known)
+            try:
+                await asyncio.to_thread(
+                    sweep.remember_declined,
+                    held.event.work_item_id,
+                    updated_at=stamp,
+                    reason=reason,
+                )
+            except Exception as exc:  # noqa: BLE001 - remembering must not stop the hand-back
+                log.warning("[serve] Could not remember handing back %s: %s", job.subject, exc)
         return _result(job, _declined_exit_code(), reason)
 
     async def _stopped(self, ticket: Ticket) -> dict[str, Any]:
