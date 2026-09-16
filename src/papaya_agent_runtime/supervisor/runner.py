@@ -213,6 +213,8 @@ class RunnerGuardian:
             self._on_exit()
 
         result = self.adapter.result(events, exit_code)
+        from papaya_agent_runtime import deficiencies
+
         denials = self.adapter.permission_denials(events)
         if denials:
             from papaya_agent_runtime import tool_learning
@@ -222,6 +224,10 @@ class RunnerGuardian:
                 task_id=spec.task_id,
                 run_id=spec.run_id,
                 worktree=spec.worktree_path,
+            )
+            # What the runtime would not learn, twice on one repository, is its own gap.
+            deficiencies.record_denials(
+                denials, task_id=spec.task_id, run_id=spec.run_id, worktree=spec.worktree_path
             )
         if result.usage is not None:
             store.record_usage(
@@ -317,6 +323,10 @@ class RunnerGuardian:
         task_status = _TERMINAL_STATUS.get(result.status, "failed")
         if verdict.stopped:
             task_status = turn_end.WORKER_STOPPED
+            if verdict.background_command:
+                deficiencies.record_gate_past_tool_cap(
+                    spec.task_id, spec.run_id, verdict.background_command
+                )
 
         # Emit an actionable event for the manager/human loop. Every terminal event
         # carries the session it came from so a late arrival can be attributed.

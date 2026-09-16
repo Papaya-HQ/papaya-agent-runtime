@@ -533,6 +533,55 @@ ticket's phase is `stalled`, nothing is posted, and the next round takes it back
 A terminal `serve` has no protocol to hear `job.stalled` on, so there the regular lines
 are the only defence.
 
+### It opens issues on itself
+
+When the runtime itself gets in the way (not your code, and not a worker's mistake on a
+ticket), `serve` records a **deficiency** and opens a GitHub issue about it in the
+runtime's own repository. Each deficiency is one row in the `deficiencies` ledger,
+fingerprinted by its kind and its detail with the numbers and ids taken out. These are
+the signals, recorded where they already happen:
+
+- **A turn reports it.** Any turn (brief, answer, review, check-in) ends with a line
+  `RUNTIME: <what got in the way>`. Every turn prompt invites that line when a tool was
+  refused, a fact could not be found, or a contract was wrong.
+- **Readiness can't be fixed.** A blocking readiness finding the runtime owns is still
+  there after first-run setup.
+- **A live worker stalls.** The client stalls a held ticket while its worker's session is
+  still live: the liveness lines above did not reach it in time.
+- **A turn misses its job.** A ticket is handed back because a turn ended twice without
+  doing its job, or a worker's gate was backgrounded past the tool cap with no
+  `ppy gate run` on record.
+- **A tool is refused.** A worker is denied a tool outside the safe family
+  (`tool_learning`, which learns the ones inside it) twice in one repository.
+- **Something crashes.** An exception escapes `serve`, a ticket's hold, a round, the
+  sweep or the supervisor's worker thread. It is recorded with the traceback.
+- **A steer doesn't stick.** A check-in steers one ticket twice for the same reason.
+- **The runtime's own CI goes red.** CI fails on a pull request the runtime delivered to
+  its own repository.
+
+**One issue per fingerprint.** It is labelled `self-reported` plus the kind, and the
+body has four parts: what happened, the evidence, what the runtime did instead, and a
+proposed remedy. A deficiency that happens again adds one comment and bumps the count.
+If its issue was closed, that comment reopens it instead of opening a duplicate.
+
+**Where issues go, and how many.** The repository is the origin of the running
+checkout, or `self_report.repo` in the config. At most `self_report.max_per_day` new
+issues open a day (5 by default); the rest wait in the ledger for a later day.
+`self_report.enabled = false` keeps the ledger and opens nothing. An origin that is not
+GitHub keeps the ledger and logs one warning.
+
+**Nothing private leaves the machine.** An issue names ticket keys and repository names
+only. It never includes source, diffs, ticket titles or descriptions, comment text, or
+people's names. Paths under your home directory become `~`, and tokens and email
+addresses are removed.
+
+**Seeing it locally.**
+
+- `ppy deficiency list` shows the ledger with issue links; `--all` adds deficiencies
+  still below their threshold.
+- `ppy doctor` shows how many self-reported issues are open.
+- `serve` prints one line at start when some are waiting to open.
+
 ## Where state lives
 
 All working state is under `.ppy/` (gitignored):

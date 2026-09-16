@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from papaya_agent_runtime import health, papaya_events, serve, sweep
+from papaya_agent_runtime import deficiencies, health, papaya_events, serve, sweep
 from papaya_agent_runtime.state import db, store
 
 log = logging.getLogger("papaya_agent_runtime.rounds")
@@ -813,6 +813,7 @@ class Rounds:
         gate: Callable[[int], GateState] | None = None,
         gate_verdict: Callable[[int], Any] | None = None,
         pushed: Callable[[int], PushState | None] | None = None,
+        runtime_repo: Callable[[], str | None] | None = None,
     ) -> None:
         self._built = built
         self._runner = runner
@@ -829,6 +830,8 @@ class Rounds:
         self._gate = gate or gate_state
         self._gate_verdict = gate_verdict or _default_gate_verdict
         self._pushed = pushed or push_state
+        #: The runtime's own GitHub repository (`owner/name`), whose red CI is a deficiency.
+        self._runtime_repo = runtime_repo or deficiencies.runtime_repo
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
         self._watched: Any = None
@@ -867,6 +870,10 @@ class Rounds:
             except Exception as exc:  # noqa: BLE001 - a bad round must not end serve
                 log.warning("[rounds] Round failed: %s", exc)
                 parts = [f"the round failed: {exc}"]
+                await asyncio.to_thread(deficiencies.record_exception, "a manager round", exc)
+        # A deficiency another process recorded (a `ppy` command, a worker) is
+        # reported on the next round rather than on the next start.
+        deficiencies.notify()
         if parts:
             line = "round: " + "; ".join(parts)
             self.summaries.append(line)
@@ -1292,6 +1299,8 @@ class Rounds:
                 continue
             summary = "; ".join(reasons)
             await asyncio.to_thread(record_pr_attention, worker_id, summary, reasons)
+            if entry.get("ci") == "fail":
+                await asyncio.to_thread(self._runtime_ci_red, worker_id, ticket, entry)
             await asyncio.to_thread(
                 _set_phase,
                 ticket.task_id,
@@ -1300,6 +1309,44 @@ class Rounds:
             )
             parts.append(f"worker task {worker_id}: {summary}")
         return parts
+
+    def _runtime_ci_red(self, worker_id: int, ticket: Ticket, entry: dict[str, Any]) -> None:
+        """Red CI on a pull request the runtime delivered to its own repository."""
+        try:
+            runtime = self._runtime_repo()
+            if not runtime:
+                return
+            conn = db.init_db()
+            try:
+                row = conn.execute(
+                    "SELECT r.name, r.origin, r.forge_url FROM tasks t "
+                    "JOIN repos r ON r.id = t.repo_id WHERE t.id = ?",
+                    (worker_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                return
+            slugs = {
+                deficiencies.github_slug(row["forge_url"]),
+                deficiencies.github_slug(row["origin"]),
+            }
+            if runtime.lower() not in {s.lower() for s in slugs if s}:
+                return
+            failing = ", ".join(sorted(entry.get("failing") or [])) or "a check"
+            deficiencies.record(
+                deficiencies.RUNTIME_CI_RED,
+                f"failing: {failing}",
+                evidence={
+                    "repo": row["name"],
+                    "ticket": ticket.work_item_id,
+                    "task_id": ticket.task_id,
+                    "worker_task_id": worker_id,
+                    "pr": entry.get("url") or f"#{entry.get('pr')}",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - reporting must never end a round
+            log.warning("[rounds] Could not check worker task %d's repository: %s", worker_id, exc)
 
     def _forge_states(self) -> list[dict[str, Any]]:
         conn = db.init_db()

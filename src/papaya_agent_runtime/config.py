@@ -288,6 +288,17 @@ class UsagePolicy:
 
 
 @dataclass
+class SelfReportPolicy:
+    """Whether `ppy serve` opens GitHub issues about the runtime's own deficiencies."""
+
+    enabled: bool = True
+    # `owner/name` or a GitHub URL; empty means the origin of the running checkout.
+    repo: str = ""
+    # New issues a day; the rest wait in the ledger and open on later days.
+    max_per_day: int = 5
+
+
+@dataclass
 class MMConfig:
     manager: ManagerProfile = field(default_factory=ManagerProfile)
     worker: WorkerCeiling = field(default_factory=WorkerCeiling)
@@ -298,6 +309,7 @@ class MMConfig:
     health: HealthPolicy = field(default_factory=HealthPolicy)
     usage: UsagePolicy = field(default_factory=UsagePolicy)
     claude: ClaudeProfile = field(default_factory=ClaudeProfile)
+    self_report: SelfReportPolicy = field(default_factory=SelfReportPolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -391,6 +403,13 @@ class MMConfig:
                         if name != "locked"
                         else f"claude.locked holds a bad entry {entry!r}; name a key"
                     )
+        max_per_day = self.self_report.max_per_day
+        if isinstance(max_per_day, bool) or not isinstance(max_per_day, int) or max_per_day < 0:
+            raise ConfigError("self_report.max_per_day must be zero or a positive integer")
+        if not isinstance(self.self_report.enabled, bool):
+            raise ConfigError("self_report.enabled must be true or false")
+        if not isinstance(self.self_report.repo, str):
+            raise ConfigError("self_report.repo must be a string such as 'owner/name'")
 
     def to_dict(self) -> dict:
         """Every setting, resolved — what the runtime runs with, not what is stored."""
@@ -407,6 +426,7 @@ class MMConfig:
             "health": asdict(self.health),
             "usage": asdict(self.usage),
             "claude": claude,
+            "self_report": asdict(self.self_report),
         }
 
 
@@ -436,6 +456,7 @@ def _from_dict(data: dict) -> MMConfig:
         health=HealthPolicy(**data.get("health", {})),
         usage=UsagePolicy(**data.get("usage", {})),
         claude=ClaudeProfile(**data.get("claude", {})),
+        self_report=SelfReportPolicy(**data.get("self_report", {})),
     )
     return cfg
 

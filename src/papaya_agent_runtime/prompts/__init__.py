@@ -72,6 +72,20 @@ PUSH_MILESTONE_RULE = (
     "push goes to your task's lease branch."
 )
 
+#: How any turn says the runtime itself, not the repository, got in its way: a line
+#: starting with this at the end of its last message. The runner records it as a
+#: deficiency (`deficiencies.py`) and `ppy serve` opens an issue about it.
+RUNTIME_PREFIX = "RUNTIME:"
+
+#: The rule every turn prompt carries verbatim, and a test holds them to.
+RUNTIME_RULE = (
+    "If the runtime itself got in the way of this turn (not the repository and not the "
+    "work, but a tool you were refused, a fact you could not obtain, or a contract such as "
+    "these instructions or a `ppy` command's output that was not true), say so in one line "
+    "of its own: `RUNTIME: <what got in the way>`. Name ids, never people, and quote no code "
+    "or ticket text. Leave it out when nothing did."
+)
+
 #: How a check-in turn says what it decided: its last line starts with this, then
 #: one of the three decisions below (the steer and stop ones carry the message).
 CHECKIN_PREFIX = "CHECK-IN:"
@@ -136,6 +150,8 @@ __all__ = [
     "PUSH_MILESTONE_RULE",
     "REVIEW_SKILL",
     "RUNTIME_DIR",
+    "RUNTIME_PREFIX",
+    "RUNTIME_RULE",
     "TEN_MINUTE_RULE",
     "TURNS",
     "WAITING_PREFIX",

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -278,6 +278,27 @@ CREATE TABLE IF NOT EXISTS repo_budget_overrides (
     set_at TEXT NOT NULL,
     PRIMARY KEY (repo, kind)
 );
+
+-- Structural deficiencies the runtime found in itself (`deficiencies.py`): one row per
+-- fingerprint (kind + normalised detail), with every occurrence's redacted evidence and
+-- the GitHub issue `ppy serve` opened about it. Never the user's code.
+CREATE TABLE IF NOT EXISTS deficiencies (
+    fingerprint TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    issue_url TEXT,
+    -- watching (below its threshold), pending (due an issue), reported (has one)
+    status TEXT NOT NULL DEFAULT 'watching',
+    opened_at TEXT,
+    -- How many occurrences the issue and its comments already carry.
+    reported_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_deficiencies_status ON deficiencies(status, first_seen);
 
 CREATE TABLE IF NOT EXISTS assessment_cycles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
