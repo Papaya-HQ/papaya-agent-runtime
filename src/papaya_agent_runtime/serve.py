@@ -197,6 +197,13 @@ WORKER_STOPPED = "worker_stopped"
 #: Event kinds on a worker task that mean the manager has acted on it, so the
 #: trigger before them is spent. Used both to tell whether a turn did its job and
 #: to stop a replayed history re-triggering a turn that already ran.
+#: How a review that sent the worker back reads: the ticket-phase detail (after
+#: "Worker task N"), and the one comment the ticket gets the first time only.
+SENT_BACK_DETAIL = "sent back with findings."
+SENT_BACK_LINE = "Sent the worker back with findings; still working."
+#: `_say`'s key for that comment, which is not a phase of its own.
+SAID_SENT_BACK = "sent_back"
+
 ACTED_KINDS = ("answer", "steer", "resumed", "auto_answered", "review_requested", "delivered")
 
 
@@ -977,7 +984,7 @@ class TicketRunner:
         ticket.gate_steers += 1
         ticket.trigger = None
         sent = f"Worker task {worker_id} stopped mid-gate; sent back to run its gate to completion."
-        await self._enter(ticket, PHASE_DISPATCHED, sent, say=sent)
+        await self._enter(ticket, PHASE_DISPATCHED, sent)
         return True
 
     async def _answer(self, ticket: Ticket) -> HandBack | None:
@@ -1033,7 +1040,9 @@ class TicketRunner:
                 if failure
                 else f"Reviewing worker task {worker_id} at its head."
             )
-            await self._enter(ticket, PHASE_REVIEWING, detail, say=detail)
+            # Review internals are progress, not ticket comments: the person
+            # reading the thread wants decisions and results.
+            await self._enter(ticket, PHASE_REVIEWING, detail)
             heard = await asyncio.to_thread(_max_event_id)
             if await self._hear(ticket):
                 # A comment turn that steered the worker reopened the work: there
@@ -1060,8 +1069,12 @@ class TicketRunner:
                 return PHASE_DELIVERING
             if await asyncio.to_thread(acted_since, worker_id, mark):
                 ticket.trigger = None
-                sent_back = f"Worker task {worker_id} sent back with findings."
-                await self._enter(ticket, PHASE_DISPATCHED, sent_back, say=sent_back)
+                # The first send-back is news on the ticket; the rounds after it are not.
+                first = not await asyncio.to_thread(sent_back_before, held.task_id)
+                sent_back = f"Worker task {worker_id} {SENT_BACK_DETAIL}"
+                await self._enter(ticket, PHASE_DISPATCHED, sent_back)
+                if first:
+                    await self._say(ticket, SAID_SENT_BACK, SENT_BACK_LINE)
                 return PHASE_DISPATCHED
             if await self._wait_on_person(ticket):
                 continue
@@ -1081,7 +1094,12 @@ class TicketRunner:
         worker = ticket.worker or await asyncio.to_thread(find_worker, held)
         pr_url = await asyncio.to_thread(pull_request_url, worker.task_id) if worker else None
         opened = f"Pull request open: {pr_url}" if pr_url else "Delivered."
-        await self._enter(ticket, PHASE_DELIVERING, opened, say=opened)
+        # The ticket's last agent comment should be the turn's own report. Only
+        # when the report could not be checked does the runner name the pull
+        # request, and only when it is missing does it post the fallback.
+        await self._enter(
+            ticket, PHASE_DELIVERING, opened, say=opened if ticket.reported is None else ""
+        )
         await self._status(ticket, papaya_events.STATUS_REVIEW)
         if ticket.reported is False:
             # The review turn's report was looked for and is not there, twice. Say
@@ -1090,8 +1108,7 @@ class TicketRunner:
             fallback = f"Pull request open: {where}; see the pull request for details."
             await self._enter(ticket, PHASE_REPORTED, "reported (fallback)", say=fallback)
         elif ticket.reported:
-            reported = "Result reported on this item."
-            await self._enter(ticket, PHASE_REPORTED, reported, say=reported)
+            await self._enter(ticket, PHASE_REPORTED, "Result reported on this item.")
         else:
             await self._enter(
                 ticket, PHASE_REPORTED, "reported (unverified: the work item could not be read)"
@@ -1477,7 +1494,9 @@ class TicketRunner:
         """One comment, as the agent, when the phase differs from the last one said.
 
         Only phase changes reach the ticket: a retried turn, a slot wait or a
-        worker's progress stays in the app and the log. Never fatal.
+        worker's progress stays in the app and the log. ``phase`` is what repeats
+        are told apart by, so a line that is not a phase (`SAID_SENT_BACK`) passes
+        its own key. Never fatal.
         """
         line = _one_line(text)
         if not line or phase == ticket.said:
@@ -1727,6 +1746,22 @@ def phase_history(conn, task_id: int) -> list[str]:
         (task_id, store.TICKET_PHASE_EVENT),
     ).fetchall()
     return [str(_payload(row).get("phase") or "") for row in rows]
+
+
+def sent_back_before(task_id: int) -> bool:
+    """Has a review already sent this ticket's worker back? Read from the phase history,
+    so a resumed ticket does not tell the thread a second time."""
+    conn = db.init_db()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM events WHERE task_id = ? AND kind = ? "
+            "AND json_extract(payload, '$.phase') = ? "
+            "AND json_extract(payload, '$.detail') LIKE ? LIMIT 1",
+            (task_id, store.TICKET_PHASE_EVENT, PHASE_DISPATCHED, f"% {SENT_BACK_DETAIL}"),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
 
 def resumable_phase(conn, task_id: int) -> str | None:
@@ -2491,6 +2526,7 @@ __all__ = [
     "PHASE_STALLED",
     "GATE_STEERS",
     "RUNTIME_NOT_READY",
+    "SENT_BACK_LINE",
     "WAIT_FIRST_SECONDS",
     "WAIT_MAX_SECONDS",
     "WORKER_STOPPED",
@@ -2518,6 +2554,7 @@ __all__ = [
     "resumable_phase",
     "runtime_descriptor",
     "self_setup",
+    "sent_back_before",
     "serve",
     "session_id_for",
     "steer_worker",
