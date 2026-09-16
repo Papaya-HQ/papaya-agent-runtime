@@ -4,10 +4,19 @@ version = "0.0.0"
 description = "A lightweight, local framework for directing autonomous software work across one or more Git repositories."
 readme = "README.md"
 requires-python = ">=3.13"
-# Zero runtime package dependencies by design.
-# The control plane uses only the Python standard library. Treehouse, gh-axi,
-# and lavish-axi are pinned companion CLIs, not Python libraries.
-dependencies = []
+# One runtime dependency, and it is deliberate. The control plane is otherwise
+# standard library only; Treehouse, gh-axi and lavish-axi are pinned companion
+# CLIs, not Python libraries.
+#
+# `papaya-agent-client` is embedded rather than shelled out to: `ppy serve` runs
+# the client's listener loop in-process, so its cursor, reservations, renewals and
+# supervised-protocol writer are used as-is instead of reimplemented here. That
+# makes this a library API dependency, not a tool: pre-1.0 the minor is the
+# client's breaking-change unit, so the range is the current 0.14 line and moving
+# to 0.15 is a deliberate change with the import sites re-checked.
+dependencies = [
+    "papaya-agent-client>=0.14.0,<0.15.0",
+]
 
 [dependency-groups]
 dev = [

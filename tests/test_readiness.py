@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from papaya_agent_runtime import readiness
+from papaya_agent_runtime import capabilities, readiness
 from papaya_agent_runtime.state import init_db, store
 
 
@@ -332,6 +332,42 @@ def test_a_broken_readiness_check_never_takes_the_session_down(ppy_home, monkeyp
 
     monkeypatch.setattr(readiness, "check", boom)
     hooks.session_start_context(init_db())  # must not raise
+
+
+def test_a_host_client_newer_than_the_embedded_one_is_a_gap_not_a_block(
+    quiet_machine, monkeypatch
+) -> None:
+    """The app updates its pinned client; the checkout does not. Say so, don't stop.
+
+    The client refuses to delegate on a protocol mismatch, never on a version, so a
+    runtime that treated being a release behind as blocking would break machines
+    that work.
+    """
+    monkeypatch.setattr(capabilities, "client_version", lambda: "0.14.0")
+    monkeypatch.setenv(capabilities.HOST_CLIENT_VERSION_ENV, "0.15.0")
+
+    verdict = readiness.check()
+
+    assert verdict.state == readiness.DEGRADED
+    assert [p.code for p in verdict.problems] == ["client_behind_host"]
+    problem = verdict.problems[0]
+    assert problem.blocking is False
+    assert "0.14.0" in problem.summary and "0.15.0" in problem.summary
+    assert problem.fix == "update this checkout and run `uv sync`"
+
+
+@pytest.mark.parametrize("host", ["0.14.0", "0.13.9", "main", ""])
+def test_a_host_client_that_is_not_strictly_newer_says_nothing(
+    quiet_machine, monkeypatch, host
+) -> None:
+    """Equal is the normal case, older is the host's problem, unparseable is unactionable."""
+    monkeypatch.setattr(capabilities, "client_version", lambda: "0.14.0")
+    monkeypatch.setenv(capabilities.HOST_CLIENT_VERSION_ENV, host)
+
+    verdict = readiness.check()
+
+    assert verdict.state == readiness.READY
+    assert verdict.problems == []
 
 
 def test_every_session_is_told_it_is_the_runtime(ppy_home, monkeypatch) -> None:

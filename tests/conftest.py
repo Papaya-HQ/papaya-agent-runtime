@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from papaya_agent_runtime import papaya
+from papaya_agent_runtime import capabilities, papaya
 from papaya_agent_runtime.providers import capability
 
 
@@ -112,6 +112,10 @@ def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         papaya.HOME_ENV, str(tmp_path_factory.mktemp("papaya-client-home", numbered=True))
     )
+    # A developer running the suite inside a supervised session inherits the host's
+    # client version, which readiness reads. Without this, whether the suite sees a
+    # `client_behind_host` warning depends on how the shell was launched.
+    monkeypatch.delenv(capabilities.HOST_CLIENT_VERSION_ENV, raising=False)
 
 
 @pytest.fixture

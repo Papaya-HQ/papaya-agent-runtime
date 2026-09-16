@@ -164,6 +164,7 @@ ppy  ◂ PR up: returns 200, JSON body, no auth. I read the diff. CI green. One 
 You don't type these — the runtime does — but nothing is hidden:
 
 ```bash
+ppy capabilities --json                 # what this runtime is, for the client that found it
 ppy doctor                              # environment, capability drift, Papaya connection
 ppy papaya status                       # which Papaya agent this machine is
 ppy papaya connect                      # sign in and pin this machine to an agent
@@ -181,6 +182,18 @@ ppy plan <run_id>                       # cross-repo rollout order
 ppy usage <run_id>                      # model token accounting
 ppy assessment status                   # performance-review cadence
 ```
+
+`ppy capabilities --json` is the one the Papaya client reads rather than types. When
+you connect a machine, the client finds this checkout and has to know what it can
+delegate here; this prints one JSON object — `runtime`, `version`, `client_version`
+(the `papaya-agent-client` release embedded in this checkout), `protocol` (the
+supervised-protocol version that client speaks) and `modes` (the launch modes this
+runtime can serve, empty until `ppy serve` exists) — from local state only, so it
+answers instantly, offline, and on a machine that has never been set up. It never
+fails: a checkout where the client cannot be imported reports `client_version: null`
+and still exits 0. `ppy doctor` and `ppy readiness` show the same embedded client
+version, and readiness warns — without blocking — when the client that launched this
+runtime is newer than the one in the checkout.
 
 ## Where state lives
 
