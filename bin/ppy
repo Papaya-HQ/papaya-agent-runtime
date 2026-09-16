@@ -8,11 +8,21 @@ export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 # silently targets a different (usually empty) instance. An explicit PPY_HOME
 # still wins, for tests and multi-instance setups.
 export PPY_HOME="${PPY_HOME:-$ROOT/.ppy}"
+VENV="${UV_PROJECT_ENVIRONMENT:-$ROOT/.venv}"
+
+# The interpreter series is the checkout's, not the invoker's. Left to uv, the
+# desktop app (managed-only interpreters from its own install dir) and a shell
+# (`.python-version` from the user's uv) picked different series for the same
+# project, and each side's `uv run` rebuilt the environment for itself.
+PYTHON=""
+if [ -f "$ROOT/.python-version" ]; then
+    PYTHON="$(tr -d '[:space:]' <"$ROOT/.python-version")"
+fi
 
 # `capabilities` on a checkout nobody has synced yet.
 #
-# Every other command goes through `uv run`, which *builds* the environment the
-# first time it is used: on a machine with no uv cache that is a download of
+# Every other command goes through `uv run`, and a checkout with no environment
+# builds one first: on a machine with no uv cache that is a download of
 # sixty-odd packages. The Papaya client's connect-time probe asks this one
 # question and gives the answer ten seconds, so a fresh clone — exactly the
 # machine somebody has just pointed the desktop app at — would time out on it.
@@ -25,7 +35,7 @@ export PPY_HOME="${PPY_HOME:-$ROOT/.ppy}"
 # installed in it. Anything unexpected (no python3, an interpreter too old to
 # import the module) falls through to `uv run` and simply takes as long as it
 # takes.
-if [ "${1:-}" = "capabilities" ] && [ ! -d "${UV_PROJECT_ENVIRONMENT:-$ROOT/.venv}" ]; then
+if [ "${1:-}" = "capabilities" ] && [ ! -d "$VENV" ]; then
     if command -v python3 >/dev/null 2>&1; then
         shift
         python3 -m papaya_agent_runtime.capabilities "$@" && exit 0
@@ -33,4 +43,32 @@ if [ "${1:-}" = "capabilities" ] && [ ! -d "${UV_PROJECT_ENVIRONMENT:-$ROOT/.ven
     fi
 fi
 
-exec uv run --project "$ROOT" python -m papaya_agent_runtime "$@"
+# The environment is built once, never under a running `serve`.
+#
+# `uv run` re-syncs whenever it decides the environment is stale, and a sync
+# deletes the interpreter and packages a live `serve` is importing from — which
+# is how a `ppy status` in a terminal killed the app's manager on 2026-09-16. So
+# only three things sync: `ppy serve` as it starts, an explicit `ppy env sync`,
+# and first use on a checkout with no environment. `envsync` refuses while the
+# supervisor lock is held and names the pid. It is standard-library only, so any
+# interpreter runs it; with none at all there is no environment for anything to
+# be running from, and a plain sync is safe.
+sync_env() {
+    if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c "" >/dev/null 2>&1; then
+        "$VENV/bin/python" -m papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"}
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -m papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"}
+    else
+        uv sync --frozen --project "$ROOT" ${PYTHON:+--python "$PYTHON"}
+    fi
+}
+
+if [ "${1:-}" = "env" ] && [ "${2:-}" = "sync" ]; then
+    sync_env
+    exit $?
+fi
+if [ "${1:-}" = "serve" ] || [ ! -d "$VENV" ]; then
+    sync_env || exit $?
+fi
+
+exec uv run --no-sync --project "$ROOT" ${PYTHON:+--python "$PYTHON"} python -m papaya_agent_runtime "$@"

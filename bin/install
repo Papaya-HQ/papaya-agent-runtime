@@ -36,7 +36,9 @@ if [ "$MISSING" -ne 0 ]; then
 fi
 
 say "provisioning the local Python environment with uv"
-uv sync
+# Through the launcher's guarded sync: pinned interpreter, and a refusal (naming the
+# pid) rather than a rebuild when a running `ppy serve` is using the environment.
+"$ROOT/bin/ppy" env sync
 
 say "environment ready"
 say "next: ./bin/ppy start   (talk to the manager; it configures itself and drives the rest)"

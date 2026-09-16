@@ -218,6 +218,16 @@ reports `client_version: null` and still exits 0. `ppy doctor` and `ppy readines
 show the same embedded client version, and readiness warns — without blocking — when
 the client that launched this runtime is newer than the one in the checkout.
 
+**The environment is built once, never under a running `serve`.** `bin/ppy` runs every
+command with `uv run --no-sync`, so typing `ppy status` in a terminal cannot rebuild
+`.venv` out from under the manager the desktop app started. Only three things sync:
+`ppy serve` as it starts, an explicit `ppy env sync`, and the first command on a
+checkout with no environment. Each takes the supervisor's lock
+(`.ppy/run/supervisor.lock`) for the length of the sync and refuses, naming the pid,
+while a `serve` or `supervisor serve` holds it. The launcher also passes `--python`
+from `.python-version`, so the app's uv and a shell's uv ask for the same interpreter
+series; `ppy doctor` warns when the environment's `pyvenv.cfg` disagrees with it.
+
 ## Running as the Papaya manager
 
 `ppy serve` is the always-on manager. It runs until told to stop, and in one process
