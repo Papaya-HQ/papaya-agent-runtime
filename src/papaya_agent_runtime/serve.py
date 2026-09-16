@@ -553,6 +553,9 @@ class Held:
     #: back, when the offer said. Progress after it is news, however late the hold
     #: starts; ``None`` falls back to the newest event when the hold starts.
     reported_until: int | None = None
+    #: The newest ledger event when the ticket was recorded: worker activity after it is
+    #: what a liveness line reports. ``None`` reads it when the keep-alive task starts.
+    events_at_pickup: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1129,7 +1132,14 @@ class TicketRunner:
             return _result(job, _declined_exit_code(), outcome.reason)
 
         held = outcome
-        ticket = Ticket(held=held, job=job)
+        # The liveness interval runs from the hold's start, not from whenever the
+        # keep-alive task gets a thread for its first reads.
+        ticket = Ticket(
+            held=held,
+            job=job,
+            liveness_at=self._clock(),
+            liveness_cursor=held.events_at_pickup or 0,
+        )
         self._loop = asyncio.get_running_loop()
         self.held[held.task_id] = ticket
         alive = asyncio.create_task(self._keep_alive(ticket))
@@ -1185,9 +1195,18 @@ class TicketRunner:
         so the client's stall observation still fires for a worker that truly went
         quiet, and what quiet means for a repository is still the rounds' budget.
         """
+        # The baseline (`liveness_at`, and the event cursor from the pickup) was set when
+        # the hold began. Taken here instead, after two thread hops, both landed late
+        # by however long a busy thread pool took to run them (CI run 35153754298):
+        # the clock had moved on, and the heartbeats written meanwhile were already
+        # behind the cursor, so the five-minute line never came.
         interval = await asyncio.to_thread(self._liveness_interval)
-        ticket.liveness_cursor = max(ticket.liveness_cursor, await asyncio.to_thread(_max_event_id))
-        ticket.liveness_at = self._clock()
+        if ticket.held.events_at_pickup is None:
+            ticket.liveness_cursor = max(
+                ticket.liveness_cursor, await asyncio.to_thread(_max_event_id)
+            )
+        if ticket.liveness_at is None:
+            ticket.liveness_at = self._clock()
         while not ticket.should_stop():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(ticket.job.stop.wait(), timeout=self._poll_seconds)
@@ -2580,6 +2599,9 @@ class TicketRunner:
             resume_from=resume_from,
             reclaimed=reclaimed,
             reported_until=reported_until,
+            events_at_pickup=int(
+                conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+            ),
         )
 
     @staticmethod

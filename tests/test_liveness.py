@@ -157,6 +157,28 @@ def test_worker_heartbeats_over_twelve_minutes_make_exactly_two_liveness_lines(
     ]
 
 
+def test_the_liveness_interval_runs_from_the_hold_not_from_a_late_keep_alive(
+    ppy_home, client_home, ready, registered_repo, progress_lines, monkeypatch
+) -> None:
+    """CI run 35153754298: the five-minute line never came on a busy runner.
+
+    The keep-alive task took its baseline (the clock, and the event cursor) only after
+    two thread hops. When a busy thread pool ran them late, the clock had already moved
+    and the heartbeats written meanwhile were behind the cursor. Forced here: its first
+    hop returns a second late, while the clock keeps moving.
+    """
+    real = serve.TicketRunner._liveness_interval
+
+    def late(self: serve.TicketRunner) -> float:
+        time.sleep(1.0)
+        return real(self)
+
+    monkeypatch.setattr(serve.TicketRunner, "_liveness_interval", late)
+    test_worker_heartbeats_over_twelve_minutes_make_exactly_two_liveness_lines(
+        ppy_home, client_home, ready, registered_repo, progress_lines
+    )
+
+
 def test_a_live_worker_with_no_events_for_twelve_minutes_reports_nothing(
     ppy_home, client_home, ready, registered_repo, progress_lines
 ) -> None:
