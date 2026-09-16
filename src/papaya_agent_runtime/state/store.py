@@ -695,15 +695,26 @@ def delete_watermark(conn: sqlite3.Connection, key: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+#: What makes a `worker_progress` event a progress *note* (`ppy progress --phase`).
+#: The runner records every stream line as `worker_<type>`, so a provider's
+#: `{"type": "progress"}` chatter shares the kind but carries no phase. Read as a
+#: note, a line recorded after the done note hid it, and a finished worker was
+#: judged `worker_stopped` whenever the runner read stdout later than the worker
+#: wrote its note (CI, 2026-09-16).
+PROGRESS_NOTE = "kind = 'worker_progress' AND COALESCE(json_extract(payload, '$.phase'), '') != ''"
+
+
 def progress_events(
     conn: sqlite3.Connection, *, task_id: int | None = None, repo_id: int | None = None
 ) -> list[sqlite3.Row]:
-    """Progress reports, newest first, for one task or every task of a repo."""
+    """Progress notes, newest first, for one task or every task of a repo.
+
+    Notes only: a phaseless `worker_progress` stream line is not a report.
+    """
     if task_id is not None:
         return list(
             conn.execute(
-                "SELECT * FROM events WHERE task_id = ? AND kind = 'worker_progress' "
-                "ORDER BY id DESC",
+                f"SELECT * FROM events WHERE task_id = ? AND {PROGRESS_NOTE} ORDER BY id DESC",
                 (task_id,),
             ).fetchall()
         )
@@ -711,14 +722,13 @@ def progress_events(
         return list(
             conn.execute(
                 "SELECT e.* FROM events e JOIN tasks t ON t.id = e.task_id "
-                "WHERE t.repo_id = ? AND e.kind = 'worker_progress' ORDER BY e.id DESC",
+                "WHERE t.repo_id = ? AND e.kind = 'worker_progress' "
+                "AND COALESCE(json_extract(e.payload, '$.phase'), '') != '' ORDER BY e.id DESC",
                 (repo_id,),
             ).fetchall()
         )
     return list(
-        conn.execute(
-            "SELECT * FROM events WHERE kind = 'worker_progress' ORDER BY id DESC"
-        ).fetchall()
+        conn.execute(f"SELECT * FROM events WHERE {PROGRESS_NOTE} ORDER BY id DESC").fetchall()
     )
 
 

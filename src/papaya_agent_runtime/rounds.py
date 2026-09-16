@@ -200,7 +200,7 @@ def look_at_worker(task_id: int, *, now: datetime, quiet_after: timedelta) -> Wo
         last_acted = 0
         for row in rows:
             kind, payload = str(row["kind"]), _payload(row)
-            if kind == "worker_progress":
+            if kind == "worker_progress" and payload.get("phase"):
                 progress.append(
                     (
                         int(row["id"]),

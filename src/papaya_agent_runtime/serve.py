@@ -2290,7 +2290,8 @@ def read_run(held: Held, cursor: int) -> RunRead:
             kind = str(row["kind"])
             payload = _payload(row)
             task_id = int(row["task_id"] or 0)
-            if kind == "worker_progress":
+            if kind == "worker_progress" and payload.get("phase"):
+                # A note, not the stream's phaseless `progress` chatter of the same kind.
                 progress.append(
                     (
                         cursor,

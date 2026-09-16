@@ -102,6 +102,52 @@ def test_a_worker_that_pushed_and_filed_a_done_note_is_done(server, source_repo)
     assert not _events(resp["task_id"], turn_end.WORKER_STOPPED)
 
 
+def test_a_worker_that_keeps_talking_after_its_done_note_is_still_done(server, source_repo) -> None:
+    """The same race end to end: a stream line recorded after the note, every time."""
+    srv, client = server
+    resp = _dispatch(client, source_repo, "CHATTER")
+    task_id = resp["task_id"]
+    _wait_status(client, task_id, {"worker_done", turn_end.WORKER_STOPPED})
+    notes = _events(task_id, "worker_progress")
+    assert notes[-1].get("type") == "progress" and "phase" not in notes[-1], (
+        "the phaseless stream line was not the newest progress event, so this proves nothing"
+    )
+    assert _events(task_id, turn_end.WORKER_STOPPED) == []
+    assert store.get_task(init_db(), task_id)["status"] == "worker_done"
+
+
+def test_a_stream_progress_event_recorded_after_the_done_note_does_not_hide_it(ppy_home) -> None:
+    """CI runs 35129973517 / 35132060840: a finished worker was recorded `worker_stopped`.
+
+    The runner records every stream event as `worker_<type>`, so a provider's
+    `{"type": "progress"}` line is a `worker_progress` event too — with no phase. The
+    worker emits it *before* filing its done note, but the note is the worker's own
+    database write while the stream line waits for the runner thread to read stdout.
+    When the runner is the slower of the two, the phaseless event lands after the note,
+    and reading "the newest progress event" as the newest note said no done note was
+    ever filed. Only a note with a phase is a progress note.
+    """
+    from papaya_agent_runtime import progress
+
+    conn = init_db()
+    task_id = store.add_task(conn, run_id=store.create_run(conn, "race"), title="race")
+    progress.record(task_id, phase="done", note="finished; branch pushed", conn=conn)
+    # The stream line the worker emitted earlier, recorded by the runner only now.
+    store.append_event(
+        conn,
+        kind="worker_progress",
+        payload={"type": "progress", "session_id": "s-1", "text": "committed change"},
+        task_id=task_id,
+    )
+
+    verdict = turn_end.why_stopped(conn, task_id)
+
+    assert verdict.phase == "done"
+    assert verdict.stopped is False, verdict.reasons
+    assert store.latest_progress(conn, task_id) is not None
+    assert json.loads(store.latest_progress(conn, task_id)["payload"])["phase"] == "done"
+
+
 def test_review_terminal_phase_needs_review_note_and_does_not_need_a_push(
     ppy_home, source_repo
 ) -> None:
