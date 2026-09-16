@@ -30,25 +30,45 @@ What the sweep adds is only the choosing:
   Papaya, or with another person's or another machine's runtime — is **kept
   elsewhere**: remembered with its `updated_at` and not asked for again until
   that moves or `KEPT_RECHECK_EVERY` (thirty minutes) passes;
+- but a claim is not work. Kept work is left alone only while there is
+  **evidence** somebody is doing it (:func:`evidence_of_work`): a live
+  reservation on the subject, a live agent job, or a comment or status change by
+  the holder within `sweep.idle_claim_minutes` (fifteen). Without it the item is
+  **idle**: the memory is bypassed and it is asked for on every sweep. When Papaya
+  still refuses it (the fallback's guard window), the refused idle items are one
+  blocker a person sees (:func:`blockers.set_idle_work_kept`), and an item refused
+  on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps running is a deficiency;
 - a full pool ends the round, and the rest wait for the next one.
+
+On start, and on the first sweep after Papaya could not be reached (a reconnect),
+the sweep first **reclaims** what an earlier connection of this runtime held
+(:meth:`Sweeper._reclaim_earlier`): an item with a ticket task here, a
+reservation or a Run on this Mac hold naming an earlier connection id
+(`.ppy/papaya-sessions.json`), or an on-call fallback note on an item this
+runtime's since-revoked connection had commented on. It calls Papaya's reclaim
+route and offers the item, and the runner resumes the ticket from its recorded
+state. Nothing a live reservation of somebody else's or a live job shows being
+done is taken.
 
 A sweep says one line on stderr — what it found, why it left each one alone,
 what it offered — and nothing on the supervised protocol, which is for jobs, not
-for bookkeeping. A sweep that found exactly what the one before it found says so
-at most every half hour.
+for bookkeeping. Kept work is said as "being worked" or "idle for N minutes". A
+sweep that found exactly what the one before it found says so at most every half
+hour.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -98,6 +118,40 @@ OFFER_BLOCKED = "blocked"
 
 #: How long `ppy sweep` waits for the running `serve` to finish one sweep.
 REQUEST_TIMEOUT_SECONDS = 120.0
+
+#: Minutes kept work may go without evidence of work before it is idle.
+DEFAULT_IDLE_CLAIM_MINUTES = 15
+
+#: Sweeps running on which Papaya refuses one idle item before that is a deficiency.
+REFUSALS_BEFORE_DEFICIENCY = 3
+
+#: `metadata.system_type` of the note Papaya's on-call fallback leaves on a work item.
+FALLBACK_NOTE_TYPE = "on_call_fallback"
+
+#: The connection id Papaya names when its hosted agent is the holder.
+HOSTED_CONNECTION_ID = "papaya-hosted"
+
+#: Agent job statuses that mean a run is still going.
+LIVE_JOB_STATUSES = frozenset({"queued", "pending", "claimed", "running", "in_progress"})
+
+#: What Papaya's reclaim route said, or that it could not say.
+RECLAIMED = "reclaimed"
+RECLAIM_REFUSED = "refused"
+RECLAIM_UNSUPPORTED = "unsupported"
+RECLAIM_FAILED = "failed"
+
+#: Ticket phases that mean this runtime gave the work away on purpose.
+GIVEN_AWAY_PHASES = ("handed_back", "declined", "done")
+
+
+def idle_claim_minutes() -> int:
+    """`sweep.idle_claim_minutes` from the config, or fifteen when there is none."""
+    from papaya_agent_runtime.config import ConfigError, load_config
+
+    try:
+        return int(load_config().sweep.idle_claim_minutes)
+    except (ConfigError, OSError, ValueError, TypeError):
+        return DEFAULT_IDLE_CLAIM_MINUTES
 
 
 def interval_from_env(environ: Mapping[str, str] | None = None) -> float:
@@ -251,6 +305,8 @@ def forget_kept(work_item_ids: Any) -> None:
 def holder_name(holder: Mapping[str, Any] | None) -> str:
     """The name Papaya gave the holder of refused work, as a person would recognise it."""
     holder = holder or {}
+    if not holder.get("connection_name") and holder.get("connection_id") == HOSTED_CONNECTION_ID:
+        return "the agent in Papaya"
     return str(holder.get("connection_name") or holder.get("connection_id") or "another machine")
 
 
@@ -299,6 +355,238 @@ def kept_elsewhere(item: dict[str, Any], remembered: dict[str, Any] | None, *, n
     return then is None or current is None or current <= then
 
 
+# ── evidence of work ────────────────────────────────────────────────────────
+#
+# Papaya saying who keeps an item is a claim. Whether anybody is doing it is read
+# from what doing it leaves behind: a lease being renewed, a run in flight, or
+# the holder saying or changing something on the item lately.
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """Whether kept work shows anybody doing it, and when its holder last did anything."""
+
+    working: bool
+    #: What showed it, for a log line: "a live reservation", "a live agent job", ...
+    what: str = ""
+    last_activity: datetime | None = None
+
+    def idle_minutes(self, now: datetime) -> int | None:
+        if self.working or self.last_activity is None:
+            return None
+        return max(0, int((now - self.last_activity).total_seconds() // 60))
+
+
+def live_reservation(item: Mapping[str, Any], now: datetime) -> dict[str, Any] | None:
+    """The item's reservation when it has one whose lease has not run out."""
+    reservation = item.get("reservation")
+    if not isinstance(reservation, dict) or not reservation:
+        return None
+    expires = _timestamp(reservation.get("lease_expires_at"))
+    if expires is not None and expires <= now:
+        return None
+    return reservation
+
+
+def live_job(item: Mapping[str, Any]) -> bool:
+    """Whether the item names an agent job or run that is still going."""
+    for key in ("agent_jobs", "linked_agent_jobs", "agent_runs", "jobs"):
+        for job in item.get(key) or ():
+            status = str(job.get("status") or "").strip().lower() if isinstance(job, dict) else ""
+            if status in LIVE_JOB_STATUSES:
+                return True
+    return False
+
+
+def _via_connection(comment: Mapping[str, Any]) -> dict[str, Any]:
+    actor = comment.get("author_actor")
+    via = actor.get("via_connection") if isinstance(actor, dict) else None
+    return via if isinstance(via, dict) else {}
+
+
+def said_by_holder(comment: Mapping[str, Any], holder: Mapping[str, Any], agent_id: str) -> bool:
+    """Whether the holder Papaya named wrote ``comment``.
+
+    A machine writes through its connection. The hosted agent writes as the agent
+    through no connection at all.
+    """
+    connection = str(holder.get("connection_id") or "")
+    via = _via_connection(comment)
+    if connection and connection != HOSTED_CONNECTION_ID:
+        return str(via.get("id") or "") == connection
+    if str(comment.get("author_type") or "") != "agent" or via:
+        return False
+    return not agent_id or str(comment.get("author_id") or "") == agent_id
+
+
+def holder_activity(
+    item: Mapping[str, Any],
+    comments: list[dict[str, Any]],
+    holder: Mapping[str, Any],
+    *,
+    agent_id: str,
+) -> datetime | None:
+    """When the holder last commented on or changed the item, as far as can be read.
+
+    A status change is read from `status_changed_at` when Papaya sends one, else
+    from `updated_at`, which moves for any change: that can only make work look
+    busier than it is, never idler.
+    """
+    stamps = [
+        _timestamp(comment.get("created_at"))
+        for comment in comments
+        if said_by_holder(comment, holder, agent_id)
+    ]
+    stamps.append(_timestamp(item.get("status_changed_at")) or _timestamp(item.get("updated_at")))
+    return max((stamp for stamp in stamps if stamp is not None), default=None)
+
+
+def evidence_of_work(
+    item: Mapping[str, Any],
+    comments: list[dict[str, Any]] | None,
+    holder: Mapping[str, Any] | None,
+    *,
+    agent_id: str,
+    now: datetime,
+    idle_after: float,
+) -> Evidence:
+    """Whether anybody is doing kept work: a live reservation, a live job, or recent activity.
+
+    Comments that could not be read cannot show the work idle, so they count as work.
+    """
+    if live_reservation(item, now) is not None:
+        return Evidence(True, "a live reservation")
+    if live_job(item):
+        return Evidence(True, "a live agent job")
+    if comments is None:
+        return Evidence(True, "comments that could not be read")
+    last = holder_activity(item, comments, holder or {}, agent_id=agent_id)
+    if last is not None and (now - last).total_seconds() < idle_after:
+        return Evidence(True, "recent activity by the holder", last)
+    return Evidence(False, "", last)
+
+
+def _short(item: Mapping[str, Any]) -> str:
+    return str(item.get("short_id") or item.get("id") or "")
+
+
+def held_earlier(
+    item: Mapping[str, Any], ticket: Any, earlier: set[str], *, now: datetime
+) -> str | None:
+    """Why an earlier connection of this runtime held ``item``, from what needs no extra call."""
+    if ticket is not None and ticket.phase not in GIVEN_AWAY_PHASES:
+        return f"ticket task {ticket.task_id} here"
+    reservation = live_reservation(item, now) or {}
+    holder = reservation.get("holder") if isinstance(reservation.get("holder"), dict) else {}
+    if holder and str(holder.get("connection_id") or "") in earlier:
+        return "reserved by an earlier connection"
+    hold = item.get("run_on_this_mac")
+    if isinstance(hold, dict) and str(hold.get("connection_id") or "") in earlier:
+        return "kept for an earlier connection"
+    return None
+
+
+def taken_by_fallback(comments: list[dict[str, Any]] | None, earlier: set[str]) -> str | None:
+    """Why Papaya's on-call fallback took ``comments``' item from this runtime, if it did.
+
+    The fallback leaves a note carrying its `handoff_id`; the item was this runtime's
+    when one of its own connections, since revoked, had commented on it.
+    """
+    if not comments:
+        return None
+    notes = [
+        comment
+        for comment in comments
+        if isinstance(comment.get("metadata"), dict)
+        and comment["metadata"].get("system_type") == FALLBACK_NOTE_TYPE
+        and comment["metadata"].get("handoff_id")
+    ]
+    if not notes:
+        return None
+    for comment in comments:
+        via = _via_connection(comment)
+        if str(via.get("id") or "") in earlier and str(via.get("status") or "") == "revoked":
+            return f"taken by the on-call fallback (handoff {notes[-1]['metadata']['handoff_id']})"
+    return None
+
+
+class PapayaReads:
+    """The Papaya calls the evidence and the reclaim need, over the listener's agent api."""
+
+    def __init__(self, api: Any) -> None:
+        self._api = api
+
+    def _workspace(self) -> str:
+        return str((getattr(self._api, "agent_config", None) or {}).get("workspace_id") or "")
+
+    async def comments(self, work_item_id: str) -> list[dict[str, Any]] | None:
+        """The item's comments, or ``None`` when they cannot be read."""
+        try:
+            answer = await self._api.request_json(
+                "GET", f"/workspaces/{self._workspace()}/work-items/{work_item_id}/comments"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - unreadable is "cannot tell", not an error
+            log.debug("[sweep] Could not read the comments on %s: %s", work_item_id, exc)
+            return None
+        if isinstance(answer, dict):
+            answer = answer.get("comments") or answer.get("items") or []
+        if not isinstance(answer, list):
+            return None
+        return [comment for comment in answer if isinstance(comment, dict)]
+
+    async def reservation(self, subject: str) -> dict[str, Any] | None:
+        from papaya_agent_client import api_client
+
+        return await api_client.get_subject_reservation(self._api, subject)
+
+    async def reclaim(self, work_item_id: str) -> tuple[str, str]:
+        """Ask Papaya to give this connection back what an earlier one held.
+
+        The route is new in the backend ("reconnect is not a decline"); a server
+        without it answers 404, which is :data:`RECLAIM_UNSUPPORTED`, and the offer
+        that follows falls back on `reserve`.
+        """
+        path = f"/agent-client/workspaces/{self._workspace()}/work-items/{work_item_id}/reclaim"
+        try:
+            response = await self._api.request_response("POST", path, json={})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the offer is still worth making
+            return RECLAIM_FAILED, str(exc) or exc.__class__.__name__
+        if response.status_code in (404, 405):
+            return RECLAIM_UNSUPPORTED, "Papaya has no reclaim route yet"
+        if response.status_code >= 400:
+            return RECLAIM_FAILED, f"HTTP {response.status_code}"
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        reason = str(body.get("reason") or "")
+        return (RECLAIMED if body.get("reclaimed") else RECLAIM_REFUSED), reason
+
+
+def ticket_index() -> dict[str, Any]:
+    """The newest ticket task per work item, from the rounds' reading of the table."""
+    from papaya_agent_runtime import rounds
+    from papaya_agent_runtime.lifecycle import TERMINAL_STATUSES
+
+    return {
+        ticket.work_item_id: ticket
+        for ticket in rounds.ticket_tasks()
+        if ticket.status not in TERMINAL_STATUSES
+    }
+
+
+def earlier_connection_ids() -> set[str]:
+    """Every connection id this runtime has held a lease under (`.ppy/papaya-sessions.json`)."""
+    from papaya_agent_runtime import serve
+
+    return set(serve.stored_session_ids())
+
+
 @dataclass(frozen=True)
 class SweepResult:
     """What one sweep found and did with it."""
@@ -310,8 +598,12 @@ class SweepResult:
     declined_earlier: int = 0
     #: Of `skipped`, `in_progress` items touched too recently to be anybody's but their own.
     in_progress_elsewhere: int = 0
-    #: Of `skipped`, the items Papaya keeps elsewhere, as `(holder name, count)`, most first.
+    #: Of `skipped`, the items Papaya keeps elsewhere and somebody is working, as
+    #: `(holder name, count)`, most first.
     kept: tuple[tuple[str, int], ...] = ()
+    #: Of `skipped`, the items Papaya keeps elsewhere that nobody is working, as
+    #: `(holder name, count, minutes since the holder last did anything or None)`.
+    idle: tuple[tuple[str, int, int | None], ...] = ()
     #: Open items not reached because every slot was busy; the next sweep has them.
     waiting: int = 0
     #: Why the sweep could not ask Papaya at all, when it could not.
@@ -319,11 +611,18 @@ class SweepResult:
 
     @property
     def kept_total(self) -> int:
-        return sum(count for _, count in self.kept)
+        return sum(count for _, count in self.kept) + self.idle_total
+
+    @property
+    def idle_total(self) -> int:
+        return sum(count for _, count, _ in self.idle)
 
     def _parts(self) -> str:
         """Why each found item was left alone, then what was offered."""
-        parts = [f"{count} kept by {name}" for name, count in self.kept]
+        parts = [f"{count} kept by {name} and being worked" for name, count in self.kept]
+        for name, count, minutes in self.idle:
+            idle = "idle" if minutes is None else f"idle for {minutes} minutes"
+            parts.append(f"{count} kept by {name} and {idle}")
         if parts:
             parts[-1] += f" ({ROUTE_HERE_HINT})"
         if self.declined_earlier:
@@ -361,6 +660,7 @@ class SweepResult:
             "declined_earlier": self.declined_earlier,
             "in_progress_elsewhere": self.in_progress_elsewhere,
             "kept": dict(self.kept),
+            "idle": {name: {"count": n, "minutes": minutes} for name, n, minutes in self.idle},
             "waiting": self.waiting,
             "error": self.error,
             "summary": self.summary(),
@@ -489,8 +789,34 @@ class Sweeper:
         stale_after: float | None = None,
         clock: Callable[[], float] | None = None,
         lock: asyncio.Lock | None = None,
+        runner: Any = None,
+        reads: Any = None,
+        idle_after: float | None = None,
+        connection_ids: Callable[[], set[str]] | None = None,
+        tickets: Callable[[], dict[str, Any]] | None = None,
+        publish: Callable[[], None] | None = None,
     ) -> None:
         self._built = built
+        #: The ticket runner a reclaimed item resumes on (its `reclaim(item, task, mark)`).
+        self._runner = runner
+        # Seams for tests: Papaya's comments, reservation and reclaim route; the
+        # connection ids this runtime has held; its ticket tasks by work item.
+        self._reads = reads if reads is not None else PapayaReads(getattr(built, "api", None))
+        #: `sweep.idle_claim_minutes`, in seconds: kept work with no evidence this long is idle.
+        self._idle_after = idle_claim_minutes() * 60.0 if idle_after is None else float(idle_after)
+        self._connection_ids = connection_ids or earlier_connection_ids
+        self._tickets = tickets or ticket_index
+        #: Sends a supervised host a fresh `status` when the blockers changed.
+        self._publish = publish
+        #: Reclaim what earlier connections held before the next sweep: at start and
+        #: after a sweep that could not reach Papaya.
+        self._reclaim_due = True
+        #: Idle items Papaya refused, by work item id: the name the blocker lists.
+        self._refused_idle: dict[str, str] | None = None
+        #: Work item id -> sweeps running on which Papaya refused it while idle.
+        self._refusal_streak: dict[str, int] = {}
+        #: Reclaim lines, for tests and `ppy serve`'s log.
+        self.reclaim_lines: list[str] = []
         self._interval = float(interval)
         self._stderr = stderr
         # Seam for tests: the timer, fired on demand instead of every five minutes.
@@ -507,7 +833,8 @@ class Sweeper:
         self.results: list[SweepResult] = []
         #: When a summary line was last written, or None before the first.
         self._last_written: float | None = None
-        #: Subjects whose reserve Papaya refused as not routed here, with the holder.
+        #: Subjects whose reserve Papaya refused on its own word (not routed here, or
+        #: handled in Papaya), with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
         #: The listener's events client whose `reserve` is already watched.
         self._watched: Any = None
@@ -568,7 +895,11 @@ class Sweeper:
         stays full is one line every half hour, not one every five minutes.
         """
         now = self._clock()
-        if by_hand or previous is None or result.offered or result != previous:
+        # Idle minutes grow every sweep; that alone is not something new to say.
+        same = previous is not None and replace(
+            result, idle=tuple((n, c, None) for n, c, _ in result.idle)
+        ) == replace(previous, idle=tuple((n, c, None) for n, c, _ in previous.idle))
+        if by_hand or previous is None or result.offered or not same:
             self._last_written = now
             return result.summary()
         if self._last_written is not None and now - self._last_written < UNCHANGED_SUMMARY_EVERY:
@@ -583,14 +914,15 @@ class Sweeper:
         playbook skip, and the holder it names goes no further than a log line.
         The reserve call is where it can be seen, so the loop's events client has
         its `reserve` wrapped once: a `SubjectHeld` the client classifies as
-        `not_routed_here` is noted by subject and raised on unchanged.
+        Papaya's own word (`not_routed_here`, `handled_in_papaya`) is noted by
+        subject and raised on unchanged. An ordinary lost race is not noted.
         """
         events = getattr(loop, "_events", None)
         reserve = getattr(events, "reserve", None)
         if reserve is None or events is self._watched:
             return
         from papaya_agent_client.api_client import SubjectHeld
-        from papaya_agent_client.listener import SKIP_NOT_ROUTED_HERE, refusal_skip_reason
+        from papaya_agent_client.listener import refusal_skip_reason
 
         refused = self._refused
 
@@ -598,12 +930,165 @@ class Sweeper:
             try:
                 return await reserve(subject, *args, **kwargs)
             except SubjectHeld as held:
-                if refusal_skip_reason(held.holder) == SKIP_NOT_ROUTED_HERE:
+                if refusal_skip_reason(held.holder) is not None:
                     refused[subject] = dict(held.holder or {})
                 raise
 
         events.reserve = watched_reserve
         self._watched = events
+
+    def _identity(self) -> tuple[str, str]:
+        agent_config = getattr(self._built, "agent_config", None) or {}
+        return str(agent_config.get("agent_id") or ""), str(agent_config.get("workspace_id") or "")
+
+    async def _offer(self, item: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        """Offer one item to the loop: its answer, and the holder when Papaya refused it."""
+        subject = f"work_item:{item['id']}"
+        agent_id, workspace_id = self._identity()
+        self._refused.pop(subject, None)
+        status = await self._built.loop.offer(
+            envelope_for(item, agent_id=agent_id, workspace_id=workspace_id)
+        )
+        return status, self._refused.pop(subject, None)
+
+    async def _evidence(
+        self, item: dict[str, Any], holder: Mapping[str, Any] | None, now: datetime
+    ) -> Evidence:
+        """Read what kept work leaves behind: its reservation, its jobs, its holder's activity."""
+        subject = f"work_item:{item['id']}"
+        if "reservation" not in item:
+            try:
+                item = {**item, "reservation": await self._reads.reservation(subject)}
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - cannot tell is not idle
+                log.debug("[sweep] Could not read the reservation on %s: %s", subject, exc)
+                return Evidence(True, "a reservation that could not be read")
+        if live_reservation(item, now) is not None or live_job(item):
+            return evidence_of_work(
+                item, [], holder, agent_id="", now=now, idle_after=self._idle_after
+            )
+        comments = await self._reads.comments(str(item["id"]))
+        return evidence_of_work(
+            item,
+            comments,
+            holder,
+            agent_id=self._identity()[0],
+            now=now,
+            idle_after=self._idle_after,
+        )
+
+    def _say(self, line: str) -> None:
+        self.reclaim_lines.append(line)
+        log.info("[sweep] %s", line)
+        if self._stderr is not None:
+            with contextlib.suppress(Exception):
+                print(f"ppy serve: {line}", file=self._stderr, flush=True)
+
+    async def _reclaim_earlier(
+        self, items: list[dict[str, Any]], live: set[str], now: datetime
+    ) -> dict[str, tuple[str, dict[str, Any] | None]]:
+        """Take back what an earlier connection of this runtime held. Returns each offer's answer.
+
+        One line per item reclaimed or refused, then one summary line; nothing at all
+        when no open item was held earlier. A refusal is returned so the sweep that
+        follows counts it (and its blocker) without asking Papaya a second time.
+        """
+        self._reclaim_due = False
+        earlier = await asyncio.to_thread(self._connection_ids)
+        tickets = await asyncio.to_thread(self._tickets)
+        running = set(getattr(self._built.loop, "running_subjects", ()) or ())
+        asked: dict[str, tuple[str, dict[str, Any] | None]] = {}
+        reclaimed = refused = 0
+        for item in items:
+            item_id = str(item["id"])
+            if f"work_item:{item_id}" in running or item_id in live:
+                continue
+            ticket = tickets.get(item_id)
+            why = held_earlier(item, ticket, earlier, now=now)
+            if why is None and earlier:
+                why = taken_by_fallback(await self._reads.comments(item_id), earlier)
+            if why is None:
+                continue
+            lease_holder = (live_reservation(item, now) or {}).get("holder")
+            holder = lease_holder if isinstance(lease_holder, dict) else {}
+            if (holder and str(holder.get("connection_id") or "") not in earlier) or live_job(item):
+                log.debug("[sweep] %s is being worked by somebody else; not reclaiming it", item_id)
+                continue
+            answer, reason = await self._reads.reclaim(item_id)
+            if ticket is not None and getattr(self._runner, "reclaim", None) is not None:
+                from papaya_agent_runtime import serve
+
+                mark = await asyncio.to_thread(serve._max_event_id)
+                self._runner.reclaim(item_id, ticket.task_id, mark)
+            status, holder = await self._offer(item)
+            asked[item_id] = (status, holder)
+            said = answer if not reason else f"{answer}: {reason}"
+            if status == OFFER_PENDING:
+                reclaimed += 1
+                resume = f"; resuming ticket task {ticket.task_id}" if ticket is not None else ""
+                self._say(f"reclaimed {_short(item)} ({why}; reclaim {said}){resume}")
+                continue
+            forget = getattr(self._runner, "forget_reclaim", None)
+            if forget is not None:
+                forget(item_id)
+            if status == OFFER_BLOCKED:
+                self._say(f"could not reclaim {_short(item)} yet ({why}): every slot is busy")
+                continue
+            refused += 1
+            by = holder_name(holder) if holder is not None else "another session"
+            self._say(f"could not reclaim {_short(item)} ({why}; reclaim {said}): {by} refused it")
+        if reclaimed or refused or asked:
+            self._say(
+                f"reclaim on connect: {len(asked)} held by an earlier connection, "
+                f"{reclaimed} reclaimed, {refused} refused"
+            )
+        return asked
+
+    async def _record_refusals(
+        self, refused_now: dict[str, tuple[str, str]], reached: set[str], found: set[str]
+    ) -> None:
+        """Bring the idle-work blocker and the refusal streaks in line with this sweep.
+
+        ``refused_now`` is `{work item id: (name, refusal reason)}` for the idle items
+        Papaya refused this sweep; ``reached`` the items this sweep got as far as asking
+        about; ``found`` every open item. An item a full pool kept this sweep from
+        reaching keeps its place in the blocker until a sweep reaches it.
+        """
+        from papaya_agent_runtime import blockers, deficiencies
+
+        previous = self._refused_idle
+        kept_over = {
+            item_id: name
+            for item_id, name in (previous or {}).items()
+            if item_id not in reached and item_id in found
+        }
+        current = {**kept_over, **{item_id: name for item_id, (name, _) in refused_now.items()}}
+        for item_id in list(self._refusal_streak):
+            if (item_id in reached and item_id not in refused_now) or item_id not in found:
+                del self._refusal_streak[item_id]
+        for item_id, (name, reason) in refused_now.items():
+            streak = self._refusal_streak.get(item_id, 0) + 1
+            self._refusal_streak[item_id] = streak
+            if streak == REFUSALS_BEFORE_DEFICIENCY:
+                await asyncio.to_thread(
+                    functools.partial(
+                        deficiencies.record,
+                        deficiencies.IDLE_WORK_REFUSED,
+                        f"{reason} refusal",
+                        evidence={"ticket": name, "code": reason},
+                        scope=f"ticket:{item_id}",
+                    )
+                )
+        self._refused_idle = current
+        if previous is not None and set(previous.values()) == set(current.values()):
+            return
+        changes = await asyncio.to_thread(
+            functools.partial(blockers.set_idle_work_kept, sorted(current.values()))
+        )
+        if changes and self._publish is not None:
+            with contextlib.suppress(Exception):
+                self._publish()
 
     async def _sweep(self, *, include_declined: bool, include_kept: bool) -> SweepResult:
         from papaya_agent_client import api_client
@@ -616,30 +1101,45 @@ class Sweeper:
             raise
         except Exception as exc:  # noqa: BLE001 - an unreachable Papaya is a quiet round
             log.warning("[sweep] Could not list assigned work items: %s", exc)
+            # Reaching Papaya again is a reconnect: take back what was held first.
+            self._reclaim_due = True
             return SweepResult(error=str(exc) or exc.__class__.__name__)
 
         items = sweep_order([item for item in _items(answer) if is_open(item)])
         live = await asyncio.to_thread(self._live_items)
         declined = {} if include_declined else await asyncio.to_thread(declined_items)
         kept = {} if include_kept else await asyncio.to_thread(kept_items)
-        agent_config = getattr(built, "agent_config", None) or {}
-        agent_id = str(agent_config.get("agent_id") or "")
-        workspace_id = str(agent_config.get("workspace_id") or "")
         clock_now = self._clock()
         now = datetime.fromtimestamp(clock_now, UTC)
+        asked: dict[str, tuple[str, dict[str, Any] | None]] = {}
+        if self._reclaim_due:
+            asked = await self._reclaim_earlier(items, live, now)
 
         offered = skipped = earlier = elsewhere = waiting = 0
         kept_by: dict[str, int] = {}
+        idle_by: dict[str, list[int | None]] = {}
         newly_kept: dict[str, dict[str, Any]] = {}
+        refused_idle: dict[str, tuple[str, str]] = {}
+        reached: set[str] = set()
         taken: list[str] = []
         for index, item in enumerate(items):
             item_id = str(item["id"])
             subject = f"work_item:{item_id}"
-            if subject in built.loop.running_subjects or item_id in live:
+            reached.add(item_id)
+            if item_id in asked and asked[item_id][0] == OFFER_PENDING:
+                offered += 1
+                taken.append(item_id)
+                continue
+            if item_id not in asked and (subject in built.loop.running_subjects or item_id in live):
                 log.debug("[sweep] %s already has a live task here; not offering it", subject)
                 skipped += 1
                 continue
-            if in_progress_elsewhere(item, now=now, stale_after=self._stale_after):
+            remembered = kept.get(item_id)
+            # Work Papaya has refused here before is judged on evidence, not on how
+            # recently somebody touched it.
+            if remembered is None and in_progress_elsewhere(
+                item, now=now, stale_after=self._stale_after
+            ):
                 log.debug(
                     "[sweep] %s is in progress and was touched within %ss; not offering it",
                     subject,
@@ -657,18 +1157,26 @@ class Sweeper:
                 skipped += 1
                 earlier += 1
                 continue
-            remembered = kept.get(item_id)
-            if kept_elsewhere(item, remembered, now=clock_now):
-                name = holder_name((remembered or {}).get("holder"))
-                log.debug("[sweep] %s is kept by %s; not asking again yet", subject, name)
-                skipped += 1
-                kept_by[name] = kept_by.get(name, 0) + 1
-                continue
-            self._refused.pop(subject, None)
-            status = await built.loop.offer(
-                envelope_for(item, agent_id=agent_id, workspace_id=workspace_id)
-            )
-            refused = self._refused.pop(subject, None)
+            evidence: Evidence | None = None
+            if item_id not in asked and kept_elsewhere(item, remembered, now=clock_now):
+                holder = (remembered or {}).get("holder") or {}
+                name = holder_name(holder)
+                evidence = await self._evidence(item, holder, now)
+                if evidence.working:
+                    log.debug(
+                        "[sweep] %s is kept by %s and shows %s; not asking again yet",
+                        subject,
+                        name,
+                        evidence.what,
+                    )
+                    skipped += 1
+                    kept_by[name] = kept_by.get(name, 0) + 1
+                    continue
+                log.debug("[sweep] %s is kept by %s but idle; asking", subject, name)
+            if item_id in asked:
+                status, refused = asked[item_id]
+            else:
+                status, refused = await self._offer(item)
             if status == OFFER_PENDING:
                 offered += 1
                 taken.append(item_id)
@@ -676,20 +1184,37 @@ class Sweeper:
                 # Every slot is busy (or the reserve failed): nothing was taken,
                 # and asking for the rest this round would only be refused again.
                 log.debug("[sweep] %s not offered: no free slot; stopping this round", subject)
+                reached.discard(item_id)
                 waiting = len(items) - index
                 break
             elif refused is not None:
-                # Papaya sent this work somewhere else: the agent in Papaya, another
+                # Papaya keeps this work somewhere else: the agent in Papaya, another
                 # person's machines, or another machine that keeps it.
                 name = holder_name(refused)
-                log.debug("[sweep] %s was not sent to this machine (%s has it)", subject, name)
                 skipped += 1
-                kept_by[name] = kept_by.get(name, 0) + 1
+                if evidence is None:
+                    evidence = await self._evidence(item, refused, now)
+                # Remembered either way. Idle work is still asked for every sweep (its
+                # evidence is read before the memory is believed), and the memory is
+                # what keeps a recently touched `in_progress` item from being skipped
+                # as in progress elsewhere on the next one.
                 newly_kept[item_id] = {
                     "updated_at": item.get("updated_at"),
                     "holder": refused,
                     "kept_at": now.isoformat(),
                 }
+                if evidence.working:
+                    log.debug("[sweep] %s is kept by %s (%s)", subject, name, evidence.what)
+                    kept_by[name] = kept_by.get(name, 0) + 1
+                    continue
+                # Refused, and nobody is doing it: asked for again every sweep, and
+                # a person hears about it through the blocker.
+                from papaya_agent_client.listener import refusal_skip_reason
+
+                reason = refusal_skip_reason(refused) or "refused"
+                log.debug("[sweep] %s is kept by %s and idle; Papaya refused it", subject, name)
+                idle_by.setdefault(name, []).append(evidence.idle_minutes(now))
+                refused_idle[item_id] = (_short(item), reason)
             else:
                 # Held by another session, taken over in Papaya, or not this
                 # playbook's to act on. Not ours this round.
@@ -699,6 +1224,7 @@ class Sweeper:
             await asyncio.to_thread(remember_kept, newly_kept)
         if taken:
             await asyncio.to_thread(forget_kept, taken)
+        await self._record_refusals(refused_idle, reached, {str(item["id"]) for item in items})
         return SweepResult(
             found=len(items),
             offered=offered,
@@ -706,6 +1232,15 @@ class Sweeper:
             declined_earlier=earlier,
             in_progress_elsewhere=elsewhere,
             kept=tuple(sorted(kept_by.items(), key=lambda pair: (-pair[1], pair[0]))),
+            idle=tuple(
+                sorted(
+                    (
+                        (name, len(ages), min((m for m in ages if m is not None), default=None))
+                        for name, ages in idle_by.items()
+                    ),
+                    key=lambda entry: (-entry[1], entry[0]),
+                )
+            ),
             waiting=waiting,
         )
 

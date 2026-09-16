@@ -605,7 +605,11 @@ def ticket_tasks() -> list[Ticket]:
 
 
 def reclaimable(tickets: list[Ticket]) -> list[Ticket]:
-    """The tickets a new offer would resume: work was under way and nobody gave it away."""
+    """The tickets a new offer would resume: work was under way and nobody gave it away.
+
+    A ticket handed over to another holder is not the rounds' to ask for again every
+    five minutes: the sweep asks once that holder shows no evidence of working it.
+    """
     from papaya_agent_runtime.lifecycle import TERMINAL_STATUSES
 
     conn = db.init_db()
@@ -613,7 +617,9 @@ def reclaimable(tickets: list[Ticket]) -> list[Ticket]:
         return [
             t
             for t in tickets
-            if t.status not in TERMINAL_STATUSES and serve.resumable_phase(conn, t.task_id)
+            if t.status not in TERMINAL_STATUSES
+            and t.phase != serve.PHASE_HANDED_OVER
+            and serve.resumable_phase(conn, t.task_id)
         ]
     finally:
         conn.close()

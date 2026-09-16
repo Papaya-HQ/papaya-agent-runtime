@@ -73,6 +73,8 @@ UNHANDLED_EXCEPTION = "unhandled-exception"
 REPEATED_STEER = "repeated-steer"
 #: CI went red on a pull request the runtime delivered to its own repository.
 RUNTIME_CI_RED = "runtime-ci-red"
+#: Papaya refused this machine the same idle item on three sweeps running.
+IDLE_WORK_REFUSED = "idle-work-refused"
 
 #: Ledger statuses: below its threshold; ready for an issue; an issue exists.
 WATCHING = "watching"
@@ -220,6 +222,22 @@ KINDS: dict[str, Kind] = {
             "so the review turn steers the worker with the failure."
         ),
         remedy="Close the gap between this repository's local gate and what CI runs.",
+    ),
+    IDLE_WORK_REFUSED: Kind(
+        title="Papaya kept refusing work nobody was doing",
+        happened=(
+            "The sweep asked for an item assigned to this agent on three sweeps running and "
+            "Papaya refused it every time ({detail}), while the item had no live reservation, "
+            "no live agent job and no word from its holder."
+        ),
+        instead=(
+            "Kept asking every sweep and told the owner, through a blocker, to use Run on this "
+            "Mac or wait for the guard to lift."
+        ),
+        remedy=(
+            "Let a connection reclaim work its earlier connection held, and end a guard window "
+            "that no hosted run is using."
+        ),
     ),
 }
 

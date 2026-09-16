@@ -2654,12 +2654,25 @@ def resumable_phase(conn, task_id: int) -> str | None:
     the work, so it resumes from the phase the worker's state implies. A ticket that
     was handed back, stalled with nothing left of its worker, declined, or finished
     starts over.
+
+    One `handed_over` to a holder that has since given it back (the sweep found it
+    idle, or the reclaim on connect took it back) resumes the way the hold before the
+    hand-over would have: a stalled one by its worker, anything else from its
+    working phase.
     """
     phase = store.task_phase(conn, task_id)
     if phase in WORKING_PHASES:
         return phase
     if phase == PHASE_STALLED:
         return stalled_resume_phase(conn, task_id)
+    if phase == PHASE_HANDED_OVER:
+        for earlier in reversed(phase_history(conn, task_id)):
+            if earlier in (PHASE_HANDED_OVER, PHASE_RELEASED):
+                continue
+            if earlier == PHASE_STALLED:
+                return stalled_resume_phase(conn, task_id)
+            return earlier if earlier in WORKING_PHASES else None
+        return None
     if phase != PHASE_RELEASED:
         return None
     for earlier in reversed(phase_history(conn, task_id)):
@@ -3815,7 +3828,13 @@ async def _run(
     )
     walking = asyncio.create_task(manager_rounds.run())
     sweeper = sweep.Sweeper(
-        built, interval=options.sweep_interval, stderr=stderr, sleep=sweep_sleep, lock=lock
+        built,
+        interval=options.sweep_interval,
+        stderr=stderr,
+        sleep=sweep_sleep,
+        lock=lock,
+        runner=runner,
+        publish=functools.partial(publish_status, built),
     )
     sweeping = asyncio.create_task(sweeper.run())
     if server is not None:

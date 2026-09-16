@@ -77,6 +77,12 @@ DECLINE_REASON = "this machine needs setup before it can take work"
 #: How long after a device-flow attempt ends before another one is started.
 DEVICE_RETRY = timedelta(minutes=30)
 
+#: The sweep's blocker: Papaya refuses this machine work nobody is doing.
+IDLE_WORK_KEPT = "papaya_keeps_idle_work"
+
+#: Blocker codes a readiness verdict never carries, so observing one never clears them.
+OBSERVED_ELSEWHERE = frozenset({IDLE_WORK_KEPT})
+
 
 # ── redaction ────────────────────────────────────────────────────────────────
 
@@ -293,6 +299,8 @@ class Ledger:
             existing.repos = list(problem.repos)
             existing.last_seen = stamp
         for fp in [fp for fp in self.open if fp not in seen]:
+            if self.open[fp].code in OBSERVED_ELSEWHERE:
+                continue  # not readiness's to clear
             blocker = self.open.pop(fp)
             blocker.cleared_at = stamp
             if blocker.reported_at is not None:
@@ -376,6 +384,57 @@ def update(
             # may offer it again if nobody else has taken it meanwhile.
             with contextlib.suppress(Exception):
                 sweep.forget_declined(item)
+    return changes
+
+
+def idle_work_kept(names: list[str]) -> str:
+    """The sentence a person reads about idle work Papaya will not let this machine take."""
+    return (
+        f"Papaya keeps {len(names)} idle item{'' if len(names) == 1 else 's'} from this Mac: "
+        f"{', '.join(names)}; use Run on this Mac, or wait for the guard to lift"
+    )
+
+
+def set_idle_work_kept(names: list[str], *, now: datetime | None = None) -> Changes:
+    """Keep the sweep's one blocker in line with the idle items Papaya refused this sweep.
+
+    It appears with the first refused item, changes (and is said again) when the set
+    changes, and clears when the set is empty. Readiness rounds leave it alone.
+    """
+    stamp = _iso(now or datetime.now(UTC))
+    fp = hashlib.sha256(f"{IDLE_WORK_KEPT}:".encode()).hexdigest()[:16]
+    names = sorted(dict.fromkeys(str(name) for name in names if name))
+    changes = Changes()
+    with _lock:
+        ledger = Ledger.load()
+        existing = ledger.open.get(fp)
+        if not names:
+            if existing is None:
+                return changes
+            blocker = ledger.open.pop(fp)
+            blocker.cleared_at = stamp
+            if blocker.reported_at is not None:
+                ledger.cleared[fp] = blocker
+            changes.cleared.append(blocker)
+        else:
+            title = idle_work_kept(names)
+            steps = [
+                f"In Papaya, open {', '.join(names)} and use Run on this Mac to send "
+                f"{'it' if len(names) == 1 else 'them'} here",
+                "Or wait: the sweep asks again every round and takes the work once "
+                "Papaya's guard lifts",
+            ]
+            if existing is None:
+                blocker = Blocker(fp, IDLE_WORK_KEPT, title, steps, stamp, stamp)
+                ledger.open[fp] = blocker
+                ledger.cleared.pop(fp, None)
+                changes.appeared.append(blocker)
+            else:
+                if existing.title != title:
+                    existing.title, existing.steps = title, steps
+                    changes.changed.append(existing)
+                existing.last_seen = stamp
+        ledger.save()
     return changes
 
 
@@ -756,6 +815,8 @@ class Watch:
 
 __all__ = [
     "DECLINE_REASON",
+    "IDLE_WORK_KEPT",
+    "OBSERVED_ELSEWHERE",
     "REPEAT_AFTER",
     "TICKET_COMMENT",
     "Blocker",
@@ -770,6 +831,8 @@ __all__ = [
     "fingerprint",
     "from_verdict",
     "github_client_id",
+    "idle_work_kept",
+    "set_idle_work_kept",
     "message",
     "redact",
     "render_text",
