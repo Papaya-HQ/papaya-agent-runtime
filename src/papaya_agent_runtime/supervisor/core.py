@@ -1318,7 +1318,7 @@ class Supervisor:
         thread = threading.Thread(
             target=self._resume_after_interrupt,
             args=(task_id, message, [r["runner"] for r in superseded]),
-            kwargs={"by": by},
+            kwargs={"by": by} if by else {},
             daemon=True,
         )
         self._start(thread)
