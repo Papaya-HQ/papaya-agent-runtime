@@ -638,6 +638,83 @@ def _client_problems(problems: list[Problem]) -> None:
     )
 
 
+ENVIRONMENT_BROKEN = "environment_broken"
+
+
+def environment_path() -> Path:
+    """This checkout's environment, where `bin/ppy` runs everything from."""
+    import os
+
+    import papaya_agent_runtime
+
+    configured = os.environ.get("UV_PROJECT_ENVIRONMENT")
+    if configured:
+        return Path(configured)
+    return Path(papaya_agent_runtime.__file__).resolve().parents[2] / ".venv"
+
+
+def environment_imports(env: Path) -> bool:
+    """Would the runtime's dependency import from ``env``? Read from disk, not by running it.
+
+    Its interpreter must resolve (a swapped or deleted build leaves a dangling link)
+    and the Papaya client must be in its site-packages — the package a refused or
+    interrupted sync left missing on 2026-09-16.
+    """
+    if not (env / "bin" / "python").exists():
+        return False
+    return any(
+        (site / "papaya_agent_client" / "__init__.py").is_file()
+        for site in env.glob("lib/python*/site-packages")
+    )
+
+
+def _environment_problems(problems: list[Problem]) -> None:
+    env = environment_path()
+    if environment_imports(env):
+        return
+    problems.append(
+        Problem(
+            code=ENVIRONMENT_BROKEN,
+            summary=(
+                "this checkout's environment does not import the runtime's packages "
+                "(the Papaya client is missing from it)"
+            ),
+            fix=(
+                "the launcher rebuilds it before anything else on the next `ppy serve` "
+                "start; `ppy env sync` rebuilds it now"
+            ),
+        )
+    )
+
+
+def _start_failure_problems(problems: list[Problem]) -> None:
+    """The sentence a `ppy serve` that could not start left, until a start has said it.
+
+    A start that fails cannot tell anybody but its own stderr. The next one that
+    does start reports it once, with its steps, as a blocker (not blocking: that
+    start is running), and clears it; the ledger then says once that it cleared.
+    """
+    from papaya_agent_runtime import takeover
+    from papaya_agent_runtime.paths import ppy_home
+
+    record = takeover.start_failure(str(ppy_home().resolve()))
+    if record is None:
+        return
+    line = str(record.get("line") or "")
+    problems.append(
+        Problem(
+            code=takeover.START_FAILURE_CODE,
+            summary=f"`ppy serve` could not start at {record.get('at') or 'an earlier start'}: "
+            + line,
+            fix="nothing now: a later start succeeded",
+            owner=USER,
+            blocking=False,
+            title=takeover.title_for(line),
+            steps=tuple(str(step) for step in record.get("steps") or ()),
+        )
+    )
+
+
 # ── the machine: the forge, the toolchains, Docker, the disk ────────────────
 
 FORGE_UNAUTHENTICATED = "forge_unauthenticated"
@@ -966,6 +1043,8 @@ def setup_blocker(
 def check() -> Readiness:
     """The verdict for this instance."""
     problems: list[Problem] = []
+    _environment_problems(problems)
+    _start_failure_problems(problems)
     _config_problems(problems)
     _harness_problems(problems)
     _repo_problems(problems)

@@ -137,8 +137,9 @@ from papaya_agent_runtime import (
     prompts,
     readiness,
     sweep,
+    takeover,
 )
-from papaya_agent_runtime.paths import papaya_sessions_path
+from papaya_agent_runtime.paths import papaya_sessions_path, ppy_home
 from papaya_agent_runtime.state import db, store
 
 log = logging.getLogger("papaya_agent_runtime.serve")
@@ -3748,9 +3749,8 @@ async def _run(
         # Supervised, this has already gone down the protocol as a fatal `error`;
         # the status is the client's own for this failure, so `serve` exits the
         # way `papaya-agent listen` would have.
-        print(f"ppy serve: {exc.message}", file=stderr)
-        if exc.advice:
-            print(f"  {exc.advice}", file=stderr)
+        # One line: the client and the app show the last thing said, not a transcript.
+        print(f"ppy serve: {exc.message}" + (f" — {exc.advice}" if exc.advice else ""), file=stderr)
         return exc.status
 
     for problem in unremedied_readiness(verdict):
@@ -3770,12 +3770,24 @@ async def _run(
         **(blocker_seams or {}),
     )
     await report_readiness(verdict, built, watch)
+    # A start that failed before this one has now been said, with its steps; from
+    # here the next readiness check finds it gone and says once that it cleared.
+    with contextlib.suppress(OSError):
+        await asyncio.to_thread(takeover.clear_start_failure, str(ppy_home().resolve()))
     watching = asyncio.create_task(watch.run())
 
     event_loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         with contextlib.suppress(NotImplementedError, ValueError, OSError):
             event_loop.add_signal_handler(sig, built.loop.request_stop)
+    if server is not None:
+        # `ppy supervisor stop` (or a newer serve retiring this one) stops the
+        # supervisor; the listener that depends on it stops with it.
+        def stop_listening() -> None:
+            with contextlib.suppress(RuntimeError):
+                event_loop.call_soon_threadsafe(built.loop.request_stop)
+
+        server.on_shutdown = stop_listening
     if not options.supervised:
         print(
             f"ppy serve: listening as {built.agent_ref or 'this connection'} "
@@ -3813,6 +3825,7 @@ async def _run(
     finally:
         if server is not None:
             server.sweep_handler = None
+            server.on_shutdown = None
         for background in (walking, sweeping, watching):
             background.cancel()
         for background in (walking, sweeping, watching):
@@ -3828,13 +3841,21 @@ async def _run(
     return 0
 
 
-def serve(argv: list[str] | None = None, *, stdout=None, stderr=None, **extra: Any) -> int:
+def serve(
+    argv: list[str] | None = None,
+    *,
+    stdout=None,
+    stderr=None,
+    takeover_seams: dict[str, Any] | None = None,
+    **extra: Any,
+) -> int:
     """Run the manager until it is told to stop. The whole of `ppy serve`.
 
     `extra` is passed straight through to the client's builders; the tests use its
     `events_factory` and `loop_factory` seams, and nothing else should.
+    `takeover_seams` reach :func:`takeover.retire` when a supervisor has to be retired.
     """
-    from papaya_agent_runtime.supervisor.server import SupervisorOwned, SupervisorServer
+    from papaya_agent_runtime.supervisor import lifeline
 
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
@@ -3855,12 +3876,13 @@ def serve(argv: list[str] | None = None, *, stdout=None, stderr=None, **extra: A
     # one stray log line on it is a parse error in the host.
     logging.basicConfig(stream=stderr, level=logging.INFO, format="%(message)s")
 
-    server = SupervisorServer()
-    try:
-        server.start_background()
-    except SupervisorOwned as exc:
-        print(f"refusing to start: {exc}", file=stderr)
-        return 1
+    server, status = take_supervisor(stderr=stderr, seams=takeover_seams)
+    if status is not None:
+        return status
+    if server is not None:
+        # What this serve starts dies with it, even when it dies without running
+        # another line of Python.
+        lifeline.start()
     try:
         return asyncio.run(run(options, stdout=stdout, stderr=stderr, extra=extra, server=server))
     except KeyboardInterrupt:
@@ -3875,8 +3897,81 @@ def serve(argv: list[str] | None = None, *, stdout=None, stderr=None, **extra: A
     finally:
         # The listener has already stopped by the time `run` returns (its own
         # `shutdown` releases every subject it holds), so the supervisor is the
-        # last thing down and nothing is working a repository while it goes.
-        server.stop()
+        # last thing down and nothing is working a repository while it goes. It
+        # stops what it started: every worker is asked to stop and given
+        # `supervisor.stop_timeout` to be recorded stopped, its session kept for
+        # the next start's rounds to resume. An adopted supervisor was not started
+        # here and keeps running.
+        if server is not None:
+            left = server.shutdown()
+            if left:
+                print(
+                    f"ppy serve: {len(left)} worker(s) had not stopped after "
+                    f"{server.stop_timeout:g}s; they are being killed",
+                    file=stderr,
+                )
+            lifeline.stop()
+
+
+def _say(line: str, *, stderr) -> None:
+    log.info("[serve] %s", line)
+    print(f"ppy serve: {line}", file=stderr, flush=True)
+
+
+def take_supervisor(*, stderr, seams: dict[str, Any] | None = None) -> tuple[Any, int | None]:
+    """Own this home's supervisor, adopt a live one of this build, or retire one of another.
+
+    Returns ``(server, None)`` when this process owns the supervisor, ``(None, None)``
+    when it adopted a running one, and ``(None, status)`` when `serve` cannot start —
+    having said why in one line and recorded it for the blockers ledger. `seams` are
+    :func:`takeover.retire`'s keyword seams (clock, sleep, kill, shutdown) for tests.
+    """
+    from papaya_agent_runtime.supervisor.server import (
+        SupervisorOwned,
+        SupervisorServer,
+        checkout_root,
+    )
+
+    home = str(ppy_home().resolve())
+    build = takeover.checkout_build(checkout_root())
+    refusal: SupervisorOwned | None = None
+    retired = False
+    for _attempt in range(3):
+        server = SupervisorServer(role="serve")
+        try:
+            server.start_background()
+        except SupervisorOwned as exc:
+            refusal = exc
+        else:
+            if server.took_over_from:
+                _say(takeover.stale_line(server.took_over_from), stderr=stderr)
+            return server, None
+        holder = takeover.inspect(home)
+        decision = takeover.decide(holder, build)
+        if decision == takeover.ADOPT:
+            _say(
+                f"adopted the running supervisor, pid {holder.pid}: it runs this checkout's "
+                f"build ({holder.build_id}), so its workers keep running",
+                stderr=stderr,
+            )
+            return None, None
+        if decision == takeover.STALE:
+            takeover.clear_stale(home, holder.dead_pids)
+            _say(takeover.stale_line(holder.dead_pids), stderr=stderr)
+        if decision != takeover.RETIRE or retired:
+            continue
+        retired = True
+        outcome = takeover.retire(home, holder, build, timeout=server.stop_timeout, **(seams or {}))
+        _say(outcome.line, stderr=stderr)
+        if not outcome.ok:
+            takeover.record_start_failure(
+                home, outcome.line, [f"kill {holder.pid}" if holder.pid else "ppy supervisor stop"]
+            )
+            return None, takeover.EXIT_CANNOT_START
+    line = f"cannot start: {refusal}" if refusal else "cannot start: the supervisor would not start"
+    _say(line, stderr=stderr)
+    takeover.record_start_failure(home, line, ["ppy supervisor stop"])
+    return None, takeover.EXIT_CANNOT_START
 
 
 __all__ = [

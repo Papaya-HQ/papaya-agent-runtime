@@ -545,3 +545,54 @@ def test_the_role_arrives_even_when_the_runtime_is_perfectly_healthy(ppy_home, m
     context = hooks.session_start_context(init_db())
     assert context is not None
     assert "YOU ARE THE PAPAYA AGENT RUNTIME" in context
+
+
+# ── the environment, and a start that failed (task 272) ─────────────────────
+
+
+def _environment(root, *, client: bool) -> None:
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "bin" / "python").write_text("#!/bin/sh\n")
+    site = root / "lib" / "python3.13" / "site-packages"
+    site.mkdir(parents=True, exist_ok=True)
+    if client:
+        (site / "papaya_agent_client").mkdir(exist_ok=True)
+        (site / "papaya_agent_client" / "__init__.py").write_text("")
+
+
+def test_an_environment_without_the_client_is_broken_and_the_launcher_is_the_remedy(
+    quiet_machine, tmp_path, monkeypatch
+) -> None:
+    env = tmp_path / "env"
+    _environment(env, client=False)
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(env))
+
+    verdict = readiness.check()
+
+    (broken,) = verdict.problems
+    assert broken.code == readiness.ENVIRONMENT_BROKEN
+    assert broken.blocking and broken.owner == readiness.RUNTIME
+    assert "next `ppy serve` start" in broken.fix and "`ppy env sync`" in broken.fix
+
+    _environment(env, client=True)
+    assert readiness.check().problems == []
+
+
+def test_a_start_that_failed_is_a_blocker_until_a_start_has_said_it(quiet_machine) -> None:
+    from papaya_agent_runtime import blockers, takeover
+
+    home = str(quiet_machine.resolve())
+    takeover.record_start_failure(home, "cannot start: pid 9 still holds the lock", ["kill 9"])
+
+    verdict = readiness.check()
+
+    (failed,) = verdict.problems
+    assert failed.code == takeover.START_FAILURE_CODE and not failed.blocking
+    assert failed.steps == ("kill 9", takeover.AFTER)
+    assert "pid 9 still holds the lock" in failed.title
+    # Written to the ledger at once, in the ledger's own shape, for `ppy blockers`.
+    assert [b["code"] for b in blockers.Ledger.load().public()] == [takeover.START_FAILURE_CODE]
+    # A start that reports it clears the record, and the next observation clears the blocker.
+    assert [b.code for b in blockers.update(verdict).appeared] == []
+    takeover.clear_start_failure(home)
+    assert readiness.check().problems == []

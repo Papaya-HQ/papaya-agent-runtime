@@ -1868,10 +1868,11 @@ class Supervisor:
         LeaseManager(lease.backend).release(lease, repo_path=repo_path, remove_branch=remove_branch)
 
     def shutdown(self) -> None:
+        """Stop every running worker as the supervisor goes: recorded stopped, not failed."""
         with self._lock:
             runners = list(self._runners.values())
         for runner in runners:
-            runner.interrupt()
+            runner.interrupt(shutdown=True)
 
     def _start(self, thread: threading.Thread) -> None:
         thread.start()

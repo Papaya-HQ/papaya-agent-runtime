@@ -43,31 +43,73 @@ if [ "${1:-}" = "capabilities" ] && [ ! -d "$VENV" ]; then
     fi
 fi
 
+# Does the runtime's dependency import from the environment? A refused or
+# interrupted sync used to leave it without the Papaya client (2026-09-16).
+environment_ok() {
+    [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c "import papaya_agent_client" >/dev/null 2>&1
+}
+
+# The standard-library helpers (`envsync`, `takeover`) run under whatever
+# interpreter works: the environment's, a system python3, or uv's own for the
+# pinned series. None of them needs the environment to import.
+helper() {
+    if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c "" >/dev/null 2>&1; then
+        "$VENV/bin/python" -m "$@"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -m "$@"
+    else
+        uv run --no-project ${PYTHON:+--python "$PYTHON"} python -m "$@"
+    fi
+}
+
 # The environment is built once, never under a running `serve`.
 #
 # `uv run` re-syncs whenever it decides the environment is stale, and a sync
 # deletes the interpreter and packages a live `serve` is importing from — which
 # is how a `ppy status` in a terminal killed the app's manager on 2026-09-16. So
-# only three things sync: `ppy serve` as it starts, an explicit `ppy env sync`,
-# and first use on a checkout with no environment. `envsync` refuses while the
-# supervisor lock is held and names the pid. It is standard-library only, so any
-# interpreter runs it; with none at all there is no environment for anything to
-# be running from, and a plain sync is safe.
+# only three things sync: `ppy serve` as it starts (when the environment is out
+# of date or broken), an explicit `ppy env sync`, and first use on a checkout
+# with no environment. `envsync` refuses while the supervisor lock is held and
+# names the pid; it builds into a fresh directory and swaps it in only once the
+# client imports from it, so a refused or interrupted sync leaves the previous
+# environment as it was.
 sync_env() {
-    if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c "" >/dev/null 2>&1; then
-        "$VENV/bin/python" -m papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"}
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -m papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"}
-    else
-        uv sync --frozen --project "$ROOT" ${PYTHON:+--python "$PYTHON"}
-    fi
+    helper papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"} "$@"
 }
+
+# Commands that must work when the environment is refused or broken — above all
+# `ppy supervisor stop`, which is how a person clears a supervisor in the way.
+# They never sync: from the environment when it imports, else from the source
+# tree under uv's interpreter for the pinned series.
+case "${1:-} ${2:-}" in
+    "supervisor stop" | "supervisor status" | "version "* | "doctor "* | "blockers "*)
+        if environment_ok; then
+            exec uv run --no-sync --project "$ROOT" ${PYTHON:+--python "$PYTHON"} python -m papaya_agent_runtime "$@"
+        fi
+        exec uv run --no-project ${PYTHON:+--python "$PYTHON"} python -m papaya_agent_runtime "$@"
+        ;;
+esac
 
 if [ "${1:-}" = "env" ] && [ "${2:-}" = "sync" ]; then
     sync_env
     exit $?
 fi
-if [ "${1:-}" = "serve" ] || [ ! -d "$VENV" ]; then
+
+if [ "${1:-}" = "serve" ]; then
+    # Take over from whatever holds the supervisor lock *before* syncing: a stale
+    # holder is cleared, a live supervisor of this build is adopted (and nothing is
+    # rebuilt under it), one of another build is asked to stop and retired. Only
+    # then can the sync's refusal be about a supervisor this start chose to keep.
+    broken=""
+    environment_ok || broken="--environment-broken"
+    decision=0
+    helper papaya_agent_runtime.takeover --project "$ROOT" $broken || decision=$?
+    case "$decision" in
+        0) sync_env --if-needed --record-failure || exit $? ;;
+        3) ;; # adopted: its environment is this build's, and it is running from it
+        *) exit "$decision" ;;
+    esac
+elif [ ! -d "$VENV" ]; then
     sync_env || exit $?
 fi
 

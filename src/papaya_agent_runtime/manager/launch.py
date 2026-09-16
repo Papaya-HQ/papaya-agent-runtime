@@ -492,6 +492,10 @@ def run_turn(launch: Launch, *, should_stop=None, transcript_path=None) -> TurnR
                 f"{launch.provider} CLI not found on PATH; install it and sign in "
                 "(`ppy doctor` shows harness status)"
             ) from exc
+        from papaya_agent_runtime.supervisor import lifeline
+
+        # A turn shares `serve`'s process group; the lifeline ends it if serve dies abruptly.
+        lifeline.watch_pid(proc.pid)
         stopped = False
         while True:
             try:
@@ -507,6 +511,7 @@ def run_turn(launch: Launch, *, should_stop=None, transcript_path=None) -> TurnR
                         proc.kill()
                         code = proc.wait()
                     break
+        lifeline.release_pid(proc.pid)
         output.seek(0)
         return TurnResult(exit_code=int(code), transcript=output.read(), stopped=stopped)
 
