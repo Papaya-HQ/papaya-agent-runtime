@@ -460,7 +460,11 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
    never re-dispatched. A ticket someone else now holds is closed here as
    `handed_over`, with its branch kept and nothing posted. Once per start, tickets
    handed back because a turn "ended without" doing its job (PAP-213) are offered
-   again, with the earlier worker's branch in the brief's facts.
+   again, with the earlier worker's branch in the brief's facts. A ticket whose hold
+   the client ended as `stalled` counts as working too when its worker's work went on:
+   a live session is watched again, a `worker_done` goes to review, and a
+   `worker_stopped` with its branch ahead of base goes back to its gate. None of those
+   runs a new brief or a new dispatch.
 3. **Looks at every worker it holds**, using `ppy health`'s facts:
    - **Dead session with no done note.** The worker is recorded as `worker_stopped`,
      and the runner's gate steer (`ppy gate run`) takes it from there.
@@ -491,6 +495,26 @@ The round only decides *when* to look and *what facts* a turn gets. It never wri
 message for a worker: every continue, steer, stop and answer comes from a turn. A round
 writes one progress line for each ticket whose state it changed and one `round:` line
 on stderr. A round that finds nothing writes nothing.
+
+### A busy worker is not a stalled job
+
+The client calls a held job stalled after 30 quiet minutes and hands it back 10 minutes
+later. It counts only progress lines and a harness's own output as activity, and a
+manager's worker is neither. So while a held ticket's worker session is live, or its
+gate runs under the supervisor, `serve` sends one progress line at most every
+`health.liveness_minutes` (5). The line comes from what the supervisor already records:
+the tool call running and how long it has run (Claude's `tool_progress` heartbeat), for
+example ``Worker task 9 active: `make verify`, 12 min in, third run``; the worker's
+latest words; or ``Gate running under the supervisor: full suite `make verify`, 8 min``.
+The line goes only to the job's progress log, never to the ticket. If there have been
+no worker events since the last line and no gate is running, nothing is sent, so a
+worker that has really gone quiet still stalls. What quiet means for a repository is
+still the rounds' silence budget. Under `--supervised`, a `job.stalled` for a ticket
+whose worker is active gets that line at once, which clears the stall before its grace
+runs out. If the hold is handed back as stalled anyway, the worker keeps running, the
+ticket's phase is `stalled`, nothing is posted, and the next round takes it back up.
+A terminal `serve` has no protocol to hear `job.stalled` on, so there the regular lines
+are the only defence.
 
 ## Where state lives
 

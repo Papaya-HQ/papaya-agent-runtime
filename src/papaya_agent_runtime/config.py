@@ -167,6 +167,9 @@ class HealthPolicy:
     checkin_after: int = 20
     # Seconds between `ppy serve`'s rounds, when neither the flag nor the env says.
     rounds_interval: int = 300
+    # Minutes, at most, between `ppy serve`'s liveness lines for a held ticket whose
+    # worker or gate is active: the client's stall clock hears the work that way.
+    liveness_minutes: int = 5
 
 
 @dataclass
@@ -257,6 +260,8 @@ class MMConfig:
             raise ConfigError("health.checkin_after must be at least 1")
         if self.health.rounds_interval < 0:
             raise ConfigError("health.rounds_interval must be zero or greater")
+        if self.health.liveness_minutes < 1:
+            raise ConfigError("health.liveness_minutes must be at least 1")
         if self.health.max_stale_stacks < 0:
             raise ConfigError("health.max_stale_stacks must be zero or greater")
         for name in ("input_ceiling_per_task", "input_ceiling_per_review"):

@@ -16,6 +16,9 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    restart, all of them — is offered to the client's loop again, under the
    persisted session id, and the runner resumes it on its own task from its
    recorded phase; a worker already running is watched, never re-dispatched. A
+   ticket whose hold the client ended as `stalled` while its worker's work went on
+   (live, done, or stopped ahead of base) counts as working
+   (:func:`serve.stalled_resume_phase`). A
    ticket Papaya says somebody else holds is closed here as `handed_over`, its
    branch kept and nothing posted. On the first round of a process, tickets
    declined because a turn "ended without" doing its job (PAP-213) are offered
@@ -338,6 +341,10 @@ class GateState:
     running: bool
     #: The newest recorded gate result's one line, or what is known instead.
     line: str
+    #: While running: the gate's command, how long it has run, and whether it is the full suite.
+    command: str = ""
+    elapsed_seconds: float = 0.0
+    full: bool = False
 
 
 def gate_state(worker_task_id: int) -> GateState:
@@ -378,9 +385,15 @@ def gate_state(worker_task_id: int) -> GateState:
         return GateState(False, line)
     if not answer.get("ok") or not answer.get("running"):
         return GateState(False, line)
-    elapsed = health.humanize(int(float(answer.get("elapsed") or 0)))
-    command = answer.get("command") or started.get("command") or "the gate"
-    return GateState(True, f"running under the supervisor for {elapsed}: `{command}`; {line}")
+    seconds = float(answer.get("elapsed") or 0)
+    command = str(answer.get("command") or started.get("command") or "the gate")
+    return GateState(
+        True,
+        f"running under the supervisor for {health.humanize(int(seconds))}: `{command}`; {line}",
+        command=command,
+        elapsed_seconds=seconds,
+        full=bool(started.get("full")),
+    )
 
 
 def record_worker_stopped(task_id: int, detail: str) -> None:
