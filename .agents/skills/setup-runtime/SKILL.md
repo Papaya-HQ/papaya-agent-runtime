@@ -27,6 +27,15 @@ hands authentication steps back to the user.
 4. When at least one harness is authenticated, run `ppy setup`. Offer only the
    harnesses `ppy doctor` reports as usable. Setup collects the driver profile
    and the hard worker ceiling and writes `.ppy/config.toml`.
+
+   Both roles default to the **same** harness, and it is never picked by list
+   position: the one this machine is connected to Papaya with (`ppy papaya status`),
+   or — with no connection yet — whichever one drives. A Claude connection means
+   Claude workers; a Codex connection means Codex workers. Mixing is still allowed,
+   but only when someone asks for it: an explicit answer at the prompt,
+   `ppy config models --worker-provider ...`, or `ppy dispatch --provider ...` for
+   one task. If a configured harness later stops being usable, `ppy readiness` says
+   so and names the sign-in step; do not switch the other harness in for them.
 5. **Connect to Papaya.** `ppy papaya status` says whether this machine is pinned to
    an agent. If it is not, run `ppy papaya connect` yourself — it signs in, pins the
    machine, and installs the harness plugin that carries the `papaya` MCP server and

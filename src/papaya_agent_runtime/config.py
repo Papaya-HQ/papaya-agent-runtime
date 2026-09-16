@@ -36,7 +36,13 @@ class ManagerProfile:
 
 @dataclass
 class WorkerCeiling:
-    provider: str = "codex"
+    # Deliberately the same literal as ``ManagerProfile.provider``: the runtime does
+    # not mix harnesses unless a person asked it to. This used to default to "codex"
+    # while the manager defaulted to "claude", so a config that named no worker
+    # provider silently produced a Claude manager driving Codex workers. An absent
+    # ``worker.provider`` now resolves to the manager's (see ``_from_dict``); this
+    # default only applies when there is no manager table either.
+    provider: str = "claude"
     max_model: str = "gpt-5-codex"
     max_reasoning: str = "medium"
     # Defaults are independent of the ceiling: omitted task choices must resolve
@@ -251,13 +257,18 @@ class MMConfig:
 
 
 def _from_dict(data: dict) -> MMConfig:
+    manager = dict(data.get("manager", {}))
     worker = dict(data.get("worker", {}))
+    # No worker provider means "whoever drives"; the runtime does not mix harnesses
+    # unless a person said so. An existing file that names one explicitly is a
+    # choice and is loaded verbatim.
+    worker.setdefault("provider", manager.get("provider", ManagerProfile.provider))
     # A pre-defaults config inherits its former ceiling explicitly. That keeps old
     # custom-model configs loadable and deterministic without guessing a rank.
     worker.setdefault("default_model", worker.get("max_model", WorkerCeiling.max_model))
     worker.setdefault("default_reasoning", worker.get("max_reasoning", WorkerCeiling.max_reasoning))
     cfg = MMConfig(
-        manager=ManagerProfile(**data.get("manager", {})),
+        manager=ManagerProfile(**manager),
         worker=WorkerCeiling(**worker),
         cost_posture=data.get("cost_posture", "lean"),
         authority=Authority(**data.get("authority", {})),
@@ -294,7 +305,8 @@ def default_worker_provider() -> str:
 
     With no readable config there is no ceiling to read, so this falls back to the
     schema default rather than guessing ``fake``; the dispatch then fails plainly
-    at the ceiling check with "run `ppy setup` first".
+    at the ceiling check with "run `ppy setup` first". That schema default is the
+    manager's own provider, so even the fallback never silently mixes harnesses.
     """
     try:
         return load_config().worker.provider

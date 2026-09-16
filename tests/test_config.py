@@ -61,6 +61,61 @@ max_reasoning = "medium"
     assert loaded.worker.max_concurrent == 2
 
 
+def test_a_config_written_before_the_default_changed_keeps_its_split(tmp_path) -> None:
+    """An explicit `worker.provider` is a choice somebody made; loading never re-derives it.
+
+    Written by the version whose schema defaults were `claude` manager / `codex`
+    worker, so the mixed pair is spelled out in the file and has to survive.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+cost_posture = "lean"
+[manager]
+provider = "claude"
+model = "opus"
+reasoning = "high"
+[worker]
+provider = "codex"
+max_model = "gpt-5-codex"
+max_reasoning = "medium"
+default_model = "gpt-5-codex"
+default_reasoning = "medium"
+max_concurrent = 2
+[authority]
+merge = true
+"""
+    )
+    loaded = load_config(path)
+    assert loaded.manager.provider == "claude"
+    assert loaded.worker.provider == "codex"
+    assert loaded.authority.merge is True
+
+
+def test_a_worker_with_no_provider_uses_the_managers(tmp_path) -> None:
+    """Silence means "whoever drives", never the other harness by schema accident."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+cost_posture = "lean"
+[manager]
+provider = "codex"
+model = "gpt-5-codex"
+reasoning = "high"
+[worker]
+max_model = "gpt-5-codex"
+max_reasoning = "medium"
+"""
+    )
+    assert load_config(path).worker.provider == "codex"
+
+
+def test_the_worker_schema_default_never_differs_from_the_managers() -> None:
+    """The bare schema is the last fallback there is; it must not mix either."""
+    assert WorkerCeiling().provider == ManagerProfile().provider
+    assert MMConfig().worker.provider == MMConfig().manager.provider
+
+
 def test_missing_config_raises(tmp_path) -> None:
     with pytest.raises(ConfigError):
         load_config(tmp_path / "nope.toml")
