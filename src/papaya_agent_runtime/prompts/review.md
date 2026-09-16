@@ -7,6 +7,14 @@ worker stopped mid-gate, or a gate failed), the work is not finished: read the f
 and steer. A worker that stops mid-gate has already been sent back by the runtime to run
 its gate to completion; if you see one here, that did not work, so say why in the steer.
 
+If the facts are a `pr_attention` on a pull request already delivered (conflicts, a branch
+behind its base, red or stuck CI, reviewer threads or comments), the work shipped and its
+pull request needs the worker again. Read the pull request and every thread named, then
+steer the worker with all of it at once: fix on the same branch, never a second pull
+request. Where a reviewer is owed an answer rather than a change, answer on the pull
+request yourself, as this agent. Once it is fixed and pushed, review and deliver as below;
+delivery records the new head.
+
 ## 1. Review the way the skill says
 
 Read `{runtime_dir}/.agents/skills/review-a-worker/SKILL.md` and follow it, in order.
