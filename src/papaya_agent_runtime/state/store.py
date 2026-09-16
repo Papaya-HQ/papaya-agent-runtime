@@ -135,11 +135,28 @@ def set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None
     conn.commit()
 
 
-#: The phases `ppy serve` records while it holds a ticket's lease. `picked_up` is
-#: written the moment the manager takes the work; the other four are how the hold
-#: ended, and they are the client's own vocabulary rather than a second one
-#: invented here — the reason on `Job.stop` is what chooses between them.
-TASK_PHASES = ("picked_up", "released", "handed_back", "stalled", "declined")
+#: The phases `ppy serve` records while it holds a ticket's lease. The first seven
+#: are how far the work has got, in the order a ticket normally passes through
+#: them (`blocked` is a detour off `dispatched` and back). The last four are how
+#: the hold ended, in the client's own vocabulary rather than a second one
+#: invented here — the reason on `Job.stop` chooses between the first three.
+TASK_PHASES = (
+    "picked_up",
+    "briefing",
+    "dispatched",
+    "blocked",
+    "reviewing",
+    "delivering",
+    "reported",
+    "released",
+    "handed_back",
+    "stalled",
+    "declined",
+)
+
+#: The event kind every phase change is also written as, so the order a ticket
+#: went through its phases survives the column only holding the latest one.
+TICKET_PHASE_EVENT = "ticket_phase"
 
 
 def set_task_phase(conn: sqlite3.Connection, task_id: int, phase: str) -> None:

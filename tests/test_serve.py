@@ -1,10 +1,16 @@
-"""`ppy serve`: picking one real ticket up, holding it, and letting it go.
+"""`ppy serve`: picking a ticket up and working it through its phases to the end.
 
 Every test here drives the *client's own loop* with a fake events API, the way
 the client's `tests/test_embed.py` does, rather than a stand-in for it. That is
 the point of the whole design: the cursor, the acquire-or-extend reserve, the
 renewal cadence and the supervised protocol are the client's, and a test that
 faked them would be testing a copy nobody ships.
+
+What *is* faked is everything outside this process: the manager harness (a
+:class:`FakeTurns` that does to the ledger what a real turn's `ppy` calls would),
+Papaya's HTTP API (a :class:`FakePapaya` opener) and the worker pool. The ledger
+itself is real SQLite, and a worker's progress is written the way `ppy progress`
+writes it.
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ import os
 import socket
 import threading
 import time
+import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,25 +31,31 @@ from typing import Any
 import pytest
 
 from conftest import scale
-from papaya_agent_runtime import papaya, papaya_events, readiness, serve, solicit
+from papaya_agent_runtime import papaya, papaya_events, progress, prompts, readiness, serve, solicit
+from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling
+from papaya_agent_runtime.manager.launch import TurnResult, repo_root
 from papaya_agent_runtime.state import store
 from papaya_agent_runtime.state.db import init_db
 
 CONNECTION_ID = "conn-1"
 SUBJECT = "work_item:item-9"
-EVENT = {
-    "id": 101,
-    "kind": "work_item.assigned",
-    "subject": SUBJECT,
-    "agent_id": "agent-1",
-    "workspace_id": "ws-1",
-    # Papaya marks the events it will grant a lease on. Without it the playbook
-    # degrades `act` to `acknowledge`, and nothing is ever reserved.
-    "reservable": True,
-    "payload": {
-        "work_item": {"id": "item-9", "title": "Fix the thing", "repo": "acme/runtime"},
-    },
-}
+
+
+def _assigned(event_id: int, item_id: str, title: str) -> dict[str, Any]:
+    return {
+        "id": event_id,
+        "kind": "work_item.assigned",
+        "subject": f"work_item:{item_id}",
+        "agent_id": "agent-1",
+        "workspace_id": "ws-1",
+        # Papaya marks the events it will grant a lease on. Without it the playbook
+        # degrades `act` to `acknowledge`, and nothing is ever reserved.
+        "reservable": True,
+        "payload": {"work_item": {"id": item_id, "title": title, "repo": "acme/runtime"}},
+    }
+
+
+EVENT = _assigned(101, "item-9", "Fix the thing")
 
 
 # ── the world a listener is built in ────────────────────────────────────────
@@ -330,14 +344,221 @@ async def _until(predicate, *, what: str, timeout: float = 5.0) -> None:
     raise AssertionError(f"timed out waiting for {what}")
 
 
+# ── the world outside the process: the harness, Papaya, the worker ─────────
+
+
+def _which_turn(prompt: str) -> str:
+    """Which of the three turns a prompt is, by its reviewed heading."""
+    for turn in prompts.TURNS:
+        if prompts.load(turn).splitlines()[0] in prompt:
+            return turn
+    raise AssertionError(f"not a turn prompt: {prompt[:80]!r}")
+
+
+@dataclass
+class Turn:
+    """One launch the fake harness received."""
+
+    name: str
+    launch: Any
+
+    @property
+    def prompt(self) -> str:
+        return self.launch.seed_prompt
+
+    @property
+    def run_id(self) -> int:
+        return int(self.launch.env[papaya_events.TICKET_RUN_ENV])
+
+    def item(self) -> str:
+        for line in self.prompt.splitlines():
+            if line.startswith("- work item id: "):
+                return line.removeprefix("- work item id: ")
+        raise AssertionError("the turn was not told which work item it is for")
+
+
+class FakeTurns:
+    """The manager harness. `act` does to the ledger what the turn's `ppy` calls would.
+
+    A turn that should do nothing (a missed turn) simply leaves `act` a no-op for
+    it; the runner has to notice that from the ledger, exactly as it would have to
+    for a real session that ended without dispatching.
+    """
+
+    def __init__(self, act: Callable[[Turn], None] | None = None) -> None:
+        self._act = act or (lambda _turn: None)
+        self.calls: list[Turn] = []
+
+    def __call__(self, launch: Any, *, should_stop) -> TurnResult:
+        turn = Turn(_which_turn(launch.seed_prompt), launch)
+        self.calls.append(turn)
+        self._act(turn)
+        return TurnResult(exit_code=0, transcript=f"{turn.name} transcript #{len(self.calls)}")
+
+    def names(self) -> list[str]:
+        return [turn.name for turn in self.calls]
+
+
+class _Body:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+class FakePapaya:
+    """Papaya's work-item routes, as an `urlopen` stand-in that records every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, Any]] = []
+        self._lock = threading.Lock()
+        #: Bumped by a test to stand for a person replying on the item.
+        self.updated_at = "2026-09-16T10:00:00Z"
+
+    def __call__(self, request, timeout):
+        body = json.loads(request.data) if request.data else None
+        path = urllib.parse.unquote(urllib.parse.urlparse(request.full_url).path)
+        with self._lock:
+            self.calls.append((request.method, path, body))
+        if request.method == "GET":
+            item = path.rstrip("/").rsplit("/", 1)[-1]
+            record = {"id": item, "repo": "acme/runtime", "updated_at": self.updated_at}
+            return _Body(json.dumps(record).encode())
+        return _Body(b"")
+
+    @staticmethod
+    def _item(path: str) -> str:
+        return path.split("/work-items/", 1)[1].split("/", 1)[0]
+
+    def statuses(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return [
+                (self._item(path), body["status"])
+                for method, path, body in self.calls
+                if method == "PATCH"
+            ]
+
+    def comments(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return [
+                (self._item(path), body["body"])
+                for method, path, body in self.calls
+                if method == "POST" and path.endswith("/comments")
+            ]
+
+
+def _manager_config() -> MMConfig:
+    return MMConfig(
+        manager=ManagerProfile(provider="claude", model=None, reasoning=None),
+        worker=WorkerCeiling(provider="codex", max_model="gpt-5-codex", max_reasoning="medium"),
+    )
+
+
+def _runner(turns: FakeTurns, papaya_api: FakePapaya, *, capacity=None) -> serve.TicketRunner:
+    return serve.TicketRunner(
+        run_turn=turns,
+        config=_manager_config,
+        opener=papaya_api,
+        worker_capacity=capacity or (lambda: (0, 2)),
+        poll_seconds=0.01,
+    )
+
+
+def dispatch_worker(run_id: int, *, repo: str = "runtime") -> int:
+    """What `ppy dispatch --run-id` leaves in the ledger: a task and a `dispatched` event."""
+    conn = init_db()
+    try:
+        repo_row = store.get_repo(conn, repo)
+        task_id = store.add_task(
+            conn, run_id=run_id, title="worker", repo_id=int(repo_row["id"]) if repo_row else None
+        )
+        store.update_task_fields(conn, task_id, status="in_progress", branch=f"ppy/task-{task_id}")
+        store.append_event(
+            conn, kind="dispatched", payload={"task_id": task_id}, run_id=run_id, task_id=task_id
+        )
+        return task_id
+    finally:
+        conn.close()
+
+
+def worker_event(task_id: int, kind: str, *, status: str | None = None, **payload: Any) -> None:
+    """A worker (or `ppy answer` / `ppy deliver`) changing the ledger."""
+    conn = init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        if status is not None:
+            store.set_task_status(conn, task_id, status)
+        store.append_event(
+            conn,
+            kind=kind,
+            payload={"task_id": task_id, **payload},
+            run_id=int(task["run_id"]),
+            task_id=task_id,
+        )
+    finally:
+        conn.close()
+
+
+def workers_in(run_id: int) -> list[int]:
+    conn = init_db()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE run_id = ? AND phase IS NULL ORDER BY id", (run_id,)
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
+    finally:
+        conn.close()
+
+
+def ticket_task(event_id: int = 101) -> Any:
+    conn = init_db()
+    try:
+        return papaya_events.find_existing_task(conn, f"papaya:event:{event_id}")
+    finally:
+        conn.close()
+
+
+def history(event_id: int = 101) -> list[str]:
+    task = ticket_task(event_id)
+    if task is None:
+        return []
+    conn = init_db()
+    try:
+        return serve.phase_history(conn, int(task["id"]))
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def progress_lines(monkeypatch) -> list[tuple[str, str, str]]:
+    """Every `job.report_progress` the runner makes, as `(subject, phase, detail)`."""
+    lines: list[tuple[str, str, str]] = []
+    real = serve._report_progress
+
+    def spy(job: Any, phase: str, detail: str) -> None:
+        lines.append((job.subject, phase, detail))
+        real(job, phase, detail)
+
+    monkeypatch.setattr(serve, "_report_progress", spy)
+    return lines
+
+
 # ── terminal mode ───────────────────────────────────────────────────────────
 
 
 def test_it_picks_up_one_assignment_holds_it_and_releases_it_on_stop(
     ppy_home, client_home, ready, registered_repo
 ) -> None:
-    """The whole skeleton in one run: take the ticket, hold the lease, let go."""
+    """The skeleton, still: take the ticket, hold the lease while a worker runs, let go."""
     harness = Harness(FakeEvents([EVENT]))
+    turns = FakeTurns(lambda turn: dispatch_worker(turn.run_id))
     options = serve.parse_args(
         ["--harness", "codex", "--working-directory", str(client_home.work_dir)]
     )
@@ -345,10 +566,19 @@ def test_it_picks_up_one_assignment_holds_it_and_releases_it_on_stop(
 
     async def scenario() -> int:
         runner = asyncio.create_task(
-            serve.run(options, stdout=io.StringIO(), stderr=stderr, extra=harness.extra())
+            serve.run(
+                options,
+                stdout=io.StringIO(),
+                stderr=stderr,
+                extra=harness.extra(),
+                runner=_runner(turns, FakePapaya()),
+            )
         )
         await _until(lambda: harness.jobs, what="the job to start")
         await _until(lambda: harness.events.reserves, what="the subject to be reserved")
+        await _until(
+            lambda: serve.PHASE_DISPATCHED in history(), what="the worker to be dispatched"
+        )
 
         # Held across two renewal ticks: the run is still going and the lease has
         # been extended twice by the session that took it.
@@ -588,10 +818,17 @@ def test_supervised_over_a_pipe_says_hello_asks_and_reports_the_outcome(
         ]
     )
     extra = {**harness.extra(), "stdin_fd": stdin_read}
+    turns = FakeTurns(lambda turn: dispatch_worker(turn.run_id))
 
     async def scenario() -> int:
         runner = asyncio.create_task(
-            serve.run(options, stdout=stdout, stderr=io.StringIO(), extra=extra)
+            serve.run(
+                options,
+                stdout=stdout,
+                stderr=io.StringIO(),
+                extra=extra,
+                runner=_runner(turns, FakePapaya()),
+            )
         )
         await _until(lambda: host.of_type("job.started"), what="the approved job to start")
         await _until(lambda: harness.jobs, what="the runner to take the ticket")
@@ -741,10 +978,483 @@ def test_every_way_a_hold_ends_has_a_phase() -> None:
     assert serve.phase_for_stop(STOP_HANDED_BACK) == serve.PHASE_HANDED_BACK
     assert serve.phase_for_stop(STOP_STALLED) == serve.PHASE_STALLED
     assert serve.phase_for_stop(None) == serve.PHASE_RELEASED
-    assert set(store.TASK_PHASES) == {
+    # The store's vocabulary and the runner's are one list, in the same order.
+    assert store.TASK_PHASES == (
         serve.PHASE_PICKED_UP,
+        serve.PHASE_BRIEFING,
+        serve.PHASE_DISPATCHED,
+        serve.PHASE_BLOCKED,
+        serve.PHASE_REVIEWING,
+        serve.PHASE_DELIVERING,
+        serve.PHASE_REPORTED,
         serve.PHASE_RELEASED,
         serve.PHASE_HANDED_BACK,
         serve.PHASE_STALLED,
         serve.PHASE_DECLINED,
-    }
+    )
+
+
+# ── the phase machine ───────────────────────────────────────────────────────
+
+
+def _serve_ticket(harness: Harness, client_home: ClientHome, runner: serve.TicketRunner):
+    """`serve.run` as a task, with a runner whose outside world is fake."""
+    return asyncio.create_task(
+        serve.run(
+            serve.parse_args(["--working-directory", str(client_home.work_dir)]),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            extra=harness.extra(),
+            runner=runner,
+        )
+    )
+
+
+def _deliver(turn: Turn) -> None:
+    """What `ppy review approve` then `ppy deliver` leave in the ledger."""
+    (worker,) = workers_in(turn.run_id)
+    worker_event(worker, "reviewed", verdict="approved")
+    worker_event(
+        worker,
+        "delivered",
+        status="delivered",
+        branch=f"ppy/task-{worker}",
+        pr_url="https://github.com/acme/runtime/pull/7",
+    )
+
+
+def test_an_assignment_is_briefed_dispatched_watched_reviewed_delivered_and_released(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """The whole ticket, in order, on the task row, with the worker's progress relayed."""
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            dispatch_worker(turn.run_id)
+        elif turn.name == prompts.REVIEW:
+            _deliver(turn)
+
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        # A worker reporting the way `ppy progress` does.
+        progress.record(worker, phase="plan", note="Add the endpoint behind the flag.")
+        progress.record(worker, phase="implement", note="Endpoint and tests written.")
+        await _until(
+            lambda: len([line for line in progress_lines if "Worker task" in line[2]]) == 2,
+            what="both progress reports to be relayed",
+        )
+        worker_event(worker, "worker_done", status="worker_done", summary="done at abc123")
+        await _until(lambda: harness.results, what="the ticket to be released")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert history() == [
+        serve.PHASE_PICKED_UP,
+        serve.PHASE_BRIEFING,
+        serve.PHASE_DISPATCHED,
+        serve.PHASE_REVIEWING,
+        serve.PHASE_DELIVERING,
+        serve.PHASE_REPORTED,
+        serve.PHASE_RELEASED,
+    ]
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    relayed = [detail for _subject, _phase, detail in progress_lines if "Worker task" in detail]
+    assert relayed == [
+        f"Worker task {relayed[0].split()[2]} plan: Add the endpoint behind the flag.",
+        f"Worker task {relayed[0].split()[2]} implement: Endpoint and tests written.",
+    ]
+    assert any("pull/7" in detail for _s, phase, detail in progress_lines if phase == "delivering")
+    # Released as done: not declined, exit 0.
+    assert harness.results[0]["exit_code"] == 0
+    assert harness.events.releases == [(SUBJECT, harness.loop.session_id, False)]
+
+
+def test_the_items_status_follows_the_work_and_nowhere_else(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """`in_progress` on pickup, `review` when the PR is open, `todo` on hand-back. Once each.
+
+    Two tickets in one listener: one goes all the way to a pull request, and one
+    whose brief turn never dispatches is handed back.
+    """
+    delivered, handed_back = "item-9", "item-10"
+
+    def act(turn: Turn) -> None:
+        if turn.item() != delivered:
+            return
+        if turn.name == prompts.BRIEF:
+            dispatch_worker(turn.run_id)
+        elif turn.name == prompts.REVIEW:
+            _deliver(turn)
+
+    papaya_api = FakePapaya()
+    turns = FakeTurns(act)
+    harness = Harness(
+        FakeEvents([EVENT, _assigned(102, handed_back, "Something nobody can place")])
+    )
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(101), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task(101)["run_id"]))
+        worker_event(worker, "worker_done", status="worker_done", summary="done")
+        await _until(lambda: len(harness.results) == 2, what="both tickets to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    statuses = papaya_api.statuses()
+    assert [s for item, s in statuses if item == delivered] == ["in_progress", "review"]
+    assert [s for item, s in statuses if item == handed_back] == ["in_progress", "todo"]
+    assert len(statuses) == len(set(statuses)) == 4
+    # The one mechanical comment, on hand-back only, naming the reason.
+    assert papaya_api.comments() == [
+        (
+            handed_back,
+            "handed back: the manager turn ended 2 times without dispatching a worker; no branch",
+        )
+    ]
+
+
+def test_a_blocked_question_runs_the_answer_turn_and_returns_to_dispatched(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            dispatch_worker(turn.run_id)
+        elif turn.name == prompts.ANSWER:
+            (worker,) = workers_in(turn.run_id)
+            # `ppy answer`: the answer event, and the worker resumed.
+            worker_event(worker, "answer", status="in_progress", answer="Use the v2 route.")
+
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(
+            worker, "question", status="blocked", question="Should this use the v1 or v2 route?"
+        )
+        await _until(
+            lambda: history()[-2:] == [serve.PHASE_BLOCKED, serve.PHASE_DISPATCHED],
+            what="the ticket to go blocked and come back",
+        )
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.ANSWER]
+    assert "Should this use the v1 or v2 route?" in turns.calls[1].prompt
+    assert history()[-3:] == [serve.PHASE_BLOCKED, serve.PHASE_DISPATCHED, serve.PHASE_RELEASED]
+
+
+def test_a_turn_that_asks_a_person_holds_blocked_until_the_item_changes(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """Layer five: post the candidates, record the wait, and resume on the reply."""
+    from papaya_agent_runtime import board
+
+    def act(turn: Turn) -> None:
+        if turn.name != prompts.BRIEF:
+            return
+        if len(turns.calls) == 1:
+            # `ppy todo add "..." --task <ticket> --blocked-on user`, after posting.
+            board.add(
+                "Is this the desktop app or the web app?",
+                task_id=int(ticket_task()["id"]),
+                blocked_on="user",
+            )
+        else:
+            dispatch_worker(turn.run_id)
+
+    papaya_api = FakePapaya()
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
+        await _until(
+            lambda: ("item-9", "blocked") in papaya_api.statuses(), what="the wait on a person"
+        )
+        await asyncio.sleep(0.1)
+        assert turns.names() == [prompts.BRIEF], "the turn ran again with nobody having replied"
+        assert history()[-1] == serve.PHASE_BLOCKED
+
+        papaya_api.updated_at = "2026-09-16T11:00:00Z"  # someone answered on the item
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.BRIEF]
+    assert [status for _item, status in papaya_api.statuses()] == [
+        "in_progress",
+        "blocked",
+        "in_progress",
+    ]
+    assert history()[:5] == [
+        serve.PHASE_PICKED_UP,
+        serve.PHASE_BRIEFING,
+        serve.PHASE_BLOCKED,
+        serve.PHASE_BRIEFING,
+        serve.PHASE_DISPATCHED,
+    ]
+    assert serve.open_person_wait(int(ticket_task()["id"])) is None
+
+
+def test_a_brief_turn_that_dispatches_nothing_is_retried_once_then_declined(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    turns = FakeTurns()  # every turn ends without doing anything
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
+        await _until(lambda: harness.results, what="the ticket to be handed back")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.BRIEF]
+    # The retry was given the tail of the first attempt's transcript.
+    assert "brief transcript #1" in turns.calls[1].prompt
+    assert "brief transcript #1" not in turns.calls[0].prompt
+
+    result = harness.results[0]
+    assert result["exit_code"] == 75
+    assert "without dispatching a worker" in result["output"]
+    assert harness.events.releases == [(SUBJECT, harness.loop.session_id, True)]
+
+    task = ticket_task()
+    assert store.task_phase(init_db(), int(task["id"])) == serve.PHASE_DECLINED
+    # No second task row: the ticket's own, and no worker beside it.
+    assert init_db().execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_a_full_worker_pool_keeps_the_ticket_dispatched_and_held(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """Capacity refuses a dispatch before any row exists; that is a wait, not a miss."""
+    turns = FakeTurns()  # dispatch is refused: the pool is full
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(
+            harness, client_home, _runner(turns, FakePapaya(), capacity=lambda: (2, 2))
+        )
+        await _until(
+            lambda: any("Waiting for a worker slot" in line[2] for line in progress_lines),
+            what="the wait for a slot to be reported",
+        )
+        await _until(lambda: harness.events.reserves, what="the subject to be reserved")
+        harness.ticks.tick()
+        await _until(lambda: harness.ticks.count >= 1, what="the first renewal")
+        harness.ticks.tick()
+        await _until(lambda: len(harness.events.reserves) >= 3, what="two renewals")
+
+        # Two renewals later: still held, still `dispatched`, never handed back.
+        assert not harness.results
+        assert history()[-1] == serve.PHASE_DISPATCHED
+        assert turns.names() == [prompts.BRIEF]
+        assert harness.events.releases == []
+
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+    assert harness.results[0]["exit_code"] == 0
+    assert harness.events.releases == [(SUBJECT, harness.loop.session_id, False)]
+    assert "Waiting for a worker slot: 2 of 2 workers are busy." in [
+        detail for _s, phase, detail in progress_lines if phase == serve.PHASE_DISPATCHED
+    ]
+
+
+def test_a_ticket_found_in_reviewing_runs_the_review_turn_without_a_new_pickup(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """A restarted `serve` goes back to where the ticket was, not to the beginning."""
+    conn = init_db()
+    event = papaya_events.PapayaEvent(
+        id="101",
+        kind="work_item.assigned",
+        subject=SUBJECT,
+        payload=EVENT["payload"],
+        work_item_id="item-9",
+    )
+    run_id = store.create_run(conn, "Fix the thing")
+    task_id = store.add_task(conn, run_id=run_id, title="Fix the thing")
+    papaya_events.record_task(conn, task_id, event)
+    for phase in (
+        serve.PHASE_PICKED_UP,
+        serve.PHASE_BRIEFING,
+        serve.PHASE_DISPATCHED,
+        serve.PHASE_REVIEWING,
+    ):
+        serve.record_phase(conn, task_id, phase)
+    conn.close()
+    worker = dispatch_worker(run_id)
+    worker_event(worker, "worker_done", status="worker_done", summary="done")
+
+    papaya_api = FakePapaya()
+    turns = FakeTurns(lambda turn: _deliver(turn) if turn.name == prompts.REVIEW else None)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
+        await _until(lambda: harness.results, what="the resumed ticket to finish")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.REVIEW]
+    phases = history()
+    assert phases.count(serve.PHASE_PICKED_UP) == 1, "the ticket was picked up a second time"
+    assert phases[4:] == [
+        serve.PHASE_REVIEWING,
+        serve.PHASE_DELIVERING,
+        serve.PHASE_REPORTED,
+        serve.PHASE_RELEASED,
+    ]
+    # Nothing was picked up, so nothing was moved to `in_progress` again.
+    assert [status for _item, status in papaya_api.statuses()] == ["review"]
+
+
+def test_manager_turns_get_the_jobs_environment_and_only_the_runtime_directory(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    turns = FakeTurns(lambda turn: dispatch_worker(turn.run_id))
+    harness = Harness(FakeEvents([EVENT]))
+    job_env: dict[str, str] = {}
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
+        await _until(lambda: turns.calls, what="the brief turn to launch")
+        job_env.update(harness.jobs[0].env)
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    runtime_dir = str(Path(repo_root()).resolve())
+    launch = turns.calls[0].launch
+    assert launch.cwd == runtime_dir
+    # The client's job environment, as a harness session would have been given it.
+    for key in (
+        "PAPAYA_CONTEXT_FILE",
+        "PAPAYA_EVENT_FILE",
+        "PAPAYA_DECLINE_FILE",
+        "PAPAYA_JOB_ACTIVITY_FILE",
+        "PAPAYA_AGENT_TOKEN",
+        "PAPAYA_WORKSPACE_ID",
+        "PAPAYA_API_URL",
+        "PAPAYA_SUBJECT",
+    ):
+        assert launch.env[key] == job_env[key], key
+    if "PAPAYA_PLUGIN_DIR" in job_env:
+        assert launch.env["PAPAYA_PLUGIN_DIR"] == job_env["PAPAYA_PLUGIN_DIR"]
+    # The write boundary is the runtime directory and nothing else.
+    assert json.loads(launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [runtime_dir]
+    assert launch.env["PAPAYA_WORKING_DIRECTORY"] == runtime_dir
+    assert launch.env[papaya_events.TICKET_RUN_ENV] == str(ticket_task()["run_id"])
+    # Launched through `ppy start`'s own builder, headless.
+    assert launch.argv[:2] == ["claude", "-p"]
+    assert launch.argv[2] == launch.seed_prompt
+    assert f"{runtime_dir}/.agents/skills/brief-a-worker/SKILL.md" in launch.seed_prompt
+
+
+def test_a_dispatch_from_a_manager_turn_defaults_into_the_tickets_run(monkeypatch) -> None:
+    """The link from worker to ticket does not rest on a turn remembering `--run-id`."""
+    from papaya_agent_runtime import cli
+
+    monkeypatch.delenv(papaya_events.TICKET_RUN_ENV, raising=False)
+    assert cli._ticket_run_id() is None
+    monkeypatch.setenv(papaya_events.TICKET_RUN_ENV, "42")
+    assert cli._ticket_run_id() == 42
+    monkeypatch.setenv(papaya_events.TICKET_RUN_ENV, "not-a-run")
+    assert cli._ticket_run_id() is None
+
+
+# ── the prompts ─────────────────────────────────────────────────────────────
+
+
+def test_the_turn_prompts_instruct_and_never_template_a_brief() -> None:
+    """Reviewed text that points at the skills; no generated Goals, done or brief."""
+    for turn in prompts.TURNS:
+        text = prompts.load(turn)
+        assert prompts.BRIEF_SKILL in text, f"{turn} does not name brief-a-worker"
+        assert prompts.REVIEW_SKILL in text, f"{turn} does not name review-a-worker"
+        # The only placeholder is where the runtime lives.
+        assert text.count("{") == text.count(prompts.RUNTIME_DIR)
+        # A brief's own sections are the turn's to write, so none may appear here.
+        headings = {
+            line.lstrip("#").strip().lower() for line in text.splitlines() if line.startswith("#")
+        }
+        generated = {
+            "goals",
+            "intent",
+            "in scope",
+            "out of scope",
+            "acceptance criteria",
+            "definition of done",
+            "verification",
+        }
+        assert not headings & generated, (turn, headings & generated)
+        assert "acceptance criteria:" not in text.lower()
+
+
+def test_the_brief_prompt_names_the_six_repository_layers_in_order_and_forbids_guessing() -> None:
+    text = prompts.load(prompts.BRIEF)
+    layers = [
+        "**The item names it.**",
+        "**You already know.**",
+        "**The code says.** `ppy repo locate",
+        "**Nothing registered fits.** `ppy repo discover`",
+        "**Still unsure.**",
+        "**Once placed.**",
+    ]
+    positions = [text.index(layer) for layer in layers]
+    assert positions == sorted(positions)
+    for number, layer in enumerate(layers, start=1):
+        assert f"{number}. {layer}" in text
+    assert "Never guess." in text
+    assert "ppy dispatch --repo <repo> --brief <path> --strict" in text
+
+
+def test_a_rendered_prompt_resolves_the_skills_and_appends_only_facts(tmp_path) -> None:
+    rendered = prompts.render(
+        prompts.ANSWER,
+        runtime_dir=tmp_path,
+        facts={
+            "work item id": "item-9",
+            "repository": None,
+            "the worker's question": "Which route?\nv1 or v2?",
+        },
+    )
+    assert prompts.RUNTIME_DIR not in rendered
+    assert f"{tmp_path.resolve()}/.agents/skills/review-a-worker/SKILL.md" in rendered
+    tail = rendered.split("## This ticket", 1)[1]
+    assert "- work item id: item-9" in tail
+    assert "repository" not in tail
+    assert "```\nWhich route?\nv1 or v2?\n```" in tail

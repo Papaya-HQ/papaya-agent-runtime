@@ -265,6 +265,63 @@ def test_onboarding_writes_notes_and_leaves_hand_written_ones_alone(registered) 
     assert second.count(solicit.NOTES_MARKER) == 1
 
 
+def test_onboarding_fills_what_it_is_from_the_readme_and_the_layout(registered) -> None:
+    """The paragraph a manager reads to decide whether a ticket belongs here.
+
+    Placing a ticket by what the agent already knows is the second of the brief
+    turn's six ways, and the half of that knowledge that lives on disk is this.
+    """
+    from papaya_agent_runtime import memory
+
+    (registered / "README.md").write_text(
+        "# App\n"
+        "\n"
+        "[![ci](https://example/badge.svg)](https://example)\n"
+        "\n"
+        "The Papaya desktop app: the Electron shell, the hover cards and the\n"
+        "connection panel people use to pair a machine.\n"
+        "\n"
+        "## Getting started\n"
+        "\n"
+        "Run the thing.\n",
+        encoding="utf-8",
+    )
+    for directory in ("src", "electron", "node_modules", ".github"):
+        (registered / directory).mkdir()
+    # A repository registered through `repo add` has the seeded template, whose
+    # "What it is" is a placeholder nobody wrote.
+    memory.seed_repo_memory("app", origin="https://github.com/acme/app.git", default_branch="main")
+
+    report, path = solicit.onboard("app")
+
+    assert report.purpose == (
+        "The Papaya desktop app: the Electron shell, the hover cards and the "
+        "connection panel people use to pair a machine."
+    )
+    assert report.layout == ["electron", "src"]
+    notes = path.read_text(encoding="utf-8")
+    assert "## What it is" in notes
+    assert "Top level: `electron/`, `src/`" in notes
+    # The placeholder is filled rather than left beside the real answer.
+    assert solicit.PURPOSE_PLACEHOLDER not in notes
+    assert notes.count(report.purpose) == 2
+    assert not any("README paragraph" in unknown for unknown in report.unknowns)
+
+
+def test_onboarding_without_a_readme_says_what_it_is_is_unknown(registered) -> None:
+    from papaya_agent_runtime import memory
+
+    memory.seed_repo_memory("app", origin="https://github.com/acme/app.git", default_branch="main")
+    (registered / "README.md").write_text("# App\n\n## Usage\n\n- a list, not prose\n")
+
+    report, path = solicit.onboard("app")
+
+    assert report.purpose == ""
+    assert any("README paragraph" in unknown for unknown in report.unknowns)
+    # A placeholder with no answer to put in it stays, so a person can see the gap.
+    assert solicit.PURPOSE_PLACEHOLDER in path.read_text(encoding="utf-8")
+
+
 # ── Registering on demand ───────────────────────────────────────────────────
 #
 # Work that names a repository must not stop because nobody registered it yet: an

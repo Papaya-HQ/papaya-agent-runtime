@@ -28,6 +28,10 @@ from papaya_agent_runtime.state import store
 
 PAPAYA_EVENT_KEY = "papaya_event_key"
 PAPAYA_EVENT_METADATA = "papaya_event_metadata"
+#: Exported by `ppy serve` into a manager turn: the run of the ticket it holds.
+#: `ppy dispatch` files a worker under it when no `--run-id` is given, and a
+#: worker in that run is how the runner knows the ticket was dispatched.
+TICKET_RUN_ENV = "PPY_TICKET_RUN_ID"
 _REPOSITORY_KEYS = ("repo", "repository", "repository_url", "repository_path")
 _REPOSITORY_VALUE_KEYS = ("url", "path", "slug", "name")
 _PAPAYA_API_ENV = "PAPAYA_API_URL"
@@ -157,29 +161,36 @@ def _papaya_request(
     url: str,
     token: str,
     *,
+    method: str = "GET",
+    body: Mapping[str, Any] | None = None,
+    what: str = "read",
     opener=urllib.request.urlopen,
 ) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        method="GET",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-    )
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    data: bytes | None = None
+    if body is not None:
+        data = json.dumps(dict(body)).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, method=method, headers=headers, data=data)
     try:
         with opener(request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            # A write may legitimately answer 204 with no body; a read may not,
+            # and the caller is the one that knows which it asked for.
+            raw = response.read().decode("utf-8")
+            payload = json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as exc:
         raise PapayaEventError(
-            f"Papaya refused the work-item read (HTTP {exc.code}); "
+            f"Papaya refused the work-item {what} (HTTP {exc.code}); "
             "refresh this agent connection and retry"
         ) from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         raise PapayaEventError(
-            f"Papaya could not be reached to read the work item: {_one_line(exc)}; retry"
+            f"Papaya could not be reached to {what} the work item: {_one_line(exc)}; retry"
         ) from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PapayaEventError("Papaya returned an unreadable work item; retry") from exc
+        raise PapayaEventError(f"Papaya returned an unreadable work-item {what}; retry") from exc
     if not isinstance(payload, dict):
-        raise PapayaEventError("Papaya returned an invalid work item; retry")
+        raise PapayaEventError(f"Papaya returned an invalid work-item {what}; retry")
     return payload
 
 
@@ -202,7 +213,83 @@ def hydrate_work_item(
     token = _clean(env.get(_PAPAYA_TOKEN_ENV))
     if url is None or token is None:
         return event
-    return _with_work_item(event, _papaya_request(url, token, opener=opener))
+    return _with_work_item(event, _papaya_request(url, token, what="read", opener=opener))
+
+
+#: The work-item statuses `ppy serve` sets while it holds a ticket. Status is
+#: *state*, not judgment: each of these follows mechanically from where the work
+#: has got to, and anything said in words on the item is a manager turn's to say.
+STATUS_TODO = "todo"
+STATUS_IN_PROGRESS = "in_progress"
+STATUS_REVIEW = "review"
+STATUS_BLOCKED = "blocked"
+WORK_ITEM_STATUSES = (STATUS_TODO, STATUS_IN_PROGRESS, STATUS_REVIEW, STATUS_BLOCKED)
+
+
+def set_work_item_status(
+    event: PapayaEvent,
+    status: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> bool:
+    """Move this event's work item to ``status``. Returns whether a call was made.
+
+    ``False`` means there was nothing to call with — no API url, no workspace, no
+    token, no work item — which is the ordinary state of a machine that is not
+    connected and never an error. A route that *is* reachable and refuses raises
+    :class:`PapayaEventError`, because that is a fact the caller should report.
+    """
+    if status not in WORK_ITEM_STATUSES:
+        raise PapayaEventError(
+            f"status must be one of {', '.join(WORK_ITEM_STATUSES)}, not {status!r}"
+        )
+    env = os.environ if environ is None else environ
+    url = _papaya_work_item_url(event, env)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return False
+    _papaya_request(
+        url,
+        token,
+        method="PATCH",
+        body={"status": status},
+        what="status change",
+        opener=opener,
+    )
+    return True
+
+
+def post_work_item_comment(
+    event: PapayaEvent,
+    body: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> bool:
+    """Post one comment on this event's work item. Returns whether a call was made.
+
+    For the runner's single mechanical sentence only — the hand-back line. What a
+    manager has to *say* about a ticket is said by a manager turn through MCP.
+    Same connection rules as :func:`set_work_item_status`.
+    """
+    text = str(body or "").strip()
+    if not text:
+        raise PapayaEventError("a comment needs a body")
+    env = os.environ if environ is None else environ
+    url = _papaya_work_item_url(event, env)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return False
+    _papaya_request(
+        f"{url}/comments",
+        token,
+        method="POST",
+        body={"body": text},
+        what="comment",
+        opener=opener,
+    )
+    return True
 
 
 def _repository_value(value: object) -> str | None:
@@ -216,7 +303,15 @@ def _repository_value(value: object) -> str | None:
 
 
 def repository_spec(event: PapayaEvent) -> str:
-    """Return the explicitly named repository, then the listener cwd fallback."""
+    """Return the repository this event names, or refuse.
+
+    There is deliberately no fallback to the listener's working directory. That
+    directory is the *runtime's own checkout* — the one place a ticket can never
+    belong — and on the first real run (2026-09-16, PAP-217, a desktop-app ticket)
+    the fallback silently placed the ticket there. An event that names nothing is
+    a question for the manager's brief turn, which has six ordered ways to answer
+    it and a person to ask when none of them do; a mechanical guess is not one.
+    """
     item = _work_item(event)
     metadata = item.get("metadata")
     containers = (event.payload, item, metadata if isinstance(metadata, Mapping) else {})
@@ -225,8 +320,6 @@ def repository_spec(event: PapayaEvent) -> str:
             found = _repository_value(container.get(key))
             if found:
                 return found
-    if event.working_directory:
-        return event.working_directory
     raise PapayaEventError(
         "event does not name a repository; add repo, repository, repository_url, "
         "or repository_path to the work item"
@@ -296,6 +389,12 @@ def record_task(conn: sqlite3.Connection, task_id: int, event: PapayaEvent) -> N
 __all__ = [
     "PAPAYA_EVENT_KEY",
     "PAPAYA_EVENT_METADATA",
+    "STATUS_BLOCKED",
+    "STATUS_IN_PROGRESS",
+    "STATUS_REVIEW",
+    "STATUS_TODO",
+    "TICKET_RUN_ENV",
+    "WORK_ITEM_STATUSES",
     "PapayaEvent",
     "PapayaEventError",
     "ensure_repository",
@@ -304,6 +403,8 @@ __all__ = [
     "find_existing_task",
     "hydrate_work_item",
     "parse_event",
+    "post_work_item_comment",
     "record_task",
     "repository_spec",
+    "set_work_item_status",
 ]

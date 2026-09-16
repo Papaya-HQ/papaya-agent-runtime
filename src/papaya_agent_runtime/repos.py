@@ -267,6 +267,98 @@ def list_repos() -> list[dict]:
     return [dict(r) for r in store.list_repos(conn)]
 
 
+# ── Where does a ticket's language actually live? ────────────────────────────
+
+#: How many files to name per repository. The point of a hit list is to be read
+#: in one glance by whoever is placing a ticket, not to be complete.
+MAX_LOCATE_FILES = 8
+
+
+@dataclass
+class LocateHit:
+    """One registered repository's answer to "does this language occur here?"."""
+
+    repo: str
+    local_path: str
+    #: Matching file paths, most matches first, capped at :data:`MAX_LOCATE_FILES`.
+    files: list[str] = field(default_factory=list)
+    #: How many files matched in all, before the cap on `files`.
+    file_count: int = 0
+    matches: int = 0
+    #: Why this repository could not be searched, when it could not be.
+    note: str = ""
+
+    @property
+    def found(self) -> bool:
+        return self.matches > 0
+
+
+def locate(terms: list[str]) -> list[LocateHit]:
+    """Which registered clones contain these strings, and in which files.
+
+    A mechanical primitive and nothing more: it greps, counts and sorts. Whether
+    a hit means the ticket belongs to that repository is a judgment, and it
+    belongs to the manager turn that asked — this only stops the turn guessing
+    from a repository name when the code could simply have been read.
+
+    Every term must occur somewhere in the file for it to count, so two words
+    from one ticket narrow the answer instead of widening it. Search is literal
+    and case-insensitive: ticket prose quotes identifiers and UI strings, it does
+    not write regular expressions.
+    """
+    wanted = [term for term in (t.strip() for t in terms) if term]
+    if not wanted:
+        raise RepoError("locate needs at least one term to search for")
+    hits: list[LocateHit] = []
+    for row in list_repos():
+        name = str(row.get("name") or "")
+        path = str(row.get("local_path") or "")
+        hit = LocateHit(repo=name, local_path=path)
+        if not path or not Path(path).is_dir():
+            hit.note = f"the base clone is missing at {path or '(unrecorded)'}; `ppy repo sync`"
+            hits.append(hit)
+            continue
+        counts = _grep_counts(path, wanted)
+        hit.matches = sum(counts.values())
+        hit.file_count = len(counts)
+        hit.files = sorted(counts, key=lambda f: (-counts[f], f))[:MAX_LOCATE_FILES]
+        hits.append(hit)
+    # Most matches first, then by name, so two repositories that both hit are in
+    # a stable order and the strongest candidate is the one read first.
+    hits.sort(key=lambda h: (-h.matches, h.repo))
+    return hits
+
+
+def _grep_counts(path: str, terms: list[str]) -> dict[str, int]:
+    """Per-file match counts for files containing *every* term, via `git grep`.
+
+    Tracked files only, which is the point of searching a base clone: build
+    output and vendored dependencies are not what a ticket is about. Each term is
+    counted separately and the file's total is their sum; a file missing any term
+    is dropped, which is how several terms narrow rather than widen.
+    """
+    per_term: list[dict[str, int]] = []
+    for term in terms:
+        rc, out, _err = _git_ok(["grep", "-I", "-i", "-c", "-F", "-e", term], cwd=path)
+        # 1 is `git grep`'s "no match", which is an answer, not a failure. Any
+        # other non-zero (not a repository, a broken index) leaves this term
+        # empty, and the intersection below then reports the repository as cold.
+        if rc not in (0, 1):
+            return {}
+        counts: dict[str, int] = {}
+        for line in out.splitlines():
+            file, _, count = line.rpartition(":")
+            if file and count.isdigit():
+                counts[file] = int(count)
+        per_term.append(counts)
+    if not per_term:
+        return {}
+    common = set(per_term[0])
+    for counts in per_term[1:]:
+        common &= set(counts)
+    return {file: sum(counts[file] for counts in per_term) for file in common}
+
+
 @dataclass
 class ProvisionSettings:
     """What a repo wants done to a fresh worktree before its worker starts."""

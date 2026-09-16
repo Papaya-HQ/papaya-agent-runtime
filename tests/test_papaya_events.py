@@ -177,6 +177,106 @@ def test_repository_spec_accepts_explicit_string_and_mapping_forms(payload, expe
     assert papaya_events.repository_spec(event) == expected
 
 
+def test_repository_spec_never_falls_back_to_the_listener_working_directory(tmp_path) -> None:
+    """The listener's directory is the runtime's own checkout: never a ticket's home.
+
+    On 2026-09-16 (PAP-217) a desktop-app ticket that named no repository was
+    silently placed in the runtime checkout through this fallback. An item that
+    names nothing is now an error here, and a question for the brief turn.
+    """
+    runtime_checkout = tmp_path / "papaya-agent-runtime"
+    runtime_checkout.mkdir()
+    event = papaya_events.PapayaEvent(
+        "1",
+        "work_item.assigned",
+        "work_item:1",
+        {"work_item": {"id": "1", "title": "Hover card clips on the desktop app"}},
+        work_item_id="1",
+        working_directory=str(runtime_checkout),
+    )
+
+    with pytest.raises(papaya_events.PapayaEventError, match="does not name a repository"):
+        papaya_events.repository_spec(event)
+
+
+_CONNECTED = {
+    "PAPAYA_API_URL": "https://papaya.example",
+    "PAPAYA_AGENT_TOKEN": "secret-token",
+    "PAPAYA_WORKSPACE_ID": "ws-1",
+}
+
+
+class _Answer:
+    """A response with no body, which is what a write may legitimately return."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b""
+
+
+def test_set_work_item_status_patches_the_item_it_reads() -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        return _Answer()
+
+    assert papaya_events.set_work_item_status(
+        _event(), "in_progress", environ=_CONNECTED, opener=open_request
+    )
+
+    (request,) = calls
+    assert request.method == "PATCH"
+    assert request.full_url.endswith("/api/v1/workspaces/ws-1/work-items/item-9")
+    assert json.loads(request.data) == {"status": "in_progress"}
+    assert request.headers["Authorization"] == "Bearer secret-token"
+
+
+def test_set_work_item_status_refuses_a_status_outside_the_runners_four() -> None:
+    with pytest.raises(papaya_events.PapayaEventError, match="status must be one of"):
+        papaya_events.set_work_item_status(_event(), "done", environ=_CONNECTED)
+
+
+def test_status_and_comment_without_connection_facts_make_no_call() -> None:
+    def never(_request, timeout):  # pragma: no cover - the assertion is that it is not called
+        raise AssertionError("no call should be made without connection facts")
+
+    assert papaya_events.set_work_item_status(_event(), "todo", environ={}, opener=never) is False
+    assert papaya_events.post_work_item_comment(_event(), "hi", environ={}, opener=never) is False
+
+
+def test_a_refused_status_change_is_one_actionable_line() -> None:
+    def refused(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 409, "closed", {}, None)
+
+    with pytest.raises(papaya_events.PapayaEventError) as raised:
+        papaya_events.set_work_item_status(_event(), "review", environ=_CONNECTED, opener=refused)
+    assert "status change" in str(raised.value)
+    assert "HTTP 409" in str(raised.value)
+
+
+def test_post_work_item_comment_posts_one_body_to_the_items_comments() -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        return _Answer()
+
+    papaya_events.post_work_item_comment(
+        _event(), "handed back: no worker; no branch", environ=_CONNECTED, opener=open_request
+    )
+
+    (request,) = calls
+    assert request.method == "POST"
+    assert request.full_url.endswith("/work-items/item-9/comments")
+    assert json.loads(request.data) == {"body": "handed back: no worker; no branch"}
+
+
 def test_ensure_repository_delegates_to_existing_boundary_without_override(monkeypatch) -> None:
     calls = []
     ensured = solicit.Ensured("runtime", "acme/runtime", True, True, "/notes")

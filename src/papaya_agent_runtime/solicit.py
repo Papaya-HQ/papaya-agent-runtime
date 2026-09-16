@@ -208,6 +208,13 @@ class Onboarding:
     local_path: str
     origin: str = ""
     default_branch: str = ""
+    #: One paragraph of what this repository covers, read from its README. The
+    #: manager's second way of placing a ticket is "the agent already knows", and
+    #: this is the half of that which lives on disk rather than in Papaya.
+    purpose: str = ""
+    #: The top-level directories, which say what the repository is made of when
+    #: the README does not say what it is for.
+    layout: list[str] = field(default_factory=list)
     stacks: list[str] = field(default_factory=list)
     commands: dict[str, str] = field(default_factory=dict)
     ci_commands: list[str] = field(default_factory=list)
@@ -280,6 +287,9 @@ def inspect(name: str) -> Onboarding:
         report.unknowns.append(f"the base clone is missing at {root}; `ppy repo sync {name}` first")
         return report
 
+    report.purpose = _readme_paragraph(root)
+    report.layout = _top_level_layout(root)
+
     for marker, stack in _STACK_MARKERS.items():
         if (root / marker).exists():
             report.stacks.append(stack)
@@ -293,6 +303,11 @@ def inspect(name: str) -> Onboarding:
     report.contracts = [f for f in _CONTRACT_FILES if (root / f).exists()]
     report.design = [m for m in _DESIGN_MARKERS if (root / m).exists()]
 
+    if not report.purpose:
+        report.unknowns.append(
+            "no README paragraph says what this repository is for, so a ticket cannot be "
+            "placed here by subject; write one into the notes by hand"
+        )
     if not report.stacks:
         report.unknowns.append("no recognised build manifest, so the stack is a guess")
     if not report.commands:
@@ -304,6 +319,82 @@ def inspect(name: str) -> Onboarding:
             "no AGENTS.md/CLAUDE.md/CONTRIBUTING.md, so conventions are unstated"
         )
     return report
+
+
+#: Where a repository says what it is, in the order people write it.
+_README_FILES = ("README.md", "README.rst", "README.txt", "README", "docs/README.md")
+
+#: Directories that say nothing about what a repository covers.
+_DULL_DIRECTORIES = {
+    ".git",
+    ".github",
+    ".idea",
+    ".venv",
+    ".vscode",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+}
+
+#: How long the recorded purpose may run. A paragraph the manager reads to place
+#: a ticket, not the README itself.
+MAX_PURPOSE_CHARS = 600
+
+#: Line openings that are README structure — headings, quotes, tables, rules,
+#: comments, badges, images and lists — rather than the prose that says what it is.
+_NOT_PROSE = ("#", ">", "|", "---", "===", "<!--", "[!", "![", "- ", "* ", "+ ", "<")
+
+
+def _readme_paragraph(root: Path) -> str:
+    """The first real paragraph of the README, as one line.
+
+    "Real" means the first block of prose that is not the title, a badge row, a
+    table of contents entry or a fenced block — the sentence a person wrote to
+    answer "what is this". Everything structural is skipped rather than cleaned
+    up, because a paragraph that needs cleaning up is not the one worth keeping.
+    """
+    for candidate in _README_FILES:
+        path = root / candidate
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        paragraph: list[str] = []
+        fenced = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                fenced = not fenced
+                continue
+            if fenced:
+                continue
+            if not stripped:
+                if paragraph:
+                    break
+                continue
+            if stripped.startswith(_NOT_PROSE):
+                if paragraph:
+                    break
+                continue
+            paragraph.append(stripped)
+        prose = " ".join(paragraph).strip()
+        if prose:
+            return prose[:MAX_PURPOSE_CHARS].rstrip()
+    return ""
+
+
+def _top_level_layout(root: Path) -> list[str]:
+    """The repository's top-level directories, alphabetically."""
+    try:
+        entries = sorted(p.name for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    return [name for name in entries if name not in _DULL_DIRECTORIES and not name.startswith(".")]
 
 
 def _node_scripts(root: Path) -> dict[str, str]:
@@ -414,6 +505,19 @@ def render_notes(report: Onboarding) -> str:
         lines.append(f"- Stack: {', '.join(report.stacks)}")
     lines.append("")
 
+    # First, because it is what a manager placing a ticket reads: which of the
+    # registered repositories does this work item's subject belong to?
+    lines.append("## What it is")
+    lines.append("")
+    if report.purpose:
+        lines.append(report.purpose)
+    else:
+        lines.append("Not stated in a README; say what this repository covers here by hand.")
+    if report.layout:
+        lines.append("")
+        lines.append(f"Top level: {', '.join(f'`{name}/`' for name in report.layout)}")
+    lines.append("")
+
     lines.append("## How it builds and verifies")
     lines.append("")
     if report.commands:
@@ -476,6 +580,9 @@ def render_notes(report: Onboarding) -> str:
 NOTES_MARKER = "<!-- ppy:onboarding -->"
 NOTES_END = "<!-- /ppy:onboarding -->"
 
+#: The line `memory.seed_repo_memory` puts under "What it is" before anyone knows.
+PURPOSE_PLACEHOLDER = "- One-paragraph purpose and high-level architecture."
+
 
 def write_notes(report: Onboarding) -> Path:
     """Put an onboarding into the repository's durable notes, keeping what people wrote.
@@ -497,6 +604,11 @@ def write_notes(report: Onboarding) -> Path:
         updated = f"{head}{block}{tail.lstrip(os.linesep)}"
     else:
         updated = f"{block}\n{existing}" if existing.strip() else block
+    if report.purpose:
+        # The seeded template's "What it is" is a placeholder nobody wrote. Filling
+        # it — and only while it is still the untouched placeholder — keeps one
+        # answer in the file; a person's own paragraph there is never replaced.
+        updated = updated.replace(PURPOSE_PLACEHOLDER, report.purpose, 1)
     path.write_text(updated, encoding="utf-8")
     return path
 

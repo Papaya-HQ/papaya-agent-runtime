@@ -365,3 +365,71 @@ def test_delivery_pushes_and_opens_the_pr_on_the_registered_forge(
     delivery.deliver(task_id, remote="origin")
     push_argv = next(a for a in calls if a[:2] == ["git", "push"])
     assert push_argv[2] == "origin"
+
+
+def _commit_file(repo_path, relative: str, text: str) -> None:
+    target = repo_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "commit", "-qm", f"add {relative}"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_locate_reports_hits_only_in_the_clone_that_contains_the_string(
+    tmp_path, ppy_home, capsys
+) -> None:
+    """`ppy repo locate "hover card"` points at the code, and says nothing about the rest.
+
+    Two registered clones, one of which renders a hover card. The locate reads the
+    base clones the runtime owns, and finds the one that does — without being told
+    which repository sounds like it should.
+    """
+    from papaya_agent_runtime.cli import main
+
+    desktop = tmp_path / "desktop"
+    _make_source_repo(desktop)
+    _commit_file(desktop, "src/components/HoverCard.tsx", "export const label = 'Hover card';\n")
+    _commit_file(desktop, "src/components/Profile.tsx", "// opens the hover card on focus\n")
+    backend = tmp_path / "backend"
+    _make_source_repo(backend)
+    _commit_file(backend, "api/cards.py", "def card():\n    return 'hover'\n")
+    repos.add_repo(str(desktop))
+    repos.add_repo(str(backend))
+
+    hits = {hit.repo: hit for hit in repos.locate(["hover card"])}
+
+    assert hits["desktop"].found
+    assert hits["desktop"].file_count == 2
+    assert set(hits["desktop"].files) == {
+        "src/components/HoverCard.tsx",
+        "src/components/Profile.tsx",
+    }
+    # "hover" and "card" both occur in the backend, but never the phrase.
+    assert not hits["backend"].found
+    assert hits["backend"].files == []
+
+    assert main(["repo", "locate", "hover card"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "desktop: 2 hit(s) in 2 file(s)"
+    assert "backend: no hits" in out
+
+
+def test_locate_with_several_terms_needs_every_term_in_the_same_file(tmp_path, ppy_home) -> None:
+    source = tmp_path / "web"
+    _make_source_repo(source)
+    _commit_file(source, "a.txt", "tooltip only\n")
+    _commit_file(source, "b.txt", "tooltip and clipping\n")
+    repos.add_repo(str(source))
+
+    (hit,) = repos.locate(["Tooltip", "clipping"])
+
+    assert hit.files == ["b.txt"]
+
+
+def test_locate_needs_a_term(ppy_home) -> None:
+    with pytest.raises(repos.RepoError, match="at least one term"):
+        repos.locate(["  "])
