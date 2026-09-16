@@ -68,6 +68,13 @@ mechanical too — a worker row in the ticket's run, or an answer, steer or
 delivery event since the turn began. A turn that did not is retried once with the
 tail of its transcript; a second miss hands the ticket back.
 
+Waiting is a state, not a miss. A brief or review turn whose gate cannot finish
+inside it ends with a first line `WAITING: <what>`; the runner says so as progress,
+keeps the phase, and reruns the turn with its tail after five minutes, doubling to
+thirty. And a long gate is the worker's: a worker whose session ended mid-gate
+(`worker_stopped`) is steered by the runner to run it to completion, so the review
+turn runs on a `worker_done` with a gate result on the record (PAP-213).
+
 The work item's *status* is state, so the runner sets it: ``in_progress`` on
 pickup, ``review`` when the pull request is open, ``blocked`` while a question
 waits on a person, ``todo`` on hand-back. The *phase* is state too, so the runner
@@ -173,6 +180,19 @@ COMMENT_HANDLED_EVENT = "ticket_comment_handled"
 
 #: How many attempts a turn gets at its job before the ticket is handed back.
 TURN_ATTEMPTS = 2
+
+#: How long the runner waits before rerunning a turn that ended `WAITING:`, the
+#: first time; each further wait in a row doubles it, up to the cap. Waiting is a
+#: state, not a miss, so these never count toward `TURN_ATTEMPTS`.
+WAIT_FIRST_SECONDS = 5 * 60.0
+WAIT_MAX_SECONDS = 30 * 60.0
+
+#: How many times in a row the runner itself sends a worker that stopped mid-gate
+#: back to finish its gate before the review turn is given the failure instead.
+GATE_STEERS = 2
+
+#: The event kind `turn_end` records for a worker whose session ended mid-gate.
+WORKER_STOPPED = "worker_stopped"
 
 #: Event kinds on a worker task that mean the manager has acted on it, so the
 #: trigger before them is spent. Used both to tell whether a turn did its job and
@@ -453,6 +473,8 @@ class Trigger:
     detail: str = ""
     #: True when the worker did not finish: the review turn is then a steer.
     failure: bool = False
+    #: The ledger event kind that raised it (`worker_done`, `worker_stopped`, ...).
+    kind: str = ""
 
 
 @dataclass
@@ -485,6 +507,8 @@ class Ticket:
     #: When the comments were last read, on the runner's clock; ``None`` reads
     #: them at the next chance, which is what the end of every turn asks for.
     comments_read_at: float | None = None
+    #: How many times in a row the runner has sent a stopped worker back to its gate.
+    gate_steers: int = 0
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -575,6 +599,50 @@ def comments_after(
     ]
 
 
+def waiting_reason(result: object) -> str | None:
+    """What a turn said it is waiting for, or ``None`` if it did not say it is.
+
+    The contract is in the brief and review prompts: a turn that cannot finish
+    (a gate that outlasts it) ends with a message whose first line starts
+    `WAITING:`. A transcript carries more than that message, so the last such line
+    in its tail is the one that counts. An empty reason is still a wait.
+    """
+    text = result.tail() if hasattr(result, "tail") else str(result or "")
+    for line in reversed(text.splitlines()):
+        stripped = line.strip().lstrip("*_`> ").strip()
+        if stripped.startswith(prompts.WAITING_PREFIX):
+            reason = stripped.removeprefix(prompts.WAITING_PREFIX).strip().rstrip("*_`").strip()
+            return reason or "(no reason given)"
+    return None
+
+
+def rerun_delay(waits: int) -> float:
+    """Seconds before rerunning a turn that has ended `WAITING:` ``waits`` times in a row."""
+    return min(WAIT_FIRST_SECONDS * 2 ** max(waits - 1, 0), WAIT_MAX_SECONDS)
+
+
+def gate_steer_message(detail: str) -> str:
+    """What a worker that stopped mid-gate is told when the runner sends it back."""
+    why = _one_line(detail)
+    return (
+        "Your session ended before your verification gate finished"
+        + (f" ({why})" if why else "")
+        + ". Run the brief's authoritative gate again in the foreground and wait for it to "
+        "finish: never in the background, and do not end your session while it runs. Then "
+        "file your done note with the gate's summary line, and push your branch."
+    )
+
+
+def steer_worker(task_id: int, message: str) -> dict[str, Any]:
+    """`ppy steer`, from inside `serve`: through the supervisor this process runs."""
+    from papaya_agent_runtime.supervisor.client import SupervisorClient
+
+    resp = SupervisorClient().steer_task(task_id, message)
+    if not resp.get("ok"):
+        raise RuntimeError(str(resp.get("error") or "the supervisor refused the steer"))
+    return resp
+
+
 class _Stopped(Exception):
     """The client stopped the hold while the runner was working it."""
 
@@ -640,7 +708,8 @@ class TicketRunner:
 
     Every collaborator with an outside world is a keyword seam, so the whole
     phase machine is testable with fakes: ``run_turn`` (the harness), ``opener``
-    (Papaya's HTTP API), ``worker_capacity`` (the worker pool) and ``config``.
+    (Papaya's HTTP API), ``worker_capacity`` (the worker pool), ``steer`` (the
+    supervisor), ``clock`` and ``config``.
     """
 
     def __init__(
@@ -657,6 +726,7 @@ class TicketRunner:
         comment_poll_seconds: float = COMMENT_POLL_SECONDS,
         clock=None,
         agent_id: str | None = None,
+        steer=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -675,6 +745,8 @@ class TicketRunner:
         #: Who "this agent" is when telling a person's comment from our own;
         #: read from the connection on first use when not given.
         self._agent_id = agent_id
+        #: `ppy steer`'s seam: how a worker that stopped mid-gate is sent back.
+        self._steer = steer or steer_worker
 
     async def __call__(self, job: Any) -> dict[str, Any]:
         outcome = await asyncio.to_thread(self.take, job)
@@ -751,6 +823,7 @@ class TicketRunner:
         held = ticket.held
         misses: list[str] = []
         tail = ""
+        waits = 0
         while True:
             worker = await asyncio.to_thread(find_worker, held)
             if worker is not None:
@@ -769,6 +842,11 @@ class TicketRunner:
             if await self._wait_on_person(ticket):
                 continue
             if await self._wait_for_slot(ticket):
+                continue
+            if (
+                waited := await self._rerun_later(ticket, prompts.BRIEF, result, waits)
+            ) is not None:
+                waits, tail = waits + 1, waited
                 continue
             outcome = self._missed(ticket, misses, "dispatching a worker", result)
             if isinstance(outcome, HandBack):
@@ -852,6 +930,10 @@ class TicketRunner:
                     if isinstance(step, HandBack):
                         return step
                     continue
+                if read.trigger.kind == WORKER_STOPPED and await self._back_to_gate(ticket):
+                    continue
+                if not read.trigger.failure:
+                    ticket.gate_steers = 0
                 return read.trigger.phase
             if ticket.worker is None:
                 # The ticket was dispatched, but its worker never made it into the
@@ -864,6 +946,39 @@ class TicketRunner:
                     await self._enter(ticket, PHASE_DISPATCHED, back, say=back)
                 continue
             await self._sleep(ticket)
+
+    async def _back_to_gate(self, ticket: Ticket) -> bool:
+        """Send a worker that stopped mid-gate back to finish it. Returns whether it went.
+
+        A long gate is the worker's to run, not the review turn's: a review turn
+        that starts a suite the worker never finished outlasts itself (PAP-213).
+        So the runner steers the worker to run its gate to completion and report,
+        and the review turn runs on the `worker_done` that follows. Mechanical, not
+        judgment — `worker_stopped` already says the gate was cut short. After
+        `GATE_STEERS` in a row, or a refused steer, the review turn gets the failure.
+        """
+        trigger, worker = ticket.trigger, ticket.worker
+        if trigger is None or worker is None or ticket.gate_steers >= GATE_STEERS:
+            return False
+        worker_id = worker.task_id
+        try:
+            await asyncio.to_thread(self._steer, worker_id, gate_steer_message(trigger.detail))
+        except Exception as exc:  # noqa: BLE001 - a refused steer is the review turn's to handle
+            log.warning(
+                "[serve] Could not send worker task %d back to its gate: %s", worker_id, exc
+            )
+            _report_progress(
+                ticket.job,
+                ticket.phase,
+                f"Could not send worker task {worker_id} back to its gate: {exc}; "
+                "reviewing instead.",
+            )
+            return False
+        ticket.gate_steers += 1
+        ticket.trigger = None
+        sent = f"Worker task {worker_id} stopped mid-gate; sent back to run its gate to completion."
+        await self._enter(ticket, PHASE_DISPATCHED, sent, say=sent)
+        return True
 
     async def _answer(self, ticket: Ticket) -> HandBack | None:
         """Answer-or-steer: until the worker is no longer waiting on its question."""
@@ -909,6 +1024,7 @@ class TicketRunner:
         worker_id = ticket.worker.task_id
         misses: list[str] = []
         tail = ""
+        waits = 0
         while True:
             await self._wait_on_person(ticket)
             failure = ticket.trigger is not None and ticket.trigger.failure
@@ -948,6 +1064,11 @@ class TicketRunner:
                 await self._enter(ticket, PHASE_DISPATCHED, sent_back, say=sent_back)
                 return PHASE_DISPATCHED
             if await self._wait_on_person(ticket):
+                continue
+            if (
+                waited := await self._rerun_later(ticket, prompts.REVIEW, result, waits)
+            ) is not None:
+                waits, tail = waits + 1, waited
                 continue
             outcome = self._missed(ticket, misses, "approving and delivering, or steering", result)
             if isinstance(outcome, HandBack):
@@ -1191,6 +1312,34 @@ class TicketRunner:
         _report_progress(ticket.job, ticket.phase, detail)
         if attempt >= TURN_ATTEMPTS:
             return HandBack(f"the manager turn ended {attempt} times without {job_of_turn}")
+        return result.tail() if hasattr(result, "tail") else str(result or "")
+
+    async def _rerun_later(self, ticket: Ticket, turn: str, result: Any, waits: int) -> str | None:
+        """A turn that ended `WAITING:` is waited out, not missed. Returns the tail, or ``None``.
+
+        The reason is a progress line; the phase does not change. The wait is on
+        the runner's clock — `WAIT_FIRST_SECONDS`, doubling for each wait in a row
+        up to `WAIT_MAX_SECONDS` — touching the activity stamp as it goes, and is
+        cut short by a stop or by a comment from somebody else, which the caller's
+        loop then hears before the turn runs again.
+        """
+        reason = waiting_reason(result)
+        if reason is None:
+            return None
+        delay = rerun_delay(waits + 1)
+        _report_progress(
+            ticket.job,
+            ticket.phase,
+            f"The {turn} turn is waiting: {reason}; "
+            f"running it again in {round(delay / 60)} minutes.",
+        )
+        deadline = self._clock() + delay
+        while self._clock() < deadline:
+            await self._sleep(ticket)
+            ticket.job.touch_activity()
+            await self._listen(ticket)
+            if ticket.pending:
+                break
         return result.tail() if hasattr(result, "tail") else str(result or "")
 
     async def _turn(self, ticket: Ticket, turn: str, facts: dict[str, object]) -> Any:
@@ -1695,13 +1844,16 @@ def read_run(held: Held, cursor: int) -> RunRead:
                     )
                 )
             elif kind == "worker_done":
-                trigger = Trigger(PHASE_REVIEWING, cursor, str(payload.get("summary") or ""))
+                summary = str(payload.get("summary") or "")
+                trigger = Trigger(PHASE_REVIEWING, cursor, summary, kind=kind)
             elif kind in ("question", "blocked"):
-                trigger = Trigger(PHASE_BLOCKED, cursor, str(payload.get("question") or ""))
-            elif kind in ("worker_stopped", "error"):
-                trigger = Trigger(PHASE_REVIEWING, cursor, _failure(kind, payload), failure=True)
+                question = str(payload.get("question") or "")
+                trigger = Trigger(PHASE_BLOCKED, cursor, question, kind=kind)
+            elif kind in (WORKER_STOPPED, "error"):
+                failure = _failure(kind, payload)
+                trigger = Trigger(PHASE_REVIEWING, cursor, failure, failure=True, kind=kind)
             elif kind == "delivered":
-                trigger = Trigger(PHASE_DELIVERING, cursor)
+                trigger = Trigger(PHASE_DELIVERING, cursor, kind=kind)
             elif kind in ACTED_KINDS:
                 trigger = None
             elif kind == "task_closed":
@@ -2337,7 +2489,11 @@ __all__ = [
     "PHASE_REPORTED",
     "PHASE_REVIEWING",
     "PHASE_STALLED",
+    "GATE_STEERS",
     "RUNTIME_NOT_READY",
+    "WAIT_FIRST_SECONDS",
+    "WAIT_MAX_SECONDS",
+    "WORKER_STOPPED",
     "WORKING_PHASES",
     "Declined",
     "HandBack",
@@ -2349,6 +2505,7 @@ __all__ = [
     "default_worker_capacity",
     "dm_channel_id",
     "find_worker",
+    "gate_steer_message",
     "parse_args",
     "phase_for_stop",
     "phase_history",
@@ -2357,12 +2514,15 @@ __all__ = [
     "record_phase",
     "remember_session_id",
     "report_readiness",
+    "rerun_delay",
     "resumable_phase",
     "runtime_descriptor",
     "self_setup",
     "serve",
     "session_id_for",
+    "steer_worker",
     "stored_session_ids",
     "turn_environment",
     "turn_transcript_path",
+    "waiting_reason",
 ]
