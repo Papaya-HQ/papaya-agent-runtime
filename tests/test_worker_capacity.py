@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +13,7 @@ from conftest import scale
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.state import init_db, store
+from papaya_agent_runtime.supervisor import core
 from papaya_agent_runtime.supervisor.core import Supervisor, SupervisorError
 from papaya_agent_runtime.supervisor.runner import RunnerGuardian
 from papaya_agent_runtime.supervisor.server import SupervisorServer
@@ -48,6 +51,45 @@ def _event_count(task_id: int, kind: str) -> int:
         .fetchone()
     )
     return int(row[0])
+
+
+class _CrashingRunner:
+    superseded = False
+
+    def __init__(self, runner_id: str) -> None:
+        self.runner_id = runner_id
+        self.interrupted = False
+
+    def run(self, spec) -> None:
+        raise RuntimeError("worker bookkeeping exploded")
+
+    def interrupt(self) -> None:
+        self.interrupted = True
+
+
+class _LockedTransaction:
+    """Connection proxy that reproduces a SQLite write-lock failure."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql, *args):
+        if sql == "BEGIN IMMEDIATE":
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def _running_crash_task(runner_id: str = "crashed-runner"):
+    conn = init_db()
+    run_id = store.create_run(conn, "crash bookkeeping")
+    task_id = store.add_task(conn, run_id=run_id, title="crash")
+    store.set_task_status(conn, task_id, "in_progress")
+    store.register_runner(conn, runner_id=runner_id, task_id=task_id, provider="fake")
+    store.update_runner(conn, runner_id, pid=2**22 + 12345, status="running")
+    return SimpleNamespace(task_id=task_id, run_id=run_id), _CrashingRunner(runner_id)
 
 
 def test_full_capacity_refuses_dispatch_before_task_lease_or_runner_creation(
@@ -203,6 +245,82 @@ def test_slot_releases_after_worker_error_and_launch_failure(
     _wait_for(lambda: _status(launch_failed["task_id"]) == "failed")
     admitted = supervisor.dispatch_task(repo=added.name, title="after failures", provider="fake")
     _wait_for(lambda: _status(admitted["task_id"]) == "worker_done")
+
+
+def test_crash_bookkeeping_retries_a_one_shot_locked_write(ppy_home, monkeypatch) -> None:
+    spec, runner = _running_crash_task()
+    real_init_db = core.init_db
+    calls = 0
+
+    def fail_first_write():
+        nonlocal calls
+        calls += 1
+        conn = real_init_db()
+        return _LockedTransaction(conn) if calls == 1 else conn
+
+    monkeypatch.setattr(core, "init_db", fail_first_write)
+    Supervisor()._run_task(runner, spec)
+
+    conn = real_init_db()
+    task = store.get_task(conn, spec.task_id)
+    recorded_runner = store.get_runner(conn, runner.runner_id)
+    errors = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = 'error'",
+        (spec.task_id,),
+    ).fetchall()
+    assert runner.interrupted is True
+    assert task["status"] == "failed"
+    assert len(errors) == 1
+    assert "worker bookkeeping exploded" in errors[0]["payload"]
+    assert recorded_runner["status"] == "failed"
+    assert recorded_runner["result_recorded"] == 1
+
+
+def test_double_crash_bookkeeping_failure_stays_reconcilable(ppy_home, monkeypatch) -> None:
+    spec, runner = _running_crash_task()
+    real_init_db = core.init_db
+    calls = 0
+
+    def fail_both_writes():
+        nonlocal calls
+        calls += 1
+        conn = real_init_db()
+        return _LockedTransaction(conn) if calls <= 2 else conn
+
+    monkeypatch.setattr(core, "init_db", fail_both_writes)
+    supervisor = Supervisor()
+    supervisor._run_task(runner, spec)
+
+    conn = real_init_db()
+    assert store.get_task(conn, spec.task_id)["status"] == "in_progress"
+    assert store.get_runner(conn, runner.runner_id)["result_recorded"] == 0
+
+    findings = supervisor.reconcile()["reconciled"]
+    assert findings == [
+        {
+            "runner": runner.runner_id,
+            "task_id": spec.task_id,
+            "action": "orphaned->needs_recovery",
+        }
+    ]
+    assert store.get_task(real_init_db(), spec.task_id)["status"] == "needs_recovery"
+    assert _event_count(spec.task_id, "error") == 1
+
+
+def test_old_runner_crash_bookkeeping_does_not_overwrite_newer_live_runner(ppy_home) -> None:
+    spec, runner = _running_crash_task("old-runner")
+    conn = init_db()
+    store.supersede_runners(conn, spec.task_id, reason="resume")
+    store.register_runner(conn, runner_id="new-runner", task_id=spec.task_id, provider="fake")
+    store.update_runner(conn, "new-runner", status="running")
+
+    Supervisor()._run_task(runner, spec)
+
+    conn = init_db()
+    assert store.get_task(conn, spec.task_id)["status"] == "in_progress"
+    assert store.get_runner(conn, "new-runner")["status"] == "running"
+    assert store.get_runner(conn, "old-runner")["result_recorded"] == 1
+    assert _event_count(spec.task_id, "error") == 0
 
 
 def test_checkpoint_auto_resume_reacquires_a_released_slot(ppy_home, source_repo) -> None:

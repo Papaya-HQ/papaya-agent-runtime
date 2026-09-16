@@ -7,12 +7,23 @@ concurrent supervisor/runner access.
 
 from __future__ import annotations
 
+import math
+import os
 import sqlite3
 from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
 SCHEMA_VERSION = 18
+
+# Five seconds is SQLite's driver default, but this runtime has a supervisor,
+# guardian threads, and worker processes writing concurrently. Thirty seconds
+# rides out a slow writer on a loaded machine while still surfacing a real lock
+# leak promptly instead of leaving an operator waiting indefinitely.
+SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+# Environment values use seconds to match sqlite3.connect; connect() converts
+# that same value to whole milliseconds for SQLite's PRAGMA.
+SQLITE_BUSY_TIMEOUT_ENV = "PPY_SQLITE_BUSY_TIMEOUT"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -278,13 +289,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_assessment
 """
 
 
+def _busy_timeout_seconds() -> float:
+    configured = os.environ.get(SQLITE_BUSY_TIMEOUT_ENV)
+    if configured is None:
+        return SQLITE_BUSY_TIMEOUT_SECONDS
+    try:
+        seconds = float(configured)
+    except ValueError:
+        return SQLITE_BUSY_TIMEOUT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0 or round(seconds * 1000) <= 0:
+        return SQLITE_BUSY_TIMEOUT_SECONDS
+    return seconds
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     p = path or db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    timeout_seconds = _busy_timeout_seconds()
+    conn = sqlite3.connect(str(p), timeout=timeout_seconds)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # The driver timeout installs a busy handler, while the pragma also covers
+    # SQLite operations whose busy handler may be replaced after connection.
+    conn.execute(f"PRAGMA busy_timeout = {round(timeout_seconds * 1000)}")
     return conn
 
 
