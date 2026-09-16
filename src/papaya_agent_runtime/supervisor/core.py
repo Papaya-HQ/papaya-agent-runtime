@@ -616,6 +616,10 @@ class Supervisor:
             run_id=run_id,
             task_id=task_id,
         )
+        # A local task has no work item for its brief's criteria, status or comment.
+        from papaya_agent_runtime import standalone
+
+        standalone.skip_if_local(conn, task_id, standalone.DISPATCHED)
 
         # Give the worktree whatever head start this repo has configured — a reused
         # virtualenv from the base clone, a provision command — before the worker

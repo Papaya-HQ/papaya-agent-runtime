@@ -897,7 +897,14 @@ class Rounds:
                     print(f"ppy serve: {line}", file=self._stderr, flush=True)
         return parts
 
+    def _standalone(self) -> bool:
+        """No Papaya connection: nothing to offer to, reserve from, or reclaim through."""
+        return bool(getattr(self._built, "standalone", False))
+
     async def _start(self) -> list[str]:
+        if self._standalone():
+            # Reclaiming a ticket is a Papaya reserve; the next connected start does it.
+            return []
         tickets = await asyncio.to_thread(ticket_tasks)
         parts = await self._reclaim(tickets)
         parts += await self._reoffer_missed(tickets)
@@ -906,7 +913,8 @@ class Rounds:
     async def _round(self) -> list[str]:
         now = self._clock()
         parts = await self._pull_requests(now)
-        parts += await self._reclaim(await asyncio.to_thread(ticket_tasks))
+        if not self._standalone():
+            parts += await self._reclaim(await asyncio.to_thread(ticket_tasks))
         for ticket in list(getattr(self._runner, "held", {}).values()):
             parts += await self._look_at(ticket, now)
         if self._last_hygiene is None or (
@@ -1663,7 +1671,25 @@ class Rounds:
         return parts
 
     async def _post(self, ticket: Ticket, body: str, *, status: str | None = None) -> None:
-        """Say one mechanical line on a ticket this process does not hold. Never fatal."""
+        """Say one mechanical line on a ticket this process does not hold. Never fatal.
+
+        Running without Papaya (no listener was built), nothing is attempted: the
+        skipped steps are recorded on the ticket task instead.
+        """
+        if self._standalone():
+            from papaya_agent_runtime import standalone
+
+            steps = [f"comment: {body.splitlines()[0] if body else ''}"]
+            if status is not None:
+                steps.append(f"set the work item to {status}")
+            await store.run_in_thread(
+                standalone.record_skipped,
+                ticket.task_id,
+                "round",
+                steps=steps,
+                reason=standalone.NOT_CONNECTED,
+            )
+            return
         env = self._papaya_env()
         opener = getattr(self._runner, "_opener_kwargs", lambda: {})()
         event = ticket.event()

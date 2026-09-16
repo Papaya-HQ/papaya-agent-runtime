@@ -348,6 +348,9 @@ def deliver(
         run_id=task["run_id"],
         task_id=task_id,
     )
+    from papaya_agent_runtime import standalone
+
+    standalone.skip_if_local(conn, task_id, standalone.DELIVERED)
     for extra in (
         cascaded["summary"] if cascaded else None,
         base_note,
@@ -526,6 +529,9 @@ def record_merged(task_id: int, merged_sha: str, *, note: str | None = None) -> 
         run_id=task["run_id"],
         task_id=task_id,
     )
+    from papaya_agent_runtime import standalone
+
+    standalone.skip_if_local(conn, task_id, standalone.MERGED)
     # The task is over, so the database it brought up for itself is over too. This
     # is the last moment anything knows the stack belongs to this task.
     torn_down = compose.teardown_for_task(task_id, trigger="deliver --merged", conn=conn)

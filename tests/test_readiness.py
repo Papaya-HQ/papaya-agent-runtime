@@ -67,15 +67,17 @@ def test_no_registered_repositories_is_a_gap_not_a_block(ppy_home, monkeypatch) 
     assert "`ppy repo add`" in no_repos.fix
 
 
-def test_a_missing_papaya_connection_is_never_blocking(ppy_home, monkeypatch) -> None:
-    """A runtime that refuses to build code because a workspace is unreachable is worse."""
+def test_a_missing_papaya_connection_is_information_not_a_gap(ppy_home, monkeypatch) -> None:
+    """No connection is a mode: never blocking, not a blocker, and ready stays ready."""
     monkeypatch.setattr(readiness, "_harness_problems", lambda problems: None)
     monkeypatch.setattr(readiness, "_config_problems", lambda problems: None)
     monkeypatch.setattr(readiness, "_repo_problems", lambda problems: None)
     verdict = readiness.check()
     assert [p.code for p in verdict.problems] == ["papaya_not_connected"]
-    assert verdict.state == readiness.DEGRADED
-    assert verdict.blockers == []
+    (note,) = verdict.notes
+    assert note.info and not note.blocking and not note.steps
+    assert verdict.state == readiness.READY
+    assert verdict.blockers == [] and verdict.warnings == []
 
 
 def test_a_repository_that_was_never_onboarded_is_a_gap_not_a_block(ppy_home, monkeypatch) -> None:

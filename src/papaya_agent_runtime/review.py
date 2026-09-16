@@ -93,6 +93,9 @@ def record_review(
         run_id=task["run_id"],
         task_id=task_id,
     )
+    from papaya_agent_runtime import standalone
+
+    standalone.skip_if_local(conn, task_id, standalone.REVIEWED)
     return {"task_id": task_id, "verdict": verdict, "head_sha": head, "note": note}
 
 

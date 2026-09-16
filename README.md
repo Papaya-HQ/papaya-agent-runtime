@@ -43,10 +43,31 @@ the session *is* that agent:
 persona, objective, rules and memories are loaded from Papaya and treated as
 standing instructions. `ppy papaya status` says who you're connected as.
 
-Preflight runs the connect flow itself — your only step is clicking Approve in the
-browser. If you decline, or Papaya is unreachable, everything else still works:
-repositories, workers, reviews and pull requests are all local. You lose the
-workspace, not the ability to ship.
+`ppy papaya connect` runs the connect flow — your only step is clicking Approve in the
+browser.
+
+### Without Papaya
+
+Open Claude or Codex in this directory on a machine with no Papaya connection and the
+runtime is still a manager, the way Middle Manager is: register and onboard repos,
+brief, dispatch, steer, answer, review, deliver, gate runs, budgets, hygiene, PR
+following, self-reported issues, config ownership, learned tools, `board`, `health`,
+`handoff` all work exactly as they do connected. It says so once — at session start, on
+`ppy start`, `ppy status` and `ppy doctor`, and when `ppy serve` starts — in one line:
+
+    Running without Papaya. It's better with it: tickets, comments and the team's record flow in and out by themselves. https://trypapaya.ai
+
+What is off without a connection:
+
+- work items: no pickup, no status changes, no comments, no acceptance criteria on the
+  item. A local task records each skipped ticket step as a `ticket_step_skipped` event;
+- `ppy serve`'s sweep and event loop (it runs the rounds, the supervisor and the blockers
+  ledger, and its start line says what is off);
+- DMs to the connection's owner, and the workspace's identity, rules and memories.
+
+Readiness lists `papaya_not_connected` as `info`: never blocking, not a blocker, and a
+ready runtime stays ready. Connect later and the next `ppy serve` start picks it up.
+`PPY_QUIET_INVITE=1`, or `papaya.invite = false` in `config.toml`, turns the line off.
 
 ## Repositories: it comes to you with options
 
@@ -280,7 +301,8 @@ at the machine can fix: `gh` not signed in to a forge a registered repository (o
 checkout's own origin) lives on, `gh` not installed, no signed-in `claude`/`codex`,
 Node or uv missing where a repository needs them, Docker stopped for a compose
 repository, the disk under 5 GiB free, a repository the signed-in GitHub account cannot
-read or push, Papaya not connected. Readiness finds each of these as a *blocker* with a
+read or push. (No Papaya connection is not one of them: see *Without Papaya*.) Readiness
+finds each of these as a *blocker* with a
 title and the literal commands that close it, in order. `ppy serve` keeps them in
 `.ppy/blockers.json`, re-checks every round (nothing to restart once a person has done
 their part), and tells the owner when one appears, again only when its steps change or a

@@ -58,7 +58,7 @@ def handle_hook(event: str, payload: dict[str, Any]) -> dict:
     # blocking continuation at Stop. The stop-active guard is supplied by the
     # harness and prevents the continuation from recursively triggering itself.
     if normalized == "session_start":
-        context = session_start_context(conn)
+        context = session_start_context(conn, payload)
         if context:
             result["hookSpecificOutput"] = {
                 "hookEventName": "SessionStart",
@@ -125,6 +125,8 @@ def readiness_context() -> str | None:
         return None
     lines = [f"RUNTIME READINESS: {verdict.state} — {readiness.headline(verdict)}"]
     for problem in verdict.problems:
+        if problem.info:
+            continue  # said by the invitation, once, not as a gap
         who = "yours to fix now" if problem.owner == readiness.RUNTIME else "needs the user"
         mark = "BLOCKS WORK" if problem.blocking else "gap"
         lines.append(f"- [{mark}, {who}] {problem.summary} — {problem.fix}")
@@ -140,7 +142,34 @@ def readiness_context() -> str | None:
     return "\n".join(lines)
 
 
-def session_start_context(conn) -> str | None:
+def invitation_context(payload: dict[str, Any] | None = None) -> str | None:
+    """Running without Papaya: say it once, in the session's first reply, and carry on.
+
+    Once per session: a compaction re-fires this hook, so it is skipped there, and a
+    session `ppy start` launched already printed the line before the harness started.
+    """
+    from papaya_agent_runtime import standalone
+
+    if os.environ.get("PPY_DEV") or (payload or {}).get("source") == "compact":
+        return None
+    line = standalone.invitation()
+    if line is None:
+        return None
+    if os.environ.get("PPY_MANAGER_SESSION"):
+        return (
+            "RUNNING WITHOUT PAPAYA: this machine has no Papaya connection. Everything local "
+            "works as usual; tickets, comments and DMs do not flow. The person was already "
+            "told once at launch — do not repeat it."
+        )
+    return (
+        "RUNNING WITHOUT PAPAYA: this machine has no Papaya connection. Everything local "
+        "works as usual; tickets, comments and DMs do not flow. Do not ask the person to "
+        "connect and do not block on it. Say this line once, verbatim, in your first reply "
+        f"and never again this session:\n{line}"
+    )
+
+
+def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | None:
     """What a (re)starting manager needs to know before its first reply.
 
     Fires on a fresh session *and* after a compaction, so it carries the durable
@@ -158,6 +187,10 @@ def session_start_context(conn) -> str | None:
         ready = readiness_context()
         if ready:
             parts.append(ready)
+    with contextlib.suppress(Exception):
+        invite = invitation_context(payload)
+        if invite:
+            parts.append(invite)
     with contextlib.suppress(Exception):
         parts.append(handoff.render_session_context(handoff.collect(conn)))
     assessment = assessments.hook_context(conn)

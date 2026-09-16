@@ -36,17 +36,14 @@ hands authentication steps back to the user.
    `ppy config models --worker-provider ...`, or `ppy dispatch --provider ...` for
    one task. If a configured harness later stops being usable, `ppy readiness` says
    so and names the sign-in step; do not switch the other harness in for them.
-5. **Connect to Papaya.** `ppy papaya status` says whether this machine is pinned to
-   an agent. If it is not, run `ppy papaya connect` yourself — it signs in, pins the
-   machine, and installs the harness plugin that carries the `papaya` MCP server and
-   the rule-enforcing hooks. The user's only step is clicking Approve in the browser,
-   so say that in one sentence and wait; do not hand them the command.
-
-   This is the step that gives the session an identity, so it is worth doing, but it
-   is **never a prerequisite**. If they decline, if the network is down, or if connect
-   fails, say once what is unavailable without it (work items, channels, workspace
-   memory) and continue. A runtime that refuses to build code because a workspace is
-   unreachable is worse than one that builds code quietly.
+5. **Papaya, if this machine is connected.** `ppy papaya status` says whether this
+   machine is pinned to an agent. Connected, that is the session's identity. Not
+   connected is a mode, not a blocker: run standalone, with everything local working
+   the same, and say once the one line the runtime prints ("Running without Papaya.
+   It's better with it: … https://trypapaya.ai") — unless `PPY_QUIET_INVITE=1` or
+   `papaya.invite = false` silenced it. Do not start a sign-in or wait for one. If the
+   user asks to connect, `ppy papaya connect` signs in, pins the machine and installs
+   the harness plugin; their only step is clicking Approve in the browser.
 6. Register work with `ppy repo add <url-or-path>`. If the user does not name one,
    run `ppy repo discover` and offer what it finds rather than asking an open
    question. Then `ppy repo onboard <name>` each newly registered repo — see the

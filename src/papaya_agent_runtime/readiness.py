@@ -73,6 +73,9 @@ class Problem:
     #: The registered repositories it stops. Work on one of them is refused at
     #: pickup even though the verdict as a whole is not blocked.
     repos: tuple[str, ...] = ()
+    #: A fact about how this runtime is running, not a gap: never blocking, never a
+    #: blocker, never a deficiency, and it leaves a ready runtime ready.
+    info: bool = False
 
 
 @dataclass
@@ -89,7 +92,12 @@ class Readiness:
 
     @property
     def warnings(self) -> list[Problem]:
-        return [p for p in self.problems if not p.blocking]
+        return [p for p in self.problems if not p.blocking and not p.info]
+
+    @property
+    def notes(self) -> list[Problem]:
+        """The informational entries: how this runtime runs, not what it lacks."""
+        return [p for p in self.problems if p.info]
 
     @property
     def fingerprint(self) -> str:
@@ -97,9 +105,10 @@ class Readiness:
 
         Reporting is keyed on it, so an unchanged situation is said once and a
         changed one is said again. Codes only: the wording may improve without
-        making the runtime repeat itself to the same person.
+        making the runtime repeat itself to the same person. Informational entries
+        are not problems anybody is told about, so they are not in it.
         """
-        codes = ",".join(sorted(p.code for p in self.problems))
+        codes = ",".join(sorted(p.code for p in self.problems if not p.info))
         return hashlib.sha256(codes.encode("utf-8")).hexdigest()[:16]
 
     def as_dict(self) -> dict:
@@ -584,27 +593,30 @@ def _learned_tool_problems(problems: list[Problem]) -> None:
         )
 
 
-def _papaya_problems(problems: list[Problem]) -> None:
-    """A missing workspace is never blocking — that is a standing rule, not a default.
+PAPAYA_NOT_CONNECTED = "papaya_not_connected"
 
-    A runtime that refuses to build code because Papaya is unreachable is worse than
-    one that builds code quietly, so this can only ever be a warning.
+
+def _papaya_problems(problems: list[Problem]) -> None:
+    """No connection is a mode, not a gap — that is a standing rule, not a default.
+
+    Everything local works without Papaya, so a runtime running standalone is as
+    ready as a connected one. The entry is informational: it has no steps (it is
+    not a blocker), it is not blocking, and it does not make a verdict degraded.
     """
     from papaya_agent_runtime import papaya
 
     if papaya.status()["state"] != "connected":
         problems.append(
             Problem(
-                code="papaya_not_connected",
-                summary="not connected to Papaya: no workspace, no work items, no shared memory",
-                fix="`ppy papaya connect`, or connect from the Papaya desktop app",
-                blocking=False,
-                title="This machine is not connected to Papaya",
-                steps=(
-                    "ppy papaya connect",
-                    "or connect this machine from the Papaya desktop app",
-                    AFTER,
+                code=PAPAYA_NOT_CONNECTED,
+                summary=(
+                    "running without Papaya: work is local only, tickets and comments do "
+                    "not flow in or out"
                 ),
+                fix="`ppy papaya connect`, or connect from the Papaya desktop app, when wanted",
+                owner=USER,
+                blocking=False,
+                info=True,
             )
         )
 
@@ -1056,7 +1068,7 @@ def check() -> Readiness:
     _machine_problems(problems)
     if any(p.blocking for p in problems):
         state = BLOCKED
-    elif problems:
+    elif any(not p.info for p in problems):
         state = DEGRADED
     else:
         state = READY
@@ -1103,8 +1115,8 @@ def report(readiness: Readiness, *, agent: str = "", where: str = "") -> str:
         )
     lines.append("")
 
-    mine = [p for p in readiness.problems if p.owner == RUNTIME]
-    yours = [p for p in readiness.problems if p.owner == USER]
+    mine = [p for p in readiness.problems if p.owner == RUNTIME and not p.info]
+    yours = [p for p in readiness.problems if p.owner == USER and not p.info]
 
     if yours:
         lines.append("**Needs you:**")

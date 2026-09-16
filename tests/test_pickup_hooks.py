@@ -49,6 +49,8 @@ def test_session_start_is_quiet_when_nothing_is_open(ppy_home, monkeypatch) -> N
     # The role block is injected into every session by design; this test is
     # about the PICKUP context, which is what should be quiet here.
     monkeypatch.setattr("papaya_agent_runtime.hooks.runtime_role_context", lambda: None)
+    # The suite's machine is not connected, so the one-line invitation would speak too.
+    monkeypatch.setenv("PPY_QUIET_INVITE", "1")
     init_db()
     response = hooks.handle_hook_stdin("SessionStart", "{}")
     assert response == {}
