@@ -204,6 +204,65 @@ def test_no_signed_in_harness_at_all_says_that_once_not_twice(ppy_home, monkeypa
     assert codes == ["no_harness"]
 
 
+# ── A stored tool profile that cannot run a repository's gate ───────────────
+#
+# Every JavaScript worker on 2026-09-16 reported `node --test` denied: the stored
+# profile had been copied from a Python-only manager. A stored profile is a choice,
+# so it is never rewritten; the person is told what to run.
+
+
+def _javascript_repo_with_profile(monkeypatch, tools: list[str]) -> None:
+    from papaya_agent_runtime import memory, solicit
+    from papaya_agent_runtime.config import MMConfig, save_config
+
+    for check in ("_harness_problems", "_papaya_problems", "_repo_problems", "_client_problems"):
+        monkeypatch.setattr(readiness, check, lambda problems: None)
+    cfg = MMConfig()
+    cfg.claude.allowed_tools = tools
+    save_config(cfg)
+    store.add_repo(
+        init_db(),
+        name="web",
+        origin="https://github.com/acme/web.git",
+        local_path="/l",
+        default_branch="main",
+        base_sha="a" * 40,
+        forge_url="https://github.com/acme/web",
+    )
+    notes = memory.repo_notes_path("web")
+    notes.parent.mkdir(parents=True, exist_ok=True)
+    notes.write_text(
+        f"{solicit.NOTES_MARKER}\n# web\n\n## How it builds and verifies\n\n"
+        "- test: `node --test`\n\n## Conventions and contracts\n\n- `cp.md` — read first.\n"
+        f"{solicit.NOTES_END}\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_profile_without_node_warns_for_a_repo_whose_gate_runs_node(
+    ppy_home, monkeypatch
+) -> None:
+    _javascript_repo_with_profile(monkeypatch, ["Read", "Edit", "Bash(git:*)"])
+    verdict = readiness.check()
+    assert [p.code for p in verdict.problems] == ["claude_tools_lack_gate"]
+    problem = verdict.problems[0]
+    assert "Bash(node:*) (web)" in problem.summary
+    assert problem.fix == "`ppy config claude --reset`"
+    assert problem.blocking is False
+    assert problem.owner == readiness.USER
+    assert verdict.state == readiness.DEGRADED
+
+
+def test_a_profile_with_node_says_nothing_about_the_gate(ppy_home, monkeypatch) -> None:
+    _javascript_repo_with_profile(monkeypatch, ["Read", "Edit", "Bash(git:*)", "Bash(node:*)"])
+    assert readiness.check().problems == []
+
+
+def test_gate_programs_include_what_a_package_manager_needs() -> None:
+    commands = ["pnpm install --frozen-lockfile && CI=1 pnpm test", "uv run pytest -q"]
+    assert readiness.gate_programs(commands) == {"pnpm", "node", "uv"}
+
+
 # ── Saying it once ──────────────────────────────────────────────────────────
 
 

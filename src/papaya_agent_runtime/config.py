@@ -98,6 +98,13 @@ def default_claude_allowed_tools() -> list[str]:
     commit, and a push. A broader list including ``rm``, ``gh`` and ``export`` was
     classifier-blocked, so it is deliberately absent — and workers never open PRs
     or hold forge credentials anyway.
+
+    The JavaScript toolchain, the file verbs and the read-only text tools arrived
+    on 2026-09-16, when every worker dispatched into a JavaScript repository
+    reported ``node --test`` denied and one could not ``cp`` its evidence into
+    place: the list had been copied from a Python-only manager. Containment is the
+    write boundary, not this verb list — a worker that may ``cp`` inside its
+    worktree is still refused outside it.
     """
     from papaya_agent_runtime.manager.launch import repo_root
 
@@ -113,6 +120,7 @@ def default_claude_allowed_tools() -> list[str]:
         "Bash(make:*)",
         "Bash(pytest:*)",
         "Bash(python:*)",
+        "Bash(python3:*)",
         "Bash(ruff:*)",
         f"Bash({os.path.join(repo_root(), 'bin', 'ppy')}:*)",
         "Bash(./bin/ppy:*)",
@@ -122,6 +130,20 @@ def default_claude_allowed_tools() -> list[str]:
         "Bash(mkdir:*)",
         "Bash(jq:*)",
         "Bash(pnpm:*)",
+        "Bash(node:*)",
+        "Bash(npm:*)",
+        "Bash(npx:*)",
+        "Bash(corepack:*)",
+        "Bash(cp:*)",
+        "Bash(mv:*)",
+        "Bash(tee:*)",
+        "Bash(touch:*)",
+        "Bash(head:*)",
+        "Bash(tail:*)",
+        "Bash(wc:*)",
+        "Bash(sed:*)",
+        "Bash(find:*)",
+        "Bash(sqlite3:*)",
     ]
 
 

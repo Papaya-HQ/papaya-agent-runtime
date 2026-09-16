@@ -256,3 +256,34 @@ def test_config_claude_sets_and_resets_the_profile(configured, capsys):
 
     assert main(["config", "claude", "--reset"]) == 0
     assert load_config().claude.allowed_tools == default_claude_allowed_tools()
+
+
+#: Added 2026-09-16: every JavaScript worker was refused `node --test`, and one could
+#: not `cp` its evidence into place, because the profile came from a Python-only manager.
+GATE_AND_FILE_TOOLS = (
+    "Bash(node:*)",
+    "Bash(npm:*)",
+    "Bash(npx:*)",
+    "Bash(corepack:*)",
+    "Bash(cp:*)",
+    "Bash(mv:*)",
+    "Bash(tee:*)",
+    "Bash(touch:*)",
+    "Bash(head:*)",
+    "Bash(tail:*)",
+    "Bash(wc:*)",
+    "Bash(sed:*)",
+    "Bash(find:*)",
+    "Bash(python3:*)",
+    "Bash(sqlite3:*)",
+)
+
+
+def test_reset_writes_a_profile_that_can_run_javascript_gates_and_move_files(configured):
+    missing = [t for t in GATE_AND_FILE_TOOLS if t not in default_claude_allowed_tools()]
+    assert missing == []
+
+    assert main(["config", "claude", "--allowed-tools", "Read"]) == 0
+    assert main(["config", "claude", "--reset"]) == 0
+    stored = load_config().claude.allowed_tools
+    assert [t for t in GATE_AND_FILE_TOOLS if t not in stored] == []

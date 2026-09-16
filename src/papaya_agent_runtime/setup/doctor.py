@@ -166,6 +166,9 @@ def render_text(data: dict) -> str:
     verdict = data.get("readiness")
     if verdict:
         lines.append(f"readiness: {verdict['state']} — see `ppy readiness` for what and whose")
+        for problem in verdict.get("problems", []):
+            if problem["code"] == "claude_tools_lack_gate":
+                lines.append(f"  WARNING — {problem['summary']}; run {problem['fix']}")
     lines.append(f"client:    {capabilities.client_line(data.get('capabilities'))}")
     connection = data.get("papaya") or {}
     if connection:

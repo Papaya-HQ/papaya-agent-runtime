@@ -378,7 +378,14 @@ All working state is under `.ppy/` (gitignored):
 - `config.toml` — driver profile, worker defaults and ceiling, active-worker limit,
   cost posture, authority, self-assessment cadence, and the tool profile Claude
   workers launch with (`claude.allowed_tools`; `PPY_CLAUDE_ALLOWED_TOOLS` overrides
-  it for a session).
+  it for a session). The default profile, which `ppy setup` writes and
+  `ppy config claude --reset` restores, covers Python (`uv`, `python`, `python3`,
+  `pytest`, `ruff`), JavaScript (`node`, `npm`, `npx`, `pnpm`, `corepack`), git, and
+  the everyday file and text verbs (`cp`, `mv`, `tee`, `touch`, `head`, `tail`, `wc`,
+  `sed`, `find`, `sqlite3`, …). Containment, not this list, is the write boundary: a
+  worker allowed `cp` is still refused outside its worktree. A stored profile is kept
+  as written; `ppy doctor` and `ppy readiness` warn when it lacks a tool a registered
+  repository's onboarded gate runs, and name `ppy config claude --reset` as the fix.
 - `state.db` — SQLite source of truth (repos, runs, tasks, decisions, sessions,
   events, usage, reviews, self-assessment cycles).
 - `repos/` — read-only base clones. The only repositories work happens in.
