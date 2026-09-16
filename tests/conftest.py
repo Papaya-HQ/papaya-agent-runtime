@@ -129,6 +129,90 @@ def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("PPY_SWEEP_INTERVAL", raising=False)
 
 
+class HealthyMachine:
+    """`readiness.machine` on a machine with nothing wrong: gh signed in, Docker up, disk free.
+
+    A test that needs something broken subclasses it or sets its fields: ``missing``
+    (programs `which` cannot find), ``failing`` (argv prefixes that exit 1),
+    ``answers`` (argv prefix -> output), ``free`` and ``files``. ``calls`` records
+    every command run, including the stdin it was given.
+    """
+
+    def __init__(self) -> None:
+        self.missing: set[str] = set()
+        self.failing: list[tuple[str, ...]] = []
+        self.answers: dict[tuple[str, ...], str] = {}
+        self.free = 500 * 1024**3
+        self.files: set[str] = set()
+        self.platform = "darwin"
+        self.calls: list[tuple[list[str], str | None]] = []
+
+    def which(self, name: str) -> str | None:
+        return None if name in self.missing else f"/usr/local/bin/{name}"
+
+    def run(self, argv, timeout: float = 20.0, input: str | None = None) -> tuple[int, str]:
+        self.calls.append((list(argv), input))
+        if argv and argv[0] in self.missing:
+            return 127, ""
+        for prefix in self.failing:
+            if tuple(argv[: len(prefix)]) == prefix:
+                return 1, ""
+        for prefix, answer in self.answers.items():
+            if tuple(argv[: len(prefix)]) == prefix:
+                return 0, answer
+        return 0, ""
+
+    def free_bytes(self, path: str) -> int | None:
+        return self.free
+
+    def is_file(self, path: str) -> bool:
+        return path in self.files
+
+
+@pytest.fixture(autouse=True)
+def machine(monkeypatch) -> HealthyMachine:
+    """Keep readiness's machine checks off the real machine (task 270).
+
+    Readiness now runs `gh auth status`, `docker info` and reads the free disk.
+    Unfaked, the suite would depend on whether the developer's `gh` is signed in
+    and would call GitHub on every readiness check.
+    """
+    from papaya_agent_runtime import readiness
+
+    fake = HealthyMachine()
+    monkeypatch.setattr(readiness, "machine", fake)
+    return fake
+
+
+#: One of each thing no blocker surface may ever carry (task 270; the same fixture
+#: holds task 268's surfaces). A token, a home path, an email address, a diff hunk.
+PRIVACY_LEAKS = {
+    "token": "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+    "home": "/Users/octo-private/code/secret-project",
+    "email": "owner.private@example.com",
+    "diff": "diff --git a/app.py b/app.py\n@@ -1,2 +1,2 @@\n-SECRET_OLD = 1\n+SECRET_NEW = 2",
+}
+
+
+@pytest.fixture
+def privacy_leaks() -> dict[str, str]:
+    """:data:`PRIVACY_LEAKS`, and the fragments that must not survive redaction."""
+    return dict(PRIVACY_LEAKS)
+
+
+def leaked(text: str) -> list[str]:
+    """Which of the privacy fixture's fragments ``text`` still carries."""
+    fragments = [
+        PRIVACY_LEAKS["token"],
+        "octo-private",
+        PRIVACY_LEAKS["email"],
+        "SECRET_OLD",
+        "SECRET_NEW",
+        "@@ -1,2",
+    ]
+    return [fragment for fragment in fragments if fragment in text]
+
+
 @pytest.fixture(autouse=True)
 def _no_real_self_reports(monkeypatch):
     """Keep the hermetic suite from opening issues on the runtime's real repository.

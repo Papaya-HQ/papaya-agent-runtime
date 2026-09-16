@@ -128,6 +128,7 @@ from pathlib import Path
 from typing import Any
 
 from papaya_agent_runtime import (
+    blockers,
     capabilities,
     deficiencies,
     gate,
@@ -480,7 +481,7 @@ def runtime_descriptor() -> dict[str, str]:
 
 
 def protocol_writer(stream: Any, *, on_stalled: Any = None) -> Any:
-    """A `ProtocolWriter` whose `hello` also names the runtime behind the client.
+    """A `ProtocolWriter` whose `hello` and `status` also carry the runtime behind the client.
 
     It is also where this process hears the client call a job stalled: the stall
     observation is a `job.stalled` message and nothing else, so ``on_stalled`` is
@@ -489,8 +490,12 @@ def protocol_writer(stream: Any, *, on_stalled: Any = None) -> Any:
 
     The client's `hello` describes the *client*: its protocol version, its own
     version, the home and the working directory. A host that exec'd a runtime
-    needs one more fact — which runtime answered — and it is added here, on the
-    one message it belongs on. Everything else goes through untouched.
+    needs two more facts — which runtime answered, and what this machine needs
+    from its owner — and they are added here as ``runtime``: the descriptor plus
+    ``blockers`` (``[{code, title, steps, since}]``, redacted; see
+    :mod:`~papaya_agent_runtime.blockers`), on `hello` and on every `status`, so
+    the desktop app can show "Setup needed on this Mac" with copyable commands.
+    Everything else goes through untouched.
 
     0.15.1 has the destination but not the road: `Supervisor.runtime` is a field
     the client deliberately never sets ("a runtime the client handed the process
@@ -502,10 +507,14 @@ def protocol_writer(stream: Any, *, on_stalled: Any = None) -> Any:
     """
     from papaya_agent_client.supervisor import ProtocolWriter
 
+    from papaya_agent_runtime import blockers
+
     class _RuntimeWriter(ProtocolWriter):
         def send(self, message_type: str, **fields: Any) -> dict[str, Any]:
-            if message_type == "hello":
-                fields.setdefault("runtime", runtime_descriptor())
+            if message_type in ("hello", "status"):
+                fields.setdefault(
+                    "runtime", {**runtime_descriptor(), "blockers": blockers.current()}
+                )
             message = super().send(message_type, **fields)
             if message_type == "job.stalled" and on_stalled is not None:
                 try:
@@ -547,6 +556,11 @@ class Declined:
     """A ticket this manager is not the right machine for, and why."""
 
     reason: str
+    #: Refused because this machine needs its owner (a blocker). The ticket then
+    #: gets the one neutral comment instead of nothing.
+    setup: bool = False
+    event: papaya_events.PapayaEvent | None = None
+    verdict: readiness.Readiness | None = None
 
 
 @dataclass(frozen=True)
@@ -556,6 +570,9 @@ class HandBack:
     reason: str
     #: The job a manager turn missed twice, when that is why: a deficiency of the runtime.
     missed: str = ""
+    #: Handed back because this machine needs its owner: the comment is the
+    #: neutral line, never the reason.
+    setup: bool = False
 
 
 @dataclass(frozen=True)
@@ -1101,6 +1118,10 @@ class TicketRunner:
         if isinstance(outcome, Declined):
             log.info("[serve] Declining %s: %s", job.job_id, outcome.reason)
             job.decline(outcome.reason)
+            if outcome.setup and outcome.event is not None and outcome.verdict is not None:
+                await asyncio.to_thread(
+                    self._setup_comment, outcome.event, outcome.verdict, job.env
+                )
             return _result(job, _declined_exit_code(), outcome.reason)
 
         held = outcome
@@ -1280,7 +1301,7 @@ class TicketRunner:
                 await asyncio.to_thread(
                     self._deficiency, ticket, deficiencies.MISSED_TURN, ending.missed
                 )
-            return await self._hand_back(ticket, ending.reason)
+            return await self._hand_back(ticket, ending.reason, setup=ending.setup)
         if ending is None:
             return await self._stopped(ticket)
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
@@ -1738,6 +1759,10 @@ class TicketRunner:
                 continue
             if await self._back_to_commit(ticket):
                 return PHASE_DISPATCHED
+            if not failure and await self._delivery_blocked(ticket):
+                # The review turn would approve and then fail to open the pull
+                # request with a gh error nobody sees. The branch is kept.
+                return HandBack(blockers.DECLINE_REASON, setup=True)
             mark = await asyncio.to_thread(_max_event_id)
             # Taken before the turn and after the runner's own comment: nothing but
             # the turn writes on the item while it runs, so a new agent comment
@@ -1768,6 +1793,14 @@ class TicketRunner:
             if isinstance(outcome, HandBack):
                 return outcome
             tail = outcome
+
+    async def _delivery_blocked(self, ticket: Ticket) -> bool:
+        """Does a blocker make a pull request for this ticket's repository impossible?"""
+        repo = (ticket.worker.repo if ticket.worker else None) or ticket.held.repo
+        if not repo:
+            return False
+        verdict = await asyncio.to_thread(self._check_readiness)
+        return readiness.setup_blocker(verdict, repo, delivery=True) is not None
 
     async def _deliver(self, ticket: Ticket) -> str:
         """The pull request is open: say so, move the item to review, and finish."""
@@ -2246,14 +2279,34 @@ class TicketRunner:
 
     # -- how a hold ends -------------------------------------------------------
 
-    async def _hand_back(self, ticket: Ticket, reason: str) -> dict[str, Any]:
-        """Give the ticket back: declined, status `todo`, one comment, branch kept."""
+    async def _hand_back(
+        self, ticket: Ticket, reason: str, *, setup: bool = False
+    ) -> dict[str, Any]:
+        """Give the ticket back: declined, status `todo`, one comment, branch kept.
+
+        ``setup``: handed back because this machine needs its owner, so the comment
+        is the neutral line and names nothing.
+        """
         held, job = ticket.held, ticket.job
         log.info("[serve] Handing back %s: %s", job.subject, reason)
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_DECLINED, reason)
         job.decline(reason)
         await self._status(ticket, papaya_events.STATUS_TODO)
-        await self._comment(ticket, reason)
+        if not setup:
+            await self._comment(ticket, reason)
+        elif held.event.work_item_id:
+            verdict = await asyncio.to_thread(self._check_readiness)
+            if await asyncio.to_thread(blockers.comment_on, held.event.work_item_id, verdict):
+                try:
+                    await asyncio.to_thread(
+                        papaya_events.post_work_item_comment,
+                        held.event,
+                        blockers.TICKET_COMMENT,
+                        environ=job.env,
+                        **self._opener_kwargs(),
+                    )
+                except papaya_events.PapayaEventError as exc:
+                    log.warning("[serve] Could not comment on %s: %s", job.subject, exc)
         # Remembered for the sweep like a first-pickup decline: the task row now reads
         # `declined`, which the sweep treats as ended, so without this the brief turns
         # would run again every sweep. The status and the comment just written move
@@ -2355,6 +2408,8 @@ class TicketRunner:
 
         verdict = self._check_readiness()
         if verdict.state == readiness.BLOCKED:
+            if readiness.setup_blocker(verdict) is not None:
+                return self._decline(event, blockers.DECLINE_REASON, setup=verdict)
             return self._decline(event, readiness.headline(verdict))
         try:
             event = papaya_events.hydrate_work_item(event, environ=job.env, **self._opener_kwargs())
@@ -2380,6 +2435,10 @@ class TicketRunner:
                 ensured = papaya_events.ensure_repository(event)
             except papaya_events.PapayaEventError as exc:
                 return self._decline(event, str(exc))
+        # A blocker scoped to this repository — its forge signed out, a toolchain it
+        # needs missing — refuses it here, while work elsewhere goes on.
+        if ensured is not None and readiness.setup_blocker(verdict, ensured.name) is not None:
+            return self._decline(event, blockers.DECLINE_REASON, setup=verdict)
 
         conn = db.init_db()
         try:
@@ -2387,8 +2446,42 @@ class TicketRunner:
         finally:
             conn.close()
 
+    def _setup_comment(
+        self,
+        event: papaya_events.PapayaEvent,
+        verdict: readiness.Readiness,
+        environ: dict[str, str],
+    ) -> None:
+        """The one neutral comment a ticket refused for a blocker gets, and the sweep's memory.
+
+        Once per ticket per blocker, so a re-offer while the same blocker stands is
+        silent. The decline is remembered with a stamp taken *after* the comment,
+        which itself moves the item's `updated_at`; otherwise the sweep would read
+        its own comment as a change and offer the ticket straight back.
+        """
+        if not event.work_item_id:
+            return
+        if blockers.comment_on(event.work_item_id, verdict):
+            try:
+                papaya_events.post_work_item_comment(
+                    event, blockers.TICKET_COMMENT, environ=environ, **self._opener_kwargs()
+                )
+            except papaya_events.PapayaEventError as exc:
+                log.warning("[serve] Could not comment on %s: %s", event.subject, exc)
+        with contextlib.suppress(Exception):
+            sweep.remember_declined(
+                event.work_item_id,
+                updated_at=datetime.now(UTC).isoformat(),
+                reason=blockers.DECLINE_REASON,
+            )
+
     @staticmethod
-    def _decline(event: papaya_events.PapayaEvent, reason: str) -> Declined:
+    def _decline(
+        event: papaya_events.PapayaEvent,
+        reason: str,
+        *,
+        setup: readiness.Readiness | None = None,
+    ) -> Declined:
         """Decline, and say so on the task if this ticket already has one.
 
         A first delivery has no task and leaves none: declining is the opposite of
@@ -2426,7 +2519,9 @@ class TicketRunner:
                         record_phase(conn, int(existing["id"]), PHASE_DECLINED, reason)
                 finally:
                     conn.close()
-        return Declined(reason)
+        if setup is None:
+            return Declined(reason)
+        return Declined(reason, setup=True, event=event, verdict=setup)
 
     def _record(self, conn, event: papaya_events.PapayaEvent, repo_name: str | None) -> Held:
         """The task row for this event, found or created, and where to take it up.
@@ -3428,20 +3523,13 @@ def dm_channel_id(channels: Any) -> str | None:
 
 
 def _where() -> str:
-    """The machine and the instance this report is about.
+    """The machine this report is about, by its short hostname and nothing more.
 
     The person reading it is usually not at the machine, so "which one" is half
-    the message.
+    the message. The instance path used to follow it; a home path is private, and
+    one runtime per machine is the case the hostname already names.
     """
-    import socket
-
-    from papaya_agent_runtime.paths import ppy_home
-
-    try:
-        host = socket.gethostname().split(".", 1)[0].strip()
-    except OSError:
-        host = ""
-    return f"{host}:{ppy_home()}" if host else str(ppy_home())
+    return blockers.short_hostname()
 
 
 async def _post_dm(built: Any, text: str) -> bool:
@@ -3471,7 +3559,7 @@ async def _post_dm(built: Any, text: str) -> bool:
     return True
 
 
-async def report_readiness(verdict, built) -> None:
+async def report_readiness(verdict, built, watch: blockers.Watch | None = None) -> None:
     """DM the owner what still needs them — once per distinct situation.
 
     Once, because the alternative is a message every restart saying the same
@@ -3479,41 +3567,66 @@ async def report_readiness(verdict, built) -> None:
     fingerprint is over the problem *codes*, so an unchanged situation stays
     quiet and a changed one speaks however soon it appears.
 
-    Marked as reported only when the post actually landed: a workspace that was
-    unreachable at start-up is not a person who has been told. And nothing here
-    can stop the listener going up — the state this reads on is the same state a
-    failed self-setup may have been unable to create.
+    The blockers the watch has due ride in the same message, with their steps,
+    so a start never sends two. Marked as reported only when the post actually
+    landed: a workspace that was unreachable at start-up is not a person who has
+    been told. And nothing here can stop the listener going up — the state this
+    reads on is the same state a failed self-setup may have been unable to create.
     """
-    if verdict.state == readiness.READY:
-        return
-    who = papaya.identity()
-    text = readiness.report(verdict, agent=who.addressed if who else "", where=_where())
-    try:
-        conn = db.init_db()
-    except Exception as exc:  # noqa: BLE001 - an unreadable home is already the verdict
-        log.warning("[serve] Could not record a readiness report: %s", exc)
-        return
-    try:
-        if readiness.already_reported(conn, verdict):
-            return
-        if await _post_dm(built, text):
+    watch = watch or blockers.Watch(say=functools.partial(_post_dm, built))
+    lead = ""
+    conn = None
+    if verdict.state != readiness.READY:
+        who = papaya.identity()
+        try:
+            conn = db.init_db()
+            if not readiness.already_reported(conn, verdict):
+                lead = readiness.report(verdict, agent=who.addressed if who else "", where=_where())
+        except Exception as exc:  # noqa: BLE001 - an unreadable home is already the verdict
+            log.warning("[serve] Could not read what readiness has reported: %s", exc)
+
+    def said() -> None:
+        if lead and conn is not None:
             readiness.mark_reported(conn, verdict)
             log.info("[serve] Reported readiness (%s) to the owner's DM", verdict.state)
+
+    try:
+        await watch.round(verdict=verdict, lead=lead, on_said=said)
     except Exception as exc:  # noqa: BLE001 - saying it must not be why serve stopped
-        log.warning("[serve] Could not record a readiness report: %s", exc)
+        log.warning("[serve] Could not report readiness: %s", exc)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+
+
+def publish_status(built: Any) -> None:
+    """Send a supervised host a fresh `status`, so a changed `runtime.blockers` reaches it.
+
+    The client publishes `status` only when its own phase changes; a blocker that
+    appears or clears while the connection is healthy would otherwise wait for
+    the next reconnect to be seen.
+    """
+    supervisor = getattr(built, "supervisor", None)
+    if supervisor is None:
+        return
+    supervisor.writer.send("status", phase=supervisor.phase)
 
 
 def _announce_readiness(verdict, built, *, stderr) -> None:
-    """Say once, at start, that this runtime cannot dispatch anything yet.
+    """Say once, at start, that this runtime cannot dispatch anything yet, and what needs a person.
 
     Once: the runner repeats the same sentence to every job it declines, and a
     host that heard it at start does not need it again on a timer. Non-fatal,
     because `serve` still runs — a manager that refused to start because no
     repository was registered would be unreachable at exactly the moment somebody
-    wanted to register one.
+    wanted to register one. The blockers, with their steps, are printed whatever
+    the verdict: a signed-out forge stops delivery without blocking the rest.
     """
+    found = blockers.from_verdict(verdict)
+    if found:
+        print("ppy serve: setup needed on this machine:", file=stderr)
+        for line in blockers.render_text(found).splitlines():
+            print(f"  {line}", file=stderr)
     if verdict.state != readiness.BLOCKED:
         return
     line = readiness.headline(verdict)
@@ -3535,6 +3648,7 @@ async def run(
     sweep_sleep: Any = None,
     rounds_seams: dict[str, Any] | None = None,
     self_report: deficiencies.Reporter | None = None,
+    blocker_seams: dict[str, Any] | None = None,
 ) -> int:
     """Set this checkout up, build the listener, report once, sweep, run until stopped.
 
@@ -3547,6 +3661,9 @@ async def run(
     the manager's rounds (:class:`~papaya_agent_runtime.rounds.Rounds`): its timer,
     clock, forge and worktree hygiene. `self_report` is the reporter that opens GitHub
     issues about the runtime's own deficiencies; a test hands in one with a fake `gh`.
+    `blocker_seams` are keyword seams for the blocker watch
+    (:class:`~papaya_agent_runtime.blockers.Watch`): its timer, clock and GitHub
+    device flow.
     """
     reporter = self_report or deficiencies.Reporter()
     deficiencies.add_listener(reporter.flush_soon)
@@ -3560,6 +3677,7 @@ async def run(
             server=server,
             sweep_sleep=sweep_sleep,
             rounds_seams=rounds_seams,
+            blocker_seams=blocker_seams,
         )
     finally:
         deficiencies.remove_listener(reporter.flush_soon)
@@ -3605,6 +3723,7 @@ async def _run(
     server: Any,
     sweep_sleep: Any,
     rounds_seams: dict[str, Any] | None,
+    blocker_seams: dict[str, Any] | None = None,
 ) -> int:
     from papaya_agent_client.embed import ListenerSetupError
 
@@ -3616,6 +3735,12 @@ async def _run(
     await asyncio.to_thread(keep_config_right, stderr=stderr)
     await asyncio.to_thread(announce_deficiencies, stderr=stderr)
     deficiencies.notify()
+    # Checked after the runtime has applied its own remedies and before the listener
+    # is built, so the `hello` a supervised host gets already carries only the
+    # blockers a person has to close.
+    verdict = await asyncio.to_thread(readiness.check)
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(blockers.update, verdict)
     runner = runner or TicketRunner()
     try:
         built = await _build(options, runner, stdout=stdout, extra=extra)
@@ -3628,7 +3753,6 @@ async def _run(
             print(f"  {exc.advice}", file=stderr)
         return exc.status
 
-    verdict = readiness.check()
     for problem in unremedied_readiness(verdict):
         await asyncio.to_thread(
             deficiencies.record,
@@ -3637,7 +3761,16 @@ async def _run(
             evidence={"code": problem.code, "error": problem.summary},
         )
     _announce_readiness(verdict, built, stderr=stderr)
-    await report_readiness(verdict, built)
+    # Readiness re-runs every round, so a blocker a person closes clears on its own
+    # — nothing to restart — and its owner hears that once.
+    watch = blockers.Watch(
+        say=functools.partial(_post_dm, built),
+        publish=functools.partial(publish_status, built),
+        interval=options.rounds_interval or rounds.DEFAULT_ROUNDS_INTERVAL,
+        **(blocker_seams or {}),
+    )
+    await report_readiness(verdict, built, watch)
+    watching = asyncio.create_task(watch.run())
 
     event_loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -3680,11 +3813,12 @@ async def _run(
     finally:
         if server is not None:
             server.sweep_handler = None
-        for background in (walking, sweeping):
+        for background in (walking, sweeping, watching):
             background.cancel()
-        for background in (walking, sweeping):
+        for background in (walking, sweeping, watching):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await background
+        await watch.close()
         # A sweep that was mid-offer while the listener shut down can have started
         # a run after `shutdown` took its list of what to release. Shutting down
         # again is safe (a released subject is never released twice) and is the
@@ -3782,6 +3916,7 @@ __all__ = [
     "phase_for_stop",
     "phase_history",
     "protocol_writer",
+    "publish_status",
     "read_run",
     "record_phase",
     "remember_session_id",

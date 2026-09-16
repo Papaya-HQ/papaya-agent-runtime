@@ -322,7 +322,8 @@ quietly; do not narrate the steps or report diagnostics.
 
    How: `whoami` gives you the connection and its owner; `get_or_create_user_dm`
    opens the DM; send what `ppy readiness --report --agent @<your handle> --where
-   <host>:<path>` prints — it names the machine, because they are often not at it.
+   <short hostname>` prints — it names the machine, because they are often not at it
+   (the hostname only: a home path is private).
    Then `ppy readiness --mark-reported`, which is what stops you repeating yourself:
    reporting is keyed on the *set* of problems, so the same trouble tomorrow is
    silent and a new one speaks immediately. Never open a work item for this — it is
@@ -330,6 +331,19 @@ quietly; do not narrate the steps or report diagnostics.
 
    If you are *not* connected, there is nobody to tell; carry on and say it to the
    user in your first reply instead.
+
+   Under `ppy serve` this is done for you, and more of it: `ppy blockers` lists every
+   problem only a person at this machine can close — `gh` signed out
+   (`forge_unauthenticated`) or missing (`gh_missing`), a harness missing or signed out,
+   Node or uv missing for a repo that needs them, Docker stopped for a compose repo,
+   low disk, a repo the GitHub account cannot read or push, Papaya not connected —
+   each with the exact commands. `serve` DMs them (once, again on a changed remedy or
+   after a day, and once when cleared), puts them on the supervised `hello`/`status` as
+   `runtime.blockers`, and hands back a ticket it cannot take because of one with a
+   single neutral comment. When you relay a blocker yourself, send its title and steps
+   only: never a token, a home path, an email address, or repository contents. A
+   signed-out forge does not stop the sweep or work on other forges; it stops pickup
+   and delivery for that forge's repositories.
 4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single
@@ -792,7 +806,8 @@ readable at a glance by someone who just wants to know if it's done.
 | Intent | Command |
 | --- | --- |
 | Can I work? | `ppy readiness [--json]` — one verdict (`ready` / `degraded` / `blocked`) with every problem, what closes it, and whether it is yours or the user's. `--report --agent @handle --where host:path` prints the message to DM the connection owner; `--mark-reported` records it so an unchanged verdict stays quiet and a changed one speaks; `--forget` clears that. Exit 1 when blocked |
-| Environment & drift | `ppy doctor` — also reports the Papaya connection: who this machine is connected as, or what would connect it |
+| Environment & drift | `ppy doctor` — also reports the Papaya connection: who this machine is connected as, or what would connect it, and lists every blocker with its steps |
+| What a person must do here | `ppy blockers [--json]` — each blocker (`code`, `title`, `steps`, `since`), redacted; exit 1 when there are any. `forge.github_oauth_client_id` in config lets `serve` sign `gh` in through GitHub's device flow instead of the manual `gh auth login` steps |
 | Papaya connection | `ppy papaya status [--json]` (which agent you are), `ppy papaya connect [--harness claude\|codex\|cursor]` (signs in, pins this machine to an agent, installs the harness plugin — the user's only step is clicking Approve in the browser), `ppy papaya context [--refresh]` (your persona, rules and memories as the client sees them). Every state short of connected still builds code |
 | Tracked record | `ppy track <task> --record <id> [--provider linear\|papaya\|notion\|...] [--url <url>] [--title "..."]` records which tracker record a dispatched task belongs to, so the pull request body names it and says where to find it; `--show` reads it back. Papaya is the default only when the workspace has not said otherwise — a workspace that tracks work elsewhere wins, and you learn that from its durable context, never from this flag |
 | Find repositories | `ppy repo discover [--owner <org>] [--limit N] [--top N] [--include-forks] [--json]` — repositories on the forge that are not registered yet, most recently pushed first. Reads the signed-in account and every organization it belongs to; archived repos never appear (they cannot take a pull request) and forks are skipped unless asked for. It only ever *offers*: registration stays `ppy repo add` |

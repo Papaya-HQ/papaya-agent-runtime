@@ -237,6 +237,7 @@ You don't type these — the runtime does — but nothing is hidden:
 ```bash
 ppy capabilities --json                 # what this runtime is, for the client that found it
 ppy doctor                              # environment, capability drift, Papaya connection
+ppy blockers                            # what this machine needs from a person, as commands
 ppy papaya status                       # which Papaya agent this machine is
 ppy papaya connect                      # sign in and pin this machine to an agent
 ppy repo discover                       # repos on the forge that aren't registered yet
@@ -273,6 +274,28 @@ sixty-odd packages. It never fails: a checkout where the client cannot be import
 reports `client_version: null` and still exits 0. `ppy doctor` and `ppy readiness`
 show the same embedded client version, and readiness warns — without blocking — when
 the client that launched this runtime is newer than the one in the checkout.
+
+**What the machine needs from its owner reaches its owner.** Some things only a person
+at the machine can fix: `gh` not signed in to a forge a registered repository (or this
+checkout's own origin) lives on, `gh` not installed, no signed-in `claude`/`codex`,
+Node or uv missing where a repository needs them, Docker stopped for a compose
+repository, the disk under 5 GiB free, a repository the signed-in GitHub account cannot
+read or push, Papaya not connected. Readiness finds each of these as a *blocker* with a
+title and the literal commands that close it, in order. `ppy serve` keeps them in
+`.ppy/blockers.json`, re-checks every round (nothing to restart once a person has done
+their part), and tells the owner when one appears, again only when its steps change or a
+day has passed, and once when it clears — in the agent's DM with the person who
+connected the machine, as `runtime.blockers: [{code, title, steps, since}]` on the
+supervised `hello` and every `status`, and at start on stderr. A ticket refused because
+of one (a pickup on a signed-out forge, a delivery that could not open its pull request)
+is handed back with one neutral comment — "This machine needs setup before it can take
+this; its owner has been told what to do" — that names nothing. Every string on those
+surfaces is redacted of tokens, home paths, email addresses and diff hunks, and the
+machine is named only by its short hostname. With `forge.github_oauth_client_id` set in
+`config.toml` (Papaya's GitHub OAuth app; not a secret), the runtime signs `gh` in
+itself through GitHub's device flow: the owner is sent the code to enter, and the token
+goes into `gh auth login --with-token` on stdin and nowhere else. `ppy blockers` (exit 1
+when there are any) and `ppy doctor` print them locally.
 
 **The environment is built once, never under a running `serve`.** `bin/ppy` runs every
 command with `uv run --no-sync`, so typing `ppy status` in a terminal cannot rebuild

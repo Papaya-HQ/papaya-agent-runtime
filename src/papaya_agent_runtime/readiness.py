@@ -20,17 +20,26 @@ it**: the runtime itself, or a person. That last distinction is the point. A mis
 config is the runtime's own job and it should just do it; an unauthenticated harness
 is not, and saying so is the difference between a useful message and a complaint.
 
-Every check reads local state only, so a verdict is instant and works offline. The
+Most checks read local state only. The machine checks (`_machine_problems`) ask
+the machine itself — `gh auth status`, `docker info`, the free disk — through one
+seam, :data:`machine`, so the hermetic suite never asks the real one. The
 fingerprint exists so the same problem is reported once rather than on every wake.
+
+A problem that carries ``steps`` is a *blocker* in :mod:`papaya_agent_runtime.blockers`'
+sense: something only a person can remedy, with the literal commands that do it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import sqlite3
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 #: The runtime can fix this itself, without asking anybody.
 RUNTIME = "runtime"
@@ -54,6 +63,16 @@ class Problem:
     fix: str
     owner: str = RUNTIME
     blocking: bool = True
+    #: For a problem only a person can remedy: a short title with nothing private
+    #: in it, and the literal commands that remedy it, in order, ending with what
+    #: the runtime does by itself afterwards. Empty for everything else.
+    title: str = ""
+    steps: tuple[str, ...] = ()
+    #: What it is about, when that is narrower than the machine: a forge host.
+    scope: str = ""
+    #: The registered repositories it stops. Work on one of them is refused at
+    #: pickup even though the verdict as a whole is not blocked.
+    repos: tuple[str, ...] = ()
 
 
 @dataclass
@@ -135,6 +154,9 @@ def _unusable_provider_problem(report: dict, usable: list[str]) -> Problem | Non
             for p in stranded.values()
         }
     )
+    steps: list[str] = []
+    for provider in sorted(set(stranded.values())):
+        steps.extend(harness_steps(report, provider))
     return Problem(
         code="provider_unusable",
         summary=(
@@ -143,7 +165,42 @@ def _unusable_provider_problem(report: dict, usable: list[str]) -> Problem | Non
         ),
         fix="; ".join(fixes) + " — or `ppy config models` to choose a harness that works here",
         owner=USER,
+        title="The coding harness this runtime is set to use cannot start on this machine",
+        steps=(*steps, AFTER),
     )
+
+
+#: How each harness is installed and signed in, as a person types it.
+_HARNESS_INSTALL = {
+    "claude": "npm install -g @anthropic-ai/claude-code",
+    "codex": "npm install -g @openai/codex",
+}
+_HARNESS_LOGIN = {"claude": "claude auth login", "codex": "codex login"}
+
+#: The last step of every blocker: what happens once the person has done theirs.
+AFTER = (
+    "Nothing to restart: the runtime checks again within a few minutes and starts "
+    "taking work by itself."
+)
+
+
+def harness_steps(report: dict, provider: str) -> list[str]:
+    """Install (when the binary is missing) and sign in to one harness."""
+    tool = next((h for h in report.get("harnesses", []) if h.get("name") == provider), {})
+    steps = [] if tool.get("path") else [_HARNESS_INSTALL.get(provider, f"install {provider}")]
+    return [*steps, _HARNESS_LOGIN.get(provider, f"sign in to {provider}")]
+
+
+def _connection_harness() -> str:
+    """The harness this machine was connected with, or Claude when nobody said."""
+    from papaya_agent_runtime import papaya
+
+    try:
+        who = papaya.identity()
+    except Exception:  # noqa: BLE001 - an unreadable connection is reported by its own check
+        who = None
+    harness = str(getattr(who, "harness", "") or "")
+    return "codex" if "codex" in harness else "claude"
 
 
 def _harness_problems(problems: list[Problem]) -> None:
@@ -161,6 +218,8 @@ def _harness_problems(problems: list[Problem]) -> None:
                 summary="no signed-in coding harness, so no worker can be launched",
                 fix="sign in to Claude Code (`claude`) or Codex (`codex`) on this machine",
                 owner=USER,
+                title="No coding harness is installed and signed in on this machine",
+                steps=(*harness_steps(report, _connection_harness()), AFTER),
             )
         )
     stranded = _unusable_provider_problem(report, usable)
@@ -540,6 +599,12 @@ def _papaya_problems(problems: list[Problem]) -> None:
                 summary="not connected to Papaya: no workspace, no work items, no shared memory",
                 fix="`ppy papaya connect`, or connect from the Papaya desktop app",
                 blocking=False,
+                title="This machine is not connected to Papaya",
+                steps=(
+                    "ppy papaya connect",
+                    "or connect this machine from the Papaya desktop app",
+                    AFTER,
+                ),
             )
         )
 
@@ -573,8 +638,333 @@ def _client_problems(problems: list[Problem]) -> None:
     )
 
 
+# ── the machine: the forge, the toolchains, Docker, the disk ────────────────
+
+FORGE_UNAUTHENTICATED = "forge_unauthenticated"
+GH_MISSING = "gh_missing"
+REPO_UNREACHABLE = "repo_unreachable"
+NODE_MISSING = "node_missing"
+UV_MISSING = "uv_missing"
+DOCKER_NOT_RUNNING = "docker_not_running"
+DISK_LOW = "disk_low"
+
+#: The blockers that make a pull request impossible, so delivery is refused too.
+DELIVERY_CODES = frozenset({FORGE_UNAUTHENTICATED, GH_MISSING, REPO_UNREACHABLE})
+
+#: Below this much free space a worktree, a dependency install or a Docker image
+#: fails part-way, which is worse than not starting.
+DISK_FLOOR_BYTES = 5 * 1024**3
+
+_COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+_NODE_PROGRAMS = frozenset({"node", "pnpm", "npm", "npx", "yarn"})
+
+
+class Machine:
+    """What readiness asks the machine, behind one seam.
+
+    The hermetic suite replaces :data:`machine` with a healthy fake
+    (``tests/conftest.py``), so no test runs `gh auth status` against a real
+    account or reads a developer's disk; a test that needs a broken machine
+    replaces it again.
+    """
+
+    def which(self, name: str) -> str | None:
+        return shutil.which(name)
+
+    def run(
+        self, argv: list[str], timeout: float = 20.0, input: str | None = None
+    ) -> tuple[int, str]:
+        """Exit status and combined output; 127 when the program cannot be run."""
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, check=False, input=input
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return 127, ""
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def free_bytes(self, path: str) -> int | None:
+        try:
+            return shutil.disk_usage(path).free
+        except OSError:
+            return None
+
+    def is_file(self, path: str) -> bool:
+        try:
+            return Path(path).is_file()
+        except OSError:
+            return False
+
+    @property
+    def platform(self) -> str:
+        return sys.platform
+
+
+machine = Machine()
+
+_HOST_PATTERNS = (
+    re.compile(r"^(?:https?|ssh|git)://(?:[^@/]+@)?(?P<host>[^/:]+)(?::\d+)?/"),
+    re.compile(r"^[^/@\s]+@(?P<host>[^/:\s]+):"),
+)
+
+
+def forge_host(url: str | None) -> str | None:
+    """The host of a remote URL (https, ssh or scp-style), or None for a path."""
+    for pattern in _HOST_PATTERNS:
+        match = pattern.match((url or "").strip())
+        if match:
+            return match.group("host").lower()
+    return None
+
+
+def _is_github(host: str) -> bool:
+    """`gh` speaks to GitHub and GitHub Enterprise only; other forges are not asked."""
+    return host == "github.com" or "github" in host
+
+
+def _install(tool: str) -> list[str]:
+    darwin = machine.platform == "darwin"
+    return {
+        "gh": ["brew install gh"] if darwin else ["see https://cli.github.com to install gh"],
+        "node": ["brew install node"] if darwin else ["see https://nodejs.org to install Node"],
+        "uv": ["curl -LsSf https://astral.sh/uv/install.sh | sh"],
+        "docker": ["brew install --cask docker"]
+        if darwin
+        else ["see https://docs.docker.com/engine/install/ to install Docker"],
+    }[tool]
+
+
+def _login_steps(host: str) -> list[str]:
+    return [
+        f"gh auth login --hostname {host} --git-protocol https --web",
+        "gh auth setup-git",
+        f"gh auth status --hostname {host}",
+    ]
+
+
+def _repo_forge(row: dict) -> str | None:
+    return row.get("forge_url") or row.get("origin")
+
+
+def _forge_problems(problems: list[Problem], registered: list[dict]) -> None:
+    """Can `gh` act on every GitHub host this runtime delivers to?
+
+    Delivery opens a pull request with `gh`; with nobody signed in, the first
+    delivery fails with a gh error nobody sees. The runtime's own origin counts
+    too: it is how this checkout is updated.
+    """
+    from papaya_agent_runtime import repos
+    from papaya_agent_runtime.manager.launch import repo_root
+
+    by_host: dict[str, list[dict]] = {}
+    for row in registered:
+        host = forge_host(_repo_forge(row))
+        if host and _is_github(host):
+            by_host.setdefault(host, []).append(row)
+    code, out = machine.run(["git", "-C", str(repo_root()), "remote", "get-url", "origin"])
+    own = forge_host(out.strip()) if code == 0 else None
+    if own and _is_github(own):
+        by_host.setdefault(own, [])
+    if not by_host:
+        return
+
+    def names(rows: list[dict]) -> tuple[str, ...]:
+        return tuple(sorted(str(r["name"]) for r in rows))
+
+    if machine.which("gh") is None:
+        every = [row for rows in by_host.values() for row in rows]
+        first = sorted(by_host)[0]
+        problems.append(
+            Problem(
+                code=GH_MISSING,
+                summary="the GitHub CLI (`gh`) is not installed, so no pull request can be opened",
+                fix="install `gh`, then `gh auth login`",
+                owner=USER,
+                blocking=False,
+                title="The GitHub CLI is not installed on this machine",
+                steps=(*_install("gh"), *_login_steps(first), AFTER),
+                repos=names(every),
+            )
+        )
+        return
+
+    for host in sorted(by_host):
+        status, _ = machine.run(["gh", "auth", "status", "--hostname", host])
+        if status != 0:
+            label = "GitHub" if host == "github.com" else f"GitHub ({host})"
+            problems.append(
+                Problem(
+                    code=FORGE_UNAUTHENTICATED,
+                    summary=(f"`gh` is not signed in to {host}, so work there cannot be delivered"),
+                    fix=f"`gh auth login --hostname {host}`",
+                    owner=USER,
+                    blocking=False,
+                    title=f"{label} is not signed in on this machine",
+                    steps=(*_login_steps(host), AFTER),
+                    scope=host,
+                    repos=names(by_host[host]),
+                )
+            )
+            continue
+        unreachable = []
+        for row in by_host[host]:
+            slug = repos.forge_slug(_repo_forge(row))
+            if not slug:
+                continue
+            rc, answer = machine.run(
+                ["gh", "api", f"repos/{slug}", "--hostname", host, "--jq", ".permissions.push"]
+            )
+            if rc != 0 or answer.strip() == "false":
+                unreachable.append(row)
+        if unreachable:
+            problems.append(
+                Problem(
+                    code=REPO_UNREACHABLE,
+                    summary=(
+                        f"the account `gh` is signed in to on {host} cannot read or push "
+                        f"{', '.join(names(unreachable))}"
+                    ),
+                    fix="ask for write access, or sign in as an account that has it",
+                    owner=USER,
+                    blocking=False,
+                    title="A repository this machine works on cannot be read or pushed "
+                    "with the GitHub account signed in here",
+                    steps=(
+                        f"gh auth status --hostname {host}",
+                        "ask the repository's owner to give <your-github-username> write access",
+                        f"or: gh auth login --hostname {host} --git-protocol https --web",
+                        AFTER,
+                    ),
+                    scope=host,
+                    repos=names(unreachable),
+                )
+            )
+
+
+def _toolchain_problems(problems: list[Problem], registered: list[dict]) -> None:
+    """Node, uv and Docker, for the repositories that need them."""
+    from papaya_agent_runtime import memory
+
+    needs: dict[str, list[str]] = {"node": [], "uv": [], "docker": []}
+    for row in registered:
+        name, path = str(row["name"]), str(row.get("local_path") or "")
+        try:
+            notes = memory.repo_notes_path(name).read_text(encoding="utf-8")
+        except OSError:
+            notes = ""
+        programs = gate_programs(gate_commands(notes))
+        if programs & _NODE_PROGRAMS or (path and machine.is_file(f"{path}/package.json")):
+            needs["node"].append(name)
+        if "uv" in programs or (path and machine.is_file(f"{path}/uv.lock")):
+            needs["uv"].append(name)
+        if path and any(machine.is_file(f"{path}/{f}") for f in _COMPOSE_FILES):
+            needs["docker"].append(name)
+
+    for tool, code, title in (
+        ("node", NODE_MISSING, "Node is not installed, and a repository here needs it"),
+        ("uv", UV_MISSING, "uv is not installed, and a repository here needs it"),
+    ):
+        if needs[tool] and machine.which(tool) is None:
+            problems.append(
+                Problem(
+                    code=code,
+                    summary=f"`{tool}` is not installed; {', '.join(needs[tool])} need it",
+                    fix=f"install {tool}",
+                    owner=USER,
+                    blocking=False,
+                    title=title,
+                    steps=(*_install(tool), f"{tool} --version", AFTER),
+                    repos=tuple(sorted(needs[tool])),
+                )
+            )
+
+    if not needs["docker"]:
+        return
+    installed = machine.which("docker") is not None
+    if installed and machine.run(["docker", "info"])[0] == 0:
+        return
+    start = "open -a Docker" if machine.platform == "darwin" else "sudo systemctl start docker"
+    problems.append(
+        Problem(
+            code=DOCKER_NOT_RUNNING,
+            summary=(
+                f"Docker is not running; {', '.join(sorted(needs['docker']))} "
+                "run their services with compose"
+            ),
+            fix="start Docker",
+            owner=USER,
+            blocking=False,
+            title="Docker is not running, and a repository here runs its services in it",
+            steps=(*([] if installed else _install("docker")), start, "docker info", AFTER),
+            repos=tuple(sorted(needs["docker"])),
+        )
+    )
+
+
+def _disk_problems(problems: list[Problem]) -> None:
+    from papaya_agent_runtime.paths import ppy_home
+
+    home = ppy_home()
+    free = machine.free_bytes(str(home if home.exists() else Path.cwd()))
+    if free is None or free >= DISK_FLOOR_BYTES:
+        return
+    problems.append(
+        Problem(
+            code=DISK_LOW,
+            summary=(
+                f"{free / 1024**3:.1f} GiB free on this disk, below the "
+                f"{DISK_FLOOR_BYTES // 1024**3} GiB a worker needs"
+            ),
+            fix="free some disk space",
+            owner=USER,
+            title="This machine is almost out of disk space",
+            steps=("ppy worktree prune", "df -h ~", "free up at least 5 GiB", AFTER),
+        )
+    )
+
+
+def _machine_problems(problems: list[Problem]) -> None:
+    from papaya_agent_runtime import repos
+
+    try:
+        registered = repos.list_repos()
+    except Exception:  # noqa: BLE001 - an unreadable state db is already reported elsewhere
+        registered = []
+    for probe in (
+        lambda: _forge_problems(problems, registered),
+        lambda: _toolchain_problems(problems, registered),
+        lambda: _disk_problems(problems),
+    ):
+        try:
+            probe()
+        except Exception:  # noqa: BLE001 - a readiness check must never be the thing that breaks
+            continue
+
+
+def setup_blocker(
+    verdict: Readiness, repo: str | None = None, *, delivery: bool = False
+) -> Problem | None:
+    """The blocker that stops this work here, if one does.
+
+    At pickup (``delivery=False``): any blocking problem a person must remedy, or
+    one scoped to ``repo``. At delivery: only what makes a pull request impossible
+    for ``repo``. ``None`` means nothing a person has to do stands in the way —
+    which is not the same as ready, since the runtime's own gaps are not blockers.
+    """
+    for problem in verdict.problems:
+        if not problem.steps:
+            continue
+        if delivery:
+            if repo and repo in problem.repos and problem.code in DELIVERY_CODES:
+                return problem
+            continue
+        if problem.blocking or (repo and repo in problem.repos):
+            return problem
+    return None
+
+
 def check() -> Readiness:
-    """The verdict for this instance, from local state only."""
+    """The verdict for this instance."""
     problems: list[Problem] = []
     _config_problems(problems)
     _harness_problems(problems)
@@ -584,6 +974,7 @@ def check() -> Readiness:
     _gate_budget_problems(problems)
     _papaya_problems(problems)
     _client_problems(problems)
+    _machine_problems(problems)
     if any(p.blocking for p in problems):
         state = BLOCKED
     elif problems:
@@ -692,17 +1083,31 @@ def forget_reports(conn: sqlite3.Connection) -> None:
 
 
 __all__ = [
+    "AFTER",
     "BLOCKED",
     "DEGRADED",
+    "DELIVERY_CODES",
+    "DISK_LOW",
+    "DOCKER_NOT_RUNNING",
+    "FORGE_UNAUTHENTICATED",
+    "GH_MISSING",
+    "NODE_MISSING",
     "READY",
+    "REPO_UNREACHABLE",
     "RUNTIME",
     "USER",
+    "UV_MISSING",
+    "Machine",
     "Problem",
     "Readiness",
     "already_reported",
     "check",
+    "forge_host",
     "forget_reports",
+    "harness_steps",
     "headline",
+    "machine",
     "mark_reported",
     "report",
+    "setup_blocker",
 ]
