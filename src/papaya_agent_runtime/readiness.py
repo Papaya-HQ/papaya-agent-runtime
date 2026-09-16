@@ -91,6 +91,60 @@ class Readiness:
         }
 
 
+#: What gets a harness signed in, when discovery has no opinion of its own.
+_SIGN_IN = {
+    "claude": "run `claude auth login`",
+    "codex": "run `codex login`",
+}
+
+
+def _configured_providers() -> dict[str, str]:
+    """The provider each role is configured to use, or nothing if unreadable."""
+    from papaya_agent_runtime.config import ConfigError, load_config
+
+    try:
+        cfg = load_config()
+    except (ConfigError, OSError):  # already reported by _config_problems
+        return {}
+    return {"driver": cfg.manager.provider, "worker": cfg.worker.provider}
+
+
+def _unusable_provider_problem(report: dict, usable: list[str]) -> Problem | None:
+    """A role pinned to a harness this machine cannot launch.
+
+    Distinct from ``no_harness``: something *is* signed in here, so the runtime
+    looks healthy and a dispatch fails only at the moment it matters. Switching
+    to the harness that happens to work would be the runtime quietly overriding a
+    choice a person made, so this stays theirs to close.
+    """
+    if not usable:
+        return None  # `no_harness` already says it, and says it better
+    stranded = {
+        role: provider
+        for role, provider in _configured_providers().items()
+        if provider not in usable
+    }
+    if not stranded:
+        return None
+    details = {h["name"]: (h.get("detail") or "") for h in report.get("harnesses", [])}
+    roles = ", ".join(f"{role} ({provider})" for role, provider in sorted(stranded.items()))
+    fixes = sorted(
+        {
+            details.get(p) or _SIGN_IN.get(p, f"install and sign in to {p}")
+            for p in stranded.values()
+        }
+    )
+    return Problem(
+        code="provider_unusable",
+        summary=(
+            f"configured to use a harness this machine cannot launch: {roles}; "
+            f"usable here: {', '.join(usable)}"
+        ),
+        fix="; ".join(fixes) + " — or `ppy config models` to choose a harness that works here",
+        owner=USER,
+    )
+
+
 def _harness_problems(problems: list[Problem]) -> None:
     from papaya_agent_runtime.setup.discovery import discover, usable_harnesses
 
@@ -98,7 +152,8 @@ def _harness_problems(problems: list[Problem]) -> None:
         report = discover()
     except Exception:  # noqa: BLE001 - a readiness check must never be the thing that breaks
         return
-    if not usable_harnesses(report):
+    usable = usable_harnesses(report)
+    if not usable:
         problems.append(
             Problem(
                 code="no_harness",
@@ -107,6 +162,9 @@ def _harness_problems(problems: list[Problem]) -> None:
                 owner=USER,
             )
         )
+    stranded = _unusable_provider_problem(report, usable)
+    if stranded is not None:
+        problems.append(stranded)
     missing = [c["name"] for c in report.get("companions", []) if not c.get("available")]
     if missing:
         problems.append(

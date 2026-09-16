@@ -106,6 +106,91 @@ def test_a_repository_with_no_forge_blocks_delivery_and_needs_the_user(
     assert forge.owner == readiness.USER
 
 
+# ── A harness that is configured but cannot be launched ─────────────────────
+#
+# Distinct from `no_harness`, and worse, because something *is* signed in here:
+# the runtime looks healthy and the dispatch fails only at the moment it matters.
+# Switching to whichever harness happens to work would be the runtime overriding a
+# choice a person made, so this is theirs to close and it names the sign-in step.
+
+
+def _harness_report(usable: list[str]) -> dict:
+    def make(name: str) -> dict:
+        return {
+            "name": name,
+            "kind": "harness",
+            "path": f"/usr/bin/{name}" if name in usable else None,
+            "version": "1.0.0",
+            "authenticated": name in usable,
+            "available": name in usable,
+            "detail": "" if name in usable else f"run `{name} login`",
+        }
+
+    return {"harnesses": [make("claude"), make("codex")], "requirements": [], "companions": []}
+
+
+@pytest.fixture
+def only_codex_is_signed_in(monkeypatch):
+    from papaya_agent_runtime.setup import discovery
+
+    monkeypatch.setattr(discovery, "discover", lambda: _harness_report(["codex"]))
+
+
+def test_a_configured_harness_that_is_not_usable_blocks_and_needs_the_user(
+    ppy_home, monkeypatch, only_codex_is_signed_in
+) -> None:
+    from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling, save_config
+
+    monkeypatch.setattr(readiness, "_papaya_problems", lambda problems: None)
+    monkeypatch.setattr(readiness, "_repo_problems", lambda problems: None)
+    save_config(
+        MMConfig(
+            manager=ManagerProfile("codex", "gpt-5-codex", "high"),
+            worker=WorkerCeiling("claude", "opus", "medium"),
+        )
+    )
+
+    verdict = readiness.check()
+
+    stranded = next(p for p in verdict.problems if p.code == "provider_unusable")
+    assert stranded.blocking is True
+    assert stranded.owner == readiness.USER
+    assert "worker (claude)" in stranded.summary
+    assert "claude login" in stranded.fix
+    assert verdict.state == readiness.BLOCKED
+    assert "no_harness" not in [p.code for p in verdict.problems]
+
+
+def test_a_configured_harness_that_is_usable_is_not_a_problem(
+    ppy_home, monkeypatch, only_codex_is_signed_in
+) -> None:
+    from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling, save_config
+
+    monkeypatch.setattr(readiness, "_papaya_problems", lambda problems: None)
+    monkeypatch.setattr(readiness, "_repo_problems", lambda problems: None)
+    save_config(
+        MMConfig(
+            manager=ManagerProfile("codex", "gpt-5-codex", "high"),
+            worker=WorkerCeiling("codex", "gpt-5-codex", "medium"),
+        )
+    )
+
+    assert [p.code for p in readiness.check().problems] == []
+
+
+def test_no_signed_in_harness_at_all_says_that_once_not_twice(ppy_home, monkeypatch) -> None:
+    """`no_harness` already covers it; adding `provider_unusable` would just be noise."""
+    from papaya_agent_runtime.setup import discovery
+
+    monkeypatch.setattr(discovery, "discover", lambda: _harness_report([]))
+    monkeypatch.setattr(readiness, "_papaya_problems", lambda problems: None)
+    monkeypatch.setattr(readiness, "_repo_problems", lambda problems: None)
+    monkeypatch.setattr(readiness, "_config_problems", lambda problems: None)
+
+    codes = [p.code for p in readiness.check().problems]
+    assert codes == ["no_harness"]
+
+
 # ── Saying it once ──────────────────────────────────────────────────────────
 
 

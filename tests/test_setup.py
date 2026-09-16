@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from papaya_agent_runtime import cli
+from papaya_agent_runtime import cli, papaya
 from papaya_agent_runtime.config import (
     ConfigError,
     MMConfig,
@@ -19,6 +21,40 @@ from papaya_agent_runtime.setup import discovery, wizard
 def ppy_home(tmp_path, monkeypatch):
     monkeypatch.setenv("PPY_HOME", str(tmp_path / ".ppy"))
     return tmp_path / ".ppy"
+
+
+@pytest.fixture
+def connected_as(tmp_path, monkeypatch):
+    """Fake this machine's Papaya connection, harness and all.
+
+    `PPY_PAPAYA_HOME` is the whole world for connection discovery, so a test can
+    say precisely which harness the person chose at connect time — the thing the
+    provider defaults are supposed to follow.
+    """
+
+    def connect(harness: str) -> None:
+        home = tmp_path / "papaya-client"
+        home.mkdir(exist_ok=True)
+        (home / "config.json").write_text(
+            json.dumps(
+                {
+                    "agents": {
+                        "a-1": {
+                            "agent_id": "a-1",
+                            "agent_name": "Ada",
+                            "agent_handle": "ada",
+                            "workspace_id": "w-1",
+                            "connection_id": "c-1",
+                        }
+                    },
+                    "connect": {"agent_id": "a-1", "harness": harness},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(papaya.HOME_ENV, str(home))
+
+    return connect
 
 
 def _fake_report(usable: list[str]):
@@ -62,6 +98,81 @@ def test_setup_non_interactive_writes_config(ppy_home, monkeypatch) -> None:
     # Persisted and reloadable.
     reloaded = load_config()
     assert reloaded.worker.provider == "codex"
+
+
+# ── One harness unless somebody asked otherwise ─────────────────────────────
+#
+# The worker used to be `usable[-1]` and the manager `usable[0]`, so any machine
+# with both harnesses signed in got a Claude manager driving Codex workers —
+# chosen by list position rather than by anyone. Shane's rule, 2026-09-16: the
+# runtime does not mix agents by default. The person already chose a harness when
+# they connected this machine; that choice is the default for everyone it launches.
+
+
+@pytest.fixture
+def both_harnesses(monkeypatch):
+    report = _fake_report(["claude", "codex"])
+    monkeypatch.setattr(wizard, "discover", lambda: report)
+    monkeypatch.setattr(wizard, "usable_harnesses", lambda r: discovery.usable_harnesses(r))
+    return report
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_the_connections_harness_is_the_default_for_both_roles(
+    ppy_home, both_harnesses, connected_as, harness
+) -> None:
+    connected_as(harness)
+    cfg = wizard.run_setup(non_interactive=True)
+    assert (cfg.manager.provider, cfg.worker.provider) == (harness, harness)
+
+
+@pytest.mark.parametrize("manager", [None, "claude", "codex"])
+def test_without_a_connection_workers_match_the_manager(ppy_home, both_harnesses, manager) -> None:
+    """A fresh runtime never drives its own workers with the other harness."""
+    overrides = {} if manager is None else {"manager_provider": manager}
+    cfg = wizard.run_setup(non_interactive=True, overrides=overrides)
+    assert cfg.worker.provider == cfg.manager.provider
+    if manager is not None:
+        assert cfg.manager.provider == manager
+
+
+def test_one_usable_harness_still_drives_and_works(ppy_home, monkeypatch, connected_as) -> None:
+    """Even a connection naming the *other* harness cannot conjure one that is not signed in."""
+    report = _fake_report(["codex"])  # claude not authenticated
+    monkeypatch.setattr(wizard, "discover", lambda: report)
+    monkeypatch.setattr(wizard, "usable_harnesses", lambda r: discovery.usable_harnesses(r))
+    connected_as("claude")
+    cfg = wizard.run_setup(non_interactive=True)
+    assert (cfg.manager.provider, cfg.worker.provider) == ("codex", "codex")
+
+
+def test_an_explicit_worker_provider_still_wins_over_the_connection(
+    ppy_home, both_harnesses, connected_as
+) -> None:
+    """Mixing stays possible — on purpose, never by list position."""
+    connected_as("claude")
+    cfg = wizard.run_setup(non_interactive=True, overrides={"worker_provider": "codex"})
+    assert (cfg.manager.provider, cfg.worker.provider) == ("claude", "codex")
+
+
+def test_interactive_setup_offers_the_connections_harness_for_both_roles(
+    ppy_home, both_harnesses, connected_as, monkeypatch
+) -> None:
+    connected_as("codex")
+    prompts: list[tuple[str, str]] = []
+
+    def fake_input(prompt: str) -> str:
+        label, _, rest = prompt.partition(" [")
+        prompts.append((label, rest.split("(")[1].rstrip("): ")))
+        return ""  # accept the offered default
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    cfg = wizard.run_setup(non_interactive=False)
+
+    offered = dict(prompts)
+    assert offered["Manager provider"] == "codex"
+    assert offered["Worker provider"] == "codex"
+    assert (cfg.manager.provider, cfg.worker.provider) == ("codex", "codex")
 
 
 def test_setup_rejects_unusable_worker(ppy_home, monkeypatch) -> None:
