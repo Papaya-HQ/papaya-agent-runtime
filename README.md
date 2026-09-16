@@ -347,15 +347,20 @@ it gets the MCP config `papaya-agent mcp runner-config` writes for this connecti
 plugin, the same as the client's own runners give a job. Its stdout and stderr are
 kept at `.ppy/runs/<run id>/turns/<turn>-<n>.log` (for example `brief-1.log`,
 `review-2.log`), and the path appears in the ticket's progress as soon as the turn
-starts. On the work item itself the runner posts one line, as the agent, each time
-the phase changes: picked up, briefing, dispatched (worker and repository), blocked
-(the question), reviewing, pull request open, reported. The web app's ticket card
-shows the latest line as the agent's status. Worker progress stays in the app and
+starts. On the work item itself the runner posts only what a person reading the
+thread needs, one line each, as the agent: picked up, dispatched (worker and
+repository), blocked (the question) and unblocked, and — the first time a review
+sends the worker back, never again — `Sent the worker back with findings; still
+working.` The report is the review turn's own comment, and the runner posts nothing
+after it. The web app's ticket card shows the latest line as the agent's status.
+Worker progress and the review loop's bookkeeping (reviewing, stopped short, sent
+back to its gate, pull request open) are progress lines to the host, in the app and
 the log. The runner also checks the turns' promises on the record: a brief with
 Goals must leave acceptance criteria on the item, and a delivery must leave the
 review turn's own report as a comment. A miss runs the turn once more with a
 one-line reminder. If the report is still missing, the runner posts
-`Pull request open: <link>; see the pull request for details.` itself.
+`Pull request open: <link>; see the pull request for details.` itself, as the last
+line.
 
 A ticket this machine cannot take at all — a repository the item names that cannot be
 registered, or a runtime that is not ready to work — is declined before any of that, so

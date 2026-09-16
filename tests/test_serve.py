@@ -1818,10 +1818,14 @@ def test_a_turns_transcript_is_kept_where_the_progress_report_says(
     assert "a warning" in kept, "stderr was not kept"
 
 
-def test_each_phase_change_is_one_comment_on_the_ticket_in_order(
-    ppy_home, client_home, ready, registered_repo
+def test_the_ticket_thread_carries_decisions_and_the_report_not_review_bookkeeping(
+    ppy_home, client_home, ready, registered_repo, progress_lines
 ) -> None:
-    """What the ticket card shows: one plain line per phase, and no worker chatter."""
+    """PAP-218: thirteen agent comments, five of them review internals, two after the report.
+
+    Two reviews send the worker back and a third delivers with its own report. The
+    thread gets pickup, dispatched, one sent-back line, and the report — last.
+    """
 
     def act(turn: Turn) -> None:
         if turn.name == prompts.BRIEF:
@@ -1829,26 +1833,35 @@ def test_each_phase_change_is_one_comment_on_the_ticket_in_order(
             progress.record(worker, phase="plan", note="Add the endpoint behind the flag.")
             worker_event(worker, "worker_done", status="worker_done", summary="done")
         elif turn.name == prompts.REVIEW:
-            _deliver(turn)
+            if turns.names().count(prompts.REVIEW) <= 2:
+                (worker,) = workers_in(turn.run_id)
+                worker_event(worker, "steer", message="The flag is not checked.")
+                worker_event(worker, "worker_done", status="worker_done", summary="fixed")
+            else:
+                _deliver(turn)
 
     papaya_api = FakePapaya()
     turns = FakeTurns(act)
     assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, _runner(turns, papaya_api)) == 0
 
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW, prompts.REVIEW, prompts.REVIEW]
     worker = workers_in(int(ticket_task()["run_id"]))[0]
     bodies = [body for _item, body in papaya_api.comments()]
     # Pickup and briefing are one comment: they happen within the same second.
     assert bodies == [
         "Picked up; choosing the repository and writing the brief.",
         f"Dispatched worker task {worker} in runtime.",
-        f"Reviewing worker task {worker} at its head.",
-        REPORT,  # the review turn's own, through MCP
-        "Pull request open: https://github.com/acme/runtime/pull/7",
-        "Result reported on this item.",
+        serve.SENT_BACK_LINE,
+        REPORT,  # the review turn's own, through MCP, and nothing after it
     ]
     assert all("\n" not in body for body in bodies)
     assert not any("Add the endpoint" in body for body in bodies), "worker progress on the ticket"
-    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    # The internals still reach the host as progress.
+    details = [detail for _s, _p, detail in progress_lines]
+    assert details.count(f"Reviewing worker task {worker} at its head.") == 3
+    assert details.count(f"Worker task {worker} sent back with findings.") == 2
+    assert "Pull request open: https://github.com/acme/runtime/pull/7" in details
+    assert "Result reported on this item." in details
 
 
 def test_a_brief_that_left_no_acceptance_criteria_is_rerun_once_then_goes_on(
@@ -1887,6 +1900,24 @@ def test_a_brief_that_left_no_acceptance_criteria_is_rerun_once_then_goes_on(
     assert harness.results[0]["exit_code"] == 0
 
 
+def test_a_resumed_ticket_knows_its_worker_was_already_sent_back(ppy_home) -> None:
+    """The sent-back comment is once per ticket, not once per hold."""
+    conn = init_db()
+    run_id = store.create_run(conn, "Fix the thing")
+    task_id = store.add_task(conn, run_id=run_id, title="Fix the thing")
+    serve.record_phase(conn, task_id, serve.PHASE_DISPATCHED, "Dispatched worker task 9.")
+    serve.record_phase(conn, task_id, serve.PHASE_REVIEWING, "Reviewing worker task 9 at its head.")
+    conn.close()
+    assert not serve.sent_back_before(task_id)
+
+    conn = init_db()
+    serve.record_phase(
+        conn, task_id, serve.PHASE_DISPATCHED, "Worker task 9 sent back with findings."
+    )
+    conn.close()
+    assert serve.sent_back_before(task_id)
+
+
 def _review_ticket(act_on_review, papaya_api: FakePapaya) -> FakeTurns:
     def act(turn: Turn) -> str | None:
         if turn.name == prompts.BRIEF:
@@ -1908,8 +1939,8 @@ def test_a_review_turn_that_reports_on_the_item_is_believed(
 
     assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
     bodies = [body for _item, body in papaya_api.comments()]
-    assert bodies[-1] == "Result reported on this item."
-    assert not any("see the pull request for details" in body for body in bodies)
+    assert bodies[-1] == REPORT
+    assert not any(body.startswith("Pull request open") for body in bodies)
 
 
 def test_a_review_turn_that_delivers_silently_is_rerun_to_report(
@@ -1930,9 +1961,8 @@ def test_a_review_turn_that_delivers_silently_is_rerun_to_report(
     assert turns.names() == [prompts.BRIEF, prompts.REVIEW, prompts.REVIEW]
     assert f"- {prompts.ADDENDUM_FACT}: {prompts.REPORT_ADDENDUM}" in turns.calls[2].prompt
     bodies = [body for _item, body in papaya_api.comments()]
-    assert REPORT in bodies
-    assert bodies[-1] == "Result reported on this item."
-    assert not any("see the pull request for details" in body for body in bodies)
+    assert bodies[-1] == REPORT
+    assert not any(body.startswith("Pull request open") for body in bodies)
 
 
 def test_a_review_turn_that_never_reports_gets_the_runners_fallback_line(
@@ -1951,11 +1981,14 @@ def test_a_review_turn_that_never_reports_gets_the_runners_fallback_line(
 
     assert turns.names() == [prompts.BRIEF, prompts.REVIEW, prompts.REVIEW]
     bodies = [body for _item, body in papaya_api.comments()]
-    assert bodies[-1] == (
+    worker = workers_in(int(ticket_task()["run_id"]))[0]
+    # The fallback is the runner's one line after dispatch, and the last.
+    assert bodies == [
+        "Picked up; choosing the repository and writing the brief.",
+        f"Dispatched worker task {worker} in runtime.",
         "Pull request open: https://github.com/acme/runtime/pull/7; "
-        "see the pull request for details."
-    )
-    assert "Result reported on this item." not in bodies
+        "see the pull request for details.",
+    ]
     assert (serve.PHASE_REPORTED, "reported (fallback)") in [
         (phase, detail) for _s, phase, detail in progress_lines
     ]
