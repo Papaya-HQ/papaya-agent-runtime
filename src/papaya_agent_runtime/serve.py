@@ -590,8 +590,8 @@ class TicketRunner:
         if held.resume_from is None:
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
-            said = f"Picked up; working in {held.repo}." if held.repo else "Picked up."
-            await self._say(ticket, PHASE_PICKED_UP, said)
+            said = "Picked up; choosing the repository and writing the brief."
+            await self._say(ticket, PHASE_BRIEFING, said)
         else:
             # A redelivered ticket that was already being worked goes back to where
             # it was. Nothing is picked up twice: no second brief, no second status,

@@ -20,10 +20,17 @@ What the sweep adds is only the choosing:
   is not live, so a ticket that is still assigned is offered again;
 - a subject someone else holds is a skip and a debug line, never an error, and it
   is not remembered — the next sweep simply asks again;
+- an `in_progress` item somebody touched in the last `stale_after` (six hours by
+  default) is being worked somewhere else — another session, the hosted agent —
+  and offering it would only start the same work twice, so it is skipped and
+  counted as in progress elsewhere; one left untouched for longer is fair game;
+- the most important first (`sweep_order`): priority, then the statuses somebody
+  is waiting on, then the oldest;
 - a full pool ends the round, and the rest wait for the next one.
 
-Each sweep says one line on stderr — found, offered, skipped — and nothing on the
-supervised protocol, which is for jobs, not for bookkeeping.
+A sweep says one line on stderr — found, offered, skipped — and nothing on the
+supervised protocol, which is for jobs, not for bookkeeping. A sweep that found
+exactly what the one before it found says so at most every half hour.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,8 +58,24 @@ DEFAULT_SWEEP_INTERVAL = 300.0
 #: The environment variable that sets the interval when `--sweep-interval` does not.
 SWEEP_INTERVAL_ENV = "PPY_SWEEP_INTERVAL"
 
+#: The environment variable that sets how long an `in_progress` item must sit untouched.
+SWEEP_STALE_AFTER_ENV = "PPY_SWEEP_STALE_AFTER"
+
+#: How long an `in_progress` item must sit untouched before the sweep offers it: six hours.
+DEFAULT_STALE_AFTER = 6 * 60 * 60.0
+
+#: How often a sweep that found nothing new may still say so: every thirty minutes.
+UNCHANGED_SUMMARY_EVERY = 30 * 60.0
+
 #: The work item statuses that still want somebody working on them.
 OPEN_STATUSES = frozenset({"todo", "in_progress", "blocked", "changes_requested"})
+
+#: Offer order, most important first. An unknown priority sorts as `normal`.
+PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+
+#: Within a priority: somebody is waiting on these, then fresh work, then work
+#: that was started once and left. An unknown status sorts last.
+STATUS_RANK = {"changes_requested": 0, "blocked": 0, "todo": 1, "in_progress": 2}
 
 #: The phases that mean a hold on the ticket has ended. A task in one of these is
 #: history, not work in flight, and does not stop the ticket being offered again.
@@ -77,6 +101,15 @@ def interval_from_env(environ: Mapping[str, str] | None = None) -> float:
     if not raw:
         return DEFAULT_SWEEP_INTERVAL
     return parse_interval(raw, source=SWEEP_INTERVAL_ENV)
+
+
+def stale_after_from_env(environ: Mapping[str, str] | None = None) -> float:
+    """How long `PPY_SWEEP_STALE_AFTER` says an `in_progress` item must sit, or six hours."""
+    env = os.environ if environ is None else environ
+    raw = str(env.get(SWEEP_STALE_AFTER_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_STALE_AFTER
+    return parse_interval(raw, source=SWEEP_STALE_AFTER_ENV)
 
 
 def parse_interval(raw: str | float, *, source: str) -> float:
@@ -191,6 +224,8 @@ class SweepResult:
     skipped: int = 0
     #: Of `skipped`, the ones this runtime declined earlier and nobody has changed since.
     declined_earlier: int = 0
+    #: Of `skipped`, `in_progress` items touched too recently to be anybody's but their own.
+    in_progress_elsewhere: int = 0
     #: Open items not reached because every slot was busy; the next sweep has them.
     waiting: int = 0
     #: Why the sweep could not ask Papaya at all, when it could not.
@@ -202,9 +237,19 @@ class SweepResult:
         line = f"sweep found {self.found}, offered {self.offered}, skipped {self.skipped}"
         if self.declined_earlier:
             line += f", {self.declined_earlier} declined earlier"
+        if self.in_progress_elsewhere:
+            line += f", {self.in_progress_elsewhere} in progress elsewhere"
         if self.waiting:
             line += f"; {self.waiting} left for the next sweep (every slot is busy)"
         return line
+
+    def unchanged_summary(self) -> str:
+        """The line for a sweep that found exactly what the one before it found."""
+        if self.error is not None:
+            return f"sweep still cannot list assigned work: {self.error}"
+        if self.waiting:
+            return f"sweep unchanged: still {self.waiting} waiting for a slot"
+        return f"sweep unchanged: still found {self.found}, skipped {self.skipped}"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +257,7 @@ class SweepResult:
             "offered": self.offered,
             "skipped": self.skipped,
             "declined_earlier": self.declined_earlier,
+            "in_progress_elsewhere": self.in_progress_elsewhere,
             "waiting": self.waiting,
             "error": self.error,
             "summary": self.summary(),
@@ -227,8 +273,48 @@ def _items(answer: Any) -> list[dict[str, Any]]:
     return [item for item in answer if isinstance(item, dict) and str(item.get("id") or "")]
 
 
+def _status(item: dict[str, Any]) -> str:
+    return str(item.get("status") or "").strip().lower()
+
+
 def is_open(item: dict[str, Any]) -> bool:
-    return str(item.get("status") or "").strip().lower() in OPEN_STATUSES
+    return _status(item) in OPEN_STATUSES
+
+
+def sweep_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`items` most important first, so a busy pool takes the ones that matter.
+
+    Priority (urgent, high, normal, low); then `changes_requested` and `blocked`,
+    which somebody is waiting on, before `todo`, before an `in_progress` item left
+    untouched; then the oldest `updated_at`. An item with no readable `updated_at`
+    goes after the dated ones at its rank, and ties keep the order Papaya gave.
+    """
+    never = datetime.max.replace(tzinfo=UTC)
+
+    def key(item: dict[str, Any]) -> tuple[int, int, datetime]:
+        priority = str(item.get("priority") or "").strip().lower()
+        return (
+            PRIORITY_RANK.get(priority, PRIORITY_RANK["normal"]),
+            STATUS_RANK.get(_status(item), len(STATUS_RANK)),
+            _timestamp(item.get("updated_at")) or never,
+        )
+
+    return sorted(items, key=key)
+
+
+def in_progress_elsewhere(item: dict[str, Any], *, now: datetime, stale_after: float) -> bool:
+    """Whether `item` is `in_progress` and touched too recently to be offered.
+
+    Started somewhere else and still moving, it is that session's work; offering
+    it would dispatch the same work twice. An `in_progress` item whose `updated_at`
+    cannot be read cannot be shown to be abandoned, so it is left alone too.
+    """
+    if _status(item) != "in_progress":
+        return False
+    touched = _timestamp(item.get("updated_at"))
+    if touched is None:
+        return True
+    return (now - touched).total_seconds() < stale_after
 
 
 def live_work_item_ids() -> set[str]:
@@ -297,6 +383,8 @@ class Sweeper:
         stderr: Any = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         live_items: Callable[[], set[str]] | None = None,
+        stale_after: float | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._built = built
         self._interval = float(interval)
@@ -304,10 +392,16 @@ class Sweeper:
         # Seam for tests: the timer, fired on demand instead of every five minutes.
         self._sleep = sleep or asyncio.sleep
         self._live_items = live_items or live_work_item_ids
+        #: `sweep_stale_after`: how long an `in_progress` item must sit untouched to be offered.
+        self._stale_after = stale_after_from_env() if stale_after is None else float(stale_after)
+        # Seam for tests: wall-clock seconds, for staleness and for the summary throttle.
+        self._clock = clock or time.time
         # A sweep asked for by hand and one on the timer never interleave: two
         # rounds offering the same item at once would each see it as not yet held.
         self._lock = asyncio.Lock()
         self.results: list[SweepResult] = []
+        #: When a summary line was last written, or None before the first.
+        self._last_written: float | None = None
 
     @property
     def interval(self) -> float:
@@ -322,11 +416,14 @@ class Sweeper:
             await self._sleep(self._interval)
             await self.sweep_once()
 
-    async def sweep_once(self, *, include_declined: bool = False) -> SweepResult:
+    async def sweep_once(
+        self, *, include_declined: bool = False, by_hand: bool = False
+    ) -> SweepResult:
         """One round: list, choose, offer. Never raises; a failure is the result.
 
         `include_declined` offers tickets this runtime declined earlier even when
         nobody has changed them since — the by-hand `ppy sweep --include-declined`.
+        `by_hand` is a person asking, who always gets the line.
         """
         async with self._lock:
             try:
@@ -336,11 +433,32 @@ class Sweeper:
             except Exception as exc:  # noqa: BLE001 - a bad sweep must not end serve
                 log.warning("[sweep] Sweep failed: %s", exc)
                 result = SweepResult(error=str(exc) or exc.__class__.__name__)
-        self.results.append(result)
-        if self._stderr is not None:
+            previous = self.results[-1] if self.results else None
+            self.results.append(result)
+            line = self._line(result, previous, by_hand=by_hand)
+        if line is not None and self._stderr is not None:
             with contextlib.suppress(Exception):
-                print(f"ppy serve: {result.summary()}", file=self._stderr, flush=True)
+                print(f"ppy serve: {line}", file=self._stderr, flush=True)
         return result
+
+    def _line(
+        self, result: SweepResult, previous: SweepResult | None, *, by_hand: bool
+    ) -> str | None:
+        """What this sweep writes on stderr, if anything.
+
+        The first sweep, a sweep that offered something, one that found something
+        different from the sweep before it, and one a person asked for always
+        write. A repeat writes at most every `UNCHANGED_SUMMARY_EVERY`: a pool that
+        stays full is one line every half hour, not one every five minutes.
+        """
+        now = self._clock()
+        if by_hand or previous is None or result.offered or result != previous:
+            self._last_written = now
+            return result.summary()
+        if self._last_written is not None and now - self._last_written < UNCHANGED_SUMMARY_EVERY:
+            return None
+        self._last_written = now
+        return result.unchanged_summary()
 
     async def _sweep(self, *, include_declined: bool) -> SweepResult:
         from papaya_agent_client import api_client
@@ -354,20 +472,30 @@ class Sweeper:
             log.warning("[sweep] Could not list assigned work items: %s", exc)
             return SweepResult(error=str(exc) or exc.__class__.__name__)
 
-        items = [item for item in _items(answer) if is_open(item)]
+        items = sweep_order([item for item in _items(answer) if is_open(item)])
         live = await asyncio.to_thread(self._live_items)
         declined = {} if include_declined else await asyncio.to_thread(declined_items)
         agent_config = getattr(built, "agent_config", None) or {}
         agent_id = str(agent_config.get("agent_id") or "")
         workspace_id = str(agent_config.get("workspace_id") or "")
+        now = datetime.fromtimestamp(self._clock(), UTC)
 
-        offered = skipped = earlier = 0
+        offered = skipped = earlier = elsewhere = 0
         for index, item in enumerate(items):
             item_id = str(item["id"])
             subject = f"work_item:{item_id}"
             if subject in built.loop.running_subjects or item_id in live:
                 log.debug("[sweep] %s already has a live task here; not offering it", subject)
                 skipped += 1
+                continue
+            if in_progress_elsewhere(item, now=now, stale_after=self._stale_after):
+                log.debug(
+                    "[sweep] %s is in progress and was touched within %ss; not offering it",
+                    subject,
+                    int(self._stale_after),
+                )
+                skipped += 1
+                elsewhere += 1
                 continue
             if declined_earlier(item, declined.get(item_id)):
                 log.debug(
@@ -392,6 +520,7 @@ class Sweeper:
                     offered=offered,
                     skipped=skipped,
                     declined_earlier=earlier,
+                    in_progress_elsewhere=elsewhere,
                     waiting=len(items) - index,
                 )
             else:
@@ -400,7 +529,11 @@ class Sweeper:
                 log.debug("[sweep] %s not taken: someone else has it or it is not ours", subject)
                 skipped += 1
         return SweepResult(
-            found=len(items), offered=offered, skipped=skipped, declined_earlier=earlier
+            found=len(items),
+            offered=offered,
+            skipped=skipped,
+            declined_earlier=earlier,
+            in_progress_elsewhere=elsewhere,
         )
 
     def sweep_from_thread(
@@ -416,16 +549,21 @@ class Sweeper:
         offer, lives on the event loop. This is the one crossing between them.
         """
         future = asyncio.run_coroutine_threadsafe(
-            self.sweep_once(include_declined=include_declined), event_loop
+            self.sweep_once(include_declined=include_declined, by_hand=True), event_loop
         )
         return future.result(timeout=timeout).as_dict()
 
 
 __all__ = [
+    "DEFAULT_STALE_AFTER",
     "DEFAULT_SWEEP_INTERVAL",
     "ENDED_PHASES",
     "OPEN_STATUSES",
+    "PRIORITY_RANK",
+    "STATUS_RANK",
     "SWEEP_INTERVAL_ENV",
+    "SWEEP_STALE_AFTER_ENV",
+    "UNCHANGED_SUMMARY_EVERY",
     "SweepResult",
     "Sweeper",
     "declined_earlier",
@@ -433,9 +571,12 @@ __all__ = [
     "declined_path",
     "envelope_for",
     "forget_declined",
+    "in_progress_elsewhere",
     "interval_from_env",
     "is_open",
     "live_work_item_ids",
     "parse_interval",
     "remember_declined",
+    "stale_after_from_env",
+    "sweep_order",
 ]
