@@ -71,7 +71,13 @@ def test_hook_records_lifecycle_event(ppy_home) -> None:
     assert json.loads(row["payload"])["reason"] == "turn end"
 
 
-def test_hook_tolerates_bad_json(ppy_home) -> None:
+def test_hook_tolerates_bad_json(ppy_home, monkeypatch) -> None:
+    # A temp .ppy home is unconfigured, so the readiness voice would speak here
+    # for real reasons. This test is about the PICKUP context being quiet.
+    monkeypatch.setattr("papaya_agent_runtime.hooks.readiness_context", lambda: None)
+    # The role block is injected into every session by design; this test is
+    # about the PICKUP context, which is what should be quiet here.
+    monkeypatch.setattr("papaya_agent_runtime.hooks.runtime_role_context", lambda: None)
     conn = init_db()
     store.create_run(conn, "obj")
     ack = hooks.handle_hook_stdin("session-start", "not json")

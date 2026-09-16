@@ -178,3 +178,112 @@ def test_a_blocked_runtime_with_nothing_for_them_says_so() -> None:
     )
     text = readiness.report(verdict)
     assert "Nothing here needs you" in text
+
+
+# ── The hook that does not depend on being read ─────────────────────────────
+
+
+def test_a_blocked_runtime_announces_itself_at_session_start(ppy_home, monkeypatch) -> None:
+    """The contract's preflight only runs if the session reads the contract.
+
+    A session started non-interactively — the Papaya listener running
+    `claude -p "<work item>"` in this directory — arrives with a job and does it.
+    On 2026-09-15 three such jobs ran here, none touched `ppy`, and nobody found
+    out the runtime had never been set up. A hook is in front of the model
+    whatever it was launched to do.
+    """
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.setattr(readiness, "_harness_problems", lambda problems: None)
+    monkeypatch.setattr(readiness, "_papaya_problems", lambda problems: None)
+
+    context = hooks.readiness_context()
+
+    assert context is not None
+    assert "RUNTIME READINESS: blocked" in context
+    assert "BLOCKS WORK" in context
+    # It informs, it does not gate: a session can still answer and help.
+    assert "Nothing here is a gate" in context
+    assert "`ppy dispatch` has nowhere to run" in context
+
+
+def test_a_ready_runtime_says_nothing_at_session_start(ppy_home, monkeypatch) -> None:
+    """A healthy runtime must not spend context restating that it is healthy."""
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.setattr(readiness, "check", lambda: readiness.Readiness(state=readiness.READY))
+    assert hooks.readiness_context() is None
+
+
+def test_the_hook_separates_what_the_agent_fixes_from_what_the_user_must(
+    ppy_home, monkeypatch
+) -> None:
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.setattr(
+        readiness,
+        "check",
+        lambda: readiness.Readiness(
+            state=readiness.BLOCKED,
+            problems=[
+                readiness.Problem("no_config", "never set up", "`ppy setup`", readiness.RUNTIME),
+                readiness.Problem("no_harness", "not signed in", "sign in", readiness.USER),
+            ],
+        ),
+    )
+    context = hooks.readiness_context()
+    assert context is not None
+    assert "yours to fix now] never set up" in context
+    assert "needs the user] not signed in" in context
+
+
+def test_a_broken_readiness_check_never_takes_the_session_down(ppy_home, monkeypatch) -> None:
+    """A hook that raises would break every session in this directory."""
+    from papaya_agent_runtime import hooks
+    from papaya_agent_runtime.state import init_db
+
+    def boom() -> None:
+        raise RuntimeError("readiness exploded")
+
+    monkeypatch.setattr(readiness, "check", boom)
+    hooks.session_start_context(init_db())  # must not raise
+
+
+def test_every_session_is_told_it_is_the_runtime(ppy_home, monkeypatch) -> None:
+    """`ppy start` injects the role; a listener-launched session never goes through it.
+
+    On 2026-09-15 three sessions started by the Papaya listener did the work
+    directly in other checkouts — nothing briefed, nothing reviewed at an exact
+    commit, nothing delivered through the gate — because all they had was
+    CLAUDE.md, which a model holding a work item can reasonably deprioritise.
+    """
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    role = hooks.runtime_role_context()
+    assert role is not None
+    assert "YOU ARE THE PAPAYA AGENT RUNTIME" in role
+    assert "ppy dispatch" in role
+    assert "skips every gate" in role
+
+
+def test_a_framework_development_session_is_not_told_it_is_the_runtime(
+    ppy_home, monkeypatch
+) -> None:
+    """PPY_DEV means editing this codebase, not operating it."""
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.setenv("PPY_DEV", "1")
+    assert hooks.runtime_role_context() is None
+
+
+def test_the_role_arrives_even_when_the_runtime_is_perfectly_healthy(ppy_home, monkeypatch) -> None:
+    """The readiness voice goes quiet once set up; the role must not go with it."""
+    from papaya_agent_runtime import hooks
+    from papaya_agent_runtime.state import init_db
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.setattr(readiness, "check", lambda: readiness.Readiness(state=readiness.READY))
+    context = hooks.session_start_context(init_db())
+    assert context is not None
+    assert "YOU ARE THE PAPAYA AGENT RUNTIME" in context

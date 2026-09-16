@@ -42,7 +42,13 @@ def test_session_start_injects_pickup_context(ppy_home) -> None:
     assert response["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
-def test_session_start_is_quiet_when_nothing_is_open(ppy_home) -> None:
+def test_session_start_is_quiet_when_nothing_is_open(ppy_home, monkeypatch) -> None:
+    # A temp .ppy home is unconfigured, so the readiness voice would speak here
+    # for real reasons. This test is about the PICKUP context being quiet.
+    monkeypatch.setattr("papaya_agent_runtime.hooks.readiness_context", lambda: None)
+    # The role block is injected into every session by design; this test is
+    # about the PICKUP context, which is what should be quiet here.
+    monkeypatch.setattr("papaya_agent_runtime.hooks.runtime_role_context", lambda: None)
     init_db()
     response = hooks.handle_hook_stdin("SessionStart", "{}")
     assert response == {}
