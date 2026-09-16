@@ -138,9 +138,11 @@ def set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None
 
 #: The phases `ppy serve` records while it holds a ticket's lease. The first seven
 #: are how far the work has got, in the order a ticket normally passes through
-#: them (`blocked` is a detour off `dispatched` and back). The last four are how
+#: them (`blocked` is a detour off `dispatched` and back). The next four are how
 #: the hold ended, in the client's own vocabulary rather than a second one
-#: invented here — the reason on `Job.stop` chooses between the first three.
+#: invented here — the reason on `Job.stop` chooses between the first three. The
+#: last two are what the manager's rounds found afterwards: somebody else holds
+#: the ticket now (`handed_over`), or its pull request merged (`done`).
 TASK_PHASES = (
     "picked_up",
     "briefing",
@@ -153,6 +155,8 @@ TASK_PHASES = (
     "handed_back",
     "stalled",
     "declined",
+    "handed_over",
+    "done",
 )
 
 #: The event kind every phase change is also written as, so the order a ticket

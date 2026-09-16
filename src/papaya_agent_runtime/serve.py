@@ -164,6 +164,10 @@ PHASE_RELEASED = "released"
 PHASE_HANDED_BACK = "handed_back"
 PHASE_STALLED = "stalled"
 PHASE_DECLINED = "declined"
+#: What the manager's rounds find after a hold (`rounds.py`): the ticket is held
+#: by somebody else now, or its pull request merged.
+PHASE_HANDED_OVER = "handed_over"
+PHASE_DONE = "done"
 
 #: The phases a ticket can be resumed from: work was under way and nobody gave it
 #: away. `released` is not here, but the working phase before it is, which is
@@ -219,6 +223,38 @@ SAID_SENT_BACK = "sent_back"
 
 ACTED_KINDS = ("answer", "steer", "resumed", "auto_answered", "review_requested", "delivered")
 
+#: The event kind, on a delivered worker's task, that the rounds write when its
+#: pull request's CI went red or a review asked for changes. Read like a stopped
+#: worker: the review turn gets the failure, and its steer is what answers it.
+PR_ATTENTION = "pr_attention"
+
+#: The event kind, on the ticket's own task, that records what a check-in turn
+#: decided, why the check ran, and the message it gave the worker if any.
+CHECKIN_EVENT = "ticket_checkin"
+
+
+@dataclass(frozen=True)
+class Nudge:
+    """Something the rounds noticed about a held ticket's worker, for its runner to act on.
+
+    The rounds only decide *that* a turn should run and hand over the facts; the
+    runner runs it in the ticket's own loop, so it never overlaps the ticket's
+    other turns, and the turn decides what is said to the worker.
+    """
+
+    #: `checkin`, `answer` or `stopped`.
+    kind: str
+    #: Why the rounds looked, in the words a turn and a progress line can use.
+    reason: str
+    #: For a check-in: `quiet`, `plan` or `midpoint`.
+    trigger: str = ""
+    #: The worker's question, or what stopped it, verbatim.
+    detail: str = ""
+    #: The ledger event the nudge is about, when there is one.
+    event_id: int = 0
+    #: Extra facts for the turn, in order.
+    facts: tuple[tuple[str, str], ...] = ()
+
 
 # ── arguments ───────────────────────────────────────────────────────────────
 
@@ -239,6 +275,8 @@ class ServeOptions:
     working_directory: str | None = None
     #: Seconds between sweeps for assigned work; zero sweeps once, at start.
     sweep_interval: float = sweep.DEFAULT_SWEEP_INTERVAL
+    #: Seconds between the manager's rounds; zero reclaims once, at start, and stops.
+    rounds_interval: float = 300.0
     #: Unknown `listen` flags, deduplicated, in the order they were given.
     ignored: tuple[str, ...] = ()
     invalid_arguments: str | None = None
@@ -294,6 +332,15 @@ def _parser() -> argparse.ArgumentParser:
             "0 sweeps once, at start"
         ),
     )
+    parser.add_argument(
+        "--rounds-interval",
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how often to look at every worker and loose end "
+            "(default 300, or $PPY_ROUNDS_INTERVAL); 0 reclaims once, at start"
+        ),
+    )
     return parser
 
 
@@ -342,12 +389,24 @@ def parse_args(argv: list[str]) -> ServeOptions:
         )
     except ValueError as exc:
         invalid = invalid or str(exc)
+    from papaya_agent_runtime import rounds
+
+    rounds_interval = rounds.DEFAULT_ROUNDS_INTERVAL
+    try:
+        rounds_interval = (
+            sweep.parse_interval(known.rounds_interval, source="--rounds-interval")
+            if known.rounds_interval is not None
+            else rounds.interval_from_env()
+        )
+    except ValueError as exc:
+        invalid = invalid or str(exc)
     return ServeOptions(
         supervised=bool(known.supervised),
         harness=known.harness,
         approval_timeout=known.approval_timeout,
         working_directory=known.working_directory,
         sweep_interval=interval,
+        rounds_interval=rounds_interval,
         ignored=_ignored_flags(extra),
         invalid_arguments=invalid,
     )
@@ -456,6 +515,9 @@ class Held:
     event: papaya_events.PapayaEvent
     #: The working phase to pick the ticket up from, or ``None`` for a fresh pickup.
     resume_from: str | None = None
+    #: Taken up again on a task this runtime already had, by the rounds' reclaim:
+    #: the run's history is not news, so its progress is not relayed a second time.
+    reclaimed: bool = False
 
 
 @dataclass(frozen=True)
@@ -532,6 +594,10 @@ class Ticket:
     #: The gate recorded at the worker's head when it last stopped or said done, as one
     #: line for the review turn; empty when none was.
     recorded_gate: str = ""
+    #: What the manager's rounds noticed and the ticket's loop has not acted on yet.
+    nudges: list[Nudge] = field(default_factory=list)
+    #: The turn running for this ticket right now, if one is.
+    turn_running: str | None = None
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -680,6 +746,48 @@ def steer_worker(task_id: int, message: str) -> dict[str, Any]:
     return resp
 
 
+def stop_and_resume_worker(task_id: int, message: str) -> dict[str, Any]:
+    """A check-in's "stop and resume with": the steer that supersedes, from inside `serve`.
+
+    `replace` delivery interrupts a live turn where the provider can and resumes
+    it with this message alone; where it cannot, it supersedes whatever was
+    queued, so the message is the next and only thing the worker reads. A worker
+    with no live turn is resumed with it straight away.
+    """
+    from papaya_agent_runtime.supervisor.client import SupervisorClient
+
+    resp = SupervisorClient().steer_task(task_id, message, delivery="replace")
+    if not resp.get("ok"):
+        raise RuntimeError(str(resp.get("error") or "the supervisor refused the steer"))
+    return resp
+
+
+def checkin_decision(result: object) -> tuple[str, str] | None:
+    """What a check-in turn decided, as ``(decision, message)``, or ``None`` if it did not say.
+
+    The contract is `prompts/checkin.md`: the last `CHECK-IN:` line in the
+    transcript's tail, one of `continue`, `steer <message>` or `stop and resume
+    with <message>`. A steer or a stop with no message is no decision: there is
+    nothing to give the worker, and the runner never writes one itself.
+    """
+    text = result.tail() if hasattr(result, "tail") else str(result or "")
+    for line in reversed(text.splitlines()):
+        stripped = line.strip().lstrip("*_`> ").strip().rstrip("*_`").strip()
+        if not stripped.startswith(prompts.CHECKIN_PREFIX):
+            continue
+        said = stripped.removeprefix(prompts.CHECKIN_PREFIX).strip()
+        lowered = said.lower()
+        # Longest first: "stop and resume with" before anything it could start with.
+        for decision in (prompts.CHECKIN_STOP, prompts.CHECKIN_STEER, prompts.CHECKIN_CONTINUE):
+            if lowered == decision or lowered.startswith(decision + " "):
+                message = said[len(decision) :].strip().lstrip(":").strip()
+                if decision == prompts.CHECKIN_CONTINUE:
+                    return decision, ""
+                return (decision, message) if message else None
+        return None
+    return None
+
+
 class _Stopped(Exception):
     """The client stopped the hold while the runner was working it."""
 
@@ -765,6 +873,7 @@ class TicketRunner:
         agent_id: str | None = None,
         steer=None,
         gate_verdict=None,
+        stop_and_resume=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -787,6 +896,20 @@ class TicketRunner:
         self._steer = steer or steer_worker
         #: `gate.verdict`'s seam: the recorded gate result at a worker's head.
         self._gate_verdict = gate_verdict or gate.verdict
+        #: How a check-in turn's "stop and resume with" reaches the worker.
+        self._stop_and_resume = stop_and_resume or stop_and_resume_worker
+        #: Every ticket held right now, by its task id: what the rounds walk.
+        self.held: dict[int, Ticket] = {}
+        #: Work item id -> the task the rounds re-offered it for, so the offer
+        #: (which carries a new event key) lands on that task, not on a new one.
+        self._reclaiming: dict[str, int] = {}
+
+    def reclaim(self, work_item_id: str, task_id: int) -> None:
+        """Take the next offer of ``work_item_id`` up on ``task_id``, the rounds' reclaim."""
+        self._reclaiming[str(work_item_id)] = int(task_id)
+
+    def forget_reclaim(self, work_item_id: str) -> None:
+        self._reclaiming.pop(str(work_item_id), None)
 
     async def __call__(self, job: Any) -> dict[str, Any]:
         outcome = await asyncio.to_thread(self.take, job)
@@ -797,8 +920,19 @@ class TicketRunner:
 
         held = outcome
         ticket = Ticket(held=held, job=job)
+        self.held[held.task_id] = ticket
+        try:
+            return await self._hold(ticket)
+        finally:
+            if self.held.get(held.task_id) is ticket:
+                del self.held[held.task_id]
+
+    async def _hold(self, ticket: Ticket) -> dict[str, Any]:
+        held, job = ticket.held, ticket.job
         where = f" in {held.repo}" if held.repo else ""
         log.info("[serve] Holding %s for task %d%s", job.subject, held.task_id, where)
+        if held.reclaimed:
+            ticket.quiet_until = await asyncio.to_thread(_max_event_id)
         if held.resume_from is None:
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
@@ -965,6 +1099,14 @@ class TicketRunner:
                 return HandBack(read.closed)
             if read.trigger is not None:
                 ticket.trigger = read.trigger
+                if read.trigger.kind == PR_ATTENTION:
+                    worker_id = ticket.worker.task_id if ticket.worker else read.trigger.event_id
+                    _report_progress(
+                        ticket.job,
+                        PHASE_DISPATCHED,
+                        f"Worker task {worker_id}'s pull request needs attention: "
+                        f"{_one_line(read.trigger.detail)}",
+                    )
                 if read.trigger.phase == PHASE_BLOCKED:
                     step = await self._answer(ticket)
                     if isinstance(step, HandBack):
@@ -981,12 +1123,96 @@ class TicketRunner:
                 # ledger (a resume from `dispatched` after the row was lost). Only a
                 # new brief can put one there.
                 return PHASE_BRIEFING
+            if ticket.nudges:
+                nudged = await self._nudged(ticket, ticket.nudges.pop(0))
+                if nudged is not None:
+                    return nudged
+                continue
             if await self._hear(ticket):
                 if await self._wait_on_person(ticket):
                     back = f"Watching worker task {ticket.worker.task_id} again."
                     await self._enter(ticket, PHASE_DISPATCHED, back, say=back)
                 continue
             await self._sleep(ticket)
+
+    async def _nudged(self, ticket: Ticket, nudge: Nudge) -> HandBack | str | None:
+        """Act on what the rounds noticed: the turn it calls for, in this ticket's loop.
+
+        Returns the phase to move to, a hand-back, or ``None`` to keep watching.
+        """
+        worker = ticket.worker
+        if worker is None:
+            return None
+        if nudge.kind == "checkin":
+            await self._checkin(ticket, nudge)
+            return None
+        if nudge.kind == "answer":
+            ticket.trigger = Trigger(PHASE_BLOCKED, nudge.event_id, nudge.detail, kind="question")
+            return await self._answer(ticket)
+        if nudge.kind == "stopped":
+            ticket.trigger = Trigger(
+                PHASE_REVIEWING, nudge.event_id, nudge.detail, failure=True, kind=WORKER_STOPPED
+            )
+            if await self._back_to_gate(ticket):
+                return None
+            return PHASE_REVIEWING
+        return None
+
+    async def _checkin(self, ticket: Ticket, nudge: Nudge) -> None:
+        """Run the check-in turn and do what its last line says, exactly once.
+
+        The rounds chose the moment and the facts; the turn chose the words. The
+        runner only reads the decision, passes the turn's message to the worker
+        verbatim, and records what was decided and why the check ran. A turn that
+        ends with no decision is recorded as that, and nothing reaches the worker.
+        """
+        assert ticket.worker is not None
+        worker_id = ticket.worker.task_id
+        facts = {
+            **_ticket_facts(ticket.held),
+            **_worker_facts(ticket.worker),
+            "why the rounds are checking in": nudge.reason,
+            **dict(nudge.facts),
+        }
+        result = await self._turn(ticket, prompts.CHECKIN, facts)
+        decision = checkin_decision(result)
+        choice, message = decision if decision is not None else ("none", "")
+        error = ""
+        if choice == prompts.CHECKIN_STEER:
+            send = self._steer
+        elif choice == prompts.CHECKIN_STOP:
+            send = self._stop_and_resume
+        else:
+            send = None
+        if send is not None:
+            try:
+                await asyncio.to_thread(send, worker_id, message)
+            except Exception as exc:  # noqa: BLE001 - a refused steer is recorded, not fatal
+                log.warning("[serve] Could not deliver the check-in to task %d: %s", worker_id, exc)
+                error = str(exc)
+        await asyncio.to_thread(
+            record_checkin,
+            ticket.held.task_id,
+            worker_id=worker_id,
+            trigger=nudge.trigger,
+            reason=nudge.reason,
+            decision=choice,
+            message=message,
+            error=error,
+        )
+        if choice == prompts.CHECKIN_CONTINUE:
+            return
+        if choice == "none":
+            said = "the check-in turn ended without a decision"
+        elif error:
+            said = f"the check-in turn chose to {choice}, and it could not be delivered: {error}"
+        else:
+            said = "steered" if choice == prompts.CHECKIN_STEER else "stopped and resumed"
+        _report_progress(
+            ticket.job,
+            ticket.phase,
+            f"Checked in on worker task {worker_id} ({nudge.reason}): {said}.",
+        )
 
     async def _back_to_gate(self, ticket: Ticket) -> bool:
         """Decide on a stopped or done worker by its recorded gate. Returns whether it was steered.
@@ -1107,6 +1333,9 @@ class TicketRunner:
         while True:
             await self._wait_on_person(ticket)
             failure = ticket.trigger is not None and ticket.trigger.failure
+            # A delivered worker whose pull request needs attention still reads
+            # `delivered`; only a new delivery event counts as delivering again.
+            by_status = not (ticket.trigger is not None and ticket.trigger.kind == PR_ATTENTION)
             detail = (
                 f"Worker task {worker_id} stopped short; reviewing what stopped it."
                 if failure
@@ -1119,7 +1348,7 @@ class TicketRunner:
             if await self._hear(ticket):
                 # A comment turn that steered the worker reopened the work: there
                 # is nothing at its head to review until it is done again.
-                if await asyncio.to_thread(delivered_since, worker_id, heard):
+                if await asyncio.to_thread(delivered_since, worker_id, heard, by_status):
                     ticket.trigger, ticket.reported = None, None
                     return PHASE_DELIVERING
                 if await asyncio.to_thread(acted_since, worker_id, heard):
@@ -1135,7 +1364,7 @@ class TicketRunner:
             # after it is the turn's report.
             before = await asyncio.to_thread(self._comments, ticket)
             result = await self._turn(ticket, prompts.REVIEW, self._review_facts(ticket, tail))
-            if await asyncio.to_thread(delivered_since, worker_id, mark):
+            if await asyncio.to_thread(delivered_since, worker_id, mark, by_status):
                 ticket.trigger = None
                 ticket.reported = await self._check_reported(ticket, before)
                 return PHASE_DELIVERING
@@ -1472,11 +1701,13 @@ class TicketRunner:
             return TurnResult(exit_code=127, transcript=text)
         runner = self._run_turn or run_turn
         await self._mark_read(ticket)
+        ticket.turn_running = turn
         try:
             result = await asyncio.to_thread(
                 runner, launch, should_stop=ticket.should_stop, transcript_path=transcript
             )
         finally:
+            ticket.turn_running = None
             # Whatever was said while the turn ran is read as soon as it ends.
             ticket.comments_read_at = None
         self._check_stop(ticket)
@@ -1489,9 +1720,18 @@ class TicketRunner:
 
     def _brief_facts(self, ticket: Ticket, tail: str) -> dict[str, object]:
         held = ticket.held
+        earlier = earlier_worker_for(str(held.event.work_item_id or ""))
         return {
             **_ticket_facts(held),
             "repository named by the item": held.repo,
+            # A ticket taken up again after an earlier worker built on a branch
+            # (a hand-back re-offered, PAP-213): start from that branch rather
+            # than redoing the work.
+            "an earlier worker's branch for this ticket (build on it; do not redo its work)": (
+                f"{earlier.branch} (worker task {earlier.task_id}, {earlier.status})"
+                if earlier is not None
+                else None
+            ),
             "previous attempt's transcript (tail)": tail,
         }
 
@@ -1749,6 +1989,18 @@ class TicketRunner:
         again; anything else starts over at `picked_up`.
         """
         existing = papaya_events.find_existing_task(conn, papaya_events.event_key(event))
+        reclaimed = False
+        if existing is None and event.work_item_id:
+            # An offer carries a new event key every time, so a ticket this runtime
+            # was already working — re-offered by the rounds' reclaim, or by the
+            # sweep after its hold ended — is found by its work item instead.
+            wanted = self._reclaiming.pop(str(event.work_item_id), None)
+            existing = (
+                store.get_task(conn, wanted)
+                if wanted is not None
+                else resumable_task_for(conn, str(event.work_item_id))
+            )
+            reclaimed = existing is not None
         if existing is not None:
             task_id, run_id = int(existing["id"]), int(existing["run_id"])
             resume_from = resumable_phase(conn, task_id)
@@ -1772,7 +2024,12 @@ class TicketRunner:
             with contextlib.suppress(Exception):
                 sweep.forget_declined(event.work_item_id)
         return Held(
-            task_id=task_id, run_id=run_id, repo=repo_name, event=event, resume_from=resume_from
+            task_id=task_id,
+            run_id=run_id,
+            repo=repo_name,
+            event=event,
+            resume_from=resume_from,
+            reclaimed=reclaimed,
         )
 
     @staticmethod
@@ -1855,6 +2112,81 @@ def resumable_phase(conn, task_id: int) -> str | None:
             continue
         return earlier if earlier in WORKING_PHASES else None
     return None
+
+
+def resumable_task_for(conn, work_item_id: str):
+    """The newest task for this work item that a new offer should resume, or ``None``."""
+    rows = conn.execute(
+        "SELECT tasks.* FROM tasks JOIN task_env ON task_env.task_id = tasks.id "
+        "WHERE task_env.key = ? AND json_valid(task_env.value) "
+        "AND json_extract(task_env.value, '$.work_item_id') = ? ORDER BY tasks.id DESC",
+        (papaya_events.PAPAYA_EVENT_METADATA, work_item_id),
+    ).fetchall()
+    for row in rows:
+        if resumable_phase(conn, int(row["id"])) is not None:
+            return row
+        # Only the newest task speaks for the ticket: an older one was superseded.
+        return None
+    return None
+
+
+def earlier_worker_for(work_item_id: str) -> Worker | None:
+    """The newest worker, in any run this ticket ever had, that left a branch behind."""
+    if not work_item_id:
+        return None
+    conn = db.init_db()
+    try:
+        row = conn.execute(
+            "SELECT w.id, w.status, w.branch, r.name AS repo FROM tasks w "
+            "JOIN tasks t ON t.run_id = w.run_id AND t.id != w.id "
+            "JOIN task_env e ON e.task_id = t.id "
+            "LEFT JOIN repos r ON r.id = w.repo_id "
+            "WHERE e.key = ? AND json_valid(e.value) "
+            "AND json_extract(e.value, '$.work_item_id') = ? "
+            "AND w.phase IS NULL AND w.branch IS NOT NULL AND w.branch != '' "
+            "ORDER BY w.id DESC LIMIT 1",
+            (papaya_events.PAPAYA_EVENT_METADATA, work_item_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return Worker(
+        task_id=int(row["id"]), status=str(row["status"]), repo=row["repo"], branch=row["branch"]
+    )
+
+
+def record_checkin(
+    task_id: int,
+    *,
+    worker_id: int,
+    trigger: str,
+    reason: str,
+    decision: str,
+    message: str = "",
+    error: str = "",
+) -> None:
+    """Record a check-in on the ticket's own task: why it ran, what the turn decided."""
+    conn = db.init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        store.append_event(
+            conn,
+            kind=CHECKIN_EVENT,
+            payload={
+                "task_id": task_id,
+                "worker_task_id": worker_id,
+                "trigger": trigger,
+                "reason": reason,
+                "decision": decision,
+                "message": message,
+                "error": error,
+            },
+            run_id=int(task["run_id"]) if task is not None else None,
+            task_id=task_id,
+        )
+    finally:
+        conn.close()
 
 
 def _payload(row) -> dict[str, Any]:
@@ -1957,7 +2289,7 @@ def read_run(held: Held, cursor: int) -> RunRead:
             elif kind in ("question", "blocked"):
                 question = str(payload.get("question") or "")
                 trigger = Trigger(PHASE_BLOCKED, cursor, question, kind=kind)
-            elif kind in (WORKER_STOPPED, "error"):
+            elif kind in (WORKER_STOPPED, "error", PR_ATTENTION):
                 failure = _failure(kind, payload)
                 trigger = Trigger(PHASE_REVIEWING, cursor, failure, failure=True, kind=kind)
             elif kind == "delivered":
@@ -2007,8 +2339,12 @@ def acted_since(worker_id: int, mark: int) -> bool:
         conn.close()
 
 
-def delivered_since(worker_id: int, mark: int) -> bool:
-    """Is this worker's work delivered — by an event since ``mark``, or by its status?"""
+def delivered_since(worker_id: int, mark: int, by_status: bool = True) -> bool:
+    """Is this worker's work delivered — by an event since ``mark``, or by its status?
+
+    ``by_status=False`` asks for the event alone: a worker sent back over its
+    open pull request still reads `delivered` until it delivers again.
+    """
     conn = db.init_db()
     try:
         row = conn.execute(
@@ -2017,6 +2353,8 @@ def delivered_since(worker_id: int, mark: int) -> bool:
         ).fetchone()
         if row is not None:
             return True
+        if not by_status:
+            return False
         task = store.get_task(conn, worker_id)
         return task is not None and task["status"] == "delivered"
     finally:
@@ -2472,6 +2810,7 @@ async def run(
     runner: TicketRunner | None = None,
     server: Any = None,
     sweep_sleep: Any = None,
+    rounds_seams: dict[str, Any] | None = None,
 ) -> int:
     """Set this checkout up, build the listener, report once, sweep, run until stopped.
 
@@ -2480,15 +2819,20 @@ async def run(
 
     `server` is the supervisor this process runs, when it runs one: `ppy sweep`
     reaches the sweeper through it. `sweep_sleep` is the sweep timer's seam for
-    tests, the way `renew_sleep` is the loop's.
+    tests, the way `renew_sleep` is the loop's. `rounds_seams` are keyword seams for
+    the manager's rounds (:class:`~papaya_agent_runtime.rounds.Rounds`): its timer,
+    clock, forge and worktree hygiene.
     """
     from papaya_agent_client.embed import ListenerSetupError
+
+    from papaya_agent_runtime import rounds
 
     # Before anything is said to Papaya: a connection whose runtime has never been
     # configured is the silent failure this whole sequence exists to end.
     await asyncio.to_thread(self_setup, stderr=stderr)
+    runner = runner or TicketRunner()
     try:
-        built = await _build(options, runner or TicketRunner(), stdout=stdout, extra=extra)
+        built = await _build(options, runner, stdout=stdout, extra=extra)
     except ListenerSetupError as exc:
         # Supervised, this has already gone down the protocol as a fatal `error`;
         # the status is the client's own for this failure, so `serve` exits the
@@ -2517,8 +2861,23 @@ async def run(
     # the loop the listener is running, so it is a task beside `loop.run()` rather
     # than a thread of its own. It starts with a sweep straight away — a start is
     # exactly when an assignment missed while the machine was off is waiting.
+    #
+    # The rounds share it too, and one lock with the sweep: a round re-offering a
+    # ticket and a sweep offering it at the same moment would each see it unheld.
+    # The rounds task is created first, so the reclaim on start runs before the
+    # start sweep and the sweep finds the reclaimed tickets already running.
+    lock = asyncio.Lock()
+    manager_rounds = rounds.Rounds(
+        built,
+        runner,
+        interval=options.rounds_interval,
+        stderr=stderr,
+        lock=lock,
+        **(rounds_seams or {}),
+    )
+    walking = asyncio.create_task(manager_rounds.run())
     sweeper = sweep.Sweeper(
-        built, interval=options.sweep_interval, stderr=stderr, sleep=sweep_sleep
+        built, interval=options.sweep_interval, stderr=stderr, sleep=sweep_sleep, lock=lock
     )
     sweeping = asyncio.create_task(sweeper.run())
     if server is not None:
@@ -2528,9 +2887,11 @@ async def run(
     finally:
         if server is not None:
             server.sweep_handler = None
-        sweeping.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await sweeping
+        for background in (walking, sweeping):
+            background.cancel()
+        for background in (walking, sweeping):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await background
         # A sweep that was mid-offer while the listener shut down can have started
         # a run after `shutdown` took its list of what to release. Shutting down
         # again is safe (a released subject is never released twice) and is the

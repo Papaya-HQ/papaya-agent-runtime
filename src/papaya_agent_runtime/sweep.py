@@ -90,7 +90,7 @@ STATUS_RANK = {"changes_requested": 0, "blocked": 0, "todo": 1, "in_progress": 2
 
 #: The phases that mean a hold on the ticket has ended. A task in one of these is
 #: history, not work in flight, and does not stop the ticket being offered again.
-ENDED_PHASES = ("released", "handed_back", "stalled", "declined")
+ENDED_PHASES = ("released", "handed_back", "stalled", "declined", "handed_over", "done")
 
 #: The client's answers to `offer`, named once here.
 OFFER_PENDING = "pending"
@@ -488,6 +488,7 @@ class Sweeper:
         live_items: Callable[[], set[str]] | None = None,
         stale_after: float | None = None,
         clock: Callable[[], float] | None = None,
+        lock: asyncio.Lock | None = None,
     ) -> None:
         self._built = built
         self._interval = float(interval)
@@ -501,7 +502,8 @@ class Sweeper:
         self._clock = clock or time.time
         # A sweep asked for by hand and one on the timer never interleave: two
         # rounds offering the same item at once would each see it as not yet held.
-        self._lock = asyncio.Lock()
+        # `serve` passes the lock its manager rounds hold too, for the same reason.
+        self._lock = lock or asyncio.Lock()
         self.results: list[SweepResult] = []
         #: When a summary line was last written, or None before the first.
         self._last_written: float | None = None

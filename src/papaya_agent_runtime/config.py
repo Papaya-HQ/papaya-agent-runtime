@@ -163,6 +163,10 @@ class HealthPolicy:
     plan_minutes: int = 10
     # Finished task stacks still consume Docker networks and database ports.
     max_stale_stacks: int = 4
+    # Minutes a worker runs before `ppy serve`'s rounds check it is still on course.
+    checkin_after: int = 20
+    # Seconds between `ppy serve`'s rounds, when neither the flag nor the env says.
+    rounds_interval: int = 300
 
 
 @dataclass
@@ -249,6 +253,10 @@ class MMConfig:
             raise ConfigError("health.quiet_minutes must be at least 1")
         if self.health.plan_minutes < 1:
             raise ConfigError("health.plan_minutes must be at least 1")
+        if self.health.checkin_after < 1:
+            raise ConfigError("health.checkin_after must be at least 1")
+        if self.health.rounds_interval < 0:
+            raise ConfigError("health.rounds_interval must be zero or greater")
         if self.health.max_stale_stacks < 0:
             raise ConfigError("health.max_stale_stacks must be zero or greater")
         for name in ("input_ceiling_per_task", "input_ceiling_per_review"):

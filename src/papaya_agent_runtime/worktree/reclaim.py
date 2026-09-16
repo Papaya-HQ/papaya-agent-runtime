@@ -370,13 +370,18 @@ def remove_orphan_slot(entry: WorktreeEntry) -> None:
         raise LeaseError(f"{entry.path} is still on disk")
 
 
-def list_worktrees(repo: str | None = None, *, include_orphans: bool = True) -> list[WorktreeEntry]:
+def list_worktrees(
+    repo: str | None = None, *, include_orphans: bool = True, task_id: int | None = None
+) -> list[WorktreeEntry]:
     """Every leased slot and every orphaned one, with task, cleanliness, and size.
 
     Leases come first (newest first), then the slots on disk that no active lease
     owns. A failure to walk the pools never costs the caller the lease inventory —
-    ``ppy dispatch`` asks this question before every dispatch.
+    ``ppy dispatch`` asks this question before every dispatch. ``task_id`` narrows
+    the inventory to that one task's slot, and then no pool is walked at all.
     """
+    if task_id is not None:
+        return [e for e in list_worktrees(repo, include_orphans=False) if e.task_id == task_id]
     conn = init_db()
     rows = conn.execute(
         """
@@ -423,20 +428,48 @@ def reclaimable_bytes(repo: str | None = None) -> int:
         return 0
 
 
-def prune(repo: str | None = None, *, dry_run: bool = False) -> dict:
+def is_managed_clone(path: str | None) -> bool:
+    """Whether ``path`` is a base clone under this instance's ``.ppy/repos/``."""
+    if not path:
+        return False
+    root = _resolved(repos_dir())
+    resolved = _resolved(path)
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
+def prune(
+    repo: str | None = None,
+    *,
+    dry_run: bool = False,
+    task_id: int | None = None,
+    managed_only: bool = False,
+) -> dict:
     """Remove the worktrees of finished tasks that hold nothing unique.
 
     Returns what went, what stayed and why, and the bytes involved. ``dry_run``
-    changes nothing on disk or in the database.
+    changes nothing on disk or in the database. ``task_id`` prunes that one
+    task's slot only. ``managed_only`` also holds a *leased* slot to the orphans'
+    ownership rule — its base clone must be under ``.ppy/repos/`` — which is what
+    the manager's unattended hygiene asks for: nothing it did not clone is its to
+    remove, even through a lease.
     """
     from papaya_agent_runtime import compose
 
     conn = init_db()
-    entries = list_worktrees(repo)
+    entries = list_worktrees(repo, task_id=task_id)
     removed: list[dict] = []
     skipped: list[dict] = []
     stacks: list[dict] = []
     for entry in entries:
+        if (
+            managed_only
+            and not entry.orphaned
+            and entry.reclaimable
+            and not is_managed_clone(entry.repo_path)
+        ):
+            entry.reclaimable = False
+            entry.managed = False
+            entry.reason = "its base clone is not under .ppy/repos, leaving it alone"
         record = {
             "lease": entry.lease_id,
             "task_id": entry.task_id,
@@ -447,6 +480,8 @@ def prune(repo: str | None = None, *, dry_run: bool = False) -> dict:
             "size_bytes": entry.size_bytes,
             "reason": entry.reason,
             "orphaned": entry.orphaned,
+            "managed": entry.managed,
+            "repo_path": entry.repo_path,
         }
         if not entry.reclaimable:
             record["dirty"] = entry.dirty

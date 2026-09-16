@@ -416,6 +416,55 @@ exactly what the last one found writes at most once every 30 minutes. Set the ca
 (`0` sweeps once, at start), and run `ppy sweep` to have the running `serve` sweep
 now and print that line.
 
+### What the manager does every five minutes
+
+Reacting to events is not enough. A worker goes quiet, a person never answers, a pull
+request turns red after delivery. So `serve` also **does rounds**: every
+`--rounds-interval SECONDS` (`PPY_ROUNDS_INTERVAL`, or `health.rounds_interval` in
+the config; 300 by default) it walks the board on the same event loop. It holds the
+sweep's lock, so a round and a sweep never overlap. In order, a round:
+
+1. **Reads the forge** for delivered tickets. A merged pull request moves the ticket
+   to `done` with one comment and cleans up its worktree at once. If CI goes red or a
+   review requests changes, the ticket goes back to `dispatched`, and the review turn
+   gets the failure and steers the worker.
+2. **Takes back what it was working and no longer holds.** On start, and after a lost
+   lease, every ticket in a working phase is re-reserved under the persisted session
+   id and resumed from its recorded phase. A worker that is still running is watched,
+   never re-dispatched. A ticket someone else now holds is closed here as
+   `handed_over`, with its branch kept and nothing posted. Once per start, tickets
+   handed back because a turn "ended without" doing its job (PAP-213) are offered
+   again, with the earlier worker's branch in the brief's facts.
+3. **Looks at every worker it holds**, using `ppy health`'s facts:
+   - **Dead session with no done note.** The worker is recorded as `worker_stopped`,
+     and the runner's gate steer (`ppy gate run`) takes it from there.
+   - **A question.** A worker whose status is `blocked`, or whose last note asks
+     something, gets the answer turn.
+   - **Stopped short.** A stopped worker whose branch is ahead of base and has no gate
+     recorded at its head goes to that same gate steer.
+   - **Check-in.** A worker gets the **check-in turn** if it is silent past
+     `health.quiet_minutes` with a live session, still planning past
+     `health.plan_minutes`, or has run for `health.checkin_after` minutes (20). The turn
+     reads the brief's Goals and the whole progress log, then ends with one line:
+     `CHECK-IN: continue`, `CHECK-IN: steer <message>` or
+     `CHECK-IN: stop and resume with <message>`. The decision and why the check ran are
+     recorded on the ticket (`ticket_checkin`).
+   - **Gate running.** A worker whose gate is running under the supervisor is not
+     silent, and is left alone.
+   - **Person wait.** A question that has waited 15 minutes on a person is said once on
+     the ticket (`waiting on you: …`), and the ticket is `blocked`.
+4. **Tidies worktrees**, at most once an hour. It uses `ppy worktree prune`'s rules:
+   only finished tasks, a clean checkout, every commit on a remote, and a base clone
+   under `.ppy/repos`. Then it runs `git worktree prune` and `git fetch --prune` on the
+   base clones. Each run records a `worktree_hygiene` event with what it removed (in
+   bytes) and what it kept (with the reason). A kept slot that is finished, dirty or
+   unpushed, and a day old becomes one "waiting on you" item.
+
+The round only decides *when* to look and *what facts* a turn gets. It never writes a
+message for a worker: every continue, steer, stop and answer comes from a turn. A round
+writes one progress line for each ticket whose state it changed and one `round:` line
+on stderr. A round that finds nothing writes nothing.
+
 ## Where state lives
 
 All working state is under `.ppy/` (gitignored):

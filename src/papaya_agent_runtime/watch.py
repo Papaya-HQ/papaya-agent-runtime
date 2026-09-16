@@ -147,7 +147,8 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
             "--state",
             "all",
             "--json",
-            "number,state,mergeable,mergeStateStatus,baseRefName,mergedAt,mergeCommit",
+            "number,state,mergeable,mergeStateStatus,baseRefName,mergedAt,mergeCommit,url,"
+            "reviewDecision",
         ],
         cwd=cwd,
     )
@@ -181,6 +182,9 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
             and _SHA_RE.fullmatch(merge_oid)
         ),
         "merge_commit": merge_oid if isinstance(merge_oid, str) else None,
+        "url": row.get("url") if isinstance(row.get("url"), str) else None,
+        # `CHANGES_REQUESTED`, `APPROVED`, `REVIEW_REQUIRED`, or "" with no review.
+        "review": str(row.get("reviewDecision") or "").upper(),
     }
     if found["state"] != "OPEN":
         return found  # a merged or closed pull request has nothing left to run
