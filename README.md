@@ -213,7 +213,9 @@ and `--working-directory`. Any other `listen` flag is ignored with one warning l
 stderr, so a newer client cannot fail to launch an older runtime. Under `--supervised`
 stdout carries the JSON Lines protocol and nothing else — every log line goes to
 stderr — and the opening `hello` carries a `runtime` field naming this runtime and its
-version, so a host never has to infer what answered.
+version, so a host never has to infer what answered. The connection registers with
+Papaya as `papaya-agent-runtime` whatever `--harness` says, so the app can tell a
+machine running the manager from one running a bare harness.
 
 Run it yourself with `./bin/ppy serve` (add `--working-directory <path>` if the
 connection has no directory stored). Only one `serve` or `supervisor serve` may own a
@@ -226,7 +228,9 @@ leases this machine already holds instead of racing them. Delete that file and t
 next start mints a fresh identity, which means waiting out the leases of the last one.
 
 What a picked-up ticket does today is deliberately small. The manager records the work
-item as a task, writes the phase `picked_up`, and then **holds the lease** until the
+item as a task, writes the phase `picked_up`, says so through the client's
+`Job.report_progress` (a `job.progress` message to a supervised host, a log line to a
+terminal one), and then **holds the lease** until the
 client stops the run — a hand-back from the app, a lease a person released, the stall
 grace expiring, or this process shutting down — at which point it records why
 (`handed_back`, `stalled`, `released`). A ticket it cannot place, because no repository

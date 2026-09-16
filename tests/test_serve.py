@@ -250,8 +250,6 @@ def test_it_picks_up_one_assignment_holds_it_and_releases_it_on_stop(
     ppy_home, client_home, ready, registered_repo
 ) -> None:
     """The whole skeleton in one run: take the ticket, hold the lease, let go."""
-    from papaya_agent_client.listener import LISTEN_HARNESSES
-
     harness = Harness(FakeEvents([EVENT]))
     options = serve.parse_args(
         ["--harness", "codex", "--working-directory", str(client_home.work_dir)]
@@ -280,8 +278,13 @@ def test_it_picks_up_one_assignment_holds_it_and_releases_it_on_stop(
 
     assert asyncio.run(scenario()) == 0
 
-    # The known passthrough flags were applied, not merely tolerated.
-    assert harness.loop_kwargs["runtime_kind"] == LISTEN_HARNESSES["codex"].runtime_kind
+    # The connection announces itself as this runtime, whatever `--harness` says.
+    # Registering as a Codex CLI listener is exactly the wrong answer: it is what
+    # the app would use to tell a machine running the manager from one running a
+    # bare harness, and this run was started as `--harness codex`.
+    assert harness.loop_kwargs["runtime_kind"] == "papaya-agent-runtime"
+    assert harness.events.connection[0]["runtime_kind"] == "papaya-agent-runtime"
+    # And the known passthrough flags were applied, not merely tolerated.
     assert harness.loop_kwargs["working_directory"] == str(client_home.work_dir)
 
     reserved_by = {session for _subject, session in harness.events.reserves}
@@ -386,6 +389,8 @@ def test_supervised_over_a_pipe_says_hello_asks_and_reports_the_outcome(
     options = serve.parse_args(
         [
             "--supervised",
+            "--harness",
+            "codex",
             "--working-directory",
             str(client_home.work_dir),
             "--approval-timeout",
@@ -420,7 +425,16 @@ def test_supervised_over_a_pipe_says_hello_asks_and_reports_the_outcome(
 
     request = host.of_type("job.request")[0]
     assert request["event"]["work_item_id"] == "item-9"
+    # `--harness` still names the bundled harness a host sees, even though the
+    # runtime label sent to Papaya is this runtime's own.
+    assert request["harness"]["key"] == "codex"
+    assert request["harness"]["runtime_kind"] == "papaya-agent-runtime"
     assert host.of_type("job.started")[0]["job_id"] == request["job_id"]
+    # `Job.report_progress` (client 0.15.1) reaches a supervised host as
+    # `job.progress`, so the hold says what it is doing rather than going quiet.
+    progress = host.of_type("job.progress")[0]
+    assert progress["job_id"] == request["job_id"]
+    assert progress["phase"] == serve.PHASE_PICKED_UP
     assert host.of_type("job.finished")[0]["outcome"] == "handed_back"
 
     conn = init_db()

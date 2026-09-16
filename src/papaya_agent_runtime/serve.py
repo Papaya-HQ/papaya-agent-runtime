@@ -55,7 +55,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import inspect
 import json
 import logging
 import os
@@ -265,9 +264,16 @@ def protocol_writer(stream: Any) -> Any:
 
     The client's `hello` describes the *client*: its protocol version, its own
     version, the home and the working directory. A host that exec'd a runtime
-    needs one more fact — which runtime answered — and 0.15 has no argument for
-    it, so it is added here, on the one message it belongs on. Everything else
-    goes through untouched.
+    needs one more fact — which runtime answered — and it is added here, on the
+    one message it belongs on. Everything else goes through untouched.
+
+    0.15.1 has the destination but not the road: `Supervisor.runtime` is a field
+    the client deliberately never sets ("a runtime the client handed the process
+    to fills it"), but `build_supervised_listener` constructs the `Supervisor`
+    itself, takes no `runtime=` argument, and calls `hello()` before it returns —
+    so there is no moment at which a host can reach the field. Injecting on the
+    message is the seam that exists. When the builder forwards `runtime=`, delete
+    this and pass it.
     """
     from papaya_agent_client.supervisor import ProtocolWriter
 
@@ -331,20 +337,18 @@ def _result(job: Any, exit_code: int, output: str) -> dict[str, Any]:
     }
 
 
-async def _report_progress(job: Any, note: str) -> None:
-    """Say what happened, if this client's `Job` can carry it. Never raises.
+def _report_progress(job: Any, phase: str, detail: str) -> None:
+    """Say what this job is doing now, and never let saying it end the hold.
 
-    `Job.report_progress` does not exist in every client this runtime will be
-    embedded in, and a missing one is not a failure — it is a client that has
-    nothing to report progress *to*.
+    `Job.report_progress` (papaya-agent-client 0.15.1) is the client's own path
+    for this: a supervised host gets a `job.progress` message, a terminal
+    listener gets a log line, and the runner does not have to know which it is
+    talking to. It is wrapped only because a hold must outlive a reporting
+    failure — the lease is the thing that matters, and a host that has gone away
+    is not a reason to give a work item back.
     """
-    report = getattr(job, "report_progress", None)
-    if report is None:
-        return
     try:
-        result = report(note)
-        if inspect.isawaitable(result):
-            await result
+        job.report_progress(phase, detail)
     except Exception as exc:  # noqa: BLE001 - reporting must never end a hold
         log.warning("[serve] Could not report progress for %s: %s", job.job_id, exc)
 
@@ -373,11 +377,14 @@ class TicketRunner:
             return _result(job, _declined_exit_code(), outcome.reason)
 
         log.info("[serve] Holding %s for task %d in %s", job.subject, outcome.task_id, outcome.repo)
-        # The stall clock reads this file's mtime and nothing else touches it,
-        # because nothing else is happening: a hold that quietly faked liveness
-        # would be a lease nobody could ever take back.
+        # Stamped once, here, and then never again: nothing else is happening, and
+        # a hold that quietly faked liveness would be a lease nobody could ever
+        # take back. The stall grace expiring is a legitimate end to a hold, not a
+        # failure to work around.
         job.touch_activity()
-        await _report_progress(job, f"Picked up as task {outcome.task_id} in {outcome.repo}.")
+        _report_progress(
+            job, PHASE_PICKED_UP, f"Recorded as task {outcome.task_id} in {outcome.repo}."
+        )
 
         try:
             await job.stop.wait()
@@ -505,6 +512,14 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
     shared: dict[str, Any] = {
         "runner": runner,
         "harness": options.harness,
+        # What this connection announces itself as to Papaya, on every start.
+        # Without it the label follows `--harness`, so a runtime exec'd as
+        # `--harness codex` would register as a Codex CLI listener — which is
+        # exactly what it is not, and the one fact the app needs to tell a
+        # machine running the manager from a machine running a bare harness.
+        # `--harness` still names the bundled harness (the `key` and `label` a
+        # supervised host reads on `job.request`); only the runtime label is ours.
+        "runtime_kind": capabilities.RUNTIME,
         "home": home,
         "working_directory": options.working_directory,
         "session_id": session_id,

@@ -12,7 +12,7 @@ is the only thing anybody should ever read to learn this, and the shape it print
 a contract:
 
     {"runtime": "papaya-agent-runtime", "version": "0.0.0",
-     "client_version": "0.15.0", "protocol": 1,
+     "client_version": "0.15.1", "protocol": 1,
      "modes": ["supervised", "terminal"]}
 
 Two properties make it usable at connect time, and both are constraints on what may
