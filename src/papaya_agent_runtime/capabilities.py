@@ -12,7 +12,8 @@ is the only thing anybody should ever read to learn this, and the shape it print
 a contract:
 
     {"runtime": "papaya-agent-runtime", "version": "0.0.0",
-     "client_version": "0.14.0", "protocol": 1, "modes": []}
+     "client_version": "0.15.1", "protocol": 1,
+     "modes": ["supervised", "terminal"]}
 
 Two properties make it usable at connect time, and both are constraints on what may
 ever be added here. It reads **local state only** — no network, no harness probe, no
@@ -22,9 +23,8 @@ raised, because "I could not tell you" is a worse answer than "the client is not
 installed here". Whether the runtime is *ready* is a different question with its own
 command; see `readiness.py`.
 
-`doctor`, `readiness` and — when it lands — `serve` read the client version from
-here rather than each working it out, so there is one answer to compare against the
-host's.
+`doctor`, `readiness` and `serve` read the client version from here rather than each
+working it out, so there is one answer to compare against the host's.
 """
 
 from __future__ import annotations
@@ -41,11 +41,12 @@ RUNTIME = "papaya-agent-runtime"
 #: declares nothing is a version-1 client rather than an unknown.
 DEFAULT_PROTOCOL = 1
 
-#: The launch modes this runtime can be started in — empty until `ppy serve`
-#: exists. A client reading an empty list must not try to exec this checkout;
-#: `supervised` and `terminal` arrive with the command that can serve them,
-#: never before it, because a mode announced early is a promise the exec keeps.
-MODES: tuple[str, ...] = ()
+#: The launch modes this runtime can be started in. A mode is announced only
+#: once the command that serves it exists, because a client reading this list
+#: will exec this checkout expecting it: `ppy serve` speaks the supervised
+#: protocol on the stdio it inherits (`--supervised`) and otherwise runs the
+#: same loop with logs on stderr, so both are promises the exec now keeps.
+MODES: tuple[str, ...] = ("supervised", "terminal")
 
 #: The version of the client that exec'd us, passed across the exec by the host.
 HOST_CLIENT_VERSION_ENV = "PAPAYA_HOST_CLIENT_VERSION"

@@ -80,6 +80,19 @@ def memory_dir() -> Path:
     return ppy_home() / "memory"
 
 
+def papaya_sessions_path() -> Path:
+    """The listener session id this manager uses for each Papaya connection.
+
+    Papaya's reserve is acquire-or-extend, keyed on the session id, so a manager
+    that mints a fresh one on every start spends the first minutes after a restart
+    colliding with leases it holds itself. Persisting the id is what makes a
+    restart *extend* its own reservations instead. It lives directly under
+    ``.ppy/`` rather than in ``run/``, because it must outlive a process, not
+    describe one.
+    """
+    return ppy_home() / "papaya-sessions.json"
+
+
 def local_capabilities_path() -> Path:
     """Machine-local provider capability record, written by the live probe.
 

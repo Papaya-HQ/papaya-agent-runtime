@@ -12,10 +12,12 @@ requires-python = ">=3.13"
 # the client's listener loop in-process, so its cursor, reservations, renewals and
 # supervised-protocol writer are used as-is instead of reimplemented here. That
 # makes this a library API dependency, not a tool: pre-1.0 the minor is the
-# client's breaking-change unit, so the range is the current 0.14 line and moving
-# to 0.15 is a deliberate change with the import sites re-checked.
+# client's breaking-change unit, so the range is the current 0.15 line and moving
+# to 0.16 is a deliberate change with the import sites re-checked. The floor is
+# 0.15.1 rather than 0.15.0 because two things `serve` calls outright arrived in
+# the patch: `Job.report_progress` and `Supervisor.runtime`.
 dependencies = [
-    "papaya-agent-client>=0.14.0,<0.15.0",
+    "papaya-agent-client>=0.15.1,<0.16.0",
 ]
 
 [dependency-groups]
