@@ -3578,28 +3578,25 @@ async def report_readiness(verdict, built, watch: blockers.Watch | None = None) 
     """
     watch = watch or blockers.Watch(say=functools.partial(_post_dm, built))
     lead = ""
-    conn = None
     if verdict.state != readiness.READY:
         who = papaya.identity()
         try:
-            conn = db.init_db()
-            if not readiness.already_reported(conn, verdict):
+            if not await store.run_in_thread(readiness.already_reported, verdict):
                 lead = readiness.report(verdict, agent=who.addressed if who else "", where=_where())
         except Exception as exc:  # noqa: BLE001 - an unreadable home is already the verdict
             log.warning("[serve] Could not read what readiness has reported: %s", exc)
 
-    def said() -> None:
-        if lead and conn is not None:
-            readiness.mark_reported(conn, verdict)
-            log.info("[serve] Reported readiness (%s) to the owner's DM", verdict.state)
-
+    landed: list[bool] = []
     try:
-        await watch.round(verdict=verdict, lead=lead, on_said=said)
+        await watch.round(verdict=verdict, lead=lead, on_said=lambda: landed.append(True))
     except Exception as exc:  # noqa: BLE001 - saying it must not be why serve stopped
         log.warning("[serve] Could not report readiness: %s", exc)
-    finally:
-        if conn is not None:
-            conn.close()
+    if lead and landed:
+        try:
+            await store.run_in_thread(readiness.mark_reported, verdict)
+            log.info("[serve] Reported readiness (%s) to the owner's DM", verdict.state)
+        except Exception as exc:  # noqa: BLE001 - an unreadable home is already the verdict
+            log.warning("[serve] Could not record the readiness report: %s", exc)
 
 
 def publish_status(built: Any) -> None:

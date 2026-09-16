@@ -7,14 +7,37 @@ across the codebase.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+async def run_in_thread[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """``fn(conn, *args, **kwargs)`` on a worker thread, on a connection opened in that thread.
+
+    A `sqlite3.Connection` only works in the thread that opened it, and two
+    `asyncio.to_thread` calls may land on two different pool threads. So async code
+    never holds a connection: it hands the whole database step to this, which opens
+    the connection inside the thread, runs the step, and closes it there.
+    """
+    from papaya_agent_runtime.state import db
+
+    def step() -> T:
+        conn = db.init_db()
+        try:
+            return fn(conn, *args, **kwargs)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(step)
 
 
 # --------------------------------------------------------------------------- #
