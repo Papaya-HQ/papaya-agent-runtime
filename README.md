@@ -106,6 +106,18 @@ repository's gate budget is longer than the ten-minute tool cap.
 whether it is `derived`, `default` or `override`. `ppy repo set <repo> --budget
 <kind>=<seconds>` sets an override, which wins over the history; `0` clears it.
 
+## Work reaches the remote as it goes
+
+A worktree is one machine's disk; a restart strands whatever is only there. Every
+brief, every worker's environment block and the Claude command rules carry one rule,
+word for word (`prompts.PUSH_MILESTONE_RULE`): commit and push after each goal in the
+brief lands with its scoped gate green, and in any case before a run that may exceed ten
+minutes. `ppy serve`'s rounds check in on a worker whose branch has nothing new on the
+remote after `health.push_by_minutes` (below). The review reads the remote branch, never
+the worktree: a worker that says done with uncommitted files is sent back with
+"uncommitted work in the worktree: <n> files" to commit and push or discard them, and
+is reviewed once its branch holds the work.
+
 Work itself only ever happens inside repositories registered under `.ppy/repos/`. It
 never scans your filesystem.
 
@@ -474,8 +486,13 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
      recorded at its head goes to that same gate steer.
    - **Check-in.** A worker gets the **check-in turn** if it is silent past its
      repository's silence budget with a live session, still planning past the plan
-     budget, or has run for half its worker-session budget. Without history those are
-     `health.quiet_minutes`, `health.plan_minutes` and `health.checkin_after` (20). The turn
+     budget, has run for half its worker-session budget, or has run
+     `health.push_by_minutes` (45) with nothing new on its remote lease branch. Without
+     history the first three are `health.quiet_minutes`, `health.plan_minutes` and
+     `health.checkin_after` (20). The push one says "nothing pushed in N minutes", comes
+     back after every further `push_by_minutes` with no push, and the turn steers the
+     worker to commit what is green and push before it continues; a worker whose branch
+     is up to date is never nudged for it. The turn
      reads the brief's Goals and the whole progress log, then ends with one line:
      `CHECK-IN: continue`, `CHECK-IN: steer <message>` or
      `CHECK-IN: stop and resume with <message>`. The decision and why the check ran are

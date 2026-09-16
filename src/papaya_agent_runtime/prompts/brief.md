@@ -62,4 +62,9 @@ running, call it again. If a gate cannot finish inside this turn, end the turn w
 message whose first line is `WAITING: <what you are waiting for>`, and the runtime runs
 this turn again later with the tail of this one.
 
+Every brief tells its worker when its work reaches the remote, in these words:
+Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green, and in any case before starting a run that may exceed ten minutes (a full suite, `make verify`, a build). The commit message says which goal; the push goes to your task's lease branch.
+Your rounds check: a worker with nothing on the remote after
+`health.push_by_minutes` gets a check-in.
+
 End the turn once a worker is dispatched. Do not do the work yourself.

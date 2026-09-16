@@ -119,6 +119,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -614,6 +615,10 @@ class Ticket:
     #: The gate recorded at the worker's head when it last stopped or said done, as one
     #: line for the review turn; empty when none was.
     recorded_gate: str = ""
+    #: How many times in a row the runner has sent a worker back for uncommitted work.
+    dirty_steers: int = 0
+    #: The uncommitted-work finding at the last review, for the review turn; empty when clean.
+    uncommitted: str = ""
     #: What the manager's rounds noticed and the ticket's loop has not acted on yet.
     nudges: list[Nudge] = field(default_factory=list)
     #: The turn running for this ticket right now, if one is.
@@ -779,6 +784,51 @@ def gate_steer_message(
     )
 
 
+def uncommitted_files(worker_task_id: int) -> list[str] | None:
+    """The paths `git status` reports in the worker's worktree, or ``None`` if unreadable.
+
+    Ignored paths (the evidence directory is excluded at dispatch) are not reported.
+    """
+    conn = db.init_db()
+    try:
+        task = store.get_task(conn, worker_task_id)
+    finally:
+        conn.close()
+    cwd = str(task["worktree_path"] or "") if task is not None else ""
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [line[3:] for line in proc.stdout.splitlines() if line.strip()]
+
+
+def uncommitted_finding(files: list[str]) -> str:
+    """The review finding for a worktree holding what its branch does not."""
+    return f"uncommitted work in the worktree: {len(files)} files"
+
+
+def uncommitted_steer_message(files: list[str], branch: str | None) -> str:
+    """What a worker is told when it says done with work that is not on its branch."""
+    shown = ", ".join(f"`{path}`" for path in files[:10]) + (" and more" if len(files) > 10 else "")
+    push = f"`git push origin HEAD:{branch}`" if branch else "your lease branch"
+    return (
+        f"Review finding: {uncommitted_finding(files)} ({shown}). The review reads your "
+        "pushed branch, never your worktree, so none of that is reviewed. Commit what should "
+        f"ship and push it ({push}), or discard what should not, then file your done note "
+        "again."
+    )
+
+
 def steer_worker(task_id: int, message: str) -> dict[str, Any]:
     """`ppy steer`, from inside `serve`: through the supervisor this process runs."""
     from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -919,6 +969,7 @@ class TicketRunner:
         stop_and_resume=None,
         gate_state=None,
         liveness_seconds: float | None = None,
+        uncommitted=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -950,6 +1001,8 @@ class TicketRunner:
         #: The event loop the holds run on, for a stall heard from the protocol writer.
         self._loop: asyncio.AbstractEventLoop | None = None
         self._answering: set[asyncio.Task[Any]] = set()
+        #: What is in a worker's worktree and not on its branch, read before a review.
+        self._uncommitted = uncommitted or uncommitted_files
         #: Every ticket held right now, by its task id: what the rounds walk.
         self.held: dict[int, Ticket] = {}
         #: Work item id -> the task the rounds re-offered it for, so the offer
@@ -1439,6 +1492,51 @@ class TicketRunner:
         await self._enter(ticket, PHASE_DISPATCHED, sent)
         return True
 
+    async def _back_to_commit(self, ticket: Ticket) -> bool:
+        """Send a worker back when its worktree holds what its branch does not.
+
+        The review reads the branch, never the worktree, so uncommitted work at review
+        time is a finding, not something to review (PAP-219). The runner steers with the
+        count and the paths, and the worker commits and pushes or discards. After
+        `GATE_STEERS` in a row, or a refused steer, the review turn gets the finding as
+        a fact and steers itself. Returns whether the worker was sent back.
+        """
+        worker = ticket.worker
+        if worker is None:
+            return False
+        try:
+            files = await asyncio.to_thread(self._uncommitted, worker.task_id) or []
+        except Exception as exc:  # noqa: BLE001 - an unreadable worktree is not a finding
+            log.warning("[serve] Could not read worker task %d's worktree: %s", worker.task_id, exc)
+            files = []
+        ticket.uncommitted = uncommitted_finding(files) if files else ""
+        if not files:
+            ticket.dirty_steers = 0
+            return False
+        if ticket.dirty_steers >= GATE_STEERS:
+            return False
+        message = uncommitted_steer_message(files, worker.branch)
+        try:
+            await asyncio.to_thread(self._steer, worker.task_id, message)
+        except Exception as exc:  # noqa: BLE001 - a refused steer is the review turn's to handle
+            log.warning("[serve] Could not steer worker task %d: %s", worker.task_id, exc)
+            _report_progress(
+                ticket.job,
+                ticket.phase,
+                f"Could not send worker task {worker.task_id} back for its "
+                f"{ticket.uncommitted}: {exc}; reviewing instead.",
+            )
+            return False
+        ticket.dirty_steers += 1
+        ticket.trigger = None
+        await self._enter(
+            ticket,
+            PHASE_DISPATCHED,
+            f"Worker task {worker.task_id} has {ticket.uncommitted}; sent back to commit and "
+            "push it or discard it.",
+        )
+        return True
+
     async def _answer(self, ticket: Ticket) -> HandBack | None:
         """Answer-or-steer: until the worker is no longer waiting on its question."""
         trigger = ticket.trigger
@@ -1512,6 +1610,8 @@ class TicketRunner:
                     return PHASE_DISPATCHED
                 await self._wait_on_person(ticket)
                 continue
+            if await self._back_to_commit(ticket):
+                return PHASE_DISPATCHED
             mark = await asyncio.to_thread(_max_event_id)
             # Taken before the turn and after the runner's own comment: nothing but
             # the turn writes on the item while it runs, so a new agent comment
@@ -1938,6 +2038,7 @@ class TicketRunner:
             **_worker_facts(ticket.worker),
             "what stopped the worker": trigger.detail if trigger and trigger.failure else "",
             "the worker's recorded gate at its head": ticket.recorded_gate,
+            "finding: uncommitted work": ticket.uncommitted,
             "previous attempt's transcript (tail)": tail,
         }
 

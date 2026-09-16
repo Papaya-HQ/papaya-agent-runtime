@@ -65,6 +65,31 @@ def test_the_block_tells_the_worker_to_run_the_suite_in_the_foreground():
     assert " ".join(prompts.TEN_MINUTE_RULE.split()) in " ".join(text.split())
 
 
+def test_the_brief_the_environment_block_and_the_rules_carry_the_push_milestone_rule():
+    """PAP-219: two hours of finished work held for one commit, on one machine's disk."""
+    from papaya_agent_runtime import environment
+
+    def flat(text: str) -> str:
+        return " ".join(text.split())
+
+    rule = flat(prompts.PUSH_MILESTONE_RULE)
+    block = environment.render(
+        environment.RepoEnvironment(repo="app"),
+        task_id=7,
+        evidence_path="/tmp/wt/.ppy-evidence",
+        branch="ppy/task-7-abc",
+    )
+    texts = {
+        "brief.md": prompts.load(prompts.BRIEF),
+        "environment block": block,
+        "command rules": command_rules("claude", "ppy/task-7-abc"),
+    }
+    for where, text in texts.items():
+        assert rule in flat(text), where
+        # Beside the ten-minute rule, which it names as the latest moment to push.
+        assert flat(prompts.TEN_MINUTE_RULE) in flat(text), where
+
+
 def test_the_block_falls_back_to_a_readable_branch_placeholder():
     assert "HEAD:<your task branch>" in command_rules("claude")
 
