@@ -30,6 +30,19 @@ REVIEW_SKILL = ".agents/skills/review-a-worker/SKILL.md"
 #: The one placeholder a prompt file may contain.
 RUNTIME_DIR = "{runtime_dir}"
 
+#: What a rerun is told when the runner found a turn's obligation unmet on the
+#: record. One line each, appended as a fact; the prompts themselves are unchanged.
+ADDENDUM_FACT = "the runner's note"
+ACCEPTANCE_ADDENDUM = (
+    "A worker is already dispatched for this ticket, so do not dispatch again: the work "
+    "item still has no acceptance criteria, so write them onto it from your brief's Goals "
+    "through the papaya MCP server, say so in a comment, then end."
+)
+REPORT_ADDENDUM = (
+    "The pull request is already delivered, so do not review or deliver again: post the "
+    "result on the work item through the papaya MCP server, then end."
+)
+
 _HERE = Path(__file__).resolve().parent
 
 
@@ -70,7 +83,10 @@ def render(turn: str, *, runtime_dir: str | Path, facts: Mapping[str, object]) -
 
 
 __all__ = [
+    "ACCEPTANCE_ADDENDUM",
+    "ADDENDUM_FACT",
     "ANSWER",
+    "REPORT_ADDENDUM",
     "BRIEF",
     "BRIEF_SKILL",
     "REVIEW",

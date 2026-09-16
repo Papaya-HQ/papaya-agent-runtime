@@ -33,7 +33,7 @@ import pytest
 from conftest import scale
 from papaya_agent_runtime import papaya, papaya_events, progress, prompts, readiness, serve, solicit
 from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling
-from papaya_agent_runtime.manager.launch import TurnResult, repo_root
+from papaya_agent_runtime.manager.launch import TurnResult, TurnTools, repo_root
 from papaya_agent_runtime.state import store
 from papaya_agent_runtime.state.db import init_db
 
@@ -202,10 +202,14 @@ def dm(monkeypatch) -> FakeDM:
     """The client's API module, answering channel calls without a workspace."""
     from papaya_agent_client import api_client
 
+    # The shape `GET /workspaces/{id}/channels` answers an agent token with: public
+    # channels, plus the ones this agent is a member of — a person-to-person `dm`
+    # it was added to, and its own DM with its owner, `agent_private`.
     fake = FakeDM(
         channels=[
-            {"id": "chan-team", "kind": "channel", "name": "engineering"},
-            {"id": "chan-dm", "kind": "dm", "name": "Shane"},
+            {"id": "chan-team", "channel_type": "public", "name": "engineering"},
+            {"id": "chan-dm", "channel_type": "dm", "name": "dm:user-1:user-2"},
+            {"id": "chan-agent-dm", "channel_type": "agent_private", "name": "agent-dm:u:a"},
         ]
     )
 
@@ -397,7 +401,7 @@ class FakeTurns:
         self._act = act or (lambda _turn: None)
         self.calls: list[Turn] = []
 
-    def __call__(self, launch: Any, *, should_stop) -> TurnResult:
+    def __call__(self, launch: Any, *, should_stop, transcript_path=None) -> TurnResult:
         turn = Turn(_which_turn(launch.seed_prompt), launch)
         self.calls.append(turn)
         self._act(turn)
@@ -422,22 +426,49 @@ class _Body:
 
 
 class FakePapaya:
-    """Papaya's work-item routes, as an `urlopen` stand-in that records every call."""
+    """Papaya's work-item routes, as an `urlopen` stand-in that records every call.
 
-    def __init__(self) -> None:
+    Comments are kept the way Papaya keeps them — a list per item, each with an id
+    and an author — because the runner now reads them back to check a turn's work.
+    Everything posted through a job's agent token is written by the agent.
+    """
+
+    #: The instance a test made last, so a fake turn can post "through MCP" to it.
+    latest: FakePapaya | None = None
+
+    def __init__(self, *, acceptance_criteria: str | None = "Done when the thing works.") -> None:
         self.calls: list[tuple[str, str, Any]] = []
         self._lock = threading.Lock()
         #: Bumped by a test to stand for a person replying on the item.
         self.updated_at = "2026-09-16T10:00:00Z"
+        self.acceptance_criteria = acceptance_criteria
+        self.stored: dict[str, list[dict[str, Any]]] = {}
+        FakePapaya.latest = self
 
     def __call__(self, request, timeout):
         body = json.loads(request.data) if request.data else None
         path = urllib.parse.unquote(urllib.parse.urlparse(request.full_url).path)
         with self._lock:
             self.calls.append((request.method, path, body))
+            item = self._item(path)
+            if path.endswith("/comments"):
+                thread = self.stored.setdefault(item, [])
+                if request.method == "POST":
+                    comment = {
+                        "id": f"comment-{len(thread) + 1}",
+                        "author_type": "agent",
+                        "body": body["body"],
+                    }
+                    thread.append(comment)
+                    return _Body(json.dumps(comment).encode())
+                return _Body(json.dumps(thread).encode())
         if request.method == "GET":
-            item = path.rstrip("/").rsplit("/", 1)[-1]
-            record = {"id": item, "repo": "acme/runtime", "updated_at": self.updated_at}
+            record = {
+                "id": item,
+                "repo": "acme/runtime",
+                "updated_at": self.updated_at,
+                "acceptance_criteria": self.acceptance_criteria,
+            }
             return _Body(json.dumps(record).encode())
         return _Body(b"")
 
@@ -469,13 +500,33 @@ def _manager_config() -> MMConfig:
     )
 
 
-def _runner(turns: FakeTurns, papaya_api: FakePapaya, *, capacity=None) -> serve.TicketRunner:
+def _no_tools(_provider: str, _env: dict[str, str], **_kwargs: Any) -> TurnTools:
+    """`prepare_turn_tools` without the client subprocess, for tests about something else."""
+    return TurnTools()
+
+
+def _runner(
+    turns: Any, papaya_api: FakePapaya, *, capacity=None, turn_tools=_no_tools
+) -> serve.TicketRunner:
     return serve.TicketRunner(
         run_turn=turns,
         config=_manager_config,
         opener=papaya_api,
         worker_capacity=capacity or (lambda: (0, 2)),
         poll_seconds=0.01,
+        turn_tools=turn_tools,
+    )
+
+
+def post_as_agent(turn: Turn, body: str) -> None:
+    """What a turn's `papaya` MCP comment call leaves on the item: a comment by the agent."""
+    papaya_events.post_work_item_comment(
+        papaya_events.PapayaEvent(
+            id=None, kind="", subject="", payload={}, work_item_id=turn.item()
+        ),
+        body,
+        environ=turn.launch.env,
+        opener=FakePapaya.latest,
     )
 
 
@@ -739,7 +790,7 @@ def test_a_machine_with_no_harness_still_listens_and_dms_what_needs_the_user(
     # this machine is connected as, naming the thing only a person can close.
     assert len(dm.posts) == 1
     channel_id, text = dm.posts[0]
-    assert channel_id == "chan-dm"
+    assert channel_id == "chan-agent-dm", "not the agent's own DM with its owner"
     assert "@tester" in text
     assert "Needs you" in text
     assert "no signed-in coding harness" in text
@@ -762,6 +813,12 @@ def test_the_readiness_report_goes_to_a_dm_and_never_to_a_team_channel() -> None
     assert serve.dm_channel_id([{"id": "team", "kind": "channel"}]) is None
     assert serve.dm_channel_id([{"id": "a", "kind": "channel"}, {"id": "b", "type": "DM"}]) == "b"
     assert serve.dm_channel_id(None) is None
+    # The agent's own DM with a person wins over a person-to-person DM it is in.
+    channels = [
+        {"id": "human", "channel_type": "dm"},
+        {"id": "agent", "channel_type": "agent_private"},
+    ]
+    assert serve.dm_channel_id(channels) == "agent"
 
 
 def _raise(exc: Exception):
@@ -1018,8 +1075,13 @@ def _serve_ticket(harness: Harness, client_home: ClientHome, runner: serve.Ticke
     )
 
 
-def _deliver(turn: Turn) -> None:
-    """What `ppy review approve` then `ppy deliver` leave in the ledger."""
+REPORT = "Approved and delivered: the thing works now, with tests."
+
+
+def _deliver(turn: Turn, *, report: bool = True) -> None:
+    """What `ppy review approve`, `ppy deliver` and the turn's MCP report leave behind."""
+    if report:
+        post_as_agent(turn, REPORT)
     (worker,) = workers_in(turn.run_id)
     worker_event(worker, "reviewed", verdict="approved")
     worker_event(
@@ -1123,12 +1185,12 @@ def test_the_items_status_follows_the_work_and_nowhere_else(
     assert [s for item, s in statuses if item == delivered] == ["in_progress", "review"]
     assert [s for item, s in statuses if item == handed_back] == ["in_progress", "todo"]
     assert len(statuses) == len(set(statuses)) == 4
-    # The one mechanical comment, on hand-back only, naming the reason.
-    assert papaya_api.comments() == [
-        (
-            handed_back,
-            "handed back: the manager turn ended 2 times without dispatching a worker; no branch",
-        )
+    # The ticket that could not be placed says it was picked up, briefed, and why
+    # it was handed back — the briefing line once, however many attempts it took.
+    assert [body for item, body in papaya_api.comments() if item == handed_back] == [
+        "Picked up; working in runtime.",
+        "Briefing: choosing the repository and writing the brief.",
+        "handed back: the manager turn ended 2 times without dispatching a worker; no branch",
     ]
 
 
@@ -1402,6 +1464,270 @@ def test_a_dispatch_from_a_manager_turn_defaults_into_the_tickets_run(monkeypatc
     assert cli._ticket_run_id() == 42
     monkeypatch.setenv(papaya_events.TICKET_RUN_ENV, "not-a-run")
     assert cli._ticket_run_id() is None
+
+
+# ── a turn is the agent: tools, transcript, and what the record shows ──────
+
+
+def _one_ticket(harness: Harness, client_home: ClientHome, runner: serve.TicketRunner) -> int:
+    """Serve until the one ticket in `harness` ends, then stop."""
+
+    async def scenario() -> int:
+        task = _serve_ticket(harness, client_home, runner)
+        await _until(lambda: harness.results, what="the ticket to end")
+        harness.loop.request_stop()
+        return await task
+
+    return asyncio.run(scenario())
+
+
+def _dispatch_then_finish(turn: Turn) -> None:
+    """A brief that dispatches a worker which is done at once."""
+    worker = dispatch_worker(turn.run_id)
+    worker_event(worker, "worker_done", status="worker_done", summary="done at abc123")
+
+
+def test_a_turn_is_launched_with_the_agents_mcp_server_and_plugin(
+    ppy_home, client_home, ready, registered_repo, tmp_path, monkeypatch
+) -> None:
+    """The first real run's turns had no MCP at all, so every Papaya call was refused.
+
+    The config comes from the client itself (`PAPAYA_AGENT_BIN mcp runner-config`),
+    exactly as its bundled Claude runner gets it, and the session is strict about it.
+    """
+    calls = tmp_path / "agent-bin-calls.txt"
+    agent_bin = tmp_path / "papaya-agent"
+    agent_bin.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+        'echo \'{"mcpServers": {"papaya": {"command": "papaya-agent"}}}\'\n',
+        encoding="utf-8",
+    )
+    agent_bin.chmod(0o755)
+    monkeypatch.setenv("PAPAYA_AGENT_BIN", str(agent_bin))
+
+    turns = FakeTurns(lambda turn: dispatch_worker(turn.run_id))
+    harness = Harness(FakeEvents([EVENT]))
+    job_env: dict[str, str] = {}
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya(), turn_tools=None))
+        await _until(lambda: turns.calls, what="the brief turn to launch")
+        job_env.update(harness.jobs[0].env)
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    runtime_dir = str(Path(repo_root()).resolve())
+    launch = turns.calls[0].launch
+    argv = launch.argv
+    assert "--strict-mcp-config" in argv
+    config_file = Path(argv[argv.index("--mcp-config") + 1])
+    assert json.loads(config_file.read_text(encoding="utf-8"))["mcpServers"]["papaya"]
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "mcp__papaya__*" in argv[argv.index("--allowedTools") + 1 :]
+    assert "Bash(./bin/ppy:*)" in argv, "`ppy` stopped being callable"
+    # The plugin the client gave the job — it carries the write-boundary hook.
+    assert argv[argv.index("--plugin-dir") + 1] == job_env["PAPAYA_PLUGIN_DIR"]
+    # Produced by the client binary the job names, for this agent, in the runtime dir.
+    (invocation,) = calls.read_text(encoding="utf-8").splitlines()
+    assert invocation == (
+        f"mcp runner-config --harness claude-code --agent @tester --working-directory {runtime_dir}"
+    )
+    assert launch.env["PAPAYA_AGENT_BIN"] == str(agent_bin)
+    # And the boundary is still the runtime directory, with the job's files beside it.
+    assert json.loads(launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [runtime_dir]
+    for key in ("PAPAYA_CONTEXT_FILE", "PAPAYA_DECLINE_FILE"):
+        assert launch.env[key] == job_env[key], key
+
+
+def test_a_turns_transcript_is_kept_where_the_progress_report_says(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """Every turn's output survives it, at a path a person can be pointed at."""
+    import sys
+
+    from papaya_agent_runtime.manager.launch import run_turn
+
+    def harness_that_dispatches(launch: Any, *, should_stop, transcript_path=None) -> TurnResult:
+        # The real `run_turn`, with a stand-in harness that says something and
+        # does what a brief turn's `ppy dispatch` would.
+        dispatch_worker(int(launch.env[papaya_events.TICKET_RUN_ENV]))
+        launch.argv = [
+            sys.executable,
+            "-c",
+            "import sys; print('briefed and dispatched'); print('a warning', file=sys.stderr)",
+        ]
+        return run_turn(launch, should_stop=should_stop, transcript_path=transcript_path)
+
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(harness_that_dispatches, FakePapaya()))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    (named,) = [
+        detail.split("transcript: ", 1)[1]
+        for _subject, _phase, detail in progress_lines
+        if "transcript: " in detail
+    ]
+    run_id = int(ticket_task()["run_id"])
+    assert Path(named) == ppy_home / "runs" / str(run_id) / "turns" / "brief-1.log"
+    kept = Path(named).read_text(encoding="utf-8")
+    assert "briefed and dispatched" in kept
+    assert "a warning" in kept, "stderr was not kept"
+
+
+def test_each_phase_change_is_one_comment_on_the_ticket_in_order(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """What the ticket card shows: one plain line per phase, and no worker chatter."""
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            worker = dispatch_worker(turn.run_id)
+            progress.record(worker, phase="plan", note="Add the endpoint behind the flag.")
+            worker_event(worker, "worker_done", status="worker_done", summary="done")
+        elif turn.name == prompts.REVIEW:
+            _deliver(turn)
+
+    papaya_api = FakePapaya()
+    turns = FakeTurns(act)
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, _runner(turns, papaya_api)) == 0
+
+    worker = workers_in(int(ticket_task()["run_id"]))[0]
+    bodies = [body for _item, body in papaya_api.comments()]
+    assert bodies == [
+        "Picked up; working in runtime.",
+        "Briefing: choosing the repository and writing the brief.",
+        f"Dispatched worker task {worker} in runtime.",
+        f"Reviewing worker task {worker} at its head.",
+        REPORT,  # the review turn's own, through MCP
+        "Pull request open: https://github.com/acme/runtime/pull/7",
+        "Result reported on this item.",
+    ]
+    assert all("\n" not in body for body in bodies)
+    assert not any("Add the endpoint" in body for body in bodies), "worker progress on the ticket"
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+
+
+def test_a_brief_that_left_no_acceptance_criteria_is_rerun_once_then_goes_on(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """Define done on the record is checked, not hoped for — and never a dead end."""
+    from papaya_agent_runtime.preflight import archive_brief
+
+    def act(turn: Turn) -> None:
+        if turn.name != prompts.BRIEF or workers_in(turn.run_id):
+            return  # the rerun writes nothing either
+        worker = dispatch_worker(turn.run_id)
+        archive_brief("runtime", worker, "# Task\n\n## Goals\n\n1. The thing works.\n")
+
+    papaya_api = FakePapaya(acceptance_criteria=None)
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        harness.jobs[0].stop.set()
+        await _until(lambda: harness.results, what="the hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.BRIEF]
+    assert prompts.ACCEPTANCE_ADDENDUM not in turns.calls[0].prompt
+    assert f"- {prompts.ADDENDUM_FACT}: {prompts.ACCEPTANCE_ADDENDUM}" in turns.calls[1].prompt
+    assert any("still has no acceptance criteria" in detail for _s, _p, detail in progress_lines)
+    # The ticket went on: dispatched, one worker, not handed back.
+    assert history()[:3] == [serve.PHASE_PICKED_UP, serve.PHASE_BRIEFING, serve.PHASE_DISPATCHED]
+    assert len(workers_in(int(ticket_task()["run_id"]))) == 1
+    assert harness.results[0]["exit_code"] == 0
+
+
+def _review_ticket(act_on_review, papaya_api: FakePapaya) -> FakeTurns:
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            _dispatch_then_finish(turn)
+        elif turn.name == prompts.REVIEW:
+            act_on_review(turn)
+
+    return FakeTurns(act)
+
+
+def test_a_review_turn_that_reports_on_the_item_is_believed(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    papaya_api = FakePapaya()
+    turns = _review_ticket(_deliver, papaya_api)
+
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, _runner(turns, papaya_api)) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    bodies = [body for _item, body in papaya_api.comments()]
+    assert bodies[-1] == "Result reported on this item."
+    assert not any("see the pull request for details" in body for body in bodies)
+
+
+def test_a_review_turn_that_delivers_silently_is_rerun_to_report(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    papaya_api = FakePapaya()
+
+    def review(turn: Turn) -> None:
+        if prompts.REPORT_ADDENDUM in turn.prompt:
+            post_as_agent(turn, REPORT)
+        else:
+            _deliver(turn, report=False)
+
+    turns = _review_ticket(review, papaya_api)
+
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, _runner(turns, papaya_api)) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW, prompts.REVIEW]
+    assert f"- {prompts.ADDENDUM_FACT}: {prompts.REPORT_ADDENDUM}" in turns.calls[2].prompt
+    bodies = [body for _item, body in papaya_api.comments()]
+    assert REPORT in bodies
+    assert bodies[-1] == "Result reported on this item."
+    assert not any("see the pull request for details" in body for body in bodies)
+
+
+def test_a_review_turn_that_never_reports_gets_the_runners_fallback_line(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """PAP-217: the runner said "Result posted" and nothing was. Never again."""
+    papaya_api = FakePapaya()
+
+    def review(turn: Turn) -> None:
+        if prompts.REPORT_ADDENDUM not in turn.prompt:
+            _deliver(turn, report=False)
+
+    turns = _review_ticket(review, papaya_api)
+
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, _runner(turns, papaya_api)) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW, prompts.REVIEW]
+    bodies = [body for _item, body in papaya_api.comments()]
+    assert bodies[-1] == (
+        "Pull request open: https://github.com/acme/runtime/pull/7; "
+        "see the pull request for details."
+    )
+    assert "Result reported on this item." not in bodies
+    assert (serve.PHASE_REPORTED, "reported (fallback)") in [
+        (phase, detail) for _s, phase, detail in progress_lines
+    ]
+    assert history()[-2:] == [serve.PHASE_REPORTED, serve.PHASE_RELEASED]
 
 
 # ── the prompts ─────────────────────────────────────────────────────────────

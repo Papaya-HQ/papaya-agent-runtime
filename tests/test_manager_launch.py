@@ -97,6 +97,55 @@ def test_a_turn_is_the_same_manager_built_headless() -> None:
     assert codex.argv[-1] == "# Turn: brief"
 
 
+def test_a_codex_turn_gets_the_clients_mcp_overrides_the_way_its_runner_does(tmp_path) -> None:
+    """`papaya-codex-runner.sh`'s shape: one `-c` per `runner-config` line, and `--cd`."""
+    import subprocess
+
+    from papaya_agent_runtime.manager import prepare_turn_tools
+
+    seen: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        seen.append(command)
+        out = 'mcp_servers.papaya.enabled=false\nmcp_servers.papaya-job.url="https://x"\n'
+        return subprocess.CompletedProcess(command, 0, stdout=out, stderr="")
+
+    env = {"PAPAYA_AGENT_BIN": "/opt/papaya-agent", "PAPAYA_AGENT_REF": "@tester"}
+    tools = prepare_turn_tools(
+        "codex", env, root=str(tmp_path), config_file=tmp_path / "unused.json", run=run
+    )
+    assert seen == [
+        [
+            "/opt/papaya-agent",
+            *("mcp", "runner-config", "--harness", "codex", "--agent", "@tester"),
+            *("--working-directory", str(tmp_path)),
+        ]
+    ]
+    codex = build_launch(
+        config=_cfg(provider="codex", model="gpt-5-codex"),
+        turn="# Turn: brief",
+        root=str(tmp_path),
+        tools=tools,
+    )
+    assert codex.argv[:6] == [
+        "codex",
+        "exec",
+        "-c",
+        "mcp_servers.papaya.enabled=false",
+        "-c",
+        'mcp_servers.papaya-job.url="https://x"',
+    ]
+    assert codex.argv[-3:] == ["--cd", str(tmp_path), "# Turn: brief"]
+
+    def refused(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 75, stdout="", stderr="identity mismatch\n")
+
+    with pytest.raises(ManagerLaunchError, match="identity mismatch"):
+        prepare_turn_tools(
+            "claude", env, root=str(tmp_path), config_file=tmp_path / "c.json", run=refused
+        )
+
+
 def test_run_turn_captures_the_transcript_and_the_exit_code(tmp_path) -> None:
     import sys
 

@@ -22,7 +22,9 @@ The manager then operates the control plane itself — the user never runs ``ppy
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import papaya_agent_runtime
 from papaya_agent_runtime.config import MMConfig
@@ -238,6 +240,107 @@ def resolve_profile(
     return resolved_provider, resolved_model, resolved_reasoning
 
 
+#: The job environment the Papaya client gives every job, as far as a turn's
+#: tools are concerned. The client's bundled runners read the same names.
+AGENT_BIN_ENV = "PAPAYA_AGENT_BIN"
+AGENT_REF_ENV = "PAPAYA_AGENT_REF"
+PLUGIN_DIR_ENV = "PAPAYA_PLUGIN_DIR"
+#: The bundled Claude runner's override for its permission mode, honoured here too.
+PERMISSION_MODE_ENV = "PAPAYA_CLAUDE_PERMISSION_MODE"
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+
+#: The Papaya MCP server's tools, by the name `runner-config` gives the server.
+PAPAYA_MCP_TOOLS = "mcp__papaya__*"
+
+
+@dataclass(frozen=True)
+class TurnTools:
+    """What a headless turn loads to act as the Papaya agent, not just as a shell.
+
+    The first real run (2026-09-16, PAP-217) launched turns with nothing but a
+    `ppy` allowlist: no MCP server, no plugin. In `-p` mode every MCP call was
+    then refused, so the brief turn could not read the item's comments, write
+    acceptance criteria or say anything on it. This is the shape the client's
+    bundled runners (`papaya-claude-runner.sh`, `papaya-codex-runner.sh`) give a
+    job, built from the same `papaya-agent mcp runner-config` output.
+    """
+
+    #: Claude: the JSON file `runner-config` wrote, for `--mcp-config`.
+    mcp_config: str | None = None
+    #: Codex: one `-c` value per line of `runner-config` output.
+    codex_overrides: tuple[str, ...] = ()
+    #: The client's bundled plugin, which carries the write-boundary hook.
+    plugin_dir: str | None = None
+    permission_mode: str = DEFAULT_PERMISSION_MODE
+
+
+def papaya_agent_command(env: dict[str, str]) -> list[str]:
+    """How a turn calls back into the Papaya client this process runs.
+
+    `$PAPAYA_AGENT_BIN` when the job names one. The client only sets it when it
+    was itself started as the `papaya-agent` console script, which `ppy serve`
+    is not, so otherwise the console script installed beside this interpreter —
+    the same release the listener embeds, rather than whichever `papaya-agent`
+    happens to be first on PATH — and failing that, the module itself.
+    """
+    explicit = str(env.get(AGENT_BIN_ENV) or "").strip()
+    if explicit:
+        return [explicit]
+    beside = Path(sys.executable).parent / "papaya-agent"
+    if beside.is_file() and os.access(beside, os.X_OK):
+        return [str(beside)]
+    return [sys.executable, "-m", "papaya_agent_client"]
+
+
+def prepare_turn_tools(
+    provider: str,
+    env: dict[str, str],
+    *,
+    root: str,
+    config_file: Path,
+    run=None,
+) -> TurnTools:
+    """Ask the client for this job's MCP configuration, the way its runners do.
+
+    Raises :class:`ManagerLaunchError` when the client refuses: a turn launched
+    without its tools is the silent failure this exists to end, so it is not
+    launched at all. ``run`` is `subprocess.run`'s seam.
+    """
+    import subprocess
+
+    runner = run or subprocess.run
+    harness = "claude-code" if provider == "claude" else "codex"
+    command = [*papaya_agent_command(env), "mcp", "runner-config", "--harness", harness]
+    agent_ref = str(env.get(AGENT_REF_ENV) or "").strip()
+    if agent_ref:
+        command += ["--agent", agent_ref]
+    command += ["--working-directory", root]
+    try:
+        proc = runner(
+            command, env=env, cwd=root, capture_output=True, text=True, timeout=120, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagerLaunchError(f"could not ask the Papaya client for MCP config: {exc}") from exc
+    if proc.returncode != 0:
+        said = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = said[-1] if said else "no output"
+        raise ManagerLaunchError(
+            f"`papaya-agent mcp runner-config` exited {proc.returncode}: {reason}"
+        )
+    if provider != "claude":
+        overrides = tuple(line.strip() for line in proc.stdout.splitlines() if line.strip())
+        return TurnTools(codex_overrides=overrides)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(proc.stdout, encoding="utf-8")
+    plugin_dir = str(env.get(PLUGIN_DIR_ENV) or "").strip()
+    mode = str(env.get(PERMISSION_MODE_ENV) or "").strip() or DEFAULT_PERMISSION_MODE
+    return TurnTools(
+        mcp_config=str(config_file),
+        plugin_dir=plugin_dir if plugin_dir and Path(plugin_dir).is_dir() else None,
+        permission_mode=mode,
+    )
+
+
 def build_launch(
     *,
     config: MMConfig | None,
@@ -248,6 +351,7 @@ def build_launch(
     root: str | None = None,
     base_env: dict[str, str] | None = None,
     turn: str | None = None,
+    tools: TurnTools | None = None,
 ) -> Launch:
     """Construct the manager harness invocation (pure; no process spawn).
 
@@ -256,6 +360,10 @@ def build_launch(
     `codex exec`): same role, same PATH, same provider resolution, and the prompt
     in place of the conversational seed. That is how `ppy serve` runs its brief,
     answer and review turns without a second, drifting harness launcher.
+
+    ``tools`` (from :func:`prepare_turn_tools`) is what makes a turn the Papaya
+    agent: the pinned MCP server with every other one shut out, and the client's
+    plugin. An interactive session loads the person's own configuration instead.
     """
     root = root or repo_root()
     env = dict(base_env if base_env is not None else os.environ)
@@ -280,19 +388,38 @@ def build_launch(
         if mdl:
             argv += ["--model", mdl]
         argv += ["--append-system-prompt", _ROLE]
+        allowed = ["Bash(ppy:*)", "Bash(./bin/ppy:*)"]
+        if turn is not None and tools is not None and tools.mcp_config:
+            # The bundled Claude runner's flags. `--strict-mcp-config` is what keeps
+            # a `papaya` server some earlier `connect` left in the person's config —
+            # possibly another agent — from loading beside this job's own.
+            argv += ["--enable-auto-mode", "--strict-mcp-config"]
+            argv += ["--mcp-config", tools.mcp_config]
+            argv += ["--permission-mode", tools.permission_mode]
+            if tools.plugin_dir:
+                argv += ["--plugin-dir", tools.plugin_dir]
+            allowed.append(PAPAYA_MCP_TOOLS)
         # Let the manager drive the control plane without a prompt per call; `ppy`
-        # itself is the authority gate, so allowing the wrapper is safe.
-        argv += ["--allowedTools", "Bash(ppy:*)", "Bash(./bin/ppy:*)"]
+        # itself is the authority gate, so allowing the wrapper is safe. Listed
+        # even under `bypassPermissions`, so a stricter mode still runs a turn.
+        argv += ["--allowedTools", *allowed]
         if turn is None:
             argv += [seed]
     else:  # codex
         argv = ["codex"]
         if turn is not None:
             argv += ["exec"]
+            if tools is not None:
+                # Codex has no strict-config flag: `runner-config` prints `-c` values
+                # that switch every other server off and add this job's own.
+                for override in tools.codex_overrides:
+                    argv += ["-c", override]
         if mdl:
             argv += ["--model", mdl]
         if rsn:
             argv += ["-c", f"model_reasoning_effort={rsn}"]
+        if turn is not None:
+            argv += ["--cd", root]
         argv += [seed]
 
     return Launch(
@@ -324,7 +451,7 @@ class TurnResult:
 TURN_STOP_POLL_SECONDS = 1.0
 
 
-def run_turn(launch: Launch, *, should_stop=None) -> TurnResult:
+def run_turn(launch: Launch, *, should_stop=None, transcript_path=None) -> TurnResult:
     """Run a headless turn built by :func:`build_launch` to completion. Blocking.
 
     The counterpart of :func:`start` for a turn: `start` replaces this process
@@ -333,6 +460,10 @@ def run_turn(launch: Launch, *, should_stop=None) -> TurnResult:
     given the previous transcript's tail. ``should_stop`` is polled while the
     turn runs; when it answers true the harness is terminated, so a ticket that is
     handed back does not leave a manager working on it.
+
+    With ``transcript_path`` stdout and stderr are written there as the turn runs,
+    and kept: a person, or a later turn, can read what a turn did (and watch one
+    that is still running). Without it the output lives only as long as the call.
     """
     import subprocess
     import tempfile
@@ -340,7 +471,12 @@ def run_turn(launch: Launch, *, should_stop=None) -> TurnResult:
     from papaya_agent_runtime.paths import ensure_layout
 
     ensure_layout()
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as output:
+    if transcript_path is not None:
+        Path(transcript_path).parent.mkdir(parents=True, exist_ok=True)
+        opened = open(transcript_path, "w+", encoding="utf-8")  # noqa: SIM115 - closed below
+    else:
+        opened = tempfile.TemporaryFile(mode="w+", encoding="utf-8")  # noqa: SIM115 - closed below
+    with opened as output:
         try:
             proc = subprocess.Popen(
                 launch.argv,

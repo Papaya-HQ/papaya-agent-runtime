@@ -165,7 +165,8 @@ def _papaya_request(
     body: Mapping[str, Any] | None = None,
     what: str = "read",
     opener=urllib.request.urlopen,
-) -> dict[str, Any]:
+    shape: type = dict,
+) -> Any:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     data: bytes | None = None
     if body is not None:
@@ -189,9 +190,9 @@ def _papaya_request(
         ) from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PapayaEventError(f"Papaya returned an unreadable work-item {what}; retry") from exc
-    if not isinstance(payload, dict):
+    if not isinstance(payload, shape) and not (shape is list and payload == {}):
         raise PapayaEventError(f"Papaya returned an invalid work-item {what}; retry")
-    return payload
+    return [] if shape is list and payload == {} else payload
 
 
 def _with_work_item(event: PapayaEvent, work_item: Mapping[str, Any]) -> PapayaEvent:
@@ -290,6 +291,29 @@ def post_work_item_comment(
         opener=opener,
     )
     return True
+
+
+def list_work_item_comments(
+    event: PapayaEvent,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> list[dict[str, Any]] | None:
+    """Every comment on this event's work item, oldest first.
+
+    ``None`` when there is nothing to call with (not connected), which a caller
+    must read as "cannot tell" rather than as "no comments". Same connection
+    rules as :func:`set_work_item_status`.
+    """
+    env = os.environ if environ is None else environ
+    url = _papaya_work_item_url(event, env)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    comments = _papaya_request(
+        f"{url}/comments", token, what="comment list", opener=opener, shape=list
+    )
+    return [comment for comment in comments if isinstance(comment, dict)]
 
 
 def _repository_value(value: object) -> str | None:
@@ -402,6 +426,7 @@ __all__ = [
     "event_metadata",
     "find_existing_task",
     "hydrate_work_item",
+    "list_work_item_comments",
     "parse_event",
     "post_work_item_comment",
     "record_task",

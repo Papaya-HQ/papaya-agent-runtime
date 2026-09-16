@@ -324,8 +324,24 @@ up from its last working phase rather than briefing it again.
 
 The work item's **status** is state, so the runner sets it: `in_progress` on pickup,
 `review` when the pull request is open, `blocked` while a question waits on a person,
-and `todo` on hand-back, with the one comment the runner ever writes —
-`handed back: <reason>; branch <name> kept`. Everything said in words is a turn's.
+and `todo` on hand-back, with `handed back: <reason>; branch <name> kept`. Everything
+that needs judgment is said by a turn.
+
+**What the ticket shows, and where the logs are.** A turn runs as the Papaya agent:
+it gets the MCP config `papaya-agent mcp runner-config` writes for this connection
+(with `--strict-mcp-config`, so no other `papaya` server loads) and the client's
+plugin, the same as the client's own runners give a job. Its stdout and stderr are
+kept at `.ppy/runs/<run id>/turns/<turn>-<n>.log` (for example `brief-1.log`,
+`review-2.log`), and the path appears in the ticket's progress as soon as the turn
+starts. On the work item itself the runner posts one line, as the agent, each time
+the phase changes: picked up, briefing, dispatched (worker and repository), blocked
+(the question), reviewing, pull request open, reported. The web app's ticket card
+shows the latest line as the agent's status. Worker progress stays in the app and
+the log. The runner also checks the turns' promises on the record: a brief with
+Goals must leave acceptance criteria on the item, and a delivery must leave the
+review turn's own report as a comment. A miss runs the turn once more with a
+one-line reminder. If the report is still missing, the runner posts
+`Pull request open: <link>; see the pull request for details.` itself.
 
 A ticket this machine cannot take at all — a repository the item names that cannot be
 registered, or a runtime that is not ready to work — is declined before any of that, so

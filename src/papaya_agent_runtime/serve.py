@@ -66,8 +66,20 @@ tail of its transcript; a second miss hands the ticket back.
 
 The work item's *status* is state, so the runner sets it: ``in_progress`` on
 pickup, ``review`` when the pull request is open, ``blocked`` while a question
-waits on a person, ``todo`` on hand-back, with one mechanical comment. Anything
-said in words is a turn's.
+waits on a person, ``todo`` on hand-back. The *phase* is state too, so the runner
+says each phase change on the item as one plain line, as the agent — that is what
+the ticket card shows as the agent's status. Worker progress stays in the app.
+Anything that needs judgment is still a turn's to say.
+
+A turn's obligations on the record are checked afterwards rather than assumed:
+a brief with Goals must have left acceptance criteria on the item, and a delivery
+must have left the turn's report as a new agent comment. A miss reruns the turn
+once with a one-line addendum; a second miss is a progress line (acceptance
+criteria) or the runner's own fallback line with the pull request (the report).
+
+Every turn is launched with the Papaya agent's tools — the MCP config
+`papaya-agent mcp runner-config` writes, `--strict-mcp-config` and the client's
+plugin — and its transcript is kept at `.ppy/runs/<run id>/turns/<turn>-<n>.log`.
 
 A ticket this runtime cannot take at all (a repository it names that cannot be
 registered, or an event carrying no work item) is declined through the client's
@@ -446,9 +458,30 @@ class Ticket:
     #: Set when the listener cancels the hold (shutdown), which does not set
     #: `job.stop`: a turn still running on its thread must end then too.
     cancelled: bool = False
+    #: The phase the last comment on the work item was about. A comment is posted
+    #: only when the phase differs, so a retry or a wait never repeats one.
+    said: str | None = None
+    #: Whether the review turn's own report was found on the work item: ``True``
+    #: it was, ``False`` it was not (the runner posts the fallback), ``None`` the
+    #: record could not be read (nothing is claimed either way).
+    reported: bool | None = False
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
+
+
+def _one_line(text: object) -> str:
+    """A comment is one line: the first line of ``text``, whitespace collapsed."""
+    lines = [line for line in str(text or "").strip().splitlines() if line.strip()]
+    return " ".join(lines[0].split()) if lines else ""
+
+
+def _is_agent_comment(comment: dict[str, Any]) -> bool:
+    return str(comment.get("author_type") or "") == "agent" or bool(comment.get("author_actor"))
+
+
+def _comment_ids(comments: list[dict[str, Any]]) -> frozenset[str]:
+    return frozenset(str(comment.get("id")) for comment in comments if comment.get("id"))
 
 
 class _Stopped(Exception):
@@ -529,6 +562,7 @@ class TicketRunner:
         worker_capacity=None,
         poll_seconds: float = POLL_SECONDS,
         runtime_dir: str | None = None,
+        turn_tools=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -539,6 +573,8 @@ class TicketRunner:
         self._worker_capacity = worker_capacity or default_worker_capacity
         self._poll_seconds = float(poll_seconds)
         self._runtime_dir = runtime_dir
+        #: `manager.launch.prepare_turn_tools`' seam: what gives a turn MCP and the plugin.
+        self._turn_tools = turn_tools
 
     async def __call__(self, job: Any) -> dict[str, Any]:
         outcome = await asyncio.to_thread(self.take, job)
@@ -554,9 +590,13 @@ class TicketRunner:
         if held.resume_from is None:
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
+            said = f"Picked up; working in {held.repo}." if held.repo else "Picked up."
+            await self._say(ticket, PHASE_PICKED_UP, said)
         else:
             # A redelivered ticket that was already being worked goes back to where
-            # it was. Nothing is picked up twice: no second brief, no second status.
+            # it was. Nothing is picked up twice: no second brief, no second status,
+            # and no second comment for the phase the earlier hold already announced.
+            ticket.said = held.resume_from
             ticket.quiet_until = await asyncio.to_thread(_max_event_id)
             _report_progress(
                 job, held.resume_from, f"Resuming task {held.task_id} from {held.resume_from}."
@@ -619,12 +659,12 @@ class TicketRunner:
             # first, rather than asking the same question again.
             if await self._wait_on_person(ticket):
                 continue
-            await self._enter(
-                ticket, PHASE_BRIEFING, "Briefing: choosing the repository and writing the brief."
-            )
+            briefing = "Briefing: choosing the repository and writing the brief."
+            await self._enter(ticket, PHASE_BRIEFING, briefing, say=briefing)
             result = await self._turn(ticket, prompts.BRIEF, self._brief_facts(ticket, tail))
             worker = await asyncio.to_thread(find_worker, held)
             if worker is not None:
+                await self._check_acceptance_criteria(ticket, worker)
                 return await self._dispatched(ticket, worker)
             if await self._wait_on_person(ticket):
                 continue
@@ -638,10 +678,58 @@ class TicketRunner:
     async def _dispatched(self, ticket: Ticket, worker: Worker) -> str:
         ticket.worker = worker
         repo = f" in {worker.repo}" if worker.repo else ""
-        await self._enter(
-            ticket, PHASE_DISPATCHED, f"Dispatched worker task {worker.task_id}{repo}."
-        )
+        dispatched = f"Dispatched worker task {worker.task_id}{repo}."
+        await self._enter(ticket, PHASE_DISPATCHED, dispatched, say=dispatched)
         return PHASE_DISPATCHED
+
+    async def _check_acceptance_criteria(self, ticket: Ticket, worker: Worker) -> None:
+        """The brief turn's first obligation, read off the record rather than assumed.
+
+        A brief with Goals means done was defined; the work item carrying no
+        acceptance criteria then means the turn did not write them where the
+        person who asked can see and correct them. One rerun with a pointed
+        addendum, then a progress line: the brief exists, so the ticket goes on.
+        A record that cannot be read claims nothing and triggers nothing.
+        """
+        if not await asyncio.to_thread(brief_has_goals, worker):
+            return
+        for attempt in range(TURN_ATTEMPTS):
+            criteria = await asyncio.to_thread(self._acceptance_criteria, ticket)
+            if criteria is None or criteria:
+                return
+            if attempt + 1 >= TURN_ATTEMPTS:
+                break
+            _report_progress(
+                ticket.job,
+                ticket.phase,
+                "The work item has no acceptance criteria yet; running the brief turn once more.",
+            )
+            facts = {
+                **self._brief_facts(ticket, ""),
+                prompts.ADDENDUM_FACT: prompts.ACCEPTANCE_ADDENDUM,
+            }
+            await self._turn(ticket, prompts.BRIEF, facts)
+        _report_progress(
+            ticket.job,
+            ticket.phase,
+            "The work item still has no acceptance criteria after a second brief turn; "
+            "going on with the brief's Goals.",
+        )
+
+    def _acceptance_criteria(self, ticket: Ticket) -> str | None:
+        """The item's acceptance criteria as Papaya has them now, or ``None`` if unreadable."""
+        try:
+            fresh = papaya_events.hydrate_work_item(
+                ticket.held.event, environ=ticket.job.env, **self._opener_kwargs()
+            )
+        except papaya_events.PapayaEventError:
+            return None
+        if fresh is ticket.held.event:
+            return None  # not connected: nothing was read
+        item = fresh.payload.get("work_item")
+        return (
+            str(item.get("acceptance_criteria") or "").strip() if isinstance(item, dict) else None
+        )
 
     async def _watch(self, ticket: Ticket) -> HandBack | str:
         """Wait on the worker: report its progress, and stop at what needs a turn."""
@@ -682,9 +770,8 @@ class TicketRunner:
         tail = ""
         while True:
             await self._wait_on_person(ticket)
-            await self._enter(
-                ticket, PHASE_BLOCKED, f"Worker task {worker_id} asked: {first_line or '(no text)'}"
-            )
+            asked = f"Worker task {worker_id} asked: {first_line or '(no text)'}"
+            await self._enter(ticket, PHASE_BLOCKED, asked, say=f"Blocked: {asked}")
             mark = await asyncio.to_thread(_max_event_id)
             result = await self._turn(ticket, prompts.ANSWER, self._answer_facts(ticket, tail))
             acted = await asyncio.to_thread(acted_since, worker_id, mark)
@@ -694,7 +781,8 @@ class TicketRunner:
             # the turn's own to show for it (the supervisor may have auto-answered).
             if acted or await asyncio.to_thread(worker_status, worker_id) != "blocked":
                 ticket.trigger = None
-                await self._enter(ticket, PHASE_DISPATCHED, f"Worker task {worker_id} unblocked.")
+                unblocked = f"Worker task {worker_id} unblocked."
+                await self._enter(ticket, PHASE_DISPATCHED, unblocked, say=unblocked)
                 return None
             outcome = self._missed(ticket, misses, "answering or steering the worker", result)
             if isinstance(outcome, HandBack):
@@ -719,17 +807,21 @@ class TicketRunner:
                 if failure
                 else f"Reviewing worker task {worker_id} at its head."
             )
-            await self._enter(ticket, PHASE_REVIEWING, detail)
+            await self._enter(ticket, PHASE_REVIEWING, detail, say=detail)
             mark = await asyncio.to_thread(_max_event_id)
+            # Taken before the turn and after the runner's own comment: nothing but
+            # the turn writes on the item while it runs, so a new agent comment
+            # after it is the turn's report.
+            before = await asyncio.to_thread(self._comments, ticket)
             result = await self._turn(ticket, prompts.REVIEW, self._review_facts(ticket, tail))
             if await asyncio.to_thread(delivered_since, worker_id, mark):
                 ticket.trigger = None
+                ticket.reported = await self._check_reported(ticket, before)
                 return PHASE_DELIVERING
             if await asyncio.to_thread(acted_since, worker_id, mark):
                 ticket.trigger = None
-                await self._enter(
-                    ticket, PHASE_DISPATCHED, f"Worker task {worker_id} sent back with findings."
-                )
+                sent_back = f"Worker task {worker_id} sent back with findings."
+                await self._enter(ticket, PHASE_DISPATCHED, sent_back, say=sent_back)
                 return PHASE_DISPATCHED
             if await self._wait_on_person(ticket):
                 continue
@@ -744,12 +836,69 @@ class TicketRunner:
         worker = ticket.worker or await asyncio.to_thread(find_worker, held)
         pr_url = await asyncio.to_thread(pull_request_url, worker.task_id) if worker else None
         opened = f"Pull request open: {pr_url}" if pr_url else "Delivered."
-        await self._enter(ticket, PHASE_DELIVERING, opened)
+        await self._enter(ticket, PHASE_DELIVERING, opened, say=opened)
         await self._status(ticket, papaya_events.STATUS_REVIEW)
-        # The review turn posts the result on the work item itself, through MCP,
-        # before it ends; by the time a delivery is on the ledger it has reported.
-        await self._enter(ticket, PHASE_REPORTED, "Result posted on the work item.")
+        if ticket.reported is False:
+            # The review turn's report was looked for and is not there, twice. Say
+            # the one thing the runner knows for certain, and say that it did.
+            where = pr_url or "the pull request on the worker's branch"
+            fallback = f"Pull request open: {where}; see the pull request for details."
+            await self._enter(ticket, PHASE_REPORTED, "reported (fallback)", say=fallback)
+        elif ticket.reported:
+            reported = "Result reported on this item."
+            await self._enter(ticket, PHASE_REPORTED, reported, say=reported)
+        else:
+            await self._enter(
+                ticket, PHASE_REPORTED, "reported (unverified: the work item could not be read)"
+            )
         return PHASE_REPORTED
+
+    def _comments(self, ticket: Ticket) -> list[dict[str, Any]] | None:
+        """The item's comments now, or ``None`` when they cannot be read."""
+        try:
+            return papaya_events.list_work_item_comments(
+                ticket.held.event, environ=ticket.job.env, **self._opener_kwargs()
+            )
+        except papaya_events.PapayaEventError as exc:
+            log.warning("[serve] Could not read the comments on %s: %s", ticket.job.subject, exc)
+            return None
+
+    def _agent_commented_since(
+        self, ticket: Ticket, before: list[dict[str, Any]] | None
+    ) -> bool | None:
+        if before is None:
+            return None
+        now = self._comments(ticket)
+        if now is None:
+            return None
+        known = _comment_ids(before)
+        return any(
+            _is_agent_comment(comment) and str(comment.get("id")) not in known for comment in now
+        )
+
+    async def _check_reported(
+        self, ticket: Ticket, before: list[dict[str, Any]] | None
+    ) -> bool | None:
+        """Did the review turn post its result on the work item? Checked, not assumed.
+
+        On the first real run the review turn had no tools, posted nothing, and the
+        runner said "Result posted on the work item" anyway. So: a new comment by
+        the agent since the turn began, or one rerun told only to post it, or
+        ``False`` — and then the runner posts the fallback itself.
+        """
+        posted = await asyncio.to_thread(self._agent_commented_since, ticket, before)
+        if posted is not False:
+            return posted
+        _report_progress(
+            ticket.job,
+            PHASE_REVIEWING,
+            "The review turn delivered but posted no result on the work item; "
+            "running it once more.",
+        )
+        before = await asyncio.to_thread(self._comments, ticket)
+        facts = {**self._review_facts(ticket, ""), prompts.ADDENDUM_FACT: prompts.REPORT_ADDENDUM}
+        await self._turn(ticket, prompts.REVIEW, facts)
+        return await asyncio.to_thread(self._agent_commented_since, ticket, before)
 
     # -- waiting, without ever blocking the loop ------------------------------
 
@@ -771,7 +920,8 @@ class TicketRunner:
         if wait is None:
             return False
         todo_id, question = wait
-        await self._enter(ticket, PHASE_BLOCKED, f"Waiting on a person: {question}")
+        waiting = f"Waiting on a person: {question}"
+        await self._enter(ticket, PHASE_BLOCKED, waiting, say=f"Blocked: {waiting}")
         await self._status(ticket, papaya_events.STATUS_BLOCKED)
         before = await asyncio.to_thread(self._fingerprint, ticket)
         while True:
@@ -845,22 +995,43 @@ class TicketRunner:
             ManagerLaunchError,
             TurnResult,
             build_launch,
+            prepare_turn_tools,
+            resolve_profile,
             run_turn,
         )
 
         root = self._root()
         prompt = prompts.render(turn, runtime_dir=root, facts=facts)
-        env = turn_environment(ticket.job.env, root=root, run_id=ticket.held.run_id)
+        env = {
+            **os.environ,
+            **turn_environment(ticket.job.env, root=root, run_id=ticket.held.run_id),
+        }
+        transcript = turn_transcript_path(ticket.held.run_id, turn)
+        # Named before the turn starts, so a turn still running can be watched.
+        _report_progress(ticket.job, ticket.phase, f"The {turn} turn's transcript: {transcript}")
         try:
             config = self._config() if self._config is not None else _load_config()
-            launch = build_launch(
-                config=config, turn=prompt, root=root, base_env={**os.environ, **env}
+            provider, _model, _reasoning = resolve_profile(config, None, None, None)
+            prepare = self._turn_tools or prepare_turn_tools
+            tools = await asyncio.to_thread(
+                prepare,
+                provider,
+                env,
+                root=root,
+                config_file=transcript.with_suffix(".mcp.json"),
             )
+            launch = build_launch(config=config, turn=prompt, root=root, base_env=env, tools=tools)
         except ManagerLaunchError as exc:
             log.error("[serve] Could not launch the %s turn: %s", turn, exc)
-            return TurnResult(exit_code=127, transcript=f"the turn could not be launched: {exc}")
+            text = f"the turn could not be launched: {exc}"
+            with contextlib.suppress(OSError):
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+                transcript.write_text(text + "\n", encoding="utf-8")
+            return TurnResult(exit_code=127, transcript=text)
         runner = self._run_turn or run_turn
-        result = await asyncio.to_thread(runner, launch, should_stop=ticket.should_stop)
+        result = await asyncio.to_thread(
+            runner, launch, should_stop=ticket.should_stop, transcript_path=transcript
+        )
         self._check_stop(ticket)
         return result
 
@@ -924,11 +1095,38 @@ class TicketRunner:
     def _opener_kwargs(self) -> dict[str, Any]:
         return {"opener": self._opener} if self._opener is not None else {}
 
-    async def _enter(self, ticket: Ticket, phase: str, detail: str) -> None:
-        """Record a phase on the task and say it as progress, which is activity."""
+    async def _enter(self, ticket: Ticket, phase: str, detail: str, *, say: str = "") -> None:
+        """Record a phase on the task and say it as progress, which is activity.
+
+        With ``say``, the phase change is also one comment on the work item — the
+        line the ticket card shows as this agent's status.
+        """
         await asyncio.to_thread(self._record_phase, ticket.held.task_id, phase, detail)
         ticket.phase = phase
         _report_progress(ticket.job, phase, detail)
+        if say:
+            await self._say(ticket, phase, say)
+
+    async def _say(self, ticket: Ticket, phase: str, text: str) -> None:
+        """One comment, as the agent, when the phase differs from the last one said.
+
+        Only phase changes reach the ticket: a retried turn, a slot wait or a
+        worker's progress stays in the app and the log. Never fatal.
+        """
+        line = _one_line(text)
+        if not line or phase == ticket.said:
+            return
+        ticket.said = phase
+        try:
+            await asyncio.to_thread(
+                papaya_events.post_work_item_comment,
+                ticket.held.event,
+                line,
+                environ=ticket.job.env,
+                **self._opener_kwargs(),
+            )
+        except papaya_events.PapayaEventError as exc:
+            log.warning("[serve] Could not comment on %s: %s", ticket.job.subject, exc)
 
     # -- how a hold ends -------------------------------------------------------
 
@@ -1414,11 +1612,50 @@ def turn_environment(job_env: dict[str, str], *, root: str, run_id: int) -> dict
     """
     from papaya_agent_client.write_boundary import ALLOWED_ROOTS_ENV
 
+    from papaya_agent_runtime.manager.launch import AGENT_BIN_ENV, papaya_agent_command
+
     env = dict(job_env)
     env[ALLOWED_ROOTS_ENV] = json.dumps([root])
     env["PAPAYA_WORKING_DIRECTORY"] = root
     env[papaya_events.TICKET_RUN_ENV] = str(run_id)
+    # The plugin's hooks and `mcp runner-config` call back into the client as
+    # `${PAPAYA_AGENT_BIN:-papaya-agent}` and read its home from the environment.
+    # `serve` is not the `papaya-agent` console script, so the client does not set
+    # the first, and the home may have been found some other way than the second.
+    if not env.get(AGENT_BIN_ENV):
+        command = papaya_agent_command({**os.environ, **env})
+        if len(command) == 1:
+            env[AGENT_BIN_ENV] = command[0]
+    if not env.get(papaya.CLIENT_HOME_ENV) and not os.environ.get(papaya.CLIENT_HOME_ENV):
+        env[papaya.CLIENT_HOME_ENV] = str(papaya.client_home())
     return env
+
+
+def turn_transcript_path(run_id: int, turn: str) -> Path:
+    """Where the next ``turn`` of this run keeps its transcript: `<turn>-<n>.log`.
+
+    Under the run's own directory, numbered per turn kind, so a brief retried
+    twice leaves `brief-1.log` and `brief-2.log` side by side.
+    """
+    from papaya_agent_runtime.paths import runs_dir
+
+    turns = runs_dir() / str(run_id) / "turns"
+    taken = len(list(turns.glob(f"{turn}-*.log"))) if turns.is_dir() else 0
+    return turns / f"{turn}-{taken + 1}.log"
+
+
+def brief_has_goals(worker: Worker) -> bool:
+    """Does the brief this worker was dispatched with carry a Goals section?"""
+    from papaya_agent_runtime import brief_lint
+    from papaya_agent_runtime.preflight import archived_brief_path
+
+    if not worker.repo:
+        return False
+    try:
+        text = archived_brief_path(worker.repo, worker.task_id).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "Goals" in brief_lint.outcome_sections(text)
 
 
 def default_worker_capacity() -> tuple[int, int] | None:
@@ -1574,31 +1811,38 @@ def self_setup(*, stderr) -> None:
 #: is a direct message. Several because the shape belongs to the workspace API,
 #: not to this runtime, and reading one spelling would silently find nothing.
 _CHANNEL_KIND_KEYS = ("kind", "type", "channel_type", "channel_kind")
+#: Papaya's own agent-to-person DM. The workspace API names it `agent_private`
+#: (a channel called `agent-dm:<user>:<agent>`); until task 253 this list did not
+#: have it, so the one channel an agent's owner reads was never found.
+_AGENT_DM_KINDS = frozenset({"agent_private"})
 _DM_KINDS = frozenset({"dm", "direct", "direct_message", "directmessage"})
 
 
 def dm_channel_id(channels: Any) -> str | None:
     """The DM to speak into, out of everything this agent can see.
 
-    The client's API module has no call that addresses a person's DM by itself
-    (see `list_agent_channels` / `post_agent_channel_message` — channels, by id).
-    So the DM is found rather than named: the agent's channel list is asked for,
-    and the first channel that says it is a direct message is the one the owner
-    reads. A workspace that shows this agent no DM at all gets nothing posted
-    rather than a readiness report in a team channel.
+    The route that exists for an agent token: `GET /workspaces/{id}/channels`
+    answers the public channels plus the ones *this agent* is a member of, and
+    `POST .../channels/{id}/messages` posts into one as the agent. There is no
+    agent-token route that opens a DM (`POST /workspaces/{id}/dm` takes a
+    person's session and writes as that person), so the DM is found rather than
+    made. The agent's own DM with a person (`agent_private`) is preferred over a
+    person-to-person `dm` it happens to be in. A workspace that shows this agent
+    no DM at all gets nothing posted rather than a report in a team channel.
     """
     if isinstance(channels, dict):  # a wrapped list is the other shape this can arrive in
         channels = channels.get("channels")
     if not isinstance(channels, list):
         return None
-    for channel in channels:
-        if not isinstance(channel, dict):
-            continue
-        kinds = {str(channel.get(key) or "").strip().lower() for key in _CHANNEL_KIND_KEYS}
-        if kinds & _DM_KINDS:
-            identifier = str(channel.get("id") or channel.get("channel_id") or "").strip()
-            if identifier:
-                return identifier
+    for wanted in (_AGENT_DM_KINDS, _DM_KINDS):
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            kinds = {str(channel.get(key) or "").strip().lower() for key in _CHANNEL_KIND_KEYS}
+            if kinds & wanted:
+                identifier = str(channel.get("id") or channel.get("channel_id") or "").strip()
+                if identifier:
+                    return identifier
     return None
 
 
@@ -1633,7 +1877,10 @@ async def _post_dm(built: Any, text: str) -> bool:
         return False
     channel_id = dm_channel_id(channels)
     if channel_id is None:
-        log.warning("[serve] No direct-message channel to report readiness in; said on stderr only")
+        log.warning(
+            "[serve] This agent is in no DM channel (agent_private or dm), so readiness "
+            "was not posted; it is on stderr, and posted on the next start that finds one"
+        )
         return False
     try:
         await api_client.post_agent_channel_message(api, channel_id, text)
@@ -1838,6 +2085,7 @@ __all__ = [
     "ServeOptions",
     "TicketRunner",
     "Worker",
+    "brief_has_goals",
     "default_worker_capacity",
     "dm_channel_id",
     "find_worker",
@@ -1856,4 +2104,5 @@ __all__ = [
     "session_id_for",
     "stored_session_ids",
     "turn_environment",
+    "turn_transcript_path",
 ]
