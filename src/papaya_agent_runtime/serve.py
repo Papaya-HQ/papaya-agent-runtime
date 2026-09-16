@@ -1029,8 +1029,24 @@ class TicketRunner:
         delivery of a ticket this manager took earlier is the case worth
         recording — the hold ended and the next attempt was refused, and a task
         still reading `picked_up` would be describing a lease nobody holds.
+
+        Either way the decline is remembered for the sweep, with the ticket's
+        `updated_at` as it stood: a ticket with no task row would otherwise be
+        offered, asked about and declined again every sweep until somebody changed it.
         """
         from papaya_agent_runtime.paths import db_path
+
+        if event.work_item_id:
+            work_item = event.payload.get("work_item")
+            updated_at = work_item.get("updated_at") if isinstance(work_item, dict) else None
+            try:
+                sweep.remember_declined(
+                    event.work_item_id,
+                    updated_at=str(updated_at) if updated_at else None,
+                    reason=reason,
+                )
+            except Exception as exc:  # noqa: BLE001 - remembering must not stop the decline
+                log.warning("[serve] Could not remember declining %s: %s", event.subject, exc)
 
         if db_path().exists():
             with contextlib.suppress(Exception):
@@ -1072,6 +1088,11 @@ class TicketRunner:
             resume_from = None
         if resume_from is None:
             record_phase(conn, task_id, PHASE_PICKED_UP)
+        if event.work_item_id:
+            # Taken now, so an earlier decline no longer describes this ticket. Left
+            # in place it would keep the sweep away after this hold is released.
+            with contextlib.suppress(Exception):
+                sweep.forget_declined(event.work_item_id)
         return Held(
             task_id=task_id, run_id=run_id, repo=repo_name, event=event, resume_from=resume_from
         )

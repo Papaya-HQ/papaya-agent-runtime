@@ -76,9 +76,9 @@ class SupervisorServer:
         self._quiet_flagged: set[int] = set()
         self._plan_flagged: set[int] = set()
         #: Set by `ppy serve` while its listener runs: one sweep for assigned work,
-        #: answered as a dict. None in a bare `ppy supervisor serve`, which has no
-        #: listener to offer anything to.
-        self.sweep_handler: Callable[[], dict] | None = None
+        #: answered as a dict (`include_declined=` is its one keyword). None in a
+        #: bare `ppy supervisor serve`, which has no listener to offer anything to.
+        self.sweep_handler: Callable[..., dict] | None = None
 
     def start_background(self) -> None:
         self._bind()
@@ -305,7 +305,8 @@ class SupervisorServer:
                         "no listener to sweep for",
                     }
                 try:
-                    return {"ok": True, "serving": True, "sweep": handler()}
+                    swept = handler(include_declined=bool(request.get("include_declined")))
+                    return {"ok": True, "serving": True, "sweep": swept}
                 except Exception as exc:  # noqa: BLE001 - a timed-out sweep still gets an answer
                     reason = str(exc) or exc.__class__.__name__
                     return {

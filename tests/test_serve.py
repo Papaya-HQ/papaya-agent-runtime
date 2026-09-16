@@ -1787,6 +1787,88 @@ def test_ppy_sweep_asks_the_running_serve_and_prints_the_summary(
     assert server.sweep_handler is None, "the handler outlived the listener"
 
 
+def _unplaceable(monkeypatch) -> None:
+    """Every ticket names a repository this runtime cannot register, so it is declined."""
+    monkeypatch.setattr(
+        papaya_events.solicit,
+        "ensure",
+        _raise(solicit.SolicitError("acme/runtime is not in any account you belong to")),
+    )
+
+
+def test_a_declined_item_is_not_offered_again_until_asked_by_hand(
+    ppy_home, client_home, ready, assigned, monkeypatch, capsys
+) -> None:
+    """Otherwise the person is asked, and the ticket declined, every five minutes."""
+    from papaya_agent_runtime import cli, sweep
+    from papaya_agent_runtime.supervisor.server import SupervisorServer
+
+    _unplaceable(monkeypatch)
+    assigned.items = [{**_item(1), "updated_at": "2026-09-16T10:00:00Z"}]
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    clock = Ticks()
+    server = SupervisorServer()
+    server.start_background()
+
+    async def scenario() -> tuple[int, int]:
+        runner = await _serving(
+            harness, client_home, stderr, sweep_sleep=clock.sleep, server=server
+        )
+        await _until(lambda: harness.results, what="the first pickup to be declined")
+        await _until(lambda: not harness.loop.running_subjects, what="the decline to finish")
+
+        clock.tick()
+        await _until(lambda: len(_summaries(stderr)) == 2, what="the next sweep")
+
+        # By hand, a person can still ask for it.
+        exit_code = await asyncio.to_thread(cli.main, ["sweep", "--include-declined"])
+        await _until(lambda: len(harness.results) == 2, what="the by-hand pickup")
+        harness.loop.request_stop()
+        return exit_code, await runner
+
+    try:
+        assert asyncio.run(scenario()) == (0, 0)
+    finally:
+        server.stop()
+
+    remembered = sweep.declined_items()["item-1"]
+    assert remembered["updated_at"] == "2026-09-16T10:00:00Z"
+    assert "not in any account" in remembered["reason"]
+    assert _summaries(stderr)[1] == (
+        "ppy serve: sweep found 1, offered 0, skipped 1, 1 declined earlier"
+    )
+    assert capsys.readouterr().out.strip() == "sweep found 1, offered 1, skipped 0"
+    assert _reserved(harness) == ["work_item:item-1", "work_item:item-1"]
+
+
+def test_a_declined_item_changed_since_is_offered_again(
+    ppy_home, client_home, ready, assigned, monkeypatch
+) -> None:
+    """A newer `updated_at` is a person editing or commenting: worth another look."""
+    _unplaceable(monkeypatch)
+    assigned.items = [{**_item(1), "updated_at": "2026-09-16T10:00:00Z"}]
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    clock = Ticks()
+
+    async def scenario() -> int:
+        runner = await _serving(harness, client_home, stderr, sweep_sleep=clock.sleep)
+        await _until(lambda: harness.results, what="the first pickup to be declined")
+        await _until(lambda: not harness.loop.running_subjects, what="the decline to finish")
+
+        assigned.items[0]["updated_at"] = "2026-09-16T10:05:00Z"
+        clock.tick()
+        await _until(lambda: len(harness.results) == 2, what="the second pickup")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert _summaries(stderr)[1] == "ppy serve: sweep found 1, offered 1, skipped 0"
+    assert _reserved(harness) == ["work_item:item-1", "work_item:item-1"]
+
+
 def test_ppy_sweep_with_nothing_serving_says_so(ppy_home, capsys) -> None:
     from papaya_agent_runtime import cli
     from papaya_agent_runtime.supervisor.server import SupervisorServer

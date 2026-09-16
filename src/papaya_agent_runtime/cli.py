@@ -543,7 +543,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
 
     not_serving = f"nothing is serving in {ppy_home()}; start `ppy serve` and it sweeps on start"
     try:
-        resp = SupervisorClient().sweep()
+        resp = SupervisorClient().sweep(include_declined=bool(args.include_declined))
     except SupervisorUnavailable:
         print(not_serving, file=sys.stderr)
         return 1
@@ -2309,6 +2309,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "ask the running `ppy serve` to look for work assigned to this agent that "
             "nothing has picked up, now, and print what it found"
+        ),
+    )
+    sweep_cmd.add_argument(
+        "--include-declined",
+        dest="include_declined",
+        action="store_true",
+        help=(
+            "also offer tickets this runtime declined earlier and nobody has changed "
+            "since; the timed sweep leaves those alone"
         ),
     )
     sweep_cmd.add_argument("--json", action="store_true", help="machine-readable output")

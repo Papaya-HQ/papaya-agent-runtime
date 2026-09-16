@@ -30,11 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from papaya_agent_runtime import papaya_events
@@ -87,6 +90,98 @@ def parse_interval(raw: str | float, *, source: str) -> float:
     return value
 
 
+# ── the tickets this runtime already said no to ─────────────────────────────
+#
+# A declined ticket leaves no task row — declining is the opposite of taking work
+# on — so without a memory of its own the sweep would offer it again every round:
+# the app asks the person, the runner declines, the subject goes back as declined,
+# and Papaya writes another event, every five minutes, for every such item. So a
+# decline is remembered with the item's `updated_at` at the time, and the sweep
+# leaves the item alone until somebody changes it (an edit or a comment moves
+# `updated_at`, and that is worth another look) or a person runs
+# `ppy sweep --include-declined`.
+
+_declined_lock = threading.Lock()
+
+
+def declined_path() -> Path:
+    """Where declined tickets are remembered: `.ppy/sweep-declined.json`."""
+    from papaya_agent_runtime.paths import ppy_home
+
+    return ppy_home() / "sweep-declined.json"
+
+
+def declined_items() -> dict[str, dict[str, Any]]:
+    """Every remembered decline, `{work item id: {updated_at, reason, declined_at}}`."""
+    try:
+        data = json.loads(declined_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): value for key, value in data.items() if isinstance(value, dict)}
+
+
+def _write_declined(data: dict[str, dict[str, Any]]) -> None:
+    path = declined_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def remember_declined(work_item_id: str, *, updated_at: str | None, reason: str) -> None:
+    """Record that this runtime declined a ticket, as the ticket stood at the time."""
+    if not work_item_id:
+        return
+    with _declined_lock:
+        data = declined_items()
+        data[str(work_item_id)] = {
+            "updated_at": updated_at,
+            "reason": reason,
+            "declined_at": datetime.now(UTC).isoformat(),
+        }
+        _write_declined(data)
+
+
+def forget_declined(work_item_id: str) -> None:
+    """Drop a remembered decline: the ticket was taken, so the memory is stale."""
+    if not work_item_id:
+        return
+    with _declined_lock:
+        data = declined_items()
+        if data.pop(str(work_item_id), None) is not None:
+            _write_declined(data)
+
+
+def _timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def declined_earlier(item: dict[str, Any], remembered: dict[str, Any] | None) -> bool:
+    """Whether `item` is a ticket this runtime declined and nobody has touched since.
+
+    Newer means strictly later than the `updated_at` remembered with the decline.
+    A decline remembered without one (an event summary that carried none) cannot
+    be compared, so the item gets one more look, and that decline records the
+    timestamp the sweep's own envelope carries.
+    """
+    if remembered is None:
+        return False
+    then = _timestamp(remembered.get("updated_at"))
+    now = _timestamp(item.get("updated_at"))
+    if then is None:
+        return False
+    return now is None or now <= then
+
+
 @dataclass(frozen=True)
 class SweepResult:
     """What one sweep found and did with it."""
@@ -94,6 +189,8 @@ class SweepResult:
     found: int = 0
     offered: int = 0
     skipped: int = 0
+    #: Of `skipped`, the ones this runtime declined earlier and nobody has changed since.
+    declined_earlier: int = 0
     #: Open items not reached because every slot was busy; the next sweep has them.
     waiting: int = 0
     #: Why the sweep could not ask Papaya at all, when it could not.
@@ -103,6 +200,8 @@ class SweepResult:
         if self.error is not None:
             return f"sweep could not list assigned work: {self.error}"
         line = f"sweep found {self.found}, offered {self.offered}, skipped {self.skipped}"
+        if self.declined_earlier:
+            line += f", {self.declined_earlier} declined earlier"
         if self.waiting:
             line += f"; {self.waiting} left for the next sweep (every slot is busy)"
         return line
@@ -112,6 +211,7 @@ class SweepResult:
             "found": self.found,
             "offered": self.offered,
             "skipped": self.skipped,
+            "declined_earlier": self.declined_earlier,
             "waiting": self.waiting,
             "error": self.error,
             "summary": self.summary(),
@@ -222,11 +322,15 @@ class Sweeper:
             await self._sleep(self._interval)
             await self.sweep_once()
 
-    async def sweep_once(self) -> SweepResult:
-        """One round: list, choose, offer. Never raises; a failure is the result."""
+    async def sweep_once(self, *, include_declined: bool = False) -> SweepResult:
+        """One round: list, choose, offer. Never raises; a failure is the result.
+
+        `include_declined` offers tickets this runtime declined earlier even when
+        nobody has changed them since — the by-hand `ppy sweep --include-declined`.
+        """
         async with self._lock:
             try:
-                result = await self._sweep()
+                result = await self._sweep(include_declined=include_declined)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a bad sweep must not end serve
@@ -238,7 +342,7 @@ class Sweeper:
                 print(f"ppy serve: {result.summary()}", file=self._stderr, flush=True)
         return result
 
-    async def _sweep(self) -> SweepResult:
+    async def _sweep(self, *, include_declined: bool) -> SweepResult:
         from papaya_agent_client import api_client
 
         built = self._built
@@ -252,17 +356,27 @@ class Sweeper:
 
         items = [item for item in _items(answer) if is_open(item)]
         live = await asyncio.to_thread(self._live_items)
+        declined = {} if include_declined else await asyncio.to_thread(declined_items)
         agent_config = getattr(built, "agent_config", None) or {}
         agent_id = str(agent_config.get("agent_id") or "")
         workspace_id = str(agent_config.get("workspace_id") or "")
 
-        offered = skipped = 0
+        offered = skipped = earlier = 0
         for index, item in enumerate(items):
             item_id = str(item["id"])
             subject = f"work_item:{item_id}"
             if subject in built.loop.running_subjects or item_id in live:
                 log.debug("[sweep] %s already has a live task here; not offering it", subject)
                 skipped += 1
+                continue
+            if declined_earlier(item, declined.get(item_id)):
+                log.debug(
+                    "[sweep] %s was declined earlier (%s) and has not changed since",
+                    subject,
+                    declined[item_id].get("reason") or "no reason recorded",
+                )
+                skipped += 1
+                earlier += 1
                 continue
             status = await built.loop.offer(
                 envelope_for(item, agent_id=agent_id, workspace_id=workspace_id)
@@ -277,6 +391,7 @@ class Sweeper:
                     found=len(items),
                     offered=offered,
                     skipped=skipped,
+                    declined_earlier=earlier,
                     waiting=len(items) - index,
                 )
             else:
@@ -284,17 +399,25 @@ class Sweeper:
                 # Papaya, or not this playbook's to act on. Not ours this round.
                 log.debug("[sweep] %s not taken: someone else has it or it is not ours", subject)
                 skipped += 1
-        return SweepResult(found=len(items), offered=offered, skipped=skipped)
+        return SweepResult(
+            found=len(items), offered=offered, skipped=skipped, declined_earlier=earlier
+        )
 
     def sweep_from_thread(
-        self, event_loop: asyncio.AbstractEventLoop, *, timeout: float = REQUEST_TIMEOUT_SECONDS
+        self,
+        event_loop: asyncio.AbstractEventLoop,
+        *,
+        include_declined: bool = False,
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Run one sweep on `event_loop` from another thread and wait for its answer.
 
         The supervisor socket is served on a thread; the listener, and so every
         offer, lives on the event loop. This is the one crossing between them.
         """
-        future = asyncio.run_coroutine_threadsafe(self.sweep_once(), event_loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self.sweep_once(include_declined=include_declined), event_loop
+        )
         return future.result(timeout=timeout).as_dict()
 
 
@@ -305,9 +428,14 @@ __all__ = [
     "SWEEP_INTERVAL_ENV",
     "SweepResult",
     "Sweeper",
+    "declined_earlier",
+    "declined_items",
+    "declined_path",
     "envelope_for",
+    "forget_declined",
     "interval_from_env",
     "is_open",
     "live_work_item_ids",
     "parse_interval",
+    "remember_declined",
 ]
