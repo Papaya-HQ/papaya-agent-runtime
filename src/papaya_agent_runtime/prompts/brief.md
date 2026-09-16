@@ -54,4 +54,9 @@ If dispatch is refused because worker capacity is full, keep the brief where it 
 end the turn. The runtime keeps holding the ticket and calls this turn back when a slot
 frees; dispatch the brief you already wrote then.
 
+Run any gate or check this turn needs in the foreground and wait for it; never in the
+background. If it cannot finish inside this turn, end the turn with a message whose
+first line is `WAITING: <what you are waiting for>`, and the runtime runs this turn
+again later with the tail of this one.
+
 End the turn once a worker is dispatched. Do not do the work yourself.

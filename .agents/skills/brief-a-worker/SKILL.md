@@ -163,7 +163,11 @@ of re-reading the brief for it.
   fix in between it is the user's budget-versus-infrastructure decision, so the worker
   files it under "Flagged, not done" instead of trying a third fix. Three workers stalled
   on a gate nobody owned and two gate cycles were lost for want of this block
-  (window ending 2026-09-01).
+  (window ending 2026-09-01). The block also says: **run the gate in the foreground and
+  wait for it; never background it, and never end the session with it still running** —
+  a backgrounded command dies with the session. A long gate is the worker's to finish;
+  the review re-checks it and does not run it first. PAP-213 lost a worker session and
+  then two review turns to a suite left running past the end of a turn (2026-09-16).
 - **Scope-change protocol.** What the worker does when the brief turns out to be wrong
   or an out-of-scope dependency turns up: stop at the checkpoint, and under "Flagged,
   not done" state the conflict, its effect on the Goals and on the timeline, and the

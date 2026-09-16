@@ -495,7 +495,10 @@ def render(
     gate = f"`{env.local_gate}`" if env.local_gate else "the scoped suite the brief names"
     owner = "CI" if env.full_suite_owner.lower() == "ci" else env.full_suite_owner
     lines.append(
-        f"- **Local gate: {gate}.** That is what you run before handing the task back. The full "
+        f"- **Local gate: {gate}.** That is what you run before handing the task back, in the "
+        "foreground, waiting for it to finish: never in the background, and never end your "
+        "session with it still running, because a backgrounded command dies with the "
+        "session and its result is lost. The full "
         f"suite belongs to {owner}; do not run it here — a run that outlasts your tool "
         "timeout is killed part-way and leaves the database poisoned for the next run."
     )

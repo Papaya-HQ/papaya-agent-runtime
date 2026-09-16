@@ -397,15 +397,17 @@ class FakeTurns:
     for a real session that ended without dispatching.
     """
 
-    def __init__(self, act: Callable[[Turn], None] | None = None) -> None:
+    def __init__(self, act: Callable[[Turn], str | None] | None = None) -> None:
         self._act = act or (lambda _turn: None)
         self.calls: list[Turn] = []
 
     def __call__(self, launch: Any, *, should_stop, transcript_path=None) -> TurnResult:
         turn = Turn(_which_turn(launch.seed_prompt), launch)
         self.calls.append(turn)
-        self._act(turn)
-        return TurnResult(exit_code=0, transcript=f"{turn.name} transcript #{len(self.calls)}")
+        # An act may return the turn's last message, which ends its transcript.
+        said = self._act(turn)
+        transcript = f"{turn.name} transcript #{len(self.calls)}"
+        return TurnResult(exit_code=0, transcript=f"{transcript}\n{said}" if said else transcript)
 
     def names(self) -> list[str]:
         return [turn.name for turn in self.calls]
@@ -530,8 +532,18 @@ def _no_tools(_provider: str, _env: dict[str, str], **_kwargs: Any) -> TurnTools
     return TurnTools()
 
 
+def _no_steer(task_id: int, message: str) -> None:
+    raise AssertionError(f"the runner steered worker task {task_id} unasked: {message}")
+
+
 def _runner(
-    turns: Any, papaya_api: FakePapaya, *, capacity=None, turn_tools=_no_tools, clock=None
+    turns: Any,
+    papaya_api: FakePapaya,
+    *,
+    capacity=None,
+    turn_tools=_no_tools,
+    clock=None,
+    steer=_no_steer,
 ) -> serve.TicketRunner:
     return serve.TicketRunner(
         run_turn=turns,
@@ -541,6 +553,7 @@ def _runner(
         poll_seconds=0.01,
         turn_tools=turn_tools,
         clock=clock,
+        steer=steer,
     )
 
 
@@ -1875,11 +1888,12 @@ def test_a_brief_that_left_no_acceptance_criteria_is_rerun_once_then_goes_on(
 
 
 def _review_ticket(act_on_review, papaya_api: FakePapaya) -> FakeTurns:
-    def act(turn: Turn) -> None:
+    def act(turn: Turn) -> str | None:
         if turn.name == prompts.BRIEF:
             _dispatch_then_finish(turn)
         elif turn.name == prompts.REVIEW:
-            act_on_review(turn)
+            return act_on_review(turn)
+        return None
 
     return FakeTurns(act)
 
@@ -1948,7 +1962,187 @@ def test_a_review_turn_that_never_reports_gets_the_runners_fallback_line(
     assert history()[-2:] == [serve.PHASE_REPORTED, serve.PHASE_RELEASED]
 
 
+# ── waiting on a gate ───────────────────────────────────────────────────────
+
+
+def test_a_review_turn_that_ends_waiting_is_rerun_later_and_never_declined(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """PAP-213: the review turn was still running the suite, and the ticket was declined."""
+    papaya_api, clock = FakePapaya(), Clock()
+
+    def review(turn: Turn) -> str | None:
+        if len([call for call in turns.calls if call.name == prompts.REVIEW]) <= 3:
+            return "Started the backend suite at abc123.\nWAITING: full suite\nIt is still running."
+        _deliver(turn)
+        return None
+
+    turns = _review_ticket(review, papaya_api)
+    harness = Harness(FakeEvents([EVENT]))
+
+    def reviews() -> int:
+        return turns.names().count(prompts.REVIEW)
+
+    def waiting() -> list[tuple[str, str]]:
+        return [(p, d) for _s, p, d in progress_lines if d.startswith("The review turn is waiting")]
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api, clock=clock))
+        for number, minutes in enumerate((5, 10, 20), start=1):
+            await _until(lambda n=number: len(waiting()) == n, what=f"wait {number}")
+            assert waiting()[-1] == (
+                serve.PHASE_REVIEWING,
+                f"The review turn is waiting: full suite; running it again in {minutes} minutes.",
+            )
+            clock.advance(minutes * 60 - 1)
+            await asyncio.sleep(scale(0.1))
+            assert reviews() == number, "rerun before the delay was up"
+            assert not harness.results, "a waiting review ended the hold"
+            assert history()[-1] == serve.PHASE_REVIEWING
+            clock.advance(1)
+            await _until(lambda n=number: reviews() == n + 1, what=f"rerun {number}")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF] + [prompts.REVIEW] * 4
+    # Each rerun is given the tail of the waiting turn before it.
+    assert "review transcript #2" in turns.calls[2].prompt
+    assert "WAITING: full suite" in turns.calls[2].prompt
+    assert "review transcript #4" in turns.calls[4].prompt
+    assert not any("The turn ended without" in d for _s, _p, d in progress_lines)
+    assert harness.results[0]["exit_code"] == 0
+    assert serve.PHASE_DECLINED not in history()
+    assert history()[-3:] == [serve.PHASE_DELIVERING, serve.PHASE_REPORTED, serve.PHASE_RELEASED]
+
+
+def test_a_review_turn_that_ends_with_nothing_twice_is_declined(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    papaya_api = FakePapaya()
+    turns = _review_ticket(lambda _turn: "I looked at it.", papaya_api)
+    harness = Harness(FakeEvents([EVENT]))
+
+    assert _one_ticket(harness, client_home, _runner(turns, papaya_api)) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW, prompts.REVIEW]
+    assert "review transcript #2" in turns.calls[2].prompt
+    result = harness.results[0]
+    assert result["exit_code"] == 75
+    assert "2 times without approving and delivering, or steering" in result["output"]
+    assert store.task_phase(init_db(), int(ticket_task()["id"])) == serve.PHASE_DECLINED
+
+
+def test_a_worker_stopped_mid_gate_is_sent_back_and_reviewed_only_once_done(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """A long gate is the worker's: the runner steers it, and the review waits for `worker_done`."""
+    steers: list[tuple[int, str]] = []
+
+    def steer(task_id: int, message: str) -> None:
+        steers.append((task_id, message))
+        # What `ppy steer` on a worker with no live turn leaves: the session resumed.
+        worker_event(task_id, "resumed", status="in_progress", message=message)
+
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya(), steer=steer))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(
+            worker,
+            "worker_stopped",
+            status="worker_stopped",
+            summary="worker stopped before done: no done note was ever filed",
+            reasons=["the last thing the session did was background `make test`"],
+        )
+        await _until(lambda: steers, what="the runner to send the worker back")
+        await asyncio.sleep(scale(0.1))
+        assert turns.names() == [prompts.BRIEF], "reviewed before the worker finished its gate"
+        assert history()[-1] == serve.PHASE_DISPATCHED
+
+        worker_event(worker, "worker_done", status="worker_done", summary="gate: 900 passed")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    ((steered, message),) = steers
+    assert steered == workers_in(int(ticket_task()["run_id"]))[0]
+    assert "in the foreground" in message and "no done note was ever filed" in message
+    assert any("sent back to run its gate to completion" in d for _s, _p, d in progress_lines)
+    # The review turn ran on `worker_done`, not on the failure.
+    assert "what stopped the worker" not in turns.calls[1].prompt
+    assert harness.results[0]["exit_code"] == 0
+
+
+def test_a_refused_gate_steer_gives_the_review_turn_the_failure(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    def steer(_task_id: int, _message: str) -> None:
+        raise RuntimeError("no supervisor")
+
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya(), steer=steer))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(worker, "worker_stopped", status="worker_stopped", summary="cut short")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    assert "worker_stopped: cut short" in turns.calls[1].prompt
+
+
+@pytest.mark.parametrize(
+    ("transcript", "reason"),
+    [
+        ("WAITING: full suite", "full suite"),
+        ("ran make test\n\n**WAITING: backend gate**\nstill going", "backend gate"),
+        ("WAITING:", "(no reason given)"),
+        ("I approved it. Nothing is WAITING: here.", None),
+        ("", None),
+    ],
+)
+def test_waiting_reason_reads_the_first_line_contract(transcript: str, reason: str | None) -> None:
+    assert serve.waiting_reason(TurnResult(exit_code=0, transcript=transcript)) == reason
+
+
+def test_the_rerun_delay_doubles_from_five_minutes_to_a_cap_of_thirty() -> None:
+    assert [serve.rerun_delay(n) / 60 for n in range(1, 6)] == [5, 10, 20, 30, 30]
+
+
 # ── the prompts ─────────────────────────────────────────────────────────────
+
+
+def test_turns_and_workers_are_told_to_run_gates_in_the_foreground_and_say_waiting() -> None:
+    def flat(text: str) -> str:
+        return " ".join(text.split())
+
+    for turn in (prompts.REVIEW, prompts.BRIEF):
+        text = flat(prompts.load(turn))
+        assert "in the foreground" in text, turn
+        assert "never in the background" in text, turn
+        assert f"`{prompts.WAITING_PREFIX} <what you are waiting for>`" in text, turn
+    assert "re-check" in prompts.load(prompts.REVIEW)
+    skill = flat((Path(serve.__file__).parents[2] / prompts.BRIEF_SKILL).read_text("utf-8"))
+    assert "run the gate in the foreground" in skill
+    assert "never end the session with it still running" in skill
 
 
 def test_the_turn_prompts_instruct_and_never_template_a_brief() -> None:

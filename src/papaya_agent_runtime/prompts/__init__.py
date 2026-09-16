@@ -43,6 +43,11 @@ REPORT_ADDENDUM = (
     "result on the work item through the papaya MCP server, then end."
 )
 
+#: How a brief or review turn says it ended on purpose, still waiting on something
+#: (a gate that outlasts the turn): the first line of its last message starts with
+#: this. The runner reruns such a turn later instead of counting it as a miss.
+WAITING_PREFIX = "WAITING:"
+
 _HERE = Path(__file__).resolve().parent
 
 
@@ -93,6 +98,7 @@ __all__ = [
     "REVIEW_SKILL",
     "RUNTIME_DIR",
     "TURNS",
+    "WAITING_PREFIX",
     "load",
     "path",
     "render",

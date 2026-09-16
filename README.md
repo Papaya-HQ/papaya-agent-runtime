@@ -318,6 +318,16 @@ dispatch but never edit a repository by hand. Its prompt is reviewed text under
 The runner knows a turn did its job from the ledger alone — a worker in the ticket's
 run, or an answer, steer or delivery event since the turn began — and retries a turn
 that did not once, with the tail of its transcript, before handing the ticket back.
+**Waiting is not a miss.** A turn runs its gates in the foreground; one whose gate
+cannot finish inside the turn ends with a message whose first line is
+`WAITING: <what it is waiting for>`. The runner reports that as progress, keeps the
+ticket in `briefing` or `reviewing`, and runs the turn again with its tail after five
+minutes, doubling each time to a cap of thirty; only a turn that ends with no dispatch,
+delivery, steer, question or `WAITING:` counts toward the hand-back. A long gate is the
+worker's job, not the review turn's: a worker whose session ended mid-gate is steered by
+the runner to run its gate to completion and report (twice at most, then the review turn
+gets the failure), so the review turn normally runs on `worker_done` and re-checks a gate
+result that is already on the record.
 A worker pool that is full is not a miss: the ticket waits in `dispatched` and is never
 handed back for it. A restarted `serve` given a ticket it was already working picks it
 up from its last working phase rather than briefing it again.
