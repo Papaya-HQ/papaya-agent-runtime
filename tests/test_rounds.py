@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -492,13 +493,24 @@ def test_a_restart_re_reserves_a_dispatched_ticket_and_watches_its_live_worker(
     live_session(worker)
     turns, timer, clock = FakeTurns(), Timer(), WallClock()
     harness = Harness(FakeEvents([]))
+    runner = _runner(turns, FakePapaya())
+    # The hold starts on a thread after the offer, late on a loaded machine (CI run
+    # 35129973517). Hold it back until the worker has reported, so the report always
+    # lands in that window: it is news, not history.
+    reported = threading.Event()
+    take = runner.take
+
+    def slow_take(job: Any) -> Any:
+        assert reported.wait(scale(5.0)), "the test never let the hold start"
+        return take(job)
+
+    runner.take = slow_take  # type: ignore[method-assign]
 
     async def scenario() -> int:
-        task = _serve(
-            harness, client_home, _runner(turns, FakePapaya()), _seams(timer, clock, pruned)
-        )
+        task = _serve(harness, client_home, runner, _seams(timer, clock, pruned))
         await _until(lambda: harness.jobs, what="the reclaimed hold")
         progress.record(worker, phase="test", note="Suite running.")
+        reported.set()
         await _until(
             lambda: any("Suite running." in d for _s, _p, d in progress_lines),
             what="the worker's progress to be relayed",

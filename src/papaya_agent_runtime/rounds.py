@@ -815,7 +815,10 @@ class Rounds:
         self._watch_refusals(loop)
         reclaim = getattr(self._runner, "reclaim", None)
         if reclaim is not None:
-            reclaim(ticket.work_item_id, ticket.task_id)
+            # History is what the ledger holds *now*, at the offer; whatever the worker
+            # reports before the hold gets round to starting is news for the ticket.
+            mark = await asyncio.to_thread(serve._max_event_id)
+            reclaim(ticket.work_item_id, ticket.task_id, mark)
         agent_config = getattr(self._built, "agent_config", None) or {}
         envelope = sweep.envelope_for(
             {"id": ticket.work_item_id, "title": ticket.title},

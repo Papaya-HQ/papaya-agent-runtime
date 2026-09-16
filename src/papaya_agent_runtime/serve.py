@@ -518,6 +518,10 @@ class Held:
     #: Taken up again on a task this runtime already had, by the rounds' reclaim:
     #: the run's history is not news, so its progress is not relayed a second time.
     reclaimed: bool = False
+    #: The newest ledger event that was already history when the ticket was offered
+    #: back, when the offer said. Progress after it is news, however late the hold
+    #: starts; ``None`` falls back to the newest event when the hold starts.
+    reported_until: int | None = None
 
 
 @dataclass(frozen=True)
@@ -901,12 +905,19 @@ class TicketRunner:
         #: Every ticket held right now, by its task id: what the rounds walk.
         self.held: dict[int, Ticket] = {}
         #: Work item id -> the task the rounds re-offered it for, so the offer
-        #: (which carries a new event key) lands on that task, not on a new one.
-        self._reclaiming: dict[str, int] = {}
+        #: (which carries a new event key) lands on that task, not on a new one, and
+        #: the newest event id at the moment of the offer.
+        self._reclaiming: dict[str, tuple[int, int | None]] = {}
 
-    def reclaim(self, work_item_id: str, task_id: int) -> None:
-        """Take the next offer of ``work_item_id`` up on ``task_id``, the rounds' reclaim."""
-        self._reclaiming[str(work_item_id)] = int(task_id)
+    def reclaim(self, work_item_id: str, task_id: int, reported_until: int | None = None) -> None:
+        """Take the next offer of ``work_item_id`` up on ``task_id``, the rounds' reclaim.
+
+        ``reported_until`` is the newest event id when the offer was made. The hold
+        starts on a thread some time later — seconds, on a loaded machine — and a
+        worker's progress in between is news: marking history at the hold's start
+        instead silently dropped it.
+        """
+        self._reclaiming[str(work_item_id)] = (int(task_id), reported_until)
 
     def forget_reclaim(self, work_item_id: str) -> None:
         self._reclaiming.pop(str(work_item_id), None)
@@ -931,8 +942,12 @@ class TicketRunner:
         held, job = ticket.held, ticket.job
         where = f" in {held.repo}" if held.repo else ""
         log.info("[serve] Holding %s for task %d%s", job.subject, held.task_id, where)
-        if held.reclaimed:
-            ticket.quiet_until = await asyncio.to_thread(_max_event_id)
+        if held.reclaimed or held.resume_from is not None:
+            ticket.quiet_until = (
+                held.reported_until
+                if held.reported_until is not None
+                else await asyncio.to_thread(_max_event_id)
+            )
         if held.resume_from is None:
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
@@ -943,7 +958,6 @@ class TicketRunner:
             # it was. Nothing is picked up twice: no second brief, no second status,
             # and no second comment for the phase the earlier hold already announced.
             ticket.said = held.resume_from
-            ticket.quiet_until = await asyncio.to_thread(_max_event_id)
             _report_progress(
                 job, held.resume_from, f"Resuming task {held.task_id} from {held.resume_from}."
             )
@@ -1990,16 +2004,17 @@ class TicketRunner:
         """
         existing = papaya_events.find_existing_task(conn, papaya_events.event_key(event))
         reclaimed = False
+        reported_until: int | None = None
         if existing is None and event.work_item_id:
             # An offer carries a new event key every time, so a ticket this runtime
             # was already working — re-offered by the rounds' reclaim, or by the
             # sweep after its hold ended — is found by its work item instead.
             wanted = self._reclaiming.pop(str(event.work_item_id), None)
-            existing = (
-                store.get_task(conn, wanted)
-                if wanted is not None
-                else resumable_task_for(conn, str(event.work_item_id))
-            )
+            if wanted is not None:
+                wanted_task, reported_until = wanted
+                existing = store.get_task(conn, wanted_task)
+            else:
+                existing = resumable_task_for(conn, str(event.work_item_id))
             reclaimed = existing is not None
         if existing is not None:
             task_id, run_id = int(existing["id"]), int(existing["run_id"])
@@ -2030,6 +2045,7 @@ class TicketRunner:
             event=event,
             resume_from=resume_from,
             reclaimed=reclaimed,
+            reported_until=reported_until,
         )
 
     @staticmethod
