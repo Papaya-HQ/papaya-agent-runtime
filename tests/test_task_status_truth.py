@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.providers.fake import FakeProvider
 from papaya_agent_runtime.state import init_db, store
@@ -42,14 +42,11 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, wanted, timeout=20.0):
-    deadline = time.monotonic() + scale(timeout)
-    last = None
-    while time.monotonic() < deadline:
-        last = client.task_status(task_id)["task"]["status"]
-        if last in wanted:
-            return last
-        time.sleep(0.05)
-    raise AssertionError(f"task {task_id} never reached {wanted} (last {last})")
+    def reached():
+        status = client.task_status(task_id)["task"]["status"]
+        return status if status in wanted else None
+
+    return wait_until(reached, timeout, what=f"task {task_id} to reach {wanted}")
 
 
 def _events(task_id, kind):
@@ -61,23 +58,15 @@ def _events(task_id, kind):
 
 
 def _wait_live_runner(task_id, timeout=20.0):
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        conn = init_db()
-        rows = store.live_runners_for_task(conn, task_id)
-        if rows and rows[0]["pid"]:
-            return rows[0]
-        time.sleep(0.05)
-    raise AssertionError(f"task {task_id} never got a live runner")
+    def live():
+        rows = store.live_runners_for_task(init_db(), task_id)
+        return rows[0] if rows and rows[0]["pid"] else None
+
+    return wait_until(live, timeout, what=f"task {task_id} to get a live runner")
 
 
 def _wait_for(predicate, timeout=20.0, what="condition"):
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {what}")
+    return wait_until(predicate, timeout, what=what)
 
 
 # --------------------------------------------------------------------------- #
@@ -119,7 +108,11 @@ def test_steer_records_the_interrupt_mode_and_not_a_bare_interrupt(
     _wait_live_runner(task_id)
     client.steer_task(task_id, "pivot")
     steers = _events(task_id, "steer")
-    assert [s["mode"] for s in steers] == ["interrupt_resume"]
+    # The resume that follows the interrupt queues its own `checkpoint_pending` steer
+    # as soon as the old process is gone, which on a fast machine is before this
+    # read: what is recorded first, and never, is what this test is about.
+    assert steers[0]["mode"] == "interrupt_resume"
+    assert "interrupt" not in [s["mode"] for s in steers]
     assert steers[0]["status"] == "in_progress"
     _wait_status(client, task_id, {"worker_done"})
 

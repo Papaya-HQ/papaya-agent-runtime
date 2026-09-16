@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from conftest import scale
+from conftest import scale, timed_out
 from papaya_agent_runtime import papaya, papaya_events, progress, prompts, readiness, serve, solicit
 from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling
 from papaya_agent_runtime.manager.launch import TurnResult, TurnTools, repo_root
@@ -353,7 +353,7 @@ async def _until(predicate, *, what: str, timeout: float = 5.0) -> None:
         if predicate():
             return
         await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
+    raise timed_out(what)
 
 
 # ── the world outside the process: the harness, Papaya, the worker ─────────

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import delivery, repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.state.db import _column_names
@@ -39,13 +39,11 @@ def _git(path, *args: str) -> str:
 
 
 def _wait_terminal(client, task_id, timeout=15.0):
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
+    def finished():
         status = client.task_status(task_id)["task"]["status"]
-        if status in {"worker_done", "blocked", "failed"}:
-            return status
-        time.sleep(0.1)
-    raise AssertionError("task never finished")
+        return status if status in {"worker_done", "blocked", "failed"} else None
+
+    return wait_until(finished, timeout, what=f"task {task_id} to finish", interval=0.1)
 
 
 _MIGRATION = '''"""a revision"""

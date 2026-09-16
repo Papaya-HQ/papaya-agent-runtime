@@ -115,8 +115,14 @@ def worker_env(
 
 
 class RunnerGuardian:
-    def __init__(self, adapter: ProviderAdapter) -> None:
+    def __init__(
+        self, adapter: ProviderAdapter, *, on_exit: Callable[[], None] | None = None
+    ) -> None:
         self.adapter = adapter
+        # Called once the worker process has exited, before its result is recorded:
+        # the supervisor hands the execution slot back here, so nothing that reads
+        # the recorded terminal status can find the slot still taken.
+        self._on_exit = on_exit
         self._proc: subprocess.Popen | None = None
         self.runner_id: str | None = None
         self._interrupt = threading.Event()
@@ -162,6 +168,9 @@ class RunnerGuardian:
             bufsize=1,
             start_new_session=True,
         )
+        if self._interrupt.is_set():
+            # Stopped between being asked to start and starting: honour it now.
+            self.interrupt()
         store.update_runner(conn, runner_id, pid=self._proc.pid, status="running")
         store.set_task_status(conn, spec.task_id, "in_progress")
 
@@ -196,6 +205,8 @@ class RunnerGuardian:
         stderr = self._proc.stderr.read() if self._proc.stderr else ""
         self._proc.wait()
         exit_code = self._proc.returncode
+        if self._on_exit is not None:
+            self._on_exit()
 
         result = self.adapter.result(events, exit_code)
         if result.usage is not None:
@@ -284,76 +295,58 @@ class RunnerGuardian:
         task_status = _TERMINAL_STATUS.get(result.status, "failed")
         if verdict.stopped:
             task_status = turn_end.WORKER_STOPPED
-        store.set_task_status(conn, spec.task_id, task_status)
 
         # Emit an actionable event for the manager/human loop. Every terminal event
         # carries the session it came from so a late arrival can be attributed.
         if verdict.stopped:
-            store.append_event(
-                conn,
-                kind=turn_end.WORKER_STOPPED,
-                payload={
-                    "task_id": spec.task_id,
-                    "head_sha": result.head_sha,
-                    "session_id": session_id,
-                    "summary": verdict.summary,
-                    "reasons": verdict.reasons,
-                    "unpushed": verdict.unpushed,
-                    "phase": verdict.phase,
-                    "background_command": verdict.background_command,
-                    "expected_phase": verdict.expected_phase,
-                    "resume_message": verdict.resume_message(),
-                },
-                run_id=spec.run_id,
-                task_id=spec.task_id,
-            )
+            kind = turn_end.WORKER_STOPPED
+            payload = {
+                "task_id": spec.task_id,
+                "head_sha": result.head_sha,
+                "session_id": session_id,
+                "summary": verdict.summary,
+                "reasons": verdict.reasons,
+                "unpushed": verdict.unpushed,
+                "phase": verdict.phase,
+                "background_command": verdict.background_command,
+                "expected_phase": verdict.expected_phase,
+                "resume_message": verdict.resume_message(),
+            }
         elif result.status == "completed":
-            store.append_event(
-                conn,
-                kind="worker_done",
-                payload={
-                    "task_id": spec.task_id,
-                    "head_sha": result.head_sha,
-                    "summary": result.summary,
-                    "session_id": session_id,
-                    "excluded_from_commit": finalized.excluded if finalized else [],
-                },
-                run_id=spec.run_id,
-                task_id=spec.task_id,
-            )
+            kind = "worker_done"
+            payload = {
+                "task_id": spec.task_id,
+                "head_sha": result.head_sha,
+                "summary": result.summary,
+                "session_id": session_id,
+                "excluded_from_commit": finalized.excluded if finalized else [],
+            }
         elif result.status == "blocked":
-            store.append_event(
-                conn,
-                kind="question",
-                payload={
-                    "task_id": spec.task_id,
-                    "question": result.question,
-                    "session_id": session_id,
-                },
-                run_id=spec.run_id,
-                task_id=spec.task_id,
-            )
+            kind = "question"
+            payload = {
+                "task_id": spec.task_id,
+                "question": result.question,
+                "session_id": session_id,
+            }
         else:
-            store.append_event(
-                conn,
-                kind="error",
-                payload={
-                    "task_id": spec.task_id,
-                    "summary": result.summary,
-                    "exit_code": exit_code,
-                    "session_id": session_id,
-                    "stderr": stderr[-2000:],
-                },
-                run_id=spec.run_id,
-                task_id=spec.task_id,
-            )
+            kind = "error"
+            payload = {
+                "task_id": spec.task_id,
+                "summary": result.summary,
+                "exit_code": exit_code,
+                "session_id": session_id,
+                "stderr": stderr[-2000:],
+            }
 
-        store.update_runner(
+        store.record_turn_result(
             conn,
-            runner_id,
-            status="exited",
+            run_id=spec.run_id,
+            task_id=spec.task_id,
+            runner_id=runner_id,
+            task_status=task_status,
+            kind=kind,
+            payload=payload,
             exit_code=exit_code if exit_code is not None else -1,
-            result_recorded=1,
         )
         self._proc = None
         return result

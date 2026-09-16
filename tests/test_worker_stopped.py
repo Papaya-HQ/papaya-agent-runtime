@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import repos, turn_end
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -45,14 +45,11 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, wanted, timeout=20.0):
-    deadline = time.monotonic() + scale(timeout)
-    last = None
-    while time.monotonic() < deadline:
-        last = client.task_status(task_id)["task"]["status"]
-        if last in wanted:
-            return last
-        time.sleep(0.05)
-    raise AssertionError(f"task {task_id} never reached {wanted} (last {last})")
+    def reached():
+        status = client.task_status(task_id)["task"]["status"]
+        return status if status in wanted else None
+
+    return wait_until(reached, timeout, what=f"task {task_id} to reach {wanted}")
 
 
 def _events(task_id, kind):

@@ -7,9 +7,8 @@ brief's boundaries repeated in it, a replacement packet silently erases them.
 from __future__ import annotations
 
 import json
-import time
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import brief_lint, preflight, repos
 from papaya_agent_runtime.providers.fake import FakeProvider
 from papaya_agent_runtime.state import init_db, store
@@ -41,12 +40,7 @@ No courier integration; no schema change.
 
 
 def _wait_for(predicate, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.03)
-    raise AssertionError("timed out waiting")
+    wait_until(predicate, timeout, interval=0.03)
 
 
 def _status(task_id: int) -> str:

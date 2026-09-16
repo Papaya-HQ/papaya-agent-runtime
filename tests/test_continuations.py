@@ -9,11 +9,10 @@ to be marked delivered before the resume was admitted, and then vanish.
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import decisions, repos
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.providers.fake import FakeProvider
@@ -34,12 +33,7 @@ def _config(limit: int = 1, max_reasoning: str = "xhigh") -> None:
 
 
 def _wait_for(predicate, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.03)
-    raise AssertionError("timed out waiting")
+    wait_until(predicate, timeout, interval=0.03)
 
 
 def _status(task_id: int) -> str:

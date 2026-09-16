@@ -9,22 +9,16 @@ before the task had to be closed and re-dispatched, losing the session.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import lifecycle, repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.core import Supervisor
 
 
 def _wait_for(predicate, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.05)
-    raise AssertionError("timed out waiting")
+    wait_until(predicate, timeout)
 
 
 def _status(task_id: int) -> str:
@@ -53,7 +47,10 @@ def test_a_failed_task_whose_pristine_lease_was_released_resumes_into_a_new_work
     )
     task_id = task["task_id"]
     _wait_for(lambda: _status(task_id) == "failed")
-    _wait_for(lambda: not Path(task["worktree_path"]).exists())
+    # Not the directory disappearing: the release removes it first and the branch
+    # after, and a resume in between rebuilds from a branch that is about to go.
+    _wait_for(lambda: _events(task_id, "lease_released"))
+    assert not Path(task["worktree_path"]).exists()
     before = store.get_task(init_db(), task_id)
     assert before["worktree_path"] == task["worktree_path"]  # the record still names it
 
@@ -109,7 +106,7 @@ def test_resume_refuses_plainly_when_nothing_can_be_rebuilt(ppy_home, source_rep
     )
     task_id = task["task_id"]
     _wait_for(lambda: _status(task_id) == "failed")
-    _wait_for(lambda: not Path(task["worktree_path"]).exists())
+    _wait_for(lambda: _events(task_id, "lease_released"))
     conn = init_db()
     conn.execute("UPDATE tasks SET repo_id = NULL WHERE id = ?", (task_id,))
     conn.commit()

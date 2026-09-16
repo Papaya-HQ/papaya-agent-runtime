@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import lifecycle, repos
 from papaya_agent_runtime.cli import main
 from papaya_agent_runtime.delivery import DeliveryError, record_merged
@@ -41,12 +41,12 @@ def server(ppy_home):
 
 def _finished_task(client, repo_name, title="ship"):
     task_id = client.dispatch_task(repo=repo_name, title=title)["task_id"]
-    deadline = time.monotonic() + scale(20)
-    while time.monotonic() < deadline:
-        if client.task_status(task_id)["task"]["status"] == "worker_done":
-            return task_id
-        time.sleep(0.05)
-    raise AssertionError(f"task {task_id} never finished")
+    wait_until(
+        lambda: client.task_status(task_id)["task"]["status"] == "worker_done",
+        20,
+        what=f"task {task_id} to finish",
+    )
+    return task_id
 
 
 def _events(task_id, kind):

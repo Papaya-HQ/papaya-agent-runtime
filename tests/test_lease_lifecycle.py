@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from conftest import scale
+from conftest import scale, wait_until
 from papaya_agent_runtime import lifecycle, repos, turn_end
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -39,14 +39,11 @@ def server(ppy_home):
 
 
 def _wait_terminal(client, task_id, timeout=15.0):
-    deadline = time.monotonic() + scale(timeout)
-    terminal = {"worker_done", "blocked", "failed"}
-    while time.monotonic() < deadline:
+    def finished():
         status = client.task_status(task_id)["task"]["status"]
-        if status in terminal:
-            return status
-        time.sleep(0.1)
-    raise AssertionError(f"task {task_id} did not reach a terminal state")
+        return status if status in {"worker_done", "blocked", "failed"} else None
+
+    return wait_until(finished, timeout, what=f"task {task_id} to finish", interval=0.1)
 
 
 def _wait_event(conn, task_id, kind, timeout=5.0):

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import scale
+from conftest import scale, wait_until
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.state import init_db, store
@@ -28,12 +27,7 @@ def _bounded_config(limit: int = 1) -> None:
 
 
 def _wait_for(predicate, timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError("timed out waiting for worker state")
+    wait_until(predicate, timeout, what="worker state", interval=0.02)
 
 
 def _live(task_id: int) -> bool:
@@ -487,6 +481,48 @@ def test_an_old_finalizer_never_releases_a_newer_executions_slot(ppy_home, sourc
         supervisor.dispatch_task(repo=added.name, title="must wait", provider="fake")
     _wait_for(lambda: not _live(task_id))
     assert supervisor._active_executions() == []
+
+
+def test_a_recorded_turn_end_never_shows_a_slot_or_runner_still_held(
+    ppy_home, source_repo, monkeypatch
+) -> None:
+    """The moment a task reads `blocked`, a resume is admitted (task 259).
+
+    The terminal status used to be committed before the runner row said `exited` and
+    before the execution slot was handed back, so a resume sent on seeing `blocked`
+    was refused as a duplicate of a worker that had already gone.
+    """
+    _bounded_config(1)
+    added = repos.add_repo(source_repo)
+    supervisor = Supervisor()
+    real_record = store.record_turn_result
+    held_at_record: list[list[dict]] = []
+
+    def record(conn, **kwargs):
+        held_at_record.append(supervisor._active_executions())
+        return real_record(conn, **kwargs)
+
+    monkeypatch.setattr(store, "record_turn_result", record)
+    task_id = _blocked_task(supervisor, added)
+    assert held_at_record == [[]]
+    assert not _live(task_id)
+    supervisor.resume_task(task_id, "HOLD:0.1")
+    _wait_for(lambda: _status(task_id) == "worker_done")
+
+
+def test_close_stops_every_worker_and_admits_nothing_more(ppy_home, source_repo) -> None:
+    _bounded_config(2)
+    added = repos.add_repo(source_repo)
+    supervisor = Supervisor()
+    task = supervisor.dispatch_task(
+        repo=added.name, title="long", instructions="HOLD:30", provider="fake"
+    )
+    _wait_for(lambda: _live(task["task_id"]))
+
+    assert supervisor.close(timeout=scale(10)) == []
+    assert not _live(task["task_id"])
+    with pytest.raises(SupervisorError, match="closing"):
+        supervisor.dispatch_task(repo=added.name, title="too late", provider="fake")
 
 
 def test_restart_counts_a_live_recorded_runner_and_frees_a_dead_one_after_reconcile(
