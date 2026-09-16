@@ -136,6 +136,7 @@ from papaya_agent_runtime import (
     papaya_events,
     prompts,
     readiness,
+    standalone,
     sweep,
     takeover,
 )
@@ -3778,6 +3779,19 @@ async def _run(
     with contextlib.suppress(Exception):
         await asyncio.to_thread(blockers.update, verdict)
     runner = runner or TicketRunner()
+    # No connection is a mode: the parts that need no Papaya run, and nothing waits
+    # for one. Supervised, the host that started this is the connection, so that
+    # path is the client's to refuse.
+    if not options.supervised and not await asyncio.to_thread(standalone.connected):
+        return await _run_standalone(
+            options,
+            runner,
+            verdict,
+            stderr=stderr,
+            server=server,
+            rounds_seams=rounds_seams,
+            blocker_seams=blocker_seams,
+        )
     try:
         built = await _build(options, runner, stdout=stdout, extra=extra)
     except ListenerSetupError as exc:
@@ -3879,6 +3893,106 @@ async def _run(
         # only way that run's lease is let go rather than left to expire.
         if built.loop.running_subjects:
             await built.loop.shutdown()
+    return 0
+
+
+@dataclass
+class Standalone:
+    """What `serve` runs with in place of a listener when there is no Papaya connection.
+
+    The rounds read ``loop``, ``api`` and ``agent_config`` off a built listener; with
+    none of them there is nothing to offer and no one to post as, and ``standalone``
+    tells them to record a ticket step as skipped rather than attempt it.
+    """
+
+    standalone: bool = True
+    loop: Any = None
+    api: Any = None
+    supervisor: Any = None
+    agent_config: dict[str, Any] = field(default_factory=dict)
+
+
+#: The start line's one clause about what is off.
+STANDALONE_START = (
+    "running without Papaya: rounds, supervisor and blockers on; "
+    "sweep, event loop and Papaya DMs off; Ctrl-C to stop"
+)
+
+
+def _unremedied_to_deficiencies(verdict: readiness.Readiness) -> None:
+    for problem in unremedied_readiness(verdict):
+        deficiencies.record(
+            deficiencies.READINESS_UNREMEDIED,
+            problem.code,
+            evidence={"code": problem.code, "error": problem.summary},
+        )
+
+
+async def _run_standalone(
+    options: ServeOptions,
+    runner: Any,
+    verdict: readiness.Readiness,
+    *,
+    stderr,
+    server: Any,
+    rounds_seams: dict[str, Any] | None,
+    blocker_seams: dict[str, Any] | None,
+) -> int:
+    """`ppy serve` on a machine with no Papaya connection: every part that needs none.
+
+    The rounds (check-ins, hygiene, delivered-PR watch, budgets), the supervisor this
+    process already owns, and the blockers ledger run as they do connected. The
+    sweep, the event loop and the DM leg do not, and the start line says so. A
+    connection made while this runs is picked up by the next start; nothing here
+    asks for a restart.
+    """
+    from papaya_agent_runtime import rounds
+
+    built = Standalone()
+    await asyncio.to_thread(_unremedied_to_deficiencies, verdict)
+    _announce_readiness(verdict, built, stderr=stderr)
+    watch = blockers.Watch(
+        interval=options.rounds_interval or rounds.DEFAULT_ROUNDS_INTERVAL,
+        **(blocker_seams or {}),
+    )
+    with contextlib.suppress(OSError):
+        await asyncio.to_thread(takeover.clear_start_failure, str(ppy_home().resolve()))
+    watching = asyncio.create_task(watch.run())
+
+    stopped = asyncio.Event()
+    event_loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(NotImplementedError, ValueError, OSError):
+            event_loop.add_signal_handler(sig, stopped.set)
+    if server is not None:
+
+        def stop_serving() -> None:
+            with contextlib.suppress(RuntimeError):
+                event_loop.call_soon_threadsafe(stopped.set)
+
+        server.on_shutdown = stop_serving
+    _say(STANDALONE_START, stderr=stderr)
+    await asyncio.to_thread(standalone.say_invitation, stderr, prefix="ppy serve: ")
+
+    manager_rounds = rounds.Rounds(
+        built,
+        runner,
+        interval=options.rounds_interval,
+        stderr=stderr,
+        **(rounds_seams or {}),
+    )
+    walking = asyncio.create_task(manager_rounds.run())
+    try:
+        await stopped.wait()
+    finally:
+        if server is not None:
+            server.on_shutdown = None
+        for background in (walking, watching):
+            background.cancel()
+        for background in (walking, watching):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await background
+        await watch.close()
     return 0
 
 

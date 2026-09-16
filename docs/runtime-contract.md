@@ -295,17 +295,27 @@ quietly; do not narrate the steps or report diagnostics.
    rules and memories come from the workspace — the harness loads them, and you act
    as that agent. It finds a connection made in a terminal *or* one made from the
    Papaya desktop app, which keeps its own; `--json` lists everywhere it looked, so
-   "not connected" is a checkable claim rather than an assumption. Not connected
-   means run `ppy papaya connect` yourself: it opens a sign-in link and the user's
-   only job is clicking Approve in the browser. That
-   click is the one thing you cannot do for them, so if it is needed, say so in a
-   single sentence and wait.
+   "not connected" is a checkable claim rather than an assumption.
 
-   **Papaya is a preference, never a prerequisite.** If they decline, if the network
-   is down, if connecting fails — carry on. Registered repos, workers, reviews and
-   pull requests all work without it. Say once, plainly, that you're running without
-   the workspace and what that costs (no work items, no channel, no shared memory),
-   then get to work. Never block a build on a connection.
+   **Not connected is a mode, not a blocker: run standalone.** Do not start a
+   sign-in and do not wait for one. Everything local works exactly as it does
+   connected — register and onboard repos, brief, dispatch, steer, answer, review,
+   deliver, gate runs, budgets, hygiene, PR following, `board`, `health`,
+   `handoff`. Say once, in your first reply, the one line the session-start hook
+   and `ppy status`/`ppy doctor` print:
+
+   > Running without Papaya. It's better with it: tickets, comments and the team's
+   > record flow in and out by themselves. https://trypapaya.ai
+
+   Once, plain, and never again that session: no nag, no comment anywhere, no
+   prompt. `PPY_QUIET_INVITE=1` or config `papaya.invite = false` turns it off, and
+   then you say nothing about it. If the user *asks* to connect, `ppy papaya connect`
+   opens a sign-in link and their only job is clicking Approve; a connection made
+   mid-session is picked up by the next `ppy serve` start, with no restart
+   demanded. A task you create locally has no work item, so the ticket steps (status
+   changes, comments, acceptance criteria on the item, DMs) are skipped and recorded
+   on the task as `ticket_step_skipped` events; they are not failures and are not
+   reported.
 3. **Check you can actually work, and tell the owner when you can't.**
    `ppy readiness`. It answers one question — `ready`, `degraded` (can work, gaps),
    or `blocked` (cannot) — and for every problem says what closes it and **who has
@@ -330,14 +340,16 @@ quietly; do not narrate the steps or report diagnostics.
    a broken machine, not tracked work.
 
    If you are *not* connected, there is nobody to tell; carry on and say it to the
-   user in your first reply instead.
+   user in your first reply instead. `papaya_not_connected` itself is listed as
+   `info`: it never blocks, it is not a blocker, and it leaves a ready runtime ready.
 
    Under `ppy serve` this is done for you, and more of it: `ppy blockers` lists every
    problem only a person at this machine can close — `gh` signed out
    (`forge_unauthenticated`) or missing (`gh_missing`), a harness missing or signed out,
    Node or uv missing for a repo that needs them, Docker stopped for a compose repo,
-   low disk, a repo the GitHub account cannot read or push, Papaya not connected —
-   each with the exact commands. `serve` DMs them (once, again on a changed remedy or
+   low disk, a repo the GitHub account cannot read or push — each with the exact
+   commands. Without a connection `serve` runs the rounds, the supervisor and this
+   ledger; the sweep, the event loop and the DMs are off, and its start line says so. `serve` DMs them (once, again on a changed remedy or
    after a day, and once when cleared), puts them on the supervised `hello`/`status` as
    `runtime.blockers`, and hands back a ticket it cannot take because of one with a
    single neutral comment. When you relay a blocker yourself, send its title and steps

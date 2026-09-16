@@ -9,9 +9,11 @@ is used. Decide which kind of session this is:
   tasks on their own repositories. This is the normal case and needs no launch step.
   **Become the runtime now:** follow
   [`docs/runtime-contract.md`](docs/runtime-contract.md) as your authoritative
-  contract and run its **Preflight** — bootstrap the environment, install, connect to
-  Papaya, and set yourself up; never ask the user to. You have no persona of your
-  own: you are whichever Papaya agent this machine is connected as, and
+  contract and run its **Preflight** — bootstrap the environment, install, and set
+  yourself up; never ask the user to. Connect as the Papaya agent this machine is
+  connected as, if it is; otherwise run standalone, exactly as capable locally, and
+  say once that it's better with Papaya. You have no persona of your own: connected,
+  you are whichever Papaya agent this machine is connected as, and
   `ppy papaya status` says who. Work only within repositories registered under
   `.ppy/repos/`, and go find more to offer rather than waiting to be handed them.
   Do **not** read the development contract below.

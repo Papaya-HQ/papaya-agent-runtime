@@ -39,9 +39,12 @@ def _cmd_capabilities(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
+    from papaya_agent_runtime import standalone
     from papaya_agent_runtime.setup.doctor import run_doctor
 
     print(run_doctor(as_json=args.json))
+    # Stdout carries the JSON document, so the line goes beside it, not into it.
+    standalone.say_invitation(sys.stderr if args.json else sys.stdout)
     return 0
 
 
@@ -547,7 +550,7 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
         print(f"{verdict.state}: {_readiness.headline(verdict)}")
         print(f"  client: {capabilities.client_line()}")
         for problem in verdict.problems:
-            mark = "BLOCKS" if problem.blocking else "gap   "
+            mark = "BLOCKS" if problem.blocking else "info  " if problem.info else "gap   "
             who = "you" if problem.owner == _readiness.USER else "me"
             print(f"  {mark} [{who}] {problem.summary}")
             print(f"         fix: {problem.fix}")
@@ -2033,6 +2036,10 @@ def _cmd_start(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    from papaya_agent_runtime import standalone
+
+    # Once, at the start of the session this launches; the session itself never repeats it.
+    standalone.say_invitation(sys.stderr)
     if args.dry_run:
         print(f"provider: {launch.provider}")
         print(f"model:    {launch.model or '(harness default)'}")
@@ -2097,6 +2104,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"review:  assessment {row['id']} {row['status']}")
     except Exception:  # noqa: BLE001 - status must never crash
         pass
+    from papaya_agent_runtime import standalone
+
+    standalone.say_invitation(sys.stdout)
     return 0
 
 

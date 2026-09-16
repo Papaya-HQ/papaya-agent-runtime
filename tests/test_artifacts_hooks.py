@@ -78,6 +78,8 @@ def test_hook_tolerates_bad_json(ppy_home, monkeypatch) -> None:
     # The role block is injected into every session by design; this test is
     # about the PICKUP context, which is what should be quiet here.
     monkeypatch.setattr("papaya_agent_runtime.hooks.runtime_role_context", lambda: None)
+    # The suite's machine is not connected, so the one-line invitation would speak too.
+    monkeypatch.setenv("PPY_QUIET_INVITE", "1")
     conn = init_db()
     store.create_run(conn, "obj")
     ack = hooks.handle_hook_stdin("session-start", "not json")

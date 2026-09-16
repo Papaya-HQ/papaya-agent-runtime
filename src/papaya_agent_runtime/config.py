@@ -341,6 +341,15 @@ class SweepPolicy:
 
 
 @dataclass
+class PapayaPolicy:
+    """How this runtime behaves about Papaya when the machine is not connected."""
+
+    # The one line a session or a `ppy serve` start says when there is no connection:
+    # that the runtime is better with Papaya. False turns even that line off.
+    invite: bool = True
+
+
+@dataclass
 class MMConfig:
     manager: ManagerProfile = field(default_factory=ManagerProfile)
     worker: WorkerCeiling = field(default_factory=WorkerCeiling)
@@ -356,6 +365,7 @@ class MMConfig:
     delivery: DeliveryPolicy = field(default_factory=DeliveryPolicy)
     supervisor: SupervisorPolicy = field(default_factory=SupervisorPolicy)
     sweep: SweepPolicy = field(default_factory=SweepPolicy)
+    papaya: PapayaPolicy = field(default_factory=PapayaPolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -474,6 +484,8 @@ class MMConfig:
         idle = self.sweep.idle_claim_minutes
         if isinstance(idle, bool) or not isinstance(idle, int) or idle < 1:
             raise ConfigError("sweep.idle_claim_minutes must be a positive number of minutes")
+        if not isinstance(self.papaya.invite, bool):
+            raise ConfigError("papaya.invite must be true or false")
 
     def to_dict(self) -> dict:
         """Every setting, resolved — what the runtime runs with, not what is stored."""
@@ -495,6 +507,7 @@ class MMConfig:
             "delivery": asdict(self.delivery),
             "supervisor": asdict(self.supervisor),
             "sweep": asdict(self.sweep),
+            "papaya": asdict(self.papaya),
         }
 
 
@@ -529,6 +542,7 @@ def _from_dict(data: dict) -> MMConfig:
         delivery=DeliveryPolicy(**data.get("delivery", {})),
         supervisor=SupervisorPolicy(**data.get("supervisor", {})),
         sweep=SweepPolicy(**data.get("sweep", {})),
+        papaya=PapayaPolicy(**data.get("papaya", {})),
     )
     return cfg
 
