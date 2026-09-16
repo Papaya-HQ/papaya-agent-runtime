@@ -21,6 +21,21 @@ def _cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_capabilities(args: argparse.Namespace) -> int:
+    """What this runtime is, from local state only — the client's connect-time probe.
+
+    One JSON object on one line, or the same fields one per line for a person. It
+    reads no network and no database, so it answers on an unconfigured machine as
+    fast as on a working one, and it has no failure mode to report: an absent
+    client is `null`, and the exit code is 0 either way.
+    """
+    from papaya_agent_runtime import capabilities
+
+    data = capabilities.collect()
+    print(json.dumps(data) if args.json else capabilities.render_text(data))
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.setup.doctor import run_doctor
 
@@ -338,6 +353,7 @@ def _repo_onboard(args: argparse.Namespace) -> int:
 
 def _cmd_readiness(args: argparse.Namespace) -> int:
     """Can this runtime take work, and if not, whose problem is each piece?"""
+    from papaya_agent_runtime import capabilities
     from papaya_agent_runtime import readiness as _readiness
     from papaya_agent_runtime.state import init_db
 
@@ -347,11 +363,16 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
         print(_readiness.report(verdict, agent=args.agent or "", where=args.where or ""))
     elif args.json:
         data = verdict.as_dict()
+        data["client"] = {
+            "version": capabilities.client_version(),
+            "protocol": capabilities.protocol(),
+        }
         conn = init_db()
         data["already_reported"] = _readiness.already_reported(conn, verdict)
         print(json.dumps(data, indent=2))
     else:
         print(f"{verdict.state}: {_readiness.headline(verdict)}")
+        print(f"  client: {capabilities.client_line()}")
         for problem in verdict.problems:
             mark = "BLOCKS" if problem.blocking else "gap   "
             who = "you" if problem.owner == _readiness.USER else "me"
@@ -1807,6 +1828,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("version", help="print version").set_defaults(func=_cmd_version)
+
+    caps = sub.add_parser(
+        "capabilities",
+        help="what this runtime is, for a client deciding what it can delegate here",
+    )
+    caps.add_argument("--json", action="store_true", help="the object a client reads")
+    caps.set_defaults(func=_cmd_capabilities)
 
     doctor = sub.add_parser("doctor", help="environment and config diagnostics")
     doctor.add_argument("--json", action="store_true", help="machine-readable output")

@@ -291,6 +291,35 @@ def _papaya_problems(problems: list[Problem]) -> None:
         )
 
 
+def _client_problems(problems: list[Problem]) -> None:
+    """Is the embedded Papaya client older than the one that launched this runtime?
+
+    The host execs this checkout and passes its own client version across, so the
+    two can disagree: the app updates its pinned client, the checkout does not, and
+    the runtime quietly runs an older loop than the machine around it expects. This
+    is a warning and only ever a warning — the client refuses to delegate on a
+    protocol mismatch, not on a version, so being a release behind is drift worth
+    naming and never a reason to stop taking work.
+    """
+    from papaya_agent_runtime import capabilities
+
+    behind = capabilities.client_behind_host()
+    if behind is None:
+        return
+    embedded, host = behind
+    problems.append(
+        Problem(
+            code="client_behind_host",
+            summary=(
+                f"the embedded Papaya client is older than the one that launched this "
+                f"runtime: {embedded} here, {host} on the host"
+            ),
+            fix="update this checkout and run `uv sync`",
+            blocking=False,
+        )
+    )
+
+
 def check() -> Readiness:
     """The verdict for this instance, from local state only."""
     problems: list[Problem] = []
@@ -298,6 +327,7 @@ def check() -> Readiness:
     _harness_problems(problems)
     _repo_problems(problems)
     _papaya_problems(problems)
+    _client_problems(problems)
     if any(p.blocking for p in problems):
         state = BLOCKED
     elif problems:
