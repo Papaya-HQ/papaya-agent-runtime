@@ -243,6 +243,8 @@ class SupervisorServer:
                         base=request.get("base"),
                         stack_on=request.get("stack_on"),
                         ends_at=request.get("ends_at") or "done",
+                        papaya_event_key=request.get("papaya_event_key"),
+                        papaya_event_metadata=request.get("papaya_event_metadata"),
                     ),
                 }
             if cmd == "task_status":

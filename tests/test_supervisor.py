@@ -8,6 +8,7 @@ import pytest
 
 from conftest import scale
 from papaya_agent_runtime import repos
+from papaya_agent_runtime.state import init_db
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import SupervisorServer
 
@@ -57,6 +58,87 @@ def test_dispatch_completes_via_socket(server, source_repo) -> None:
     assert rs["usage"]["input_tokens"] == 250
     kinds = [a["kind"] for a in rs["actionable"]]
     assert "worker_done" in kinds
+
+
+def test_dispatch_deduplicates_one_papaya_event_at_the_supervisor_boundary(
+    server, source_repo
+) -> None:
+    _srv, client = server
+    added = repos.add_repo(source_repo)
+    key = "papaya:event:event-17"
+
+    first = client.dispatch_task(
+        repo=added.name,
+        title="take it once",
+        papaya_event_key=key,
+        papaya_event_metadata='{"id":"event-17"}',
+    )
+    second = client.dispatch_task(
+        repo=added.name,
+        title="take it once",
+        papaya_event_key=key,
+        papaya_event_metadata='{"id":"event-17"}',
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["deduplicated"] is True
+    assert second["task_id"] == first["task_id"]
+    count = init_db().execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+    assert count == 1
+
+
+def test_ensure_supervisor_starts_a_detached_owner_and_waits_for_its_socket(
+    ppy_home, monkeypatch
+) -> None:
+    from papaya_agent_runtime.supervisor import client as client_module
+
+    class FakeClient:
+        def __init__(self):
+            self.pings = 0
+
+        def ping(self):
+            self.pings += 1
+            if self.pings == 1:
+                raise client_module.SupervisorUnavailable("not up")
+            return {"ok": True}
+
+    launched = []
+
+    def popen(argv, **kwargs):
+        launched.append((argv, kwargs))
+        return object()
+
+    monkeypatch.setattr(client_module, "SupervisorClient", FakeClient)
+    monkeypatch.setattr(client_module.subprocess, "Popen", popen)
+
+    client, started = client_module.ensure_supervisor(timeout=1)
+
+    assert client.ping() == {"ok": True}
+    assert started is True
+    assert launched[0][0][1:] == ["-m", "papaya_agent_runtime", "supervisor", "serve"]
+    assert launched[0][1]["start_new_session"] is True
+    assert (ppy_home / "run" / "supervisor.log").exists()
+
+
+def test_ensure_supervisor_reuses_a_running_owner_without_launching(monkeypatch) -> None:
+    from papaya_agent_runtime.supervisor import client as client_module
+
+    class FakeClient:
+        def ping(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(client_module, "SupervisorClient", FakeClient)
+    monkeypatch.setattr(
+        client_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("a second owner was launched"),
+    )
+
+    client, started = client_module.ensure_supervisor()
+
+    assert client.ping() == {"ok": True}
+    assert started is False
 
 
 def test_dispatch_wires_repo_memory_into_worker(server, source_repo, monkeypatch) -> None:

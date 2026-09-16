@@ -2,14 +2,63 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 
+from papaya_agent_runtime.paths import ensure_layout, run_dir
 from papaya_agent_runtime.supervisor.protocol import send_request
 from papaya_agent_runtime.supervisor.server import default_socket_path
 
 
 class SupervisorUnavailable(Exception):
     pass
+
+
+def ensure_supervisor(*, timeout: float = 5.0) -> tuple[SupervisorClient, bool]:
+    """Return a live client, starting the instance supervisor if necessary.
+
+    The server's owner lock makes concurrent launches safe: only one process can
+    own the instance, and every caller waits for the same socket to answer.
+    ``bool`` is true when this call launched a process, even if another launch
+    won the owner race.
+    """
+    client = SupervisorClient()
+    try:
+        client.ping()
+    except SupervisorUnavailable:
+        pass
+    else:
+        return client, False
+
+    ensure_layout()
+    log_path = run_dir() / "supervisor.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log:
+        subprocess.Popen(  # noqa: S603 - fixed interpreter/module argv
+            [sys.executable, "-m", "papaya_agent_runtime", "supervisor", "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=dict(os.environ),
+            start_new_session=True,
+            close_fds=True,
+        )
+
+    deadline = time.monotonic() + max(timeout, 0.1)
+    while time.monotonic() < deadline:
+        try:
+            client.ping()
+        except SupervisorUnavailable:
+            time.sleep(0.05)
+            continue
+        return client, True
+    raise SupervisorUnavailable(
+        f"could not start the supervisor within {timeout:g}s; see {Path(log_path)}"
+    )
 
 
 class SupervisorClient:
