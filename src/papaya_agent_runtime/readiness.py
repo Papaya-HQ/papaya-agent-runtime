@@ -278,6 +278,29 @@ def _repo_problems(problems: list[Problem]) -> None:
                 blocking=False,
             )
         )
+    ungated = sorted(
+        str(row["name"])
+        for row in registered
+        if row["name"] not in unread and not solicit.has_gate_policy(row)
+    )
+    if ungated:
+        # PAP-213: with no local gate and no push hook on record, a worker is told
+        # "local gate: not set" and runs whatever the brief names as a tool call,
+        # however long it is. Onboarding derives one where the repository has any.
+        problems.append(
+            Problem(
+                code="repo_without_gate_policy",
+                summary=(
+                    f"no gate policy for {', '.join(ungated)}: no local gate and no pre-push "
+                    "hook on record, so workers there are not told what to run"
+                ),
+                fix=(
+                    "`ppy repo onboard <name>` derives one; if the repository has no test "
+                    'target, `ppy repo set <name> --local-gate "<command>"`'
+                ),
+                blocking=False,
+            )
+        )
 
 
 #: The onboarding sections whose commands are a repository's gate.

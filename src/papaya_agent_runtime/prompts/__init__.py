@@ -48,6 +48,15 @@ REPORT_ADDENDUM = (
 #: this. The runner reruns such a turn later instead of counting it as a miss.
 WAITING_PREFIX = "WAITING:"
 
+#: The rule every turn and worker is given about gates longer than a tool call. A
+#: harness caps a tool call at ten minutes and backgrounds anything longer, and a
+#: backgrounded command dies with the session (PAP-213). The prompt files carry it
+#: verbatim; a test holds them to it.
+TEN_MINUTE_RULE = (
+    "A command that may run longer than ten minutes must not be run as a tool call; "
+    "use `ppy gate run`, or push and let the hook run it. Never background a gate and wait."
+)
+
 _HERE = Path(__file__).resolve().parent
 
 
@@ -97,6 +106,7 @@ __all__ = [
     "REVIEW",
     "REVIEW_SKILL",
     "RUNTIME_DIR",
+    "TEN_MINUTE_RULE",
     "TURNS",
     "WAITING_PREFIX",
     "load",

@@ -55,8 +55,11 @@ end the turn. The runtime keeps holding the ticket and calls this turn back when
 frees; dispatch the brief you already wrote then.
 
 Run any gate or check this turn needs in the foreground and wait for it; never in the
-background. If it cannot finish inside this turn, end the turn with a message whose
-first line is `WAITING: <what you are waiting for>`, and the runtime runs this turn
-again later with the tail of this one.
+background. A command that may run longer than ten minutes must not be run as a tool call; use `ppy gate run`, or push and let the hook run it. Never background a gate and wait.
+`ppy gate run <repo>` runs the repository's recorded local gate outside this turn, prints
+a progress line every minute, and records the result; if it says the gate is still
+running, call it again. If a gate cannot finish inside this turn, end the turn with a
+message whose first line is `WAITING: <what you are waiting for>`, and the runtime runs
+this turn again later with the tail of this one.
 
 End the turn once a worker is dispatched. Do not do the work yourself.

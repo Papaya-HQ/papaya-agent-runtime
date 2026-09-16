@@ -131,5 +131,13 @@ class SupervisorClient:
     def sweep(self, include_declined: bool = False, timeout: float = 130.0) -> dict:
         return self._call({"cmd": "sweep", "include_declined": include_declined}, timeout=timeout)
 
+    def gate_start(self, *, task_id: int | None, repo: str | None, full: bool) -> dict:
+        return self._call({"cmd": "gate_start", "task_id": task_id, "repo": repo, "full": full})
+
+    def gate_wait(self, key: str, timeout: float = 60.0) -> dict:
+        return self._call(
+            {"cmd": "gate_wait", "key": key, "timeout": timeout}, timeout=timeout + 10
+        )
+
     def shutdown(self) -> dict:
         return self._call({"cmd": "shutdown"})

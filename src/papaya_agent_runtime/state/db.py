@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS repos (
     push_hook_runs_full_suite INTEGER,
     local_gate TEXT,
     full_suite_owner TEXT,
+    -- The command `ppy gate run --full` runs (onboarding derives it).
+    full_suite_command TEXT,
     evidence_dir TEXT,
     db_url_template TEXT,
     test_db_url_template TEXT,
@@ -381,6 +383,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("push_hook_runs_full_suite", "INTEGER"),
         ("local_gate", "TEXT"),
         ("full_suite_owner", "TEXT"),
+        ("full_suite_command", "TEXT"),
         ("evidence_dir", "TEXT"),
         ("db_url_template", "TEXT"),
         ("test_db_url_template", "TEXT"),

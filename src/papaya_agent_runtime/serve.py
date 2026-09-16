@@ -71,9 +71,12 @@ tail of its transcript; a second miss hands the ticket back.
 Waiting is a state, not a miss. A brief or review turn whose gate cannot finish
 inside it ends with a first line `WAITING: <what>`; the runner says so as progress,
 keeps the phase, and reruns the turn with its tail after five minutes, doubling to
-thirty. And a long gate is the worker's: a worker whose session ended mid-gate
-(`worker_stopped`) is steered by the runner to run it to completion, so the review
-turn runs on a `worker_done` with a gate result on the record (PAP-213).
+thirty. And a long gate is the worker's, run through `ppy gate run` so it outlives
+the worker's session, and its result is on the ledger at a head commit (PAP-213).
+The runner reads that record, not the worker's note: a worker that stopped with a
+green gate at its head is reviewed; one whose gate at its head is red is steered
+with the summary (whether it stopped or said done); one that stopped with no gate
+at its head is steered to run `ppy gate run`.
 
 The work item's *status* is state, so the runner sets it: ``in_progress`` on
 pickup, ``review`` when the pull request is open, ``blocked`` while a question
@@ -123,7 +126,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from papaya_agent_runtime import capabilities, papaya, papaya_events, prompts, readiness, sweep
+from papaya_agent_runtime import (
+    capabilities,
+    gate,
+    papaya,
+    papaya_events,
+    prompts,
+    readiness,
+    sweep,
+)
 from papaya_agent_runtime.paths import papaya_sessions_path
 from papaya_agent_runtime.state import db, store
 
@@ -193,6 +204,8 @@ GATE_STEERS = 2
 
 #: The event kind `turn_end` records for a worker whose session ended mid-gate.
 WORKER_STOPPED = "worker_stopped"
+#: The triggers the runner checks against the worker's recorded gate before a review.
+GATE_TRIGGERS = (WORKER_STOPPED, "worker_done")
 
 #: Event kinds on a worker task that mean the manager has acted on it, so the
 #: trigger before them is spent. Used both to tell whether a turn did its job and
@@ -516,6 +529,9 @@ class Ticket:
     comments_read_at: float | None = None
     #: How many times in a row the runner has sent a stopped worker back to its gate.
     gate_steers: int = 0
+    #: The gate recorded at the worker's head when it last stopped or said done, as one
+    #: line for the review turn; empty when none was.
+    recorded_gate: str = ""
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -628,15 +644,29 @@ def rerun_delay(waits: int) -> float:
     return min(WAIT_FIRST_SECONDS * 2 ** max(waits - 1, 0), WAIT_MAX_SECONDS)
 
 
-def gate_steer_message(detail: str) -> str:
-    """What a worker that stopped mid-gate is told when the runner sends it back."""
+def gate_steer_message(
+    detail: str, task_id: int | str = "<task id>", result: gate.GateResult | None = None
+) -> str:
+    """What a worker is told when the runner sends it back to its gate.
+
+    With a red ``result`` it is the gate's own summary; without one, the session ended
+    before any gate was recorded at the worker's head.
+    """
+    command = f"`ppy gate run --task {task_id}`"
+    if result is not None:
+        return (
+            f"Your recorded {result.line()}. Output: {result.output_path}. Fix what it "
+            f"reports, commit, then run {command} in the foreground and file your done "
+            "note once it is green."
+        )
     why = _one_line(detail)
     return (
         "Your session ended before your verification gate finished"
         + (f" ({why})" if why else "")
-        + ". Run the brief's authoritative gate again in the foreground and wait for it to "
-        "finish: never in the background, and do not end your session while it runs. Then "
-        "file your done note with the gate's summary line, and push your branch."
+        + f", and no gate result is recorded at your head. Run {command} in the foreground: "
+        "it runs the gate as the supervisor's process and records the result. "
+        f"{prompts.TEN_MINUTE_RULE} If it says the gate is still running, run it again. "
+        "Then file your done note with the gate's summary line, and push your branch."
     )
 
 
@@ -734,6 +764,7 @@ class TicketRunner:
         clock=None,
         agent_id: str | None = None,
         steer=None,
+        gate_verdict=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -754,6 +785,8 @@ class TicketRunner:
         self._agent_id = agent_id
         #: `ppy steer`'s seam: how a worker that stopped mid-gate is sent back.
         self._steer = steer or steer_worker
+        #: `gate.verdict`'s seam: the recorded gate result at a worker's head.
+        self._gate_verdict = gate_verdict or gate.verdict
 
     async def __call__(self, job: Any) -> dict[str, Any]:
         outcome = await asyncio.to_thread(self.take, job)
@@ -937,11 +970,12 @@ class TicketRunner:
                     if isinstance(step, HandBack):
                         return step
                     continue
-                if read.trigger.kind == WORKER_STOPPED and await self._back_to_gate(ticket):
+                if read.trigger.kind in GATE_TRIGGERS and await self._back_to_gate(ticket):
                     continue
-                if not read.trigger.failure:
+                trigger = ticket.trigger or read.trigger
+                if not trigger.failure:
                     ticket.gate_steers = 0
-                return read.trigger.phase
+                return trigger.phase
             if ticket.worker is None:
                 # The ticket was dispatched, but its worker never made it into the
                 # ledger (a resume from `dispatched` after the row was lost). Only a
@@ -955,21 +989,50 @@ class TicketRunner:
             await self._sleep(ticket)
 
     async def _back_to_gate(self, ticket: Ticket) -> bool:
-        """Send a worker that stopped mid-gate back to finish it. Returns whether it went.
+        """Decide on a stopped or done worker by its recorded gate. Returns whether it was steered.
 
         A long gate is the worker's to run, not the review turn's: a review turn
         that starts a suite the worker never finished outlasts itself (PAP-213).
-        So the runner steers the worker to run its gate to completion and report,
-        and the review turn runs on the `worker_done` that follows. Mechanical, not
-        judgment — `worker_stopped` already says the gate was cut short. After
-        `GATE_STEERS` in a row, or a refused steer, the review turn gets the failure.
+        So the runner reads the gate result recorded at the worker's head
+        (`ppy gate run`) and decides mechanically:
+
+        - **green**: reviewable. A `worker_stopped` stops being a failure; the
+          review turn gets the gate line as its fact.
+        - **red**: steered with the gate's summary, whether it stopped or said done.
+        - **none**: a `worker_stopped` is steered to run `ppy gate run`; a
+          `worker_done` goes to review as before, where the re-check happens.
+
+        After `GATE_STEERS` in a row, or a refused steer, the review turn gets it.
         """
         trigger, worker = ticket.trigger, ticket.worker
-        if trigger is None or worker is None or ticket.gate_steers >= GATE_STEERS:
+        if trigger is None or worker is None:
             return False
         worker_id = worker.task_id
         try:
-            await asyncio.to_thread(self._steer, worker_id, gate_steer_message(trigger.detail))
+            recorded = await asyncio.to_thread(self._gate_verdict, worker_id)
+        except Exception as exc:  # noqa: BLE001 - an unreadable record decides nothing
+            log.warning("[serve] Could not read worker task %d's gate: %s", worker_id, exc)
+            recorded = gate.Verdict(gate.NONE)
+        ticket.recorded_gate = recorded.result.line() if recorded.result is not None else ""
+        if recorded.state == gate.GREEN and recorded.result is not None:
+            if trigger.failure:
+                line = recorded.result.line()
+                ticket.trigger = Trigger(
+                    PHASE_REVIEWING, trigger.event_id, trigger.detail, kind=trigger.kind
+                )
+                _report_progress(
+                    ticket.job,
+                    ticket.phase,
+                    f"Worker task {worker_id} stopped, but its {line}; reviewing.",
+                )
+            return False
+        if recorded.state == gate.NONE and trigger.kind != WORKER_STOPPED:
+            return False
+        if ticket.gate_steers >= GATE_STEERS:
+            return False
+        message = gate_steer_message(trigger.detail, worker_id, recorded.result)
+        try:
+            await asyncio.to_thread(self._steer, worker_id, message)
         except Exception as exc:  # noqa: BLE001 - a refused steer is the review turn's to handle
             log.warning(
                 "[serve] Could not send worker task %d back to its gate: %s", worker_id, exc
@@ -983,7 +1046,16 @@ class TicketRunner:
             return False
         ticket.gate_steers += 1
         ticket.trigger = None
-        sent = f"Worker task {worker_id} stopped mid-gate; sent back to run its gate to completion."
+        if recorded.result is not None:
+            sent = (
+                f"Worker task {worker_id}'s gate is red at its head; sent back with the summary: "
+                f"{recorded.result.summary or recorded.result.command}"
+            )
+        else:
+            sent = (
+                f"Worker task {worker_id} stopped mid-gate; sent back to run its gate to "
+                "completion with `ppy gate run`."
+            )
         await self._enter(ticket, PHASE_DISPATCHED, sent)
         return True
 
@@ -1446,6 +1518,7 @@ class TicketRunner:
             **_ticket_facts(ticket.held),
             **_worker_facts(ticket.worker),
             "what stopped the worker": trigger.detail if trigger and trigger.failure else "",
+            "the worker's recorded gate at its head": ticket.recorded_gate,
             "previous attempt's transcript (tail)": tail,
         }
 

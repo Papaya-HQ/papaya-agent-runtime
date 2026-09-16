@@ -17,14 +17,16 @@ against the brief's Goals, not against what you would have built.
 - Read the **full** progress log before the final report: `ppy task show <worker task
   id>` and `ppy memory show --repo <repo>`.
 - Review the exact head: `ppy review show <worker task id>`.
-- Run the brief's verification gate at that head yourself. A worker's pasted summary is
-  not a gate. The worker ran it first and its result is on the record; your run is a
-  re-check.
+- Run the brief's verification gate at that head yourself: `ppy gate run --task <worker
+  task id>` (add `--full` for the full suite). A worker's pasted summary is not a gate.
+  The worker ran it first and its result is on the record; your run is a re-check, and
+  `ppy gate run` records it against the head it ran at.
 
-**Run a gate in the foreground and wait for it, never in the background.** This turn
-ends when you stop talking, and a backgrounded command dies with it, so a run you
-left going never finished and proves nothing. If the gate cannot finish inside this
-turn, do not guess and do not approve on a promise. End the turn with a message whose
+**Run a gate in the foreground and wait for it, never in the background.** A command that may run longer than ten minutes must not be run as a tool call; use `ppy gate run`, or push and let the hook run it. Never background a gate and wait.
+This turn ends when you stop talking, and a backgrounded command dies with it, so a run
+you left going never finished and proves nothing. `ppy gate run` keeps the gate running
+outside this turn; when it says the gate is still running, call it again. If the gate
+cannot finish inside this turn, do not guess and do not approve on a promise. End the turn with a message whose
 first line is `WAITING: <what you are waiting for>`, then say where it stands. The
 runtime keeps the ticket in `reviewing` and runs this turn again later with the tail
 of this one.
