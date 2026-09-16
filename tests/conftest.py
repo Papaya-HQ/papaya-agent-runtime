@@ -116,6 +116,9 @@ def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
     # client version, which readiness reads. Without this, whether the suite sees a
     # `client_behind_host` warning depends on how the shell was launched.
     monkeypatch.delenv(capabilities.HOST_CLIENT_VERSION_ENV, raising=False)
+    # Likewise a shell that set its own sweep cadence: `serve.parse_args` reads it,
+    # and a test of the default must not depend on the developer's environment.
+    monkeypatch.delenv("PPY_SWEEP_INTERVAL", raising=False)
 
 
 @pytest.fixture

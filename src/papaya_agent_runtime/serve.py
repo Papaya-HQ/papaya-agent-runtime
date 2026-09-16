@@ -88,6 +88,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -97,7 +98,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from papaya_agent_runtime import capabilities, papaya, papaya_events, prompts, readiness
+from papaya_agent_runtime import capabilities, papaya, papaya_events, prompts, readiness, sweep
 from papaya_agent_runtime.paths import papaya_sessions_path
 from papaya_agent_runtime.state import db, store
 
@@ -169,6 +170,8 @@ class ServeOptions:
     harness: str | None = None
     approval_timeout: float | None = None
     working_directory: str | None = None
+    #: Seconds between sweeps for assigned work; zero sweeps once, at start.
+    sweep_interval: float = sweep.DEFAULT_SWEEP_INTERVAL
     #: Unknown `listen` flags, deduplicated, in the order they were given.
     ignored: tuple[str, ...] = ()
     invalid_arguments: str | None = None
@@ -214,6 +217,16 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="run every job under this directory and allow no other",
     )
+    parser.add_argument(
+        "--sweep-interval",
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how often to look for assigned work nothing has picked up "
+            f"(default {sweep.DEFAULT_SWEEP_INTERVAL:g}, or ${sweep.SWEEP_INTERVAL_ENV}); "
+            "0 sweeps once, at start"
+        ),
+    )
     return parser
 
 
@@ -252,11 +265,22 @@ def parse_args(argv: list[str]) -> ServeOptions:
     invalid: str | None = None
     if known.harness is not None and known.harness not in HARNESSES:
         invalid = f"--harness must be one of {', '.join(HARNESSES)}, not {known.harness!r}"
+    # The flag wins over the environment, and the environment over the default.
+    interval = sweep.DEFAULT_SWEEP_INTERVAL
+    try:
+        interval = (
+            sweep.parse_interval(known.sweep_interval, source="--sweep-interval")
+            if known.sweep_interval is not None
+            else sweep.interval_from_env()
+        )
+    except ValueError as exc:
+        invalid = invalid or str(exc)
     return ServeOptions(
         supervised=bool(known.supervised),
         harness=known.harness,
         approval_timeout=known.approval_timeout,
         working_directory=known.working_directory,
+        sweep_interval=interval,
         ignored=_ignored_flags(extra),
         invalid_arguments=invalid,
     )
@@ -1636,11 +1660,17 @@ async def run(
     stderr,
     extra: dict[str, Any],
     runner: TicketRunner | None = None,
+    server: Any = None,
+    sweep_sleep: Any = None,
 ) -> int:
-    """Set this checkout up, build the listener, report once, run until stopped.
+    """Set this checkout up, build the listener, report once, sweep, run until stopped.
 
     ``runner`` is for tests, which hand in a :class:`TicketRunner` whose harness,
     Papaya API and worker pool are fakes; a real start builds the default one.
+
+    `server` is the supervisor this process runs, when it runs one: `ppy sweep`
+    reaches the sweeper through it. `sweep_sleep` is the sweep timer's seam for
+    tests, the way `renew_sleep` is the loop's.
     """
     from papaya_agent_client.embed import ListenerSetupError
 
@@ -1672,7 +1702,31 @@ async def run(
             f"(session {built.session_id}); Ctrl-C to stop",
             file=stderr,
         )
-    await built.loop.run()
+
+    # The sweep shares this event loop with the listener: every offer goes into
+    # the loop the listener is running, so it is a task beside `loop.run()` rather
+    # than a thread of its own. It starts with a sweep straight away — a start is
+    # exactly when an assignment missed while the machine was off is waiting.
+    sweeper = sweep.Sweeper(
+        built, interval=options.sweep_interval, stderr=stderr, sleep=sweep_sleep
+    )
+    sweeping = asyncio.create_task(sweeper.run())
+    if server is not None:
+        server.sweep_handler = functools.partial(sweeper.sweep_from_thread, event_loop)
+    try:
+        await built.loop.run()
+    finally:
+        if server is not None:
+            server.sweep_handler = None
+        sweeping.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await sweeping
+        # A sweep that was mid-offer while the listener shut down can have started
+        # a run after `shutdown` took its list of what to release. Shutting down
+        # again is safe (a released subject is never released twice) and is the
+        # only way that run's lease is let go rather than left to expire.
+        if built.loop.running_subjects:
+            await built.loop.shutdown()
     return 0
 
 
@@ -1710,7 +1764,7 @@ def serve(argv: list[str] | None = None, *, stdout=None, stderr=None, **extra: A
         print(f"refusing to start: {exc}", file=stderr)
         return 1
     try:
-        return asyncio.run(run(options, stdout=stdout, stderr=stderr, extra=extra))
+        return asyncio.run(run(options, stdout=stdout, stderr=stderr, extra=extra, server=server))
     except KeyboardInterrupt:
         return 0
     finally:

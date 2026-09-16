@@ -258,6 +258,8 @@ class FakeEvents:
         self.releases: list[tuple[str, str, bool]] = []
         self.acked: list[int] = []
         self.hand_backs: list[str | None] = []
+        #: Subjects another session holds: reserving one is Papaya's 409.
+        self.held: set[str] = set()
 
     async def patch_connection(self, **fields: Any) -> dict[str, Any]:
         self.connection.append(fields)
@@ -271,6 +273,12 @@ class FakeEvents:
         self, subject: str, session_id: str, ttl_seconds: int | None = None
     ) -> dict[str, Any]:
         self.reserves.append((subject, session_id))
+        if subject in self.held:
+            from papaya_agent_client.api_client import SubjectHeld
+
+            raise SubjectHeld(
+                subject, {"connection_id": "conn-other", "session_id": "sess-other"}, None
+            )
         # Always `renewed`: the loop reads `renewed: false` as a lease taken away
         # and stops the run, which is a different test than this one.
         return {"granted_ttl_seconds": 90, "renewed": True}
@@ -1458,3 +1466,339 @@ def test_a_rendered_prompt_resolves_the_skills_and_appends_only_facts(tmp_path) 
     assert "- work item id: item-9" in tail
     assert "repository" not in tail
     assert "```\nWhich route?\nv1 or v2?\n```" in tail
+
+
+# ── the sweep: looking for work as well as waiting for it ───────────────────
+
+
+def _item(n: int, status: str = "todo") -> dict[str, Any]:
+    return {"id": f"item-{n}", "title": f"Ticket {n}", "status": status, "repo": "acme/runtime"}
+
+
+@dataclass
+class Assigned:
+    """What Papaya says is assigned to this agent, and how often it was asked."""
+
+    items: list[dict[str, Any]]
+    calls: int = 0
+
+
+@pytest.fixture
+def assigned(monkeypatch) -> Assigned:
+    """The client's `list_assigned_work_items`, answering from a list the test owns."""
+    from papaya_agent_client import api_client
+
+    fake = Assigned(items=[])
+
+    async def list_assigned_work_items(_api: Any, *, status: str | None = None) -> list[dict]:
+        fake.calls += 1
+        return [dict(item) for item in fake.items]
+
+    monkeypatch.setattr(api_client, "list_assigned_work_items", list_assigned_work_items)
+    return fake
+
+
+def _summaries(stderr: io.StringIO) -> list[str]:
+    return [line for line in stderr.getvalue().splitlines() if "ppy serve: sweep" in line]
+
+
+def _ticket_histories() -> dict[str, list[str]]:
+    """Every ticket task's phase history, by the work item it was recorded for."""
+    conn = init_db()
+    try:
+        rows = conn.execute(
+            "SELECT tasks.id, task_env.value FROM tasks JOIN task_env "
+            "ON task_env.task_id = tasks.id WHERE task_env.key = ? ORDER BY tasks.id",
+            (papaya_events.PAPAYA_EVENT_METADATA,),
+        ).fetchall()
+        return {
+            json.loads(row["value"])["work_item_id"]: serve.phase_history(conn, int(row["id"]))
+            for row in rows
+        }
+    finally:
+        conn.close()
+
+
+def _existing_task(item_id: str, phase: str, *, event_id: str = "55") -> None:
+    """A task this runtime recorded for `item_id` earlier, from an ordinary event."""
+    conn = init_db()
+    try:
+        event = papaya_events.PapayaEvent(
+            id=event_id,
+            kind="work_item.assigned",
+            subject=f"work_item:{item_id}",
+            payload={},
+            work_item_id=item_id,
+        )
+        task_id = store.add_task(conn, run_id=store.create_run(conn, "earlier"), title="earlier")
+        papaya_events.record_task(conn, task_id, event)
+        store.set_task_phase(conn, task_id, phase)
+    finally:
+        conn.close()
+
+
+def _reserved(harness: Harness) -> list[str]:
+    return [subject for subject, _session in harness.events.reserves]
+
+
+def _holding_runner() -> serve.TicketRunner:
+    """A runner whose brief turn dispatches a worker, so a swept ticket is held."""
+    return _runner(FakeTurns(lambda turn: dispatch_worker(turn.run_id)), FakePapaya())
+
+
+async def _serving(
+    harness: Harness,
+    client_home: ClientHome,
+    stderr: io.StringIO,
+    *,
+    args: tuple[str, ...] = (),
+    sweep_sleep=None,
+    server=None,
+    runner: serve.TicketRunner | None = None,
+    max_concurrent: int = 3,
+) -> asyncio.Task[int]:
+    options = serve.parse_args(["--working-directory", str(client_home.work_dir), *args])
+    extra = {**harness.extra(), "max_concurrent": max_concurrent}
+    return asyncio.create_task(
+        serve.run(
+            options,
+            stdout=io.StringIO(),
+            stderr=stderr,
+            extra=extra,
+            runner=runner or _holding_runner(),
+            server=server,
+            sweep_sleep=sweep_sleep or Ticks().sleep,
+        )
+    )
+
+
+def test_a_start_sweep_offers_every_open_assigned_item_nothing_has_picked_up(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    assigned.items = [_item(1), _item(2, "in_progress"), _item(3, "changes_requested")]
+    # Not open, so not found: a finished ticket is nobody's work.
+    assigned.items.append(_item(4, "done"))
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+
+    async def scenario() -> int:
+        runner = await _serving(harness, client_home, stderr)
+        await _until(lambda: len(harness.jobs) == 3, what="three swept jobs")
+        await _until(
+            lambda: len(_ticket_histories()) == 3
+            and all(h and h[0] == serve.PHASE_PICKED_UP for h in _ticket_histories().values()),
+            what="three tasks picked up",
+        )
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert sorted(_reserved(harness)) == [
+        "work_item:item-1",
+        "work_item:item-2",
+        "work_item:item-3",
+    ]
+    assert sorted(_ticket_histories()) == ["item-1", "item-2", "item-3"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 3, offered 3, skipped 0"]
+    # The job a swept item became is the one an event would have become.
+    assert harness.jobs[0].event["kind"] == "work_item.assigned"
+
+
+def test_an_item_with_a_live_task_is_not_offered_again(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    """Live by work item id, whatever event created the task."""
+    _existing_task("item-2", serve.PHASE_PICKED_UP)
+    assigned.items = [_item(1), _item(2), _item(3)]
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+
+    async def scenario() -> int:
+        runner = await _serving(harness, client_home, stderr)
+        await _until(lambda: _summaries(stderr), what="the start sweep")
+        await _until(lambda: len(harness.jobs) == 2, what="two swept jobs")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert sorted(_reserved(harness)) == ["work_item:item-1", "work_item:item-3"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 3, offered 2, skipped 1"]
+
+
+def test_an_item_whose_only_task_was_handed_back_is_offered_again(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    """Handed back while the machine was off, and still assigned: still work."""
+    _existing_task("item-1", serve.PHASE_HANDED_BACK)
+    assigned.items = [_item(1)]
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+
+    async def scenario() -> int:
+        runner = await _serving(harness, client_home, stderr)
+        await _until(lambda: harness.jobs, what="the swept job")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert _reserved(harness) == ["work_item:item-1"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 1, offered 1, skipped 0"]
+
+
+def test_an_item_held_by_another_session_is_skipped_and_not_remembered(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    assigned.items = [_item(1), _item(2), _item(3)]
+    harness = Harness(FakeEvents([]))
+    harness.events.held.add("work_item:item-2")
+    stderr = io.StringIO()
+    clock = Ticks()
+
+    async def scenario() -> int:
+        runner = await _serving(harness, client_home, stderr, sweep_sleep=clock.sleep)
+        await _until(lambda: len(_summaries(stderr)) == 1, what="the start sweep")
+        # A 409 is not a race to come back to: the loop does not keep it for a
+        # re-bid, and the next sweep simply asks again.
+        assert harness.loop.skipped_subjects == []
+        clock.tick()
+        await _until(lambda: len(_summaries(stderr)) == 2, what="the timed sweep")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert _summaries(stderr)[0] == "ppy serve: sweep found 3, offered 2, skipped 1"
+    assert _reserved(harness).count("work_item:item-2") == 2
+    assert "item-2" not in _ticket_histories()
+
+
+def test_a_full_pool_ends_the_round_and_the_next_sweep_offers_the_rest(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    assigned.items = [_item(1), _item(2)]
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    clock = Ticks()
+
+    async def scenario() -> int:
+        runner = await _serving(
+            harness, client_home, stderr, sweep_sleep=clock.sleep, max_concurrent=1
+        )
+        await _until(lambda: len(_summaries(stderr)) == 1, what="the start sweep")
+        assert _reserved(harness) == ["work_item:item-1"], "the full pool was asked again"
+
+        # The first ticket ends and is no longer open; its slot is free again.
+        await _until(lambda: harness.jobs, what="the first job")
+        harness.jobs[0].stop.set()
+        await _until(lambda: not harness.loop.running_subjects, what="the slot to free up")
+        assigned.items[0]["status"] = "done"
+
+        clock.tick()
+        await _until(lambda: len(_summaries(stderr)) == 2, what="the next sweep")
+        await _until(lambda: len(harness.jobs) == 2, what="the second job")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert _summaries(stderr) == [
+        "ppy serve: sweep found 2, offered 1, skipped 0; 1 left for the next sweep "
+        "(every slot is busy)",
+        "ppy serve: sweep found 1, offered 1, skipped 0",
+    ]
+    assert _reserved(harness) == ["work_item:item-1", "work_item:item-2"]
+
+
+def test_a_zero_sweep_interval_sweeps_once_at_start_and_never_again(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    waits: list[float] = []
+
+    async def never(seconds: float) -> None:
+        waits.append(seconds)
+        await asyncio.sleep(0)
+
+    async def scenario() -> int:
+        runner = await _serving(
+            harness, client_home, stderr, args=("--sweep-interval", "0"), sweep_sleep=never
+        )
+        await _until(lambda: _summaries(stderr), what="the start sweep")
+        # Long enough for a timer that slept for zero seconds to have swept again.
+        await asyncio.sleep(0.2)
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert assigned.calls == 1
+    assert waits == []
+    assert _summaries(stderr) == ["ppy serve: sweep found 0, offered 0, skipped 0"]
+
+
+def test_the_sweep_interval_comes_from_the_flag_then_the_environment(monkeypatch) -> None:
+    from papaya_agent_runtime import sweep
+
+    assert serve.parse_args([]).sweep_interval == sweep.DEFAULT_SWEEP_INTERVAL == 300.0
+    monkeypatch.setenv(sweep.SWEEP_INTERVAL_ENV, "60")
+    assert serve.parse_args([]).sweep_interval == 60.0
+    assert serve.parse_args(["--sweep-interval", "0"]).sweep_interval == 0.0
+
+    bad = serve.parse_args(["--sweep-interval", "-5"])
+    assert bad.invalid_arguments is not None and "--sweep-interval" in bad.invalid_arguments
+    monkeypatch.setenv(sweep.SWEEP_INTERVAL_ENV, "soon")
+    assert sweep.SWEEP_INTERVAL_ENV in (serve.parse_args([]).invalid_arguments or "")
+
+
+def test_ppy_sweep_asks_the_running_serve_and_prints_the_summary(
+    ppy_home, client_home, ready, registered_repo, assigned, capsys
+) -> None:
+    from papaya_agent_runtime import cli
+    from papaya_agent_runtime.supervisor.server import SupervisorServer
+
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    server = SupervisorServer()
+    server.start_background()
+
+    async def scenario() -> tuple[int, int]:
+        runner = await _serving(
+            harness, client_home, stderr, args=("--sweep-interval", "0"), server=server
+        )
+        await _until(lambda: _summaries(stderr), what="the start sweep")
+        assigned.items = [_item(7)]
+        # On a thread: the request is answered on this event loop, which must be
+        # free to run the sweep while the command waits for it.
+        exit_code = await asyncio.to_thread(cli.main, ["sweep"])
+        harness.loop.request_stop()
+        return exit_code, await runner
+
+    try:
+        assert asyncio.run(scenario()) == (0, 0)
+    finally:
+        server.stop()
+
+    assert capsys.readouterr().out.strip() == "sweep found 1, offered 1, skipped 0"
+    assert _reserved(harness) == ["work_item:item-7"]
+    assert server.sweep_handler is None, "the handler outlived the listener"
+
+
+def test_ppy_sweep_with_nothing_serving_says_so(ppy_home, capsys) -> None:
+    from papaya_agent_runtime import cli
+    from papaya_agent_runtime.supervisor.server import SupervisorServer
+
+    assert cli.main(["sweep"]) == 1
+    assert "nothing is serving" in capsys.readouterr().err
+
+    # A bare supervisor is running, but no listener: still nothing to sweep for.
+    server = SupervisorServer()
+    server.start_background()
+    try:
+        assert cli.main(["sweep"]) == 1
+    finally:
+        server.stop()
+    assert "nothing is serving" in capsys.readouterr().err

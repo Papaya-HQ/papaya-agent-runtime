@@ -536,6 +536,31 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return serve(list(getattr(args, "listen_args", None) or []))
 
 
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    """Ask the running `ppy serve` to look for assigned work now, and say what it found."""
+    from papaya_agent_runtime.paths import ppy_home
+    from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
+
+    not_serving = f"nothing is serving in {ppy_home()}; start `ppy serve` and it sweeps on start"
+    try:
+        resp = SupervisorClient().sweep()
+    except SupervisorUnavailable:
+        print(not_serving, file=sys.stderr)
+        return 1
+    if not resp.get("serving", True):
+        print(not_serving, file=sys.stderr)
+        return 1
+    if not resp.get("ok"):
+        print(f"sweep failed: {resp.get('error')}", file=sys.stderr)
+        return 1
+    result = resp.get("sweep") or {}
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(result.get("summary") or "sweep finished")
+    return 1 if result.get("error") else 0
+
+
 def _registered_repo_origin(repo: str) -> str | None:
     """The base clone's ``origin`` URL for a registered repo, or None if unknowable.
 
@@ -2278,6 +2303,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     serve_cmd.set_defaults(func=_cmd_serve)
+
+    sweep_cmd = sub.add_parser(
+        "sweep",
+        help=(
+            "ask the running `ppy serve` to look for work assigned to this agent that "
+            "nothing has picked up, now, and print what it found"
+        ),
+    )
+    sweep_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+    sweep_cmd.set_defaults(func=_cmd_sweep)
 
     supervisor = sub.add_parser("supervisor", help="run and control the supervisor")
     ssub = supervisor.add_subparsers(dest="supervisor_cmd", required=True)

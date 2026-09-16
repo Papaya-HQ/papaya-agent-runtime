@@ -28,6 +28,7 @@ import socket
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 
 from papaya_agent_runtime.paths import ensure_layout, ppy_home, run_dir
 from papaya_agent_runtime.supervisor.core import Supervisor, SupervisorError
@@ -74,6 +75,10 @@ class SupervisorServer:
         self._last_health_tick: float | None = None
         self._quiet_flagged: set[int] = set()
         self._plan_flagged: set[int] = set()
+        #: Set by `ppy serve` while its listener runs: one sweep for assigned work,
+        #: answered as a dict. None in a bare `ppy supervisor serve`, which has no
+        #: listener to offer anything to.
+        self.sweep_handler: Callable[[], dict] | None = None
 
     def start_background(self) -> None:
         self._bind()
@@ -290,6 +295,24 @@ class SupervisorServer:
                 }
             if cmd == "reconcile":
                 return {"ok": True, **sup.reconcile()}
+            if cmd == "sweep":
+                handler = self.sweep_handler
+                if handler is None:
+                    return {
+                        "ok": False,
+                        "serving": False,
+                        "error": "this supervisor is not running `ppy serve`, so there is "
+                        "no listener to sweep for",
+                    }
+                try:
+                    return {"ok": True, "serving": True, "sweep": handler()}
+                except Exception as exc:  # noqa: BLE001 - a timed-out sweep still gets an answer
+                    reason = str(exc) or exc.__class__.__name__
+                    return {
+                        "ok": False,
+                        "serving": True,
+                        "error": f"the sweep did not finish: {reason}",
+                    }
             if cmd == "shutdown":
                 sup.shutdown()
                 self._stop.set()
