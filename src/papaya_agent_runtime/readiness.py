@@ -27,6 +27,7 @@ fingerprint exists so the same problem is reported once rather than on every wak
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -279,6 +280,95 @@ def _repo_problems(problems: list[Problem]) -> None:
         )
 
 
+#: The onboarding sections whose commands are a repository's gate.
+_GATE_SECTIONS = ("## How it builds and verifies", "## What CI actually runs")
+
+#: A gate program that cannot run without another one on the worker's allowlist.
+_GATE_IMPLIES = {"pnpm": ("node",), "npm": ("node",), "npx": ("node",), "yarn": ("node",)}
+
+_COMMAND_SPLIT = re.compile(r"&&|\|\||[;|]")
+_INLINE_CODE = re.compile(r"`([^`]+)`")
+
+
+def gate_commands(notes: str) -> list[str]:
+    """The build, test and CI commands an onboarding wrote into a repository's notes."""
+    from papaya_agent_runtime import solicit
+
+    if solicit.NOTES_MARKER not in notes:
+        return []
+    block = notes.partition(solicit.NOTES_MARKER)[2].partition(solicit.NOTES_END)[0]
+    commands: list[str] = []
+    section = ""
+    for line in block.splitlines():
+        if line.startswith("## "):
+            section = line.strip()
+        elif section in _GATE_SECTIONS and line.startswith("- "):
+            commands.extend(_INLINE_CODE.findall(line))
+    return commands
+
+
+def gate_programs(commands: list[str]) -> set[str]:
+    """Every program those commands start, and the ones they cannot run without."""
+    programs: set[str] = set()
+    for command in commands:
+        for segment in _COMMAND_SPLIT.split(command):
+            words = [w for w in segment.split() if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
+            if words:
+                programs.add(words[0])
+                programs.update(_GATE_IMPLIES.get(words[0], ()))
+    return programs
+
+
+def _gate_tool_problems(problems: list[Problem]) -> None:
+    """Does the stored Claude profile lack a tool a registered repository's gate runs?
+
+    A worker whose allowlist refuses `node --test` spends its review round on a
+    tool verb rather than the work (every JavaScript worker, 2026-09-16). Only a
+    pattern the documented default carries is named, because the fix offered is
+    restoring that default; a repository with no onboarding notes is skipped, since
+    nobody knows its gate yet and `repo_not_onboarded` already says so.
+    """
+    from papaya_agent_runtime import memory, repos
+    from papaya_agent_runtime.config import default_claude_allowed_tools, load_config
+    from papaya_agent_runtime.paths import config_path
+
+    if not config_path().exists():
+        return
+    try:
+        stored = set(load_config().claude.allowed_tools)
+        registered = repos.list_repos()
+    except Exception:  # noqa: BLE001 - a bad config or state db is reported by the other checks
+        return
+    default = set(default_claude_allowed_tools())
+    lacking: dict[str, list[str]] = {}
+    for row in registered:
+        try:
+            notes = memory.repo_notes_path(row["name"]).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for program in sorted(gate_programs(gate_commands(notes))):
+            pattern = f"Bash({program}:*)"
+            if pattern in default and pattern not in stored:
+                lacking.setdefault(pattern, []).append(row["name"])
+    if not lacking:
+        return
+    needed = "; ".join(
+        f"{pattern} ({', '.join(sorted(names))})" for pattern, names in sorted(lacking.items())
+    )
+    problems.append(
+        Problem(
+            code="claude_tools_lack_gate",
+            summary=(
+                "Claude workers would be refused a tool a registered repository's gate runs: "
+                f"{needed}"
+            ),
+            fix="`ppy config claude --reset`",
+            owner=USER,
+            blocking=False,
+        )
+    )
+
+
 def _papaya_problems(problems: list[Problem]) -> None:
     """A missing workspace is never blocking — that is a standing rule, not a default.
 
@@ -333,6 +423,7 @@ def check() -> Readiness:
     _config_problems(problems)
     _harness_problems(problems)
     _repo_problems(problems)
+    _gate_tool_problems(problems)
     _papaya_problems(problems)
     _client_problems(problems)
     if any(p.blocking for p in problems):
