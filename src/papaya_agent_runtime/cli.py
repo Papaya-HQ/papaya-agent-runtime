@@ -103,6 +103,87 @@ def _cmd_tools(args: argparse.Namespace) -> int:
     return 2
 
 
+#: The `[claude]` keys a person can lock against the runtime changing them.
+_LOCKABLE_CLAUDE_KEYS = ("extra_tools", "dropped_tools", "allowed_tools")
+
+
+def _config_claude(args: argparse.Namespace) -> int:
+    """`ppy config claude`: edit the deltas against the code's profile, or show them."""
+    from papaya_agent_runtime import config_changes
+    from papaya_agent_runtime import health as _health
+    from papaya_agent_runtime.config import (
+        CLAUDE_PROFILE,
+        ConfigError,
+        claude_tool_provenance,
+        load_config,
+        normalise_tool,
+        save_config,
+    )
+
+    cfg = load_config()
+    claude = cfg.claude
+    changes: list[dict] = []
+
+    def change(key: str, before: object, after: object, what: str) -> None:
+        if before != after:
+            changes.append(
+                {
+                    "key": f"claude.{key}",
+                    "before": before,
+                    "after": after,
+                    "why": f"set by a person: ppy config claude {what}",
+                }
+            )
+
+    if args.reset:
+        before = {"extra_tools": claude.extra_tools, "dropped_tools": claude.dropped_tools}
+        if claude.allowed_tools is not None:
+            before["allowed_tools"] = claude.allowed_tools
+        claude.extra_tools, claude.dropped_tools, claude.allowed_tools = [], [], None
+        change("tools", before, {"extra_tools": [], "dropped_tools": []}, "--reset")
+    for raw in args.allow or []:
+        pattern = normalise_tool(raw)
+        extra, dropped = list(claude.extra_tools), list(claude.dropped_tools)
+        claude.dropped_tools = [t for t in dropped if t != pattern]
+        if pattern not in CLAUDE_PROFILE and pattern not in extra:
+            claude.extra_tools = [*extra, pattern]
+        change("dropped_tools", dropped, claude.dropped_tools, f"--allow {pattern}")
+        change("extra_tools", extra, claude.extra_tools, f"--allow {pattern}")
+    for raw in args.deny or []:
+        pattern = normalise_tool(raw)
+        extra, dropped = list(claude.extra_tools), list(claude.dropped_tools)
+        claude.extra_tools = [t for t in extra if t != pattern]
+        if pattern in CLAUDE_PROFILE and pattern not in dropped:
+            claude.dropped_tools = [*dropped, pattern]
+        change("extra_tools", extra, claude.extra_tools, f"--deny {pattern}")
+        change("dropped_tools", dropped, claude.dropped_tools, f"--deny {pattern}")
+    for key, locking in [(k, True) for k in args.lock or []] + [
+        (k, False) for k in args.unlock or []
+    ]:
+        if key not in _LOCKABLE_CLAUDE_KEYS:
+            raise ConfigError(
+                f"cannot lock claude.{key}; lockable keys: {', '.join(_LOCKABLE_CLAUDE_KEYS)}"
+            )
+        before = list(claude.locked)
+        if locking and key not in before:
+            claude.locked = [*before, key]
+        elif not locking:
+            claude.locked = [k for k in before if k != key]
+        change("locked", before, claude.locked, f"{'--lock' if locking else '--unlock'} {key}")
+
+    if changes:
+        save_config(cfg)
+        for entry in changes:
+            config_changes.record(**entry)
+    print(_health.describe_claude_tools(_health.claude_tool_profile()))
+    if args.show:
+        for pattern, origin in claude_tool_provenance(cfg):
+            print(f"  {origin:<8} {pattern}")
+        if claude.locked:
+            print(f"  locked: {', '.join(claude.locked)}")
+    return 0
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.config import ConfigError, load_config
     from papaya_agent_runtime.setup.wizard import config_authority, config_models
@@ -129,19 +210,22 @@ def _cmd_config(args: argparse.Namespace) -> int:
             print(f"merge authority: {'on' if cfg.authority.merge else 'off'}")
             return 0
         if args.config_cmd == "claude":
-            from papaya_agent_runtime.config import default_claude_allowed_tools, save_config
+            return _config_claude(args)
+        if args.config_cmd == "history":
+            from papaya_agent_runtime import config_changes
 
-            cfg = load_config()
-            if args.reset:
-                cfg.claude.allowed_tools = default_claude_allowed_tools()
-            if args.allowed_tools is not None:
-                cfg.claude.allowed_tools = [
-                    part.strip() for part in args.allowed_tools.split(",") if part.strip()
-                ]
-            save_config(cfg)
-            from papaya_agent_runtime import health as _health
-
-            print(_health.describe_claude_tools(_health.claude_tool_profile()))
+            entries = config_changes.history(limit=args.limit)
+            if args.json:
+                print(json.dumps(entries, indent=2))
+                return 0
+            if not entries:
+                print("no configuration changes recorded")
+            for entry in entries:
+                print(
+                    f"#{entry['id']} {entry['at']} {entry['key']}: "
+                    f"{json.dumps(entry['before'])} -> {json.dumps(entry['after'])} — "
+                    f"{entry['why']}"
+                )
             return 0
         if args.config_cmd == "health":
             from papaya_agent_runtime.config import save_config
@@ -2047,14 +2131,35 @@ def build_parser() -> argparse.ArgumentParser:
     assessments_cfg.add_argument("--max-actions", type=int, default=None)
     claude_cfg = csub.add_parser("claude", help="the tool profile Claude workers launch with")
     claude_cfg.add_argument(
-        "--allowed-tools",
-        dest="allowed_tools",
-        default=None,
-        help="comma-separated Claude Code tool patterns, e.g. 'Read,Edit,Bash(git:*)'",
+        "--allow",
+        action="append",
+        metavar="PATTERN",
+        help="add a tool pattern to the profile (or restore a dropped one), e.g. 'Bash(go:*)'",
     )
     claude_cfg.add_argument(
-        "--reset", action="store_true", help="restore the documented default profile"
+        "--deny",
+        action="append",
+        metavar="PATTERN",
+        help="take a tool pattern out of the profile",
     )
+    claude_cfg.add_argument(
+        "--show",
+        action="store_true",
+        help="list the effective tools, each marked profile, extra or dropped",
+    )
+    claude_cfg.add_argument("--reset", action="store_true", help="clear every addition and removal")
+    claude_cfg.add_argument(
+        "--lock",
+        action="append",
+        metavar="KEY",
+        help="stop the runtime changing a key by itself (extra_tools, dropped_tools)",
+    )
+    claude_cfg.add_argument("--unlock", action="append", metavar="KEY")
+    history_cfg = csub.add_parser(
+        "history", help="every change made to the configuration, by the runtime or a person"
+    )
+    history_cfg.add_argument("--limit", type=int, default=None)
+    history_cfg.add_argument("--json", action="store_true")
 
     health_cfg = csub.add_parser("health", help="change the worker quiet threshold")
     health_cfg.add_argument("--quiet-minutes", dest="quiet_minutes", type=int, default=None)

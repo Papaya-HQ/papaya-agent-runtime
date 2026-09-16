@@ -115,6 +115,14 @@ class ProviderAdapter(abc.ABC):
     def parse_event(self, line: str) -> ProviderEvent | None:
         """Parse one structured output line into a normalized event, or None."""
 
+    def permission_denials(self, events: list[ProviderEvent]) -> list[dict]:
+        """Tool calls the harness refused this turn (``tool_name``, ``tool_input``).
+
+        Only a harness that reports them structurally overrides this; the runtime
+        learns tools from them (`tool_learning`).
+        """
+        return []
+
     @abc.abstractmethod
     def parse_usage(self, events: list[ProviderEvent]) -> UsageInfo | None:
         """Extract usage accounting from a sequence of parsed events."""

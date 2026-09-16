@@ -336,9 +336,12 @@ quietly; do not narrate the steps or report diagnostics.
    thing to install/sign into, plainly, and stop until it's handled.
 5. **Config.** If none exists, configure it yourself (see below). If it exists,
    you're ready. `ppy health` also prints the tool profile Claude workers launch
-   with (`claude.allowed_tools`); it is persisted config now, so no supervisor
-   restart can leave a worker without a shell — but a profile reading `NONE`
-   means every Claude dispatch will be refused until `ppy config claude --reset`.
+   with: the code's profile plus `claude.extra_tools` minus `claude.dropped_tools`.
+   Config is yours to keep right, and the runtime does it without you: an old file
+   migrates on load, `ppy serve` start restores dropped gate tools and learns
+   denied safe-family commands, and `ppy config history` shows every change. Never
+   ask the user to reset it; an empty profile (everything dropped) is the one case
+   for `ppy config claude --reset`.
 6. **Companions.** `ppy setup` provisions treehouse/lavish-axi/gh-axi; if a run
    later needs one and it's missing, `ppy tools install` it yourself. Never make the
    user do it.
@@ -796,7 +799,7 @@ readable at a glance by someone who just wants to know if it's done.
 | Take a repo on | `ppy repo ensure <name\|owner/name\|url> [--allow-outside] [--json]` — registers and onboards in one idempotent step, and is what to call when *work* names a repository you do not have. It refuses anything outside the signed-in account and its organisations, because registering someone else's repository is not implied by anything; `--allow-outside` is an explicit human yes, never an inference |
 | Learn a repository | `ppy repo onboard <name> [--dry-run] [--json]` — reads the registered base clone and records how it builds, how it tests, the commands its CI workflows actually run, which agent contracts it carries, and whether UI work has a design reference — into that repo's durable notes, between markers so hand-written notes survive a re-run. It names what it could not determine; those unknowns are yours to close before the first dispatch |
 | Configure | `ppy setup --non-interactive ...`, `ppy config show|models|authority|assessments|health|claude` |
-| Claude worker tools | `ppy config claude --allowed-tools '...'` / `--reset`; `ppy health` prints the effective profile. `PPY_CLAUDE_ALLOWED_TOOLS` overrides the config for one session; an empty profile makes `ppy dispatch --provider claude` refuse rather than launch a worker with no shell |
+| Claude worker tools | The profile is code; config holds deltas. `ppy config claude --allow/--deny <pattern>`, `--show` (each tool marked profile/extra/dropped), `--reset` (clear deltas), `--lock/--unlock <key>`; `ppy config history` lists every change, the runtime's (migration, restored gate tools, tools learned from safe-family denials) and a person's. `ppy health` prints the effective profile. `PPY_CLAUDE_ALLOWED_TOOLS` overrides the config for one session; an empty profile makes `ppy dispatch --provider claude` refuse rather than launch a worker with no shell |
 | Companion tools | `ppy tools install [--force]`, `ppy tools status` |
 | Repositories | `ppy repo add <url|path> [--forge-url <url>]`, `ppy repo list`, `ppy repo sync <name> [--clean-stray-ppy]` — registration records the **forge**: a URL registration is its own forge, a path registration inherits the forge from that path's `origin`, and a path whose origin is local (or missing) is refused until `--forge-url` names one, because a repo with nowhere to open a pull request strands every delivery. `ppy repo list` shows it, sync fetches from it, `ppy deliver` pushes and opens the pull request there, and `ppy doctor` flags any repo without one. Sync sync fast-forwards the base clone's default branch to the remote tip and records *that* commit, so a dispatch without an explicit starting branch cannot begin from stale code; it refuses (changing nothing) when the base clone has uncommitted or untracked files, naming them, and it reports a stray `.ppy/` directory left inside the clone by an `ppy` command run from that directory without the launcher (`--clean-stray-ppy` removes it) |
 | Worktree head start | `ppy repo provision <name>` shows what a fresh worktree gets before its worker starts; `--command "uv sync --frozen"` runs that in each new worktree (its exit status is recorded, and a failure never fails the dispatch), `--reuse-venv backend/.venv` links the virtualenv the base clone already has into the same place, `--clear` turns both off. Opt-in per repo — a repo with nothing configured behaves exactly as before. Every worker already gets a writable `UV_CACHE_DIR` (shared, under `.ppy/cache/uv`, so the second dispatch is warm) and a writable `PPY_HOME`, so `ppy progress` and `uv` never need a sandbox escalation |
