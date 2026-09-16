@@ -59,7 +59,11 @@ brief and dispatch), *answer* (unblock a worker or ask a person) and *review*
 Between turns the runner watches the runtime's own state for this ticket's run:
 a worker's progress becomes a progress line, `worker_done` starts the review
 turn, a question starts the answer turn, and a stopped or failed worker starts the
-review turn with the failure attached. How it knows a turn did its job is
+review turn with the failure attached. It also listens to the ticket: while it
+is `dispatched`, `reviewing` or `blocked`, a new comment by anyone but this agent
+starts the answer turn with the comment as its fact (read at most a minute late,
+queued behind a turn already running, and recorded so it is answered once, even
+across a restart). How it knows a turn did its job is
 mechanical too — a worker row in the ticket's run, or an answer, steer or
 delivery event since the turn began. A turn that did not is retried once with the
 tail of its transcript; a second miss hands the ticket back.
@@ -106,7 +110,8 @@ import logging
 import os
 import signal
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -156,6 +161,15 @@ WORKING_PHASES = (
 #: How often the runner looks at the ledger while it waits. The ledger is local
 #: SQLite, so this is cheap; it only bounds how late a phase change is noticed.
 POLL_SECONDS = 2.0
+
+#: How often, at most, the runner reads a held ticket's comments while it waits.
+#: Papaya's API, not the ledger, so once a minute rather than every poll: it
+#: bounds how late a person's reply on the ticket is heard.
+COMMENT_POLL_SECONDS = 60.0
+
+#: The event kind, on the ticket's own task, that records the newest comment on
+#: the work item already handled. The newest such event is the record.
+COMMENT_HANDLED_EVENT = "ticket_comment_handled"
 
 #: How many attempts a turn gets at its job before the ticket is handed back.
 TURN_ATTEMPTS = 2
@@ -465,6 +479,12 @@ class Ticket:
     #: it was, ``False`` it was not (the runner posts the fallback), ``None`` the
     #: record could not be read (nothing is claimed either way).
     reported: bool | None = False
+    #: Comments by somebody other than this agent, noticed and not yet handled,
+    #: oldest first. A comment that arrives while a turn runs waits here.
+    pending: list[dict[str, Any]] = field(default_factory=list)
+    #: When the comments were last read, on the runner's clock; ``None`` reads
+    #: them at the next chance, which is what the end of every turn asks for.
+    comments_read_at: float | None = None
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -482,6 +502,77 @@ def _is_agent_comment(comment: dict[str, Any]) -> bool:
 
 def _comment_ids(comments: list[dict[str, Any]]) -> frozenset[str]:
     return frozenset(str(comment.get("id")) for comment in comments if comment.get("id"))
+
+
+def is_own_comment(comment: dict[str, Any], agent_id: str | None) -> bool:
+    """Did this agent write ``comment``? Only then is it not worth waking for.
+
+    Another agent's comment is somebody else talking. An agent comment whose
+    author cannot be told apart — no id on it, or no id for this agent — is
+    taken as this agent's own: every comment the runner and its turns post is
+    an agent comment, and waking on those would answer ourselves.
+    """
+    if not _is_agent_comment(comment):
+        return False
+    author = str(comment.get("author_id") or "")
+    return not agent_id or not author or author == agent_id
+
+
+def comment_author(comment: dict[str, Any]) -> str:
+    """Who wrote a comment, in the words a progress line can use."""
+    actor = comment.get("author_actor")
+    if isinstance(actor, dict):
+        for key in ("name", "handle", "agent_name", "agent_handle"):
+            if str(actor.get(key) or "").strip():
+                return str(actor[key]).strip()
+    kind = str(comment.get("author_type") or "").strip() or "someone"
+    author = str(comment.get("author_id") or "").strip()
+    return f"{kind} {author}" if author else kind
+
+
+def _comments_fact(comments: list[dict[str, Any]]) -> str:
+    """The comments an answer turn is woken for, verbatim, oldest first."""
+    return "\n\n".join(
+        f"From {comment_author(c)} (comment {c.get('id')}"
+        + (f", {c['created_at']}" if c.get("created_at") else "")
+        + f"):\n{str(c.get('body') or '').strip()}"
+        for c in comments
+    )
+
+
+def _parse_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def comments_after(
+    comments: list[dict[str, Any]], handled: dict[str, Any]
+) -> list[dict[str, Any]] | None:
+    """The comments newer than the handled record, or ``None`` when it cannot tell.
+
+    The record names the newest comment handled; everything after it in
+    Papaya's order (oldest first) is new. A record with no comment id was taken
+    when the item had none, so every comment is new. A record whose comment is
+    gone falls back to its timestamp; with neither, the answer is ``None`` and
+    the caller starts a fresh record rather than guess.
+    """
+    handled_id = handled.get("comment_id")
+    if not handled_id:
+        return list(comments)
+    for index, comment in enumerate(comments):
+        if str(comment.get("id")) == str(handled_id):
+            return comments[index + 1 :]
+    since = _parse_time(handled.get("created_at")) if handled.get("created_at") else None
+    if since is None:
+        return None
+    return [
+        comment
+        for comment in comments
+        if (stamp := _parse_time(comment.get("created_at"))) is not None and stamp > since
+    ]
 
 
 class _Stopped(Exception):
@@ -563,6 +654,9 @@ class TicketRunner:
         poll_seconds: float = POLL_SECONDS,
         runtime_dir: str | None = None,
         turn_tools=None,
+        comment_poll_seconds: float = COMMENT_POLL_SECONDS,
+        clock=None,
+        agent_id: str | None = None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -575,6 +669,12 @@ class TicketRunner:
         self._runtime_dir = runtime_dir
         #: `manager.launch.prepare_turn_tools`' seam: what gives a turn MCP and the plugin.
         self._turn_tools = turn_tools
+        self._comment_poll_seconds = float(comment_poll_seconds)
+        #: What "a minute since the comments were last read" is measured on.
+        self._clock = clock or time.monotonic
+        #: Who "this agent" is when telling a person's comment from our own;
+        #: read from the connection on first use when not given.
+        self._agent_id = agent_id
 
     async def __call__(self, job: Any) -> dict[str, Any]:
         outcome = await asyncio.to_thread(self.take, job)
@@ -758,6 +858,11 @@ class TicketRunner:
                 # ledger (a resume from `dispatched` after the row was lost). Only a
                 # new brief can put one there.
                 return PHASE_BRIEFING
+            if await self._hear(ticket):
+                if await self._wait_on_person(ticket):
+                    back = f"Watching worker task {ticket.worker.task_id} again."
+                    await self._enter(ticket, PHASE_DISPATCHED, back, say=back)
+                continue
             await self._sleep(ticket)
 
     async def _answer(self, ticket: Ticket) -> HandBack | None:
@@ -772,8 +877,13 @@ class TicketRunner:
             await self._wait_on_person(ticket)
             asked = f"Worker task {worker_id} asked: {first_line or '(no text)'}"
             await self._enter(ticket, PHASE_BLOCKED, asked, say=f"Blocked: {asked}")
+            # Whatever somebody said on the ticket meanwhile goes to the same turn.
+            await self._listen(ticket)
+            comments = await self._take_pending(ticket)
             mark = await asyncio.to_thread(_max_event_id)
-            result = await self._turn(ticket, prompts.ANSWER, self._answer_facts(ticket, tail))
+            result = await self._turn(
+                ticket, prompts.ANSWER, self._answer_facts(ticket, tail, comments)
+            )
             acted = await asyncio.to_thread(acted_since, worker_id, mark)
             if not acted and await self._wait_on_person(ticket):
                 continue
@@ -808,6 +918,20 @@ class TicketRunner:
                 else f"Reviewing worker task {worker_id} at its head."
             )
             await self._enter(ticket, PHASE_REVIEWING, detail, say=detail)
+            heard = await asyncio.to_thread(_max_event_id)
+            if await self._hear(ticket):
+                # A comment turn that steered the worker reopened the work: there
+                # is nothing at its head to review until it is done again.
+                if await asyncio.to_thread(delivered_since, worker_id, heard):
+                    ticket.trigger, ticket.reported = None, None
+                    return PHASE_DELIVERING
+                if await asyncio.to_thread(acted_since, worker_id, heard):
+                    ticket.trigger = None
+                    steered = f"Worker task {worker_id} steered on a comment."
+                    await self._enter(ticket, PHASE_DISPATCHED, steered, say=steered)
+                    return PHASE_DISPATCHED
+                await self._wait_on_person(ticket)
+                continue
             mark = await asyncio.to_thread(_max_event_id)
             # Taken before the turn and after the runner's own comment: nothing but
             # the turn writes on the item while it runs, so a new agent comment
@@ -900,6 +1024,82 @@ class TicketRunner:
         await self._turn(ticket, prompts.REVIEW, facts)
         return await asyncio.to_thread(self._agent_commented_since, ticket, before)
 
+    # -- listening to the ticket while the work is in flight ------------------
+
+    async def _hear(self, ticket: Ticket) -> bool:
+        """Run the answer turn for what somebody said on the ticket. Returns whether it ran.
+
+        The client skips a `work_item.comment` event for a subject this session
+        already holds, so a person's reply to a question the manager asked would
+        otherwise go unheard until review. The runner reads the comments itself,
+        at most once a minute and right after every turn, and a comment that
+        arrived while a turn ran is answered after it — all of them in one turn.
+        What to do about a comment is the turn's judgment, not the runner's.
+        """
+        await self._listen(ticket)
+        comments = await self._take_pending(ticket)
+        if not comments:
+            return False
+        await self._turn(ticket, prompts.ANSWER, self._answer_facts(ticket, "", comments))
+        return True
+
+    async def _listen(self, ticket: Ticket) -> None:
+        """Read the comments when it is time, and queue what somebody else said."""
+        now = self._clock()
+        read_at = ticket.comments_read_at
+        if read_at is not None and now - read_at < self._comment_poll_seconds:
+            return
+        ticket.comments_read_at = now
+        comments = await asyncio.to_thread(self._comments, ticket)
+        if comments is None:
+            return
+        task_id = ticket.held.task_id
+        handled = await asyncio.to_thread(last_handled_comment, task_id)
+        newer = comments_after(comments, handled) if handled is not None else None
+        if newer is None:
+            # Nothing recorded yet (or nothing the record can be placed against):
+            # what is on the item now is where listening starts, and wakes nothing.
+            await asyncio.to_thread(record_comment_handled, task_id, _newest(comments))
+            return
+        agent_id = self._own_agent_id()
+        queued = _comment_ids(ticket.pending)
+        for comment in newer:
+            if is_own_comment(comment, agent_id) or str(comment.get("id")) in queued:
+                continue
+            ticket.pending.append(comment)
+
+    async def _take_pending(self, ticket: Ticket) -> list[dict[str, Any]]:
+        """Hand the queued comments to a turn: one progress line each, then recorded."""
+        comments, ticket.pending = ticket.pending, []
+        if not comments:
+            return []
+        for comment in comments:
+            _report_progress(
+                ticket.job, ticket.phase, f"Answering a comment from {comment_author(comment)}"
+            )
+        await asyncio.to_thread(record_comment_handled, ticket.held.task_id, comments[-1])
+        return comments
+
+    async def _mark_read(self, ticket: Ticket) -> None:
+        """A turn is about to read the item: what is on it now counts as handled.
+
+        Every turn's prompt reads the work item and its comments, so a comment
+        that is there when one starts has been heard — a person's reply that a
+        brief turn acted on is not answered again once the worker is dispatched.
+        Taken before the launch, so a comment made while the turn runs is newer.
+        """
+        comments = await asyncio.to_thread(self._comments, ticket)
+        if comments is None:
+            return
+        await asyncio.to_thread(record_comment_handled, ticket.held.task_id, _newest(comments))
+        ticket.pending.clear()
+
+    def _own_agent_id(self) -> str | None:
+        if self._agent_id is None:
+            who = papaya.identity()
+            self._agent_id = who.agent_id if who is not None else ""
+        return self._agent_id or None
+
     # -- waiting, without ever blocking the loop ------------------------------
 
     async def _wait_on_person(self, ticket: Ticket) -> bool:
@@ -910,7 +1110,8 @@ class TicketRunner:
         read it without interpreting the transcript. The client drops a new event
         for a subject this session already holds, so the reply cannot arrive as a
         `work_item.comment`; the runner watches the work item itself instead, and
-        resumes when it changes (or the todo is closed here).
+        resumes when it changes, when a comment by somebody else is read (it is
+        then queued for the next turn), or when the todo is closed here.
 
         The activity stamp is touched while waiting: the ticket is knowingly
         parked on a person, in a phase the app shows, which is not a stall.
@@ -931,6 +1132,9 @@ class TicketRunner:
                 break
             now = await asyncio.to_thread(self._fingerprint, ticket)
             if now is not None and now != before:
+                break
+            await self._listen(ticket)
+            if ticket.pending:
                 break
         await asyncio.to_thread(close_person_wait, todo_id)
         await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
@@ -1029,9 +1233,14 @@ class TicketRunner:
                 transcript.write_text(text + "\n", encoding="utf-8")
             return TurnResult(exit_code=127, transcript=text)
         runner = self._run_turn or run_turn
-        result = await asyncio.to_thread(
-            runner, launch, should_stop=ticket.should_stop, transcript_path=transcript
-        )
+        await self._mark_read(ticket)
+        try:
+            result = await asyncio.to_thread(
+                runner, launch, should_stop=ticket.should_stop, transcript_path=transcript
+            )
+        finally:
+            # Whatever was said while the turn ran is read as soon as it ends.
+            ticket.comments_read_at = None
         self._check_stop(ticket)
         return result
 
@@ -1048,12 +1257,20 @@ class TicketRunner:
             "previous attempt's transcript (tail)": tail,
         }
 
-    def _answer_facts(self, ticket: Ticket, tail: str) -> dict[str, object]:
+    def _answer_facts(
+        self, ticket: Ticket, tail: str, comments: list[dict[str, Any]] | None = None
+    ) -> dict[str, object]:
         worker = ticket.worker
+        trigger = ticket.trigger
         return {
             **_ticket_facts(ticket.held),
             **_worker_facts(worker),
-            "the worker's question": ticket.trigger.detail if ticket.trigger else "",
+            "the worker's question": (
+                trigger.detail if trigger is not None and trigger.phase == PHASE_BLOCKED else ""
+            ),
+            "new comments on the work item, by someone other than you": _comments_fact(
+                comments or []
+            ),
             "previous attempt's transcript (tail)": tail,
         }
 
@@ -1571,6 +1788,49 @@ def open_person_wait(task_id: int) -> tuple[int, str] | None:
         return (int(row["id"]), str(row["text"])) if row is not None else None
     finally:
         conn.close()
+
+
+def last_handled_comment(task_id: int) -> dict[str, Any] | None:
+    """The newest handled-comment record on a ticket's task, or ``None`` if it has none."""
+    conn = db.init_db()
+    try:
+        row = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+            (task_id, COMMENT_HANDLED_EVENT),
+        ).fetchone()
+        return _payload(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def record_comment_handled(task_id: int, comment: dict[str, Any] | None) -> None:
+    """Record ``comment`` as the newest handled on this ticket; ``None`` means "none yet".
+
+    An event on the ticket's own task rather than memory, so a restarted
+    `serve` does not answer old comments again. Unchanged records are not
+    written twice.
+    """
+    comment_id = str(comment.get("id")) if comment and comment.get("id") else None
+    created_at = str(comment.get("created_at")) if comment and comment.get("created_at") else None
+    current = last_handled_comment(task_id)
+    if current is not None and current.get("comment_id") == comment_id:
+        return
+    conn = db.init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        store.append_event(
+            conn,
+            kind=COMMENT_HANDLED_EVENT,
+            payload={"task_id": task_id, "comment_id": comment_id, "created_at": created_at},
+            run_id=int(task["run_id"]) if task is not None else None,
+            task_id=task_id,
+        )
+    finally:
+        conn.close()
+
+
+def _newest(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return comments[-1] if comments else None
 
 
 def close_person_wait(todo_id: int) -> None:

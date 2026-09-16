@@ -321,6 +321,10 @@ that did not once, with the tail of its transcript, before handing the ticket ba
 A worker pool that is full is not a miss: the ticket waits in `dispatched` and is never
 handed back for it. A restarted `serve` given a ticket it was already working picks it
 up from its last working phase rather than briefing it again.
+While a ticket is `dispatched`, `reviewing` or `blocked`, a new comment on it from
+anyone but this agent is read within a minute and starts the **answer** turn with the
+comment in its facts (after any turn already running), and is recorded so that not
+even a restart answers it twice.
 
 The work item's **status** is state, so the runner sets it: `in_progress` on pickup,
 `review` when the pull request is open, `blocked` while a question waits on a person,

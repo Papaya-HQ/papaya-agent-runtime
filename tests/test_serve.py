@@ -472,6 +472,31 @@ class FakePapaya:
             return _Body(json.dumps(record).encode())
         return _Body(b"")
 
+    def comment_from(
+        self, item: str, body: str, *, author_type: str = "user", author_id: str = "user-1"
+    ) -> dict[str, Any]:
+        """Somebody commenting on the item in the app, not through this agent's token."""
+        with self._lock:
+            thread = self.stored.setdefault(item, [])
+            comment = {
+                "id": f"comment-{len(thread) + 1}",
+                "author_type": author_type,
+                "author_id": author_id,
+                "body": body,
+            }
+            thread.append(comment)
+            return comment
+
+    def comment_reads(self) -> int:
+        with self._lock:
+            return len(
+                [
+                    1
+                    for method, path, _ in self.calls
+                    if method == "GET" and path.endswith("/comments")
+                ]
+            )
+
     @staticmethod
     def _item(path: str) -> str:
         return path.split("/work-items/", 1)[1].split("/", 1)[0]
@@ -506,7 +531,7 @@ def _no_tools(_provider: str, _env: dict[str, str], **_kwargs: Any) -> TurnTools
 
 
 def _runner(
-    turns: Any, papaya_api: FakePapaya, *, capacity=None, turn_tools=_no_tools
+    turns: Any, papaya_api: FakePapaya, *, capacity=None, turn_tools=_no_tools, clock=None
 ) -> serve.TicketRunner:
     return serve.TicketRunner(
         run_turn=turns,
@@ -515,7 +540,21 @@ def _runner(
         worker_capacity=capacity or (lambda: (0, 2)),
         poll_seconds=0.01,
         turn_tools=turn_tools,
+        clock=clock,
     )
+
+
+class Clock:
+    """The runner's clock for "a minute since the comments were read", moved by hand."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float = serve.COMMENT_POLL_SECONDS) -> None:
+        self.now += seconds
 
 
 def post_as_agent(turn: Turn, body: str) -> None:
@@ -1406,6 +1445,186 @@ def test_a_ticket_found_in_reviewing_runs_the_review_turn_without_a_new_pickup(
     ]
     # Nothing was picked up, so nothing was moved to `in_progress` again.
     assert [status for _item, status in papaya_api.statuses()] == ["review"]
+
+
+# ── listening to the ticket while the work is in flight ─────────────────────
+
+
+def _brief_dispatches(turn: Turn) -> None:
+    if turn.name == prompts.BRIEF:
+        dispatch_worker(turn.run_id)
+
+
+def handled_comment(event_id: int = 101) -> str | None:
+    record = serve.last_handled_comment(int(ticket_task(event_id)["id"]))
+    return record.get("comment_id") if record is not None else None
+
+
+async def _end_hold(harness: Harness, runner: asyncio.Task) -> int:
+    harness.jobs[0].stop.set()
+    await _until(lambda: harness.results, what="the hold to end")
+    harness.loop.request_stop()
+    return await runner
+
+
+def test_a_persons_comment_while_dispatched_runs_the_answer_turn_within_a_minute(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """PAP-213: the manager asked on the ticket, the person answered, and nobody heard."""
+    papaya_api, clock = FakePapaya(), Clock()
+    turns = FakeTurns(_brief_dispatches)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api, clock=clock))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        # Read at the brief turn's launch, and again the moment it ended.
+        await _until(lambda: papaya_api.comment_reads() >= 2, what="the read after the turn")
+        comment = papaya_api.comment_from("item-9", "Read the image and attach it.")
+
+        clock.advance(serve.COMMENT_POLL_SECONDS - 1)
+        await asyncio.sleep(scale(0.1))
+        assert turns.names() == [prompts.BRIEF], "read before the minute was up"
+
+        clock.advance(1)
+        await _until(lambda: len(turns.calls) == 2, what="the answer turn")
+        assert handled_comment() == comment["id"]
+        return await _end_hold(harness, runner)
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.ANSWER]
+    assert "Read the image and attach it." in turns.calls[1].prompt
+    answering = [detail for _s, _p, detail in progress_lines if detail.startswith("Answering")]
+    assert answering == ["Answering a comment from user user-1"]
+    # The comment turn is not a phase change: the ticket stayed dispatched throughout.
+    assert history()[-2:] == [serve.PHASE_DISPATCHED, serve.PHASE_RELEASED]
+
+
+def test_the_agents_own_comment_on_the_ticket_wakes_nothing(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    papaya_api, clock = FakePapaya(), Clock()
+    turns = FakeTurns(_brief_dispatches)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api, clock=clock))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        await _until(lambda: papaya_api.comment_reads() >= 2, what="the read after the turn")
+        # A phase line, written by this agent (`agent-1` is the connected agent).
+        papaya_api.comment_from(
+            "item-9", "Worker task 2 is still going.", author_type="agent", author_id="agent-1"
+        )
+        for reads in (3, 4):
+            clock.advance()
+            await _until(lambda n=reads: papaya_api.comment_reads() >= n, what="another read")
+        await asyncio.sleep(scale(0.05))
+        return await _end_hold(harness, runner)
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF]
+    assert not [detail for _s, _p, detail in progress_lines if detail.startswith("Answering")]
+
+
+def test_comments_made_during_a_turn_are_answered_after_it_in_one_turn(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    papaya_api, clock = FakePapaya(), Clock()
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            # The person answers twice while the brief turn is still running.
+            papaya_api.comment_from("item-9", "Read the image.")
+            papaya_api.comment_from("item-9", "And attach it too.")
+            dispatch_worker(turn.run_id)
+
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api, clock=clock))
+        await _until(lambda: len(turns.calls) == 2, what="the answer turn")
+        reads = papaya_api.comment_reads()
+        for _ in range(2):
+            clock.advance()
+            reads += 1
+            await _until(lambda n=reads: papaya_api.comment_reads() >= n, what="another read")
+        await asyncio.sleep(scale(0.05))
+        return await _end_hold(harness, runner)
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.ANSWER], "each comment was answered once"
+    answer = turns.calls[1].prompt
+    assert "Read the image." in answer and "And attach it too." in answer
+    answering = [detail for _s, _p, detail in progress_lines if detail.startswith("Answering")]
+    assert len(answering) == 2
+
+
+def test_a_restart_answers_only_comments_newer_than_the_last_one_handled(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    conn = init_db()
+    event = papaya_events.PapayaEvent(
+        id="101",
+        kind="work_item.assigned",
+        subject=SUBJECT,
+        payload=EVENT["payload"],
+        work_item_id="item-9",
+    )
+    run_id = store.create_run(conn, "Fix the thing")
+    task_id = store.add_task(conn, run_id=run_id, title="Fix the thing")
+    papaya_events.record_task(conn, task_id, event)
+    for phase in (serve.PHASE_PICKED_UP, serve.PHASE_BRIEFING, serve.PHASE_DISPATCHED):
+        serve.record_phase(conn, task_id, phase)
+    conn.close()
+    dispatch_worker(run_id)
+
+    papaya_api, clock = FakePapaya(), Clock()
+    papaya_api.comment_from("item-9", "An old question, answered before the restart.")
+    handled = papaya_api.comment_from("item-9", "The last one the previous serve handled.")
+    serve.record_comment_handled(task_id, handled)
+
+    turns = FakeTurns()
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api, clock=clock))
+        await _until(lambda: papaya_api.comment_reads() >= 1, what="the first read")
+        await asyncio.sleep(scale(0.05))
+        assert turns.names() == [], "an old comment was answered again"
+
+        papaya_api.comment_from("item-9", "A new reply, after the restart.")
+        clock.advance()
+        await _until(lambda: len(turns.calls) == 1, what="the answer turn")
+        return await _end_hold(harness, runner)
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.ANSWER]
+    prompt = turns.calls[0].prompt
+    assert "A new reply, after the restart." in prompt
+    assert "old question" not in prompt and "previous serve" not in prompt
+    assert handled_comment() == "comment-3"
+
+
+def test_what_counts_as_new_and_as_somebody_else() -> None:
+    old = {"id": "c1", "created_at": "2026-09-16T09:34:49Z", "author_type": "agent"}
+    reply = {"id": "c2", "created_at": "2026-09-16T09:38:23Z", "author_type": "user"}
+    comments = [old, reply]
+    assert serve.comments_after(comments, {"comment_id": "c1"}) == [reply]
+    assert serve.comments_after(comments, {"comment_id": None}) == comments
+    # The handled comment is gone: its timestamp still places the record.
+    gone = {"comment_id": "c0", "created_at": "2026-09-16T09:35:00+00:00"}
+    assert serve.comments_after(comments, gone) == [reply]
+    assert serve.comments_after(comments, {"comment_id": "c0"}) is None
+
+    assert serve.is_own_comment({"author_type": "agent", "author_id": "agent-1"}, "agent-1")
+    assert serve.is_own_comment({"author_type": "agent"}, "agent-1")
+    assert not serve.is_own_comment({"author_type": "agent", "author_id": "agent-2"}, "agent-1")
+    assert not serve.is_own_comment(reply, "agent-1")
 
 
 def test_manager_turns_get_the_jobs_environment_and_only_the_runtime_directory(
