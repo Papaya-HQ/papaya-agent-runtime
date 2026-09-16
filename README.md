@@ -757,6 +757,8 @@ are the hosted agent's, never this machine's. Each held ticket is meant to carry
 status line as one comment edited in place; the runner has the hook
 (`TicketRunner(status_comment=)`), but nothing is posted until Papaya lets an agent edit
 its own comment (backend #636). Until then the phase comments are the ticket's record.
+Without Papaya, or for a local task with no work item, the status line is never written;
+`ppy status --team` and `ppy tail` work the same either way.
 
 ## Where state lives
 
