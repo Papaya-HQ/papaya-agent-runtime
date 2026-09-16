@@ -2058,6 +2058,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"todos:   {len(nxt)} next, {len(blocked)} waiting")
         for t in nxt[:3]:
             print(f"  next:  #{t['id']} {t['text']}")
+        from papaya_agent_runtime import reconcile
+
+        print(f"lane:    {reconcile.lane_status(conn)}")
         for advisory in health.usage_advisories(conn):
             print(health.describe_usage_advisory(advisory))
         _ = store
@@ -2383,6 +2386,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="COMMAND",
         help='the command `ppy gate run --full` runs, e.g. "make verify"; empty string clears it',
+    )
+    rset.add_argument(
+        "--auto-merge",
+        dest="auto_merge",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "merge this repo's delivered pull requests once they have sat green, mergeable and "
+            "with no changes requested for delivery.merge_after_hours (off by default; "
+            "--no-auto-merge turns it off)"
+        ),
+    )
+    rset.add_argument(
+        "--merge-method",
+        dest="merge_method",
+        default=None,
+        choices=["squash", "merge", "rebase", ""],
+        help="how --auto-merge merges (default squash); empty string restores the default",
     )
     rset.add_argument(
         "--evidence-dir",

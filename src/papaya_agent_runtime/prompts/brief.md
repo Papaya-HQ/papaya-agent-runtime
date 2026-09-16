@@ -67,6 +67,11 @@ Commit and push at milestones, not once at the end: after each goal in the brief
 Your rounds check: a worker with nothing on the remote after
 `health.push_by_minutes` gets a check-in.
 
+Every brief also tells its worker that the pull request stays theirs, in these words:
+Your pull request is yours until it merges: after delivery you will be steered back for red CI, merge conflicts, a branch behind its base, or reviewer comments. Fix it on the same branch, never open a second pull request, and never force-push over a reviewer's view without saying so in the pull request.
+Your rounds follow every delivered pull request until it merges and bring it back to you
+when it needs the worker again.
+
 End the turn once a worker is dispatched. Do not do the work yourself.
 
 ## When the runtime got in the way

@@ -79,6 +79,15 @@ class _Execution:
     task_id: int | None
     #: Set once the execution has a runner thread; until then it is pending.
     bound: bool = False
+    #: Which capacity admitted it: :data:`LANE_TICKET` (`worker.max_concurrent`) or
+    #: :data:`LANE_RECONCILE` (`worker.reconcile_slots`, pull request fixes only).
+    lane: str = "ticket"
+
+
+#: A ticket's work: its first dispatch and every run before it is delivered.
+LANE_TICKET = "ticket"
+#: Fixing a delivered pull request. Never a first dispatch; never a ticket slot.
+LANE_RECONCILE = "reconcile"
 
 
 def _adapter_for(provider: str):
@@ -233,7 +242,11 @@ def _lease_worktree_for_branch(conn, branch: str) -> str | None:
 
 
 class Supervisor:
-    def __init__(self) -> None:
+    def __init__(self, *, session_resumable=None) -> None:
+        #: Whether a delivered task's provider session can be picked up again to fix
+        #: its pull request: ``(task row, session id) -> bool``. When it cannot, the
+        #: lane runs a fresh reconciler session on the same task instead.
+        self._session_resumable = session_resumable or (lambda _task, session: bool(session))
         self._lock = threading.Lock()
         self._threads: dict[int, threading.Thread] = {}
         self._runners: dict[int, RunnerGuardian] = {}
@@ -744,7 +757,18 @@ class Supervisor:
                 return WorkerCeiling().max_concurrent
             raise SupervisorError(f"run `ppy setup` first: {exc}") from exc
 
-    def _admit(self, conn, *, limit: int, task_id: int | None) -> _Execution:
+    def _reconcile_slots(self) -> int:
+        """The reconcile lane's size, `worker.reconcile_slots`; the default without config."""
+        from papaya_agent_runtime.config import WorkerCeiling
+
+        try:
+            return load_config().worker.reconcile_slots
+        except ConfigError:
+            return WorkerCeiling().reconcile_slots
+
+    def _admit(
+        self, conn, *, limit: int, task_id: int | None, lane: str = LANE_TICKET
+    ) -> _Execution:
         """Atomically admit one execution, or refuse with nothing changed.
 
         Normal operation uses one manager-owned :class:`Supervisor` per
@@ -754,6 +778,12 @@ class Supervisor:
         are counted conservatively until reconciliation marks them otherwise.
         A resume names its task at admission, so a second resume of the same
         task — pending or live — is refused here, before any side effect.
+
+        The two lanes are counted apart. ``limit`` bounds ``lane``: a ticket
+        execution counts ticket executions and every persisted row this process
+        does not own; a reconcile execution counts only reconcile executions, so a
+        pull request fix is admitted with every ticket slot busy, and a ticket is
+        never refused because the lane is.
         """
         with self._lock:
             if self._closed:
@@ -778,12 +808,22 @@ class Supervisor:
             for active_task in bound_tasks:
                 if any(row["task_id"] == active_task for row in live):
                     persisted -= 1
-            active = len(self._executions) + persisted
-            if active >= limit:
-                raise SupervisorError(
-                    f"worker capacity is full ({active}/{limit} active); retry after a worker exits"
-                )
-            execution = _Execution(token=uuid.uuid4().hex[:12], task_id=task_id)
+            if lane == LANE_RECONCILE:
+                active = sum(1 for e in self._executions.values() if e.lane == LANE_RECONCILE)
+                if active >= limit:
+                    raise SupervisorError(
+                        f"the reconcile lane is full ({active}/{limit} fixing a pull request); "
+                        "retry after that fix ends"
+                    )
+            else:
+                ticket = sum(1 for e in self._executions.values() if e.lane != LANE_RECONCILE)
+                active = ticket + persisted
+                if active >= limit:
+                    raise SupervisorError(
+                        f"worker capacity is full ({active}/{limit} active); "
+                        "retry after a worker exits"
+                    )
+            execution = _Execution(token=uuid.uuid4().hex[:12], task_id=task_id, lane=lane)
             self._executions[execution.token] = execution
             return execution
 
@@ -847,7 +887,16 @@ class Supervisor:
             model, reasoning = self._resolve_and_enforce(provider, model, reasoning)
         # Admission names the task: a second resume of this task is refused right
         # here, before the worktree is rebuilt or synced, before any status write.
-        execution = self._admit(conn, limit=self._max_concurrent(provider), task_id=task_id)
+        # A task that was ever delivered only runs again to fix its pull request, and
+        # that is the reconcile lane's work, never a ticket slot's.
+        from papaya_agent_runtime import reconcile
+
+        if reconcile.is_reconciliation(conn, task_id):
+            execution = self._admit(
+                conn, limit=self._reconcile_slots(), task_id=task_id, lane=LANE_RECONCILE
+            )
+        else:
+            execution = self._admit(conn, limit=self._max_concurrent(provider), task_id=task_id)
         try:
             return self._launch_resumed(
                 conn,
@@ -934,21 +983,60 @@ class Supervisor:
         process_env = (
             environment.task_process_env(conn, repo_row, task_id) if repo_row is not None else {}
         )
-        spec = TaskSpec(
-            task_id=task_id,
-            title=task["title"],
-            instructions=packet or "",
-            worktree_path=task["worktree_path"] or "",
-            base_sha=task["base_sha"] or "",
-            provider=provider,
-            model=model,
-            reasoning=reasoning,
-            run_id=task["run_id"],
-            branch=task["branch"],
-            resume_session_id=session_id,
-            steer_message=packet,
-            process_env=process_env,
+        # A pull request fix resumes the session that delivered it, which holds the
+        # diff, the brief and the review. When that session cannot be resumed, or its
+        # worktree had to be rebuilt, a fresh reconciler session starts on the same
+        # task — same branch, same worktree — from a brief scoped to the pull request.
+        reconciler = execution.lane == LANE_RECONCILE and (
+            rebuilt is not None or not self._session_resumable(task, session_id)
         )
+        if reconciler:
+            from papaya_agent_runtime import reconcile
+
+            brief = reconcile.reconciler_brief(conn, task, message)
+            prepared = (
+                environment.prepare(
+                    conn,
+                    repo_row,
+                    task_id=task_id,
+                    worktree=task["worktree_path"] or "",
+                    branch=task["branch"],
+                    ends_at=ends_at,
+                )
+                if repo_row is not None
+                else None
+            )
+            spec = TaskSpec(
+                task_id=task_id,
+                title=f"Reconcile: {task['title']}",
+                instructions=f"{brief}\nTerminal instruction: {finish}",
+                worktree_path=task["worktree_path"] or "",
+                base_sha=task["base_sha"] or "",
+                provider=provider,
+                model=model,
+                reasoning=reasoning,
+                run_id=task["run_id"],
+                branch=task["branch"],
+                environment=prepared.block if prepared is not None else None,
+                process_env=(prepared.process_env if prepared is not None else None) or process_env,
+            )
+            session_id = None
+        else:
+            spec = TaskSpec(
+                task_id=task_id,
+                title=task["title"],
+                instructions=packet or "",
+                worktree_path=task["worktree_path"] or "",
+                base_sha=task["base_sha"] or "",
+                provider=provider,
+                model=model,
+                reasoning=reasoning,
+                run_id=task["run_id"],
+                branch=task["branch"],
+                resume_session_id=session_id,
+                steer_message=packet,
+                process_env=process_env,
+            )
         adapter = _adapter_for(spec.provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
         with self._lock:
@@ -969,6 +1057,8 @@ class Supervisor:
                 "status": "in_progress",
                 "scope_preserved": scope_preserved,
                 "ends_at": ends_at,
+                "lane": execution.lane,
+                "reconciler": reconciler,
                 **(continuation or {}),
             },
             run_id=task["run_id"],
@@ -983,6 +1073,8 @@ class Supervisor:
             "ends_at": ends_at,
             "superseded_runners": superseded,
             "worktree_rebuilt": rebuilt,
+            "lane": execution.lane,
+            "reconciler": reconciler,
         }
 
     def _ensure_worktree(self, conn, task) -> dict | None:

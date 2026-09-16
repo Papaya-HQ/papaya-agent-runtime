@@ -134,8 +134,13 @@ def _ci_verdict(checks: list[dict[str, Any]]) -> tuple[str, list[str]]:
     return ("pass", [])
 
 
-def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
-    """The forge's view of one branch: its pull request, mergeability, and CI."""
+def _lookup_pr(branch: str, cwd: str | None, conversation: bool = False) -> dict[str, Any]:
+    """The forge's view of one branch: its pull request, mergeability, and CI.
+
+    ``conversation`` also reads what people said on an open pull request since its last
+    push (:func:`pr_conversation`): two more queries, which the rounds pay and the
+    heartbeat does not.
+    """
     unknown = {"known": False, "pr": None, "ci": "unknown", "failing": []}
     if cwd is None:
         return unknown
@@ -149,7 +154,7 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
             "all",
             "--json",
             "number,state,mergeable,mergeStateStatus,baseRefName,mergedAt,mergeCommit,url,"
-            "reviewDecision",
+            "reviewDecision,headRefOid,createdAt",
         ],
         cwd=cwd,
     )
@@ -186,11 +191,15 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
         "url": row.get("url") if isinstance(row.get("url"), str) else None,
         # `CHANGES_REQUESTED`, `APPROVED`, `REVIEW_REQUIRED`, or "" with no review.
         "review": str(row.get("reviewDecision") or "").upper(),
+        # The commit the pull request is at: what a round's attention is keyed on.
+        "head": row.get("headRefOid") if isinstance(row.get("headRefOid"), str) else None,
+        "created_at": row.get("createdAt") if isinstance(row.get("createdAt"), str) else None,
     }
     if found["state"] != "OPEN":
         return found  # a merged or closed pull request has nothing left to run
     code, out = _run_gh(
-        ["pr", "checks", str(found["pr"]), "--json", "name,bucket,startedAt,completedAt"], cwd=cwd
+        ["pr", "checks", str(found["pr"]), "--json", "name,bucket,startedAt,completedAt,link"],
+        cwd=cwd,
     )
     checks = _load_json(out)
     if isinstance(checks, list):
@@ -200,7 +209,149 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
         )
         if found["ci"] in ("pass", "fail") and settled:
             found["ci_seconds"] = ci_wall_seconds(checks)
+        found["pending_checks"] = [
+            {"name": str(c.get("name") or "a check"), "started_at": c.get("startedAt")}
+            for c in checks
+            if isinstance(c, dict) and str(c.get("bucket") or "").lower() == "pending"
+        ]
+        found["failing_links"] = [
+            str(c.get("link"))
+            for c in checks
+            if isinstance(c, dict)
+            and str(c.get("bucket") or "").lower() in CI_BAD_BUCKETS
+            and c.get("link")
+        ]
+    if conversation:
+        found.update(pr_conversation(found["pr"], cwd))
     return found
+
+
+#: Only unresolved review threads, with the first comment of each and when the thread
+#: last moved. `gh pr view` has no field for threads, so this is the one GraphQL query.
+_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          path
+          line
+          comments(first: 100) {
+            nodes { author { login } body createdAt }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_PR_URL_PARTS = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/\d+")
+
+
+def is_bot(login: object) -> bool:
+    """A bot's comment is not a person's: logins ending in `[bot]` are skipped."""
+    return str(login or "").endswith("[bot]")
+
+
+def pr_conversation(pr: object, cwd: str | None) -> dict[str, Any]:
+    """What people said on a pull request since its last push, for the rounds.
+
+    Returns ``last_push_at`` (the newest commit's date), ``comments`` (reviews with a
+    body and top-level comments, from a person, after that push) and ``threads``
+    (unresolved review threads whose newest comment is after that push). Each item has
+    a stable ``id``, so the same comment is the same reason next round. Anything
+    unreadable is simply absent: a forge that cannot be asked raises nothing.
+    """
+    code, out = _run_gh(["pr", "view", str(pr), "--json", "reviews,comments,commits,url"], cwd=cwd)
+    view = _load_json(out)
+    if code != 0 or not isinstance(view, dict):
+        return {}
+    commits = [c for c in view.get("commits") or [] if isinstance(c, dict)]
+    stamps = [str(c.get("committedDate") or "") for c in commits if c.get("committedDate")]
+    last_push = max(stamps) if stamps else ""
+    after = _parse_stamp(last_push)
+    said: list[dict[str, Any]] = []
+    for kind, key in (("review", "reviews"), ("comment", "comments")):
+        for item in view.get(key) or []:
+            if not isinstance(item, dict) or not str(item.get("body") or "").strip():
+                continue
+            login = (item.get("author") or {}).get("login")
+            stamp = item.get("submittedAt") or item.get("createdAt")
+            if is_bot(login) or not _after(stamp, after):
+                continue
+            said.append(
+                {
+                    "id": str(item.get("id") or f"{kind}:{login}:{stamp}"),
+                    "kind": kind,
+                    "author": login,
+                    "body": str(item.get("body") or "").strip(),
+                    "at": stamp,
+                }
+            )
+    threads: list[dict[str, Any]] = []
+    match = _PR_URL_PARTS.search(str(view.get("url") or ""))
+    if match:
+        code, out = _run_gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_THREADS_QUERY}",
+                "-F",
+                f"owner={match.group(1)}",
+                "-F",
+                f"name={match.group(2)}",
+                "-F",
+                f"number={pr}",
+            ],
+            cwd=cwd,
+        )
+        data = _load_json(out)
+        nodes = (
+            ((((data or {}).get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+            .get("reviewThreads", {})
+            .get("nodes")
+            if code == 0 and isinstance(data, dict)
+            else None
+        )
+        for node in nodes or []:
+            if not isinstance(node, dict) or node.get("isResolved"):
+                continue
+            comments = [
+                c for c in (node.get("comments") or {}).get("nodes") or [] if isinstance(c, dict)
+            ]
+            people = [c for c in comments if not is_bot((c.get("author") or {}).get("login"))]
+            if not people or not _after(max(str(c.get("createdAt") or "") for c in people), after):
+                continue
+            first = people[0]
+            threads.append(
+                {
+                    "id": str(node.get("id") or ""),
+                    "path": node.get("path"),
+                    "line": node.get("line"),
+                    "author": (first.get("author") or {}).get("login"),
+                    "body": str(first.get("body") or "").strip(),
+                }
+            )
+    return {"last_push_at": last_push or None, "comments": said, "threads": threads}
+
+
+def _parse_stamp(stamp: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(stamp or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _after(stamp: object, after: datetime | None) -> bool:
+    when = _parse_stamp(stamp)
+    if when is None:
+        return False
+    return after is None or when > after
 
 
 def ci_wall_seconds(checks: list[dict[str, Any]]) -> float | None:
@@ -242,7 +393,10 @@ def is_settled(entry: dict[str, Any]) -> bool:
 
 
 def pr_states(
-    conn: sqlite3.Connection, *, settled: dict[str, dict[str, Any]] | None = None
+    conn: sqlite3.Connection,
+    *,
+    settled: dict[str, dict[str, Any]] | None = None,
+    conversation: bool = False,
 ) -> list[dict[str, Any]]:
     """One entry per delivered/finished task whose branch could still be on the forge.
 
@@ -271,7 +425,11 @@ def pr_states(
         branch = str(row["branch"])
         if branch not in cache:
             cwd = _first_existing(row["worktree_path"], row["local_path"])
-            cache[branch] = _lookup_pr(branch, cwd)
+            cache[branch] = (
+                _lookup_pr(branch, cwd, conversation=True)
+                if conversation
+                else _lookup_pr(branch, cwd)
+            )
         entry = dict(cache[branch])
         entry["task_id"] = int(row["task_id"])
         entry["branch"] = branch

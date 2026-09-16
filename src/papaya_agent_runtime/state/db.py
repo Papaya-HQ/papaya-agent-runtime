@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS repos (
     test_db_url_template TEXT,
     source_line_ceiling INTEGER,
     needs_elevated_localhost INTEGER,
+    -- Opt-in, per repo: the runtime merges a delivered pull request that has sat green,
+    -- mergeable and unrequested for `delivery.merge_after_hours`, with this method.
+    auto_merge INTEGER,
+    merge_method TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -435,6 +439,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("test_db_url_template", "TEXT"),
         ("source_line_ceiling", "INTEGER"),
         ("needs_elevated_localhost", "INTEGER"),
+        ("auto_merge", "INTEGER"),
+        ("merge_method", "TEXT"),
     ):
         # The per-repo environment block (issue #60). Unset means the default, so
         # every already-registered repo gets the evidence-directory and local/CI

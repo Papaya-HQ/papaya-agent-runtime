@@ -318,6 +318,14 @@ def deliver(
                     pr_url = None
                     note = f"pushed; PR creation failed: {proc.stderr.strip()[:200]}"
 
+    requires_up_to_date = None
+    if pr_exists and forge_slug:
+        tool = _pr_tool()
+        if tool is not None and Path(tool).name == "gh":
+            requires_up_to_date = base_requires_up_to_date(
+                tool, forge_slug, base or _default_branch(conn, task), cwd=worktree
+            )
+
     store.set_task_status(conn, task_id, "delivered")
     store.append_event(
         conn,
@@ -333,6 +341,9 @@ def deliver(
             "base": base,
             "base_note": base_note,
             "cascaded": cascaded,
+            # Whether the base's ruleset or protection requires a branch to be up to
+            # date before it merges: what makes `BEHIND` a reason to steer, not noise.
+            "requires_up_to_date": requires_up_to_date,
         },
         run_id=task["run_id"],
         task_id=task_id,
@@ -344,6 +355,110 @@ def deliver(
         if extra:
             note = f"{note}; {extra}"
     return DeliveryResult(task_id, branch, head, pushed, pr_url, note, pr_exists=pr_exists)
+
+
+def _default_branch(conn, task) -> str:
+    if task["repo_id"]:
+        row = conn.execute(
+            "SELECT default_branch FROM repos WHERE id = ?", (task["repo_id"],)
+        ).fetchone()
+        if row is not None and row["default_branch"]:
+            return str(row["default_branch"])
+    return "main"
+
+
+def base_requires_up_to_date(tool: str, forge_slug: str, base: str, *, cwd: str) -> bool | None:
+    """Does ``base`` require a pull request's branch to be up to date before it merges?
+
+    Read from the base's active rules (a ruleset's required status checks with the
+    strict policy) and then from classic branch protection (`strict`). ``None`` when
+    neither could be read: unknown is not a requirement.
+    """
+    import json
+
+    known = False
+    proc = _run([tool, "api", f"repos/{forge_slug}/rules/branches/{base}"], cwd=cwd)
+    if proc.returncode == 0:
+        try:
+            rules = json.loads(proc.stdout)
+        except ValueError:
+            rules = None
+        if isinstance(rules, list):
+            known = True
+            for rule in rules:
+                params = rule.get("parameters") if isinstance(rule, dict) else None
+                if (
+                    isinstance(rule, dict)
+                    and rule.get("type") == "required_status_checks"
+                    and isinstance(params, dict)
+                    and params.get("strict_required_status_checks_policy")
+                ):
+                    return True
+    proc = _run(
+        [tool, "api", f"repos/{forge_slug}/branches/{base}/protection/required_status_checks"],
+        cwd=cwd,
+    )
+    if proc.returncode == 0:
+        try:
+            checks = json.loads(proc.stdout)
+        except ValueError:
+            checks = None
+        if isinstance(checks, dict):
+            return bool(checks.get("strict"))
+    return False if known else None
+
+
+#: The event a merge the forge refused leaves on the task, with why.
+MERGE_REFUSED = "merge_refused"
+#: The refusal that means the base requires an up-to-date branch.
+REFUSED_BEHIND = "up_to_date_required"
+_BEHIND_WORDS = ("not up to date", "up-to-date", "behind", "update the branch")
+
+
+@dataclass
+class MergeResult:
+    merged: bool
+    detail: str
+    #: Why the forge refused, when it did: :data:`REFUSED_BEHIND` or ``other``.
+    refused: str | None = None
+
+
+def merge_pull_request(task_id: int, pr: str, method: str = "squash") -> MergeResult:
+    """Merge a delivered task's pull request with ``gh pr merge``, and record a refusal.
+
+    Only the rounds call this, and only for a repository that opted into
+    `auto_merge`. A refusal because the base requires an up-to-date branch is
+    recorded as :data:`MERGE_REFUSED` with :data:`REFUSED_BEHIND`, which is what lets
+    a later round steer the worker to update the branch.
+    """
+    tool = _pr_tool()
+    if tool is None:
+        return MergeResult(False, "no gh found to merge with")
+    flag = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}.get(method, "--squash")
+    conn = init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        cwd = task["worktree_path"] if task is not None else None
+        _remote, slug = _forge_for_task(conn, task) if task is not None else ("origin", None)
+        argv = [tool, "pr", "merge", str(pr), flag]
+        if slug:
+            argv += ["--repo", slug]
+        proc = _run(argv, cwd=cwd if cwd and Path(cwd).is_dir() else None)
+        if proc.returncode == 0:
+            return MergeResult(True, f"merged with {method}")
+        said = (proc.stderr or proc.stdout or "").strip()
+        refused = REFUSED_BEHIND if any(w in said.lower() for w in _BEHIND_WORDS) else "other"
+        if task is not None:
+            store.append_event(
+                conn,
+                kind=MERGE_REFUSED,
+                payload={"task_id": task_id, "pr": str(pr), "reason": refused, "said": said[:500]},
+                run_id=task["run_id"],
+                task_id=task_id,
+            )
+        return MergeResult(False, said[:200] or "gh pr merge failed", refused=refused)
+    finally:
+        conn.close()
 
 
 def record_merged(task_id: int, merged_sha: str, *, note: str | None = None) -> DeliveryResult:

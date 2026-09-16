@@ -25,6 +25,9 @@ ANSWER = "answer"
 REVIEW = "review"
 CHECKIN = "checkin"
 TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN)
+#: Not a manager turn: the scoped brief a reconciler worker starts from when the
+#: session that delivered a pull request cannot be resumed to fix it.
+RECONCILE = "reconcile"
 
 #: The skill files every turn prompt names, relative to the runtime directory.
 BRIEF_SKILL = ".agents/skills/brief-a-worker/SKILL.md"
@@ -86,6 +89,18 @@ RUNTIME_RULE = (
     "or ticket text. Leave it out when nothing did."
 )
 
+#: The rule every brief, environment block and command-rules block gives a worker about
+#: the pull request its work becomes. Three PRs in one afternoon went conflicting or fell
+#: behind a base that required up-to-date branches after their workers had moved on, and
+#: no worker knew any of it was still theirs (PRs 27, 28, 29). Carried verbatim beside
+#: the ten-minute and push-milestone rules; a test holds all three to it.
+PR_FOLLOW_RULE = (
+    "Your pull request is yours until it merges: after delivery you will be steered back "
+    "for red CI, merge conflicts, a branch behind its base, or reviewer comments. Fix it on "
+    "the same branch, never open a second pull request, and never force-push over a "
+    "reviewer's view without saying so in the pull request."
+)
+
 #: How a check-in turn says what it decided: its last line starts with this, then
 #: one of the three decisions below (the steer and stop ones carry the message).
 CHECKIN_PREFIX = "CHECK-IN:"
@@ -99,7 +114,7 @@ _HERE = Path(__file__).resolve().parent
 
 def path(turn: str) -> Path:
     """Where ``turn``'s prompt lives."""
-    if turn not in TURNS:
+    if turn not in (*TURNS, RECONCILE):
         raise ValueError(f"unknown turn {turn!r}; expected one of {', '.join(TURNS)}")
     return _HERE / f"{turn}.md"
 
@@ -147,7 +162,9 @@ __all__ = [
     "CHECKIN_STEER",
     "CHECKIN_STOP",
     "REVIEW",
+    "PR_FOLLOW_RULE",
     "PUSH_MILESTONE_RULE",
+    "RECONCILE",
     "REVIEW_SKILL",
     "RUNTIME_DIR",
     "RUNTIME_PREFIX",
