@@ -392,6 +392,50 @@ def _gate_tool_problems(problems: list[Problem]) -> None:
     )
 
 
+def _gate_budget_problems(problems: list[Problem]) -> None:
+    """Is a registered repository's gate, by its own history, longer than a tool call?
+
+    That is exactly the repository where `ppy gate run` is the only way a gate
+    finishes: run as a tool call it is cut off at ten minutes. Only a budget the
+    repository's history derived (or a person set) says so; a default says nothing.
+    """
+    from papaya_agent_runtime import budgets, repos
+    from papaya_agent_runtime.state import init_db
+
+    try:
+        registered = repos.list_repos()
+        conn = init_db() if registered else None
+    except Exception:  # noqa: BLE001 - an unreadable state db is reported elsewhere
+        return
+    over: list[str] = []
+    try:
+        for row in registered:
+            for kind in (budgets.GATE, budgets.FULL_SUITE):
+                found = budgets.budget(str(row["name"]), kind, conn=conn)
+                if found.source == budgets.DEFAULT or found.seconds <= budgets.TOOL_CAP_SECONDS:
+                    continue
+                label = "local gate" if kind == budgets.GATE else "full suite"
+                over.append(f"{row['name']} {label} {int(found.seconds // 60)}m ({found.source})")
+    finally:
+        if conn is not None:
+            conn.close()
+    if not over:
+        return
+    problems.append(
+        Problem(
+            code="gate_budget_over_tool_cap",
+            summary=(
+                "gate budgets longer than the harness's ten-minute tool cap: " + "; ".join(over)
+            ),
+            fix=(
+                "run those gates only with `ppy gate run` (the environment block and briefs "
+                "say so); `ppy repo budgets <name>` shows the derivation"
+            ),
+            blocking=False,
+        )
+    )
+
+
 def _papaya_problems(problems: list[Problem]) -> None:
     """A missing workspace is never blocking — that is a standing rule, not a default.
 
@@ -447,6 +491,7 @@ def check() -> Readiness:
     _harness_problems(problems)
     _repo_problems(problems)
     _gate_tool_problems(problems)
+    _gate_budget_problems(problems)
     _papaya_problems(problems)
     _client_problems(problems)
     if any(p.blocking for p in problems):

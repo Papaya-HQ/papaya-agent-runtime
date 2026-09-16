@@ -64,6 +64,9 @@ NONE = "none"
 #: The widest summary line kept on the record.
 MAX_SUMMARY = 240
 
+#: `run`'s default for ``expected``: read the repository's budget.
+_FROM_HISTORY: Any = object()
+
 _SUMMARY_LINE = re.compile(
     r"\b\d+ (?:passed|failed|errors?|tests?|skipped)\b|test result:|^(?:ok|FAIL|PASS)\b"
     r"|\bTests?:\s",
@@ -187,6 +190,40 @@ def progress_line(label: str, elapsed: float, last: str) -> str:
     )
 
 
+def _budget_kind(full: bool) -> str:
+    from papaya_agent_runtime import budgets
+
+    return budgets.FULL_SUITE if full else budgets.GATE
+
+
+def expected_seconds(repo: str, full: bool) -> float | None:
+    """This repository's budget for the gate, when its own history stands behind one."""
+    from papaya_agent_runtime import budgets
+
+    found = budgets.budget(repo, _budget_kind(full))
+    return found.seconds if found.derived or found.source == budgets.OVERRIDE else None
+
+
+def expectation_line(label: str, repo: str, full: bool) -> str | None:
+    """What a caller is told to expect, from how long this gate has taken here."""
+    from papaya_agent_runtime import budgets
+
+    found = budgets.budget(repo, _budget_kind(full))
+    if not found.known or found.p90 is None:
+        return None
+    return (
+        f"the {label} here has taken up to {_duration(found.p90)} "
+        f"(p90 of its last {found.observations} runs); its budget is {_duration(found.seconds)}"
+    )
+
+
+def longer_than_usual_line(label: str, elapsed: float, budget_seconds: float) -> str:
+    return (
+        f"{label} is taking longer than usual: {_duration(elapsed)} elapsed, past this "
+        f"repository's budget of {_duration(budget_seconds)}"
+    )
+
+
 # ── Resolving what to run ───────────────────────────────────────────────────
 
 
@@ -288,12 +325,19 @@ def run(
     popen: Callable[..., Any] = subprocess.Popen,
     progress_every: float = PROGRESS_SECONDS,
     poll: float = POLL_SECONDS,
+    expected: Any = _FROM_HISTORY,
 ) -> GateResult:
     """Run ``spec`` to the end, with no timeout, and record the result on the ledger.
 
     Output goes straight to a file in the evidence directory rather than through a
     pipe, so a suite that prints a lot can never stall on a reader that went away.
+
+    ``expected`` is how long this gate should take (by default, the repository's budget
+    when history or a person stands behind one): past it, one progress line says the
+    gate is taking longer than usual. Its duration is kept as a budget observation.
     """
+    if expected is _FROM_HISTORY:
+        expected = expected_seconds(spec.repo, spec.full)
     output_path = _output_path(spec)
     started_at = _now()
     _record(
@@ -325,9 +369,13 @@ def run(
         if proc is not None:
             on_process(proc)
             last_progress = started
+            overdue = False
             while proc.poll() is None:
                 sleep(poll)
                 now = clock()
+                if expected is not None and not overdue and now - started > expected:
+                    overdue = True
+                    on_progress(longer_than_usual_line(spec.label, now - started, expected))
                 if now - last_progress >= progress_every:
                     last_progress = now
                     output.flush()
@@ -353,6 +401,16 @@ def run(
     # A gate killed by a signal (its supervisor stopping) did not fail: it never
     # finished, so it leaves no verdict to be steered on — only a note that it died.
     _record(spec, GATE_KILLED if result.exit_code < 0 else GATE_RESULT, result.as_dict())
+    from papaya_agent_runtime import budgets
+
+    # A red gate took as long as it took; one a signal ended never finished.
+    budgets.observe(
+        spec.repo,
+        _budget_kind(spec.full),
+        result.duration_seconds,
+        task_id=spec.task_id,
+        outcome=budgets.KILL if result.exit_code < 0 else ("pass" if result.green else "fail"),
+    )
     with (
         contextlib.suppress(OSError),
         (Path(spec.evidence_dir) / "receipts.txt").open("a", encoding="utf-8") as receipts,
@@ -490,6 +548,10 @@ def run_from_cli(
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
 
     spec = resolve(task_id=task_id, repo=repo, full=full)
+    expectation = expectation_line(spec.label, spec.repo, spec.full)
+    if expectation:
+        out(expectation)
+    expected = expected_seconds(spec.repo, spec.full)
     client = client or SupervisorClient()
     try:
         client.ping()
@@ -498,7 +560,7 @@ def run_from_cli(
             f"no supervisor is running, so the {spec.label} runs in this process: "
             f"`{spec.command}` in {spec.cwd}"
         )
-        result = run(spec, on_progress=out)
+        result = run(spec, on_progress=out, expected=expected)
         out(result.line())
         return 0 if result.green else 1
 
@@ -512,6 +574,7 @@ def run_from_cli(
     )
     deadline = clock() + max(0.0, wait_seconds)
     key = str(answer["key"])
+    overdue = False
     while True:
         if answer.get("error"):
             raise GateError(f"the gate could not run: {answer['error']}")
@@ -532,6 +595,10 @@ def run_from_cli(
         if not answer.get("ok"):
             raise GateError(str(answer.get("error") or "the supervisor lost the gate"))
         if answer.get("running"):
+            elapsed = float(answer.get("elapsed") or 0)
+            if expected is not None and not overdue and elapsed > expected:
+                overdue = True
+                out(longer_than_usual_line(spec.label, elapsed, expected))
             out(
                 progress_line(
                     spec.label,

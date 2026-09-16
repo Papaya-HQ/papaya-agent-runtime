@@ -25,10 +25,12 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    runner's existing path sends back to its gate; a question (status `blocked`, or
    a last progress note that asks one) gets the answer turn; a `worker_stopped`
    worker with a branch ahead of base and nothing in flight gets the stopped-short
-   path; a live worker silent past `health.quiet_minutes`, still planning past
-   `health.plan_minutes`, or first running for `health.checkin_after` gets the
-   **check-in turn**; a person-wait older than fifteen minutes is said on the
-   ticket once ("waiting on you: …") and the ticket is `blocked`.
+   path; a live worker silent past its repository's silence budget, still planning
+   past its plan budget, or first running for half its worker-session budget
+   (:mod:`papaya_agent_runtime.budgets`; with no history, `health.quiet_minutes`,
+   `health.plan_minutes` and `health.checkin_after`) gets the **check-in turn**; a
+   person-wait older than fifteen minutes is said on the ticket once ("waiting on
+   you: …") and the ticket is `blocked`.
 4. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
    (only terminal tasks, clean, every commit on a remote, base clone under
    `.ppy/repos`), then `git worktree prune` and `git fetch --prune` on the base
@@ -117,13 +119,43 @@ def interval_from_env(environ: Mapping[str, str] | None = None) -> float:
         return DEFAULT_ROUNDS_INTERVAL
 
 
-def _minutes(name: str, default: int) -> float:
-    try:
-        from papaya_agent_runtime.config import load_config
+@dataclass(frozen=True)
+class WorkerBudgets:
+    """How long a round lets a worker in one repository go before it checks in."""
 
-        return float(getattr(load_config().health, name))
-    except Exception:  # noqa: BLE001 - rounds run before setup too
-        return float(default)
+    #: Silent this long with a live session is `quiet`: the repository's silence budget.
+    quiet_seconds: float
+    #: Still planning this long after dispatch: the repository's plan budget.
+    plan_seconds: float
+    #: Running this long gets the midpoint check-in: half its worker-session budget.
+    midpoint_seconds: float
+    #: Which of the three history stands behind, for the reason a check-in gives.
+    sources: tuple[str, str, str] = ("default", "default", "default")
+
+
+def worker_budgets(repo: str | None) -> WorkerBudgets:
+    """The rounds' thresholds for a worker in ``repo``, from its budgets.
+
+    A repository with no history gets the configured defaults (`health.quiet_minutes`,
+    `health.plan_minutes`, `health.checkin_after`), exactly what every repository got
+    before budgets existed.
+    """
+    from papaya_agent_runtime import budgets
+
+    conn = db.init_db() if repo else None
+    try:
+        quiet = budgets.budget(repo, budgets.SILENCE, conn=conn)
+        plan = budgets.budget(repo, budgets.PLAN, conn=conn)
+        session = budgets.budget(repo, budgets.WORKER_SESSION, conn=conn)
+    finally:
+        if conn is not None:
+            conn.close()
+    return WorkerBudgets(
+        quiet_seconds=quiet.seconds,
+        plan_seconds=plan.seconds,
+        midpoint_seconds=session.seconds / 2,
+        sources=(quiet.source, plan.source, session.source),
+    )
 
 
 # ── reading the ledger for a round ──────────────────────────────────────────
@@ -532,6 +564,20 @@ def pr_attention_since_delivery(worker_task_id: int) -> bool:
         conn.close()
 
 
+def observe_ci(worker_task_id: int, seconds: float, outcome: str) -> None:
+    """Keep a delivered pull request's CI wall time once, however many rounds see it."""
+    from papaya_agent_runtime import budgets
+
+    conn = db.init_db()
+    try:
+        if not budgets.observed(
+            conn, task_id=worker_task_id, kind=budgets.CI, seconds=seconds, outcome=outcome
+        ):
+            budgets.observe_task(worker_task_id, budgets.CI, seconds, outcome=outcome, conn=conn)
+    finally:
+        conn.close()
+
+
 def record_pr_attention(worker_task_id: int, summary: str, reasons: list[str]) -> None:
     conn = db.init_db()
     try:
@@ -869,7 +915,8 @@ class Rounds:
         worker = ticket.worker
         if worker is None or ticket.phase not in (serve.PHASE_DISPATCHED, serve.PHASE_BLOCKED):
             return parts
-        quiet_after = timedelta(minutes=_minutes("quiet_minutes", health.DEFAULT_QUIET_MINUTES))
+        waits = await asyncio.to_thread(worker_budgets, worker.repo)
+        quiet_after = timedelta(seconds=waits.quiet_seconds)
         look = await asyncio.to_thread(
             look_at_worker, worker.task_id, now=now, quiet_after=quiet_after
         )
@@ -942,7 +989,7 @@ class Rounds:
 
         if look.status != "in_progress" or look.verdict is None or "checkin" in queued:
             return parts
-        due = self._checkins_due(look, now, records)
+        due = self._checkins_due(look, now, records, waits)
         if not due:
             return parts
         reason = "; ".join(why for _trigger, why in due)
@@ -998,8 +1045,12 @@ class Rounds:
 
     @staticmethod
     def _checkins_due(
-        look: WorkerLook, now: datetime, records: list[tuple[int, dict[str, Any]]]
+        look: WorkerLook,
+        now: datetime,
+        records: list[tuple[int, dict[str, Any]]],
+        waits: WorkerBudgets | None = None,
     ) -> list[tuple[str, str]]:
+        waits = waits or worker_budgets(None)
         due: list[tuple[str, str]] = []
         mine = [
             payload
@@ -1014,10 +1065,12 @@ class Rounds:
                     (
                         "quiet",
                         f"silent for {health.humanize(look.silent_seconds)} "
-                        "with its session still alive",
+                        "with its session still alive, past its "
+                        f"{health.humanize(int(waits.quiet_seconds))} silence budget "
+                        f"({waits.sources[0]})",
                     )
                 )
-        plan_after = _minutes("plan_minutes", health.DEFAULT_PLAN_MINUTES) * 60
+        plan_after = waits.plan_seconds
         if (
             look.latest_phase in (None, "plan")
             and running >= plan_after
@@ -1030,7 +1083,7 @@ class Rounds:
                     f"{int(plan_after // 60)}m; it should commit to a plan or say what blocks it",
                 )
             )
-        checkin_after = _minutes("checkin_after", 20) * 60
+        checkin_after = waits.midpoint_seconds
         if running >= checkin_after and not any(p.get("trigger") == "midpoint" for p in mine):
             due.append(
                 (
@@ -1104,6 +1157,10 @@ class Rounds:
             worker_id = int(entry["task_id"])
             if entry.get("status") != "delivered":
                 continue
+            if entry.get("ci_seconds") is not None:
+                await asyncio.to_thread(
+                    observe_ci, worker_id, float(entry["ci_seconds"]), str(entry.get("ci") or "")
+                )
             ticket = await asyncio.to_thread(self._ticket_of, worker_id, tickets)
             if ticket is None or ticket.task_id in held:
                 continue

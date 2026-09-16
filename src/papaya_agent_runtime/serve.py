@@ -705,9 +705,28 @@ def waiting_reason(result: object) -> str | None:
     return None
 
 
-def rerun_delay(waits: int) -> float:
-    """Seconds before rerunning a turn that has ended `WAITING:` ``waits`` times in a row."""
-    return min(WAIT_FIRST_SECONDS * 2 ** max(waits - 1, 0), WAIT_MAX_SECONDS)
+def rerun_delay(waits: int, gate_budget: float | None = None) -> float:
+    """Seconds before rerunning a turn that has ended `WAITING:` ``waits`` times in a row.
+
+    ``gate_budget`` is the repository's gate budget when its history stands behind one:
+    a turn waiting on a gate known to take forty minutes is not rerun every five.
+    """
+    delay = min(WAIT_FIRST_SECONDS * 2 ** max(waits - 1, 0), WAIT_MAX_SECONDS)
+    return max(delay, gate_budget) if gate_budget else delay
+
+
+def turn_repo(ticket: Ticket) -> str | None:
+    """The repository a ticket's turns are about: its worker's, else the one the item names."""
+    worker = ticket.worker
+    return (worker.repo if worker is not None else None) or ticket.held.repo
+
+
+def known_gate_budget(repo: str | None) -> float | None:
+    """The longer of this repository's gate and full-suite budgets, when history backs one."""
+    from papaya_agent_runtime import budgets
+
+    found = budgets.longest_gate(repo)
+    return found.seconds if found is not None else None
 
 
 def gate_steer_message(
@@ -1644,7 +1663,8 @@ class TicketRunner:
         reason = waiting_reason(result)
         if reason is None:
             return None
-        delay = rerun_delay(waits + 1)
+        gate_budget = await asyncio.to_thread(known_gate_budget, turn_repo(ticket))
+        delay = rerun_delay(waits + 1, gate_budget)
         _report_progress(
             ticket.job,
             ticket.phase,
@@ -1702,6 +1722,7 @@ class TicketRunner:
         runner = self._run_turn or run_turn
         await self._mark_read(ticket)
         ticket.turn_running = turn
+        started = self._clock()
         try:
             result = await asyncio.to_thread(
                 runner, launch, should_stop=ticket.should_stop, transcript_path=transcript
@@ -1710,8 +1731,31 @@ class TicketRunner:
             ticket.turn_running = None
             # Whatever was said while the turn ran is read as soon as it ends.
             ticket.comments_read_at = None
+        await self._observe_turn(ticket, turn, self._clock() - started, result)
         self._check_stop(ticket)
         return result
+
+    async def _observe_turn(self, ticket: Ticket, turn: str, seconds: float, result: Any) -> None:
+        """Keep how long a brief or review turn took, against its repository."""
+        from papaya_agent_runtime import budgets
+
+        kind = {prompts.BRIEF: budgets.BRIEF_TURN, prompts.REVIEW: budgets.REVIEW_TURN}.get(turn)
+        if kind is None:
+            return
+        if ticket.should_stop():
+            outcome = budgets.KILL
+        elif waiting_reason(result) is not None:
+            outcome = "waiting"
+        else:
+            outcome = "ok" if getattr(result, "exit_code", 0) == 0 else "fail"
+        await asyncio.to_thread(
+            budgets.observe,
+            turn_repo(ticket),
+            kind,
+            seconds,
+            task_id=ticket.held.task_id,
+            outcome=outcome,
+        )
 
     def _root(self) -> str:
         from papaya_agent_runtime.manager.launch import repo_root

@@ -81,6 +81,31 @@ and exit code, and `ppy serve` decides on that record: a worker with a green gat
 its head is reviewed, a red one is steered with the summary, and one that stopped with
 none is steered to run `ppy gate run`.
 
+## Waits come from each repository's history
+
+One timeout fits no repository. A backend suite outlasts the tool cap, a frontend
+worker's first ten minutes are an install, and a client gate takes forty seconds. So the
+runtime keeps every duration it already sees, per repository, where it ends: gate and
+full-suite runs (including a push through a pre-push hook that runs the suite), worker
+sessions, a worker's plan phase, the silence between its progress notes, brief and
+review turns, and CI on delivered pull requests. From the newest 20 within 14 days it
+derives a **budget**: the 90th percentile × 1.5, never below the configured default,
+never above a ceiling (gate 2h, worker session 6h, plan 45m, silence 90m). With fewer
+than three observations the default applies. A stalled or killed run is kept but never
+derived from.
+
+The waits read those budgets. The rounds' quiet and plan check-ins use the worker's
+repository's silence and plan budgets, and the midpoint check-in uses half its
+worker-session budget. `ppy gate run` says how long the gate usually takes and says once
+when a run is taking longer than usual. A turn that ends `WAITING:` on a repository
+whose gate is known to be long waits that long before it reruns. The worker's
+environment block says how long the gate has taken there, and readiness warns when a
+repository's gate budget is longer than the ten-minute tool cap.
+
+`ppy repo budgets [<repo>]` prints each kind's observation count, p90 and budget, and
+whether it is `derived`, `default` or `override`. `ppy repo set <repo> --budget
+<kind>=<seconds>` sets an override, which wins over the history; `0` clears it.
+
 Work itself only ever happens inside repositories registered under `.ppy/repos/`. It
 never scans your filesystem.
 
@@ -206,6 +231,7 @@ ppy repo discover                       # repos on the forge that aren't registe
 ppy repo add https://github.com/you/your-repo
 ppy repo onboard your-repo              # learn what it is, its build, tests, gate policy
 ppy gate run --task <task_id>           # a gate under the supervisor, past any tool timeout
+ppy repo budgets your-repo              # how long things take there, and how long it waits
 ppy repo locate "hover card"            # which registered repos contain these strings
 ppy serve                               # the always-on manager: supervisor + Papaya loop
 ppy sweep                               # ask the running serve to look for assigned work now
@@ -442,9 +468,10 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
      something, gets the answer turn.
    - **Stopped short.** A stopped worker whose branch is ahead of base and has no gate
      recorded at its head goes to that same gate steer.
-   - **Check-in.** A worker gets the **check-in turn** if it is silent past
-     `health.quiet_minutes` with a live session, still planning past
-     `health.plan_minutes`, or has run for `health.checkin_after` minutes (20). The turn
+   - **Check-in.** A worker gets the **check-in turn** if it is silent past its
+     repository's silence budget with a live session, still planning past the plan
+     budget, or has run for half its worker-session budget. Without history those are
+     `health.quiet_minutes`, `health.plan_minutes` and `health.checkin_after` (20). The turn
      reads the brief's Goals and the whole progress log, then ends with one line:
      `CHECK-IN: continue`, `CHECK-IN: steer <message>` or
      `CHECK-IN: stop and resume with <message>`. The decision and why the check ran are

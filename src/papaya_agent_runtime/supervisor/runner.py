@@ -12,11 +12,13 @@ import contextlib
 import os
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from papaya_agent_runtime import budgets
 from papaya_agent_runtime.providers.base import ProviderAdapter, TaskSpec, WorkerResult
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor import autocommit
@@ -158,6 +160,7 @@ class RunnerGuardian:
             task_values=spec.process_env,
         )
 
+        session_started = time.monotonic()
         self._proc = subprocess.Popen(
             argv,
             cwd=spec.worktree_path,
@@ -205,6 +208,7 @@ class RunnerGuardian:
         stderr = self._proc.stderr.read() if self._proc.stderr else ""
         self._proc.wait()
         exit_code = self._proc.returncode
+        session_seconds = time.monotonic() - session_started
         if self._on_exit is not None:
             self._on_exit()
 
@@ -248,6 +252,14 @@ class RunnerGuardian:
                 },
                 run_id=spec.run_id,
                 task_id=spec.task_id,
+            )
+            # Ended by the session that replaced it, not by running its course.
+            budgets.observe_task(
+                spec.task_id,
+                budgets.WORKER_SESSION,
+                session_seconds,
+                outcome=budgets.KILL,
+                conn=conn,
             )
             self._proc = None
             return result
@@ -347,6 +359,15 @@ class RunnerGuardian:
             kind=kind,
             payload=payload,
             exit_code=exit_code if exit_code is not None else -1,
+        )
+        if verdict.stopped:
+            outcome = budgets.STALL
+        elif exit_code is not None and exit_code < 0:
+            outcome = budgets.KILL
+        else:
+            outcome = result.status
+        budgets.observe_task(
+            spec.task_id, budgets.WORKER_SESSION, session_seconds, outcome=outcome, conn=conn
         )
         self._proc = None
         return result
