@@ -37,6 +37,10 @@ Judge the direction against both.
   Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green, and in any case before starting a run that may exceed ten minutes (a full suite, `make verify`, a build). The commit message says which goal; the push goes to your task's lease branch.
 - **Carrying on would only waste its work** (it is building the wrong thing, or wedged
   in a loop): stop it and resume it with what to do instead.
+- **A person steered it** (the facts list direction given `by: person` from a session):
+  that direction stands. Judge the worker against it, not against your own idea of the
+  work, and never steer it back. If the record shows the person's direction cannot work,
+  continue and say why in your last message before the `CHECK-IN:` line.
 
 Do not run `ppy steer` or `ppy resume` yourself: the runtime does what your last line
 says, exactly once.

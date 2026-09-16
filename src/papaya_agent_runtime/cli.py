@@ -1251,12 +1251,26 @@ def _cmd_lease(args: argparse.Namespace) -> int:
     return 0
 
 
+def _actor() -> str:
+    """Who this `ppy` is acting for, as the `by` on what it records.
+
+    A manager turn `ppy serve` launched carries its ticket's run in the environment;
+    anything else on this machine is a person at a session.
+    """
+    from papaya_agent_runtime.papaya_events import TICKET_RUN_ENV
+    from papaya_agent_runtime.state import store
+
+    return store.BY_MANAGER if os.environ.get(TICKET_RUN_ENV) else store.BY_PERSON
+
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
 
     client = SupervisorClient()
     try:
-        resp = client.resume_task(args.task_id, message=args.message, ends_at=args.ends_at)
+        resp = client.resume_task(
+            args.task_id, message=args.message, ends_at=args.ends_at, by=_actor()
+        )
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1274,18 +1288,20 @@ def _cmd_steer(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
 
     client = SupervisorClient()
+    replace = args.replace or getattr(args, "stop", False)
     try:
         resp = client.steer_task(
-            args.task_id, args.message, delivery="replace" if args.replace else "append"
+            args.task_id, args.message, delivery="replace" if replace else "append", by=_actor()
         )
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    what = "stop" if getattr(args, "stop", False) else "steer"
     if not resp.get("ok"):
-        print(f"steer failed: {resp.get('error')}", file=sys.stderr)
+        print(f"{what} failed: {resp.get('error')}", file=sys.stderr)
         return 1
     status = resp.get("status")
-    line = f"steer task {args.task_id}: mode={resp.get('mode')}"
+    line = f"{what} task {args.task_id}: mode={resp.get('mode')}"
     if status:
         line += f" status={status}"
     print(f"{line} {resp.get('note', '')}".rstrip())
@@ -1303,7 +1319,7 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     client = SupervisorClient()
     try:
         resp = client.answer_question(
-            args.task_id, args.answer, scope=args.scope, rationale=args.rationale
+            args.task_id, args.answer, scope=args.scope, rationale=args.rationale, by=_actor()
         )
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)
@@ -2056,9 +2072,49 @@ def _cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_status_team(args: argparse.Namespace) -> int:
+    from papaya_agent_runtime import standalone, team
+    from papaya_agent_runtime.paths import db_path
+
+    snap = team.snapshot() if db_path().exists() else None
+    if getattr(args, "json", False):
+        print(json.dumps(snap or {}, indent=2, sort_keys=True, default=str))
+        # The JSON is for a script; the invitation must not break it.
+        standalone.say_invitation(sys.stderr)
+        return 0
+    if snap is None:
+        print("team: no state yet (nothing has been picked up or dispatched on this machine)")
+    else:
+        for line in team.render(snap):
+            print(line)
+    standalone.say_invitation(sys.stdout)
+    return 0
+
+
+def _cmd_tail(args: argparse.Namespace) -> int:
+    from papaya_agent_runtime import team
+    from papaya_agent_runtime.paths import db_path
+
+    try:
+        since = team.parse_duration(args.since)
+    except ValueError as exc:
+        print(f"tail: {exc}", file=sys.stderr)
+        return 2
+    if not db_path().exists() and not args.follow:
+        return 0
+    import contextlib
+
+    with contextlib.suppress(KeyboardInterrupt):
+        team.tail(lambda line: print(line, flush=True), since=since, follow=args.follow)
+    return 0
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.paths import config_path, ppy_home
     from papaya_agent_runtime.repos import list_repos
+
+    if getattr(args, "team", False) or getattr(args, "json", False):
+        return _cmd_status_team(args)
 
     print(f"ppy home: {ppy_home()}")
     print(f"config:  {'present' if config_path().exists() else 'missing (run ppy setup)'}")
@@ -2895,6 +2951,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     steer.set_defaults(func=_cmd_steer)
 
+    stop = sub.add_parser(
+        "stop",
+        help=(
+            "stop a worker's current turn and resume it with this message alone "
+            "(a steer that supersedes everything queued)"
+        ),
+    )
+    stop.add_argument("task_id", type=int)
+    stop.add_argument("--message", required=True, help="what the worker does instead")
+    stop.set_defaults(func=_cmd_steer, stop=True, replace=True)
+
     answer = sub.add_parser("answer", help="answer a blocked task and record a durable decision")
     answer.add_argument("task_id", type=int)
     answer.add_argument("--answer", required=True, help="the answer to the pending question")
@@ -3211,7 +3278,29 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.set_defaults(func=_cmd_reconcile)
 
     status = sub.add_parser("status", help="show a compact runtime summary")
+    status.add_argument(
+        "--team",
+        action="store_true",
+        help=(
+            "the team as one picture: held tickets, workers and what they are doing, "
+            "pull requests, the lane, blockers, the last round, what waits on a person"
+        ),
+    )
+    status.add_argument(
+        "--json", action="store_true", help="the --team facts, machine-readable (implies --team)"
+    )
     status.set_defaults(func=_cmd_status)
+
+    tail = sub.add_parser(
+        "tail", help="the daemon's event stream, one line per event (pickups, notes, rounds, ...)"
+    )
+    tail.add_argument(
+        "--since", default="10m", help="how far back to start: 30s, 10m, 2h, 1d (default 10m)"
+    )
+    tail.add_argument(
+        "--follow", "-f", action="store_true", help="keep printing new events until interrupted"
+    )
+    tail.set_defaults(func=_cmd_tail)
 
     for name in ("start", "manager"):
         start = sub.add_parser(

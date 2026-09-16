@@ -376,6 +376,8 @@ def update(
         changes = ledger.observe(verdict, moment, overrides)
         freed = ledger.release_comments({b.fingerprint for b in changes.cleared})
         ledger.save()
+    if changes.appeared or changes.cleared:
+        _record_change(changes)
     if freed:
         from papaya_agent_runtime import sweep
 
@@ -435,7 +437,36 @@ def set_idle_work_kept(names: list[str], *, now: datetime | None = None) -> Chan
                     changes.changed.append(existing)
                 existing.last_seen = stamp
         ledger.save()
+    if changes.appeared or changes.cleared:
+        _record_change(changes)
     return changes
+
+
+def _record_change(changes: Changes) -> None:
+    """A blocker opening or clearing, on the event ledger, for `ppy tail`. Never raises.
+
+    Only into a ledger that already exists: a readiness check on a machine that was
+    never set up must not create one.
+    """
+    from papaya_agent_runtime import team
+    from papaya_agent_runtime.paths import db_path
+    from papaya_agent_runtime.state import db, store
+
+    with contextlib.suppress(Exception):
+        if not db_path().exists():
+            return
+        conn = db.init_db()
+        try:
+            store.append_event(
+                conn,
+                kind=team.BLOCKERS_EVENT,
+                payload={
+                    "opened": [f"{b.code}: {redact(b.title)}" for b in changes.appeared],
+                    "cleared": [f"{b.code}: {redact(b.title)}" for b in changes.cleared],
+                },
+            )
+        finally:
+            conn.close()
 
 
 def current() -> list[dict[str, Any]]:

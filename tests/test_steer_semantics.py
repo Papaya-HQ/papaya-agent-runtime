@@ -64,6 +64,33 @@ def test_steering_a_delivered_task_resumes_it_instead_of_queueing(server, source
     assert not [e for e in _events(task_id, "steer") if e.get("mode") == "checkpoint_pending"]
 
 
+def test_a_steer_from_a_session_is_recorded_by_a_person_and_from_a_turn_by_the_manager(
+    server, source_repo, monkeypatch, capsys
+) -> None:
+    from papaya_agent_runtime import cli
+    from papaya_agent_runtime.papaya_events import TICKET_RUN_ENV
+
+    srv, client = server
+    added = repos.add_repo(source_repo)
+    task_id = client.dispatch_task(repo=added.name, title="ship it")["task_id"]
+    _wait_status(client, task_id, {"worker_done"})
+    store.set_task_status(init_db(), task_id, "delivered")
+
+    monkeypatch.delenv(TICKET_RUN_ENV, raising=False)
+    assert cli.main(["steer", str(task_id), "--message", "rename the flag too"]) == 0
+    assert capsys.readouterr().out.startswith(f"steer task {task_id}: mode=resume")
+    assert _events(task_id, "resumed")[-1]["by"] == "person"
+
+    _wait_status(client, task_id, {"worker_done"})
+    store.set_task_status(init_db(), task_id, "delivered")
+    monkeypatch.setenv(TICKET_RUN_ENV, "1")
+    assert cli.main(["stop", str(task_id), "--message", "only the rename"]) == 0
+    assert capsys.readouterr().out.startswith(f"stop task {task_id}: mode=resume")
+    resumed = _events(task_id, "resumed")
+    assert [r["by"] for r in resumed] == ["person", "manager"]
+    assert resumed[-1]["message"] == "only the rename"
+
+
 def test_queued_checkpoint_steer_is_applied_when_the_turn_ends(server, source_repo, monkeypatch):
     srv, client = server
     added = repos.add_repo(source_repo)

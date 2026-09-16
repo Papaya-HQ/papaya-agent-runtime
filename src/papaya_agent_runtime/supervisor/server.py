@@ -314,6 +314,7 @@ class SupervisorServer:
                         int(request["task_id"]),
                         request.get("message"),
                         ends_at=request.get("ends_at"),
+                        by=request.get("by"),
                     ),
                 }
             if cmd == "steer_task":
@@ -323,6 +324,7 @@ class SupervisorServer:
                         int(request["task_id"]),
                         request["message"],
                         delivery=request.get("delivery") or "append",
+                        by=request.get("by"),
                     ),
                 }
             if cmd == "answer_question":
@@ -333,6 +335,7 @@ class SupervisorServer:
                         request["answer"],
                         scope=request.get("scope", "run"),
                         rationale=request.get("rationale"),
+                        by=request.get("by"),
                     ),
                 }
             if cmd == "reconcile":

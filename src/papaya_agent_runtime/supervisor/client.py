@@ -61,6 +61,11 @@ def ensure_supervisor(*, timeout: float = 5.0) -> tuple[SupervisorClient, bool]:
     )
 
 
+def _by(by: str | None) -> dict:
+    """Who is asking, on the wire only when somebody said: an older server takes no `by`."""
+    return {"by": by} if by else {}
+
+
 class SupervisorClient:
     def __init__(self, socket_path: str | None = None) -> None:
         self.socket_path = socket_path or default_socket_path()
@@ -101,19 +106,42 @@ class SupervisorClient:
         )
 
     def resume_task(
-        self, task_id: int, message: str | None = None, ends_at: str | None = None
+        self,
+        task_id: int,
+        message: str | None = None,
+        ends_at: str | None = None,
+        by: str | None = None,
     ) -> dict:
         return self._call(
-            {"cmd": "resume_task", "task_id": task_id, "message": message, "ends_at": ends_at}
+            {
+                "cmd": "resume_task",
+                "task_id": task_id,
+                "message": message,
+                "ends_at": ends_at,
+                **_by(by),
+            }
         )
 
-    def steer_task(self, task_id: int, message: str, delivery: str = "append") -> dict:
+    def steer_task(
+        self, task_id: int, message: str, delivery: str = "append", by: str | None = None
+    ) -> dict:
         return self._call(
-            {"cmd": "steer_task", "task_id": task_id, "message": message, "delivery": delivery}
+            {
+                "cmd": "steer_task",
+                "task_id": task_id,
+                "message": message,
+                "delivery": delivery,
+                **_by(by),
+            }
         )
 
     def answer_question(
-        self, task_id: int, answer: str, scope: str = "run", rationale: str | None = None
+        self,
+        task_id: int,
+        answer: str,
+        scope: str = "run",
+        rationale: str | None = None,
+        by: str | None = None,
     ) -> dict:
         return self._call(
             {
@@ -122,6 +150,7 @@ class SupervisorClient:
                 "answer": answer,
                 "scope": scope,
                 "rationale": rationale,
+                **_by(by),
             }
         )
 

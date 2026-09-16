@@ -479,6 +479,90 @@ def test_a_worker_whose_gate_runs_under_the_supervisor_is_not_nudged(
     assert checkins() == []
 
 
+class SessionSupervisor:
+    """The supervisor `ppy steer` reaches from a session: it records the steer, as the real one."""
+
+    def steer_task(
+        self, task_id: int, message: str, delivery: str = "append", by: str | None = None
+    ) -> dict[str, Any]:
+        conn = init_db()
+        try:
+            task = store.get_task(conn, task_id)
+            store.append_event(
+                conn,
+                kind="steer",
+                payload={
+                    "task_id": task_id,
+                    "mode": "checkpoint_pending",
+                    "message": message,
+                    "delivery": delivery,
+                    "by": by,
+                },
+                run_id=task["run_id"],
+                task_id=task_id,
+            )
+        finally:
+            conn.close()
+        return {"ok": True, "mode": "checkpoint_pending", "queue": []}
+
+
+def test_a_person_steer_from_a_session_is_not_undone_by_the_next_round(
+    ppy_home, client_home, ready, registered_repo, assigned, pruned, monkeypatch
+) -> None:
+    from papaya_agent_runtime import cli
+    from papaya_agent_runtime.supervisor import client as supervisor_client
+
+    person = "Use the existing things table; do not add a migration."
+    monkeypatch.setattr(supervisor_client, "SupervisorClient", SessionSupervisor)
+    monkeypatch.delenv(papaya_events.TICKET_RUN_ENV, raising=False)
+    runtime_steers: list[tuple[int, str]] = []
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            working_worker(
+                turn.run_id, note="Deciding between a new table and a migration.", phase="plan"
+            )
+        elif turn.name == prompts.CHECKIN:
+            return "The person's direction stands and the worker has it.\nCHECK-IN: continue"
+        return None
+
+    turns, timer, clock = FakeTurns(act), Timer(), WallClock()
+    harness = Harness(FakeEvents([EVENT]))
+    runner = _runner(turns, FakePapaya(), steer=lambda t, m: runtime_steers.append((t, m)))
+
+    async def scenario() -> int:
+        task = _serve(harness, client_home, runner, _seams(timer, clock, pruned))
+        worker = await _dispatched(timer)
+        # Planning past its budget: the round is due to check in on it. A person at a
+        # session steers it first, through `ppy steer`, while the daemon runs.
+        clock.advance(minutes=11)
+        assert await asyncio.to_thread(cli.main, ["steer", str(worker), "--message", person]) == 0
+        await timer.round()
+        await asyncio.sleep(scale(0.2))
+        assert checkins() == [] and turns.names() == [prompts.BRIEF]
+        assert not events_of(int(ticket_task()["id"]), rounds.ROUND_EVENT)
+        # A silence budget later with nothing from the worker, the round checks in, and
+        # the check-in turn is told what the person said.
+        clock.advance(minutes=6)
+        await timer.round()
+        await _until(lambda: checkins(), what="the check-in after the person's steer")
+        harness.loop.request_stop()
+        assert await task == 0
+        return worker
+
+    worker = asyncio.run(scenario())
+
+    (steer,) = events_of(worker, "steer")
+    assert (steer["by"], steer["message"]) == ("person", person)
+    assert turns.names() == [prompts.BRIEF, prompts.CHECKIN]
+    prompt = turns.calls[1].prompt
+    assert "by: person" in prompt and person in prompt
+    (record,) = checkins()
+    assert record["decision"] == prompts.CHECKIN_CONTINUE
+    assert runtime_steers == []
+    assert [s for s in events_of(worker, "steer") if s.get("by") != "person"] == []
+
+
 # ── blocked workers ─────────────────────────────────────────────────────────
 
 

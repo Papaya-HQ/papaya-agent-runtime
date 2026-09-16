@@ -328,6 +328,67 @@ def _done_before(records: list[tuple[int, dict[str, Any]]], action: str, **match
     ]
 
 
+def record_round_summary(line: str) -> None:
+    """The round's summary line, as an event on no task."""
+    from papaya_agent_runtime import team
+
+    conn = db.init_db()
+    try:
+        store.append_event(conn, kind=team.ROUND_SUMMARY_EVENT, payload={"line": line})
+    finally:
+        conn.close()
+
+
+def observe_pr(worker_task_id: int, entry: dict[str, Any]) -> bool:
+    """Record a delivered worker's pull request state when it differs from the last record.
+
+    The rounds read the forge live and keep none of it, so without this nothing on the
+    record says what a pull request's CI or review is. Returns whether it recorded.
+    """
+    from papaya_agent_runtime import team
+
+    observed = {
+        "task_id": worker_task_id,
+        "pr": entry.get("pr"),
+        "url": entry.get("url"),
+        "state": entry.get("state"),
+        "merged": bool(entry.get("merged")),
+        "ci": entry.get("ci"),
+        "review": entry.get("review") or None,
+        "head": entry.get("head"),
+    }
+    conn = db.init_db()
+    try:
+        row = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+            (worker_task_id, team.PR_OBSERVED_EVENT),
+        ).fetchone()
+        if row is not None and _payload(row) == observed:
+            return False
+        task = store.get_task(conn, worker_task_id)
+        store.append_event(
+            conn,
+            kind=team.PR_OBSERVED_EVENT,
+            payload=observed,
+            run_id=int(task["run_id"]) if task is not None else None,
+            task_id=worker_task_id,
+        )
+        return True
+    finally:
+        conn.close()
+
+
+def person_steers(worker_task_id: int) -> list[dict[str, Any]]:
+    """Every steer, answer or resume a person made on this worker (:func:`team.person_actions`)."""
+    from papaya_agent_runtime import team
+
+    conn = db.init_db()
+    try:
+        return team.person_actions(conn, worker_task_id)
+    finally:
+        conn.close()
+
+
 def person_wait_since(ticket_task_id: int) -> tuple[int, str, datetime | None] | None:
     """The open person-wait todo on a ticket, with when it was recorded."""
     conn = db.init_db()
@@ -892,6 +953,9 @@ class Rounds:
         if parts:
             line = "round: " + "; ".join(parts)
             self.summaries.append(line)
+            # On the record too, so `ppy status --team` and `ppy tail` can say it.
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(record_round_summary, line)
             if self._stderr is not None:
                 with contextlib.suppress(Exception):
                     print(f"ppy serve: {line}", file=self._stderr, flush=True)
@@ -1106,6 +1170,11 @@ class Rounds:
 
         if look.status != "in_progress" or look.verdict is None or "checkin" in queued:
             return parts
+        steers = await asyncio.to_thread(person_steers, worker.task_id)
+        if self._person_has_it(look, steers, records, now, waits):
+            # A person at a session just gave this worker direction. A check-in now
+            # would second-guess it before the worker has even answered.
+            return parts
         push = None
         if look.running_seconds(now) >= _push_by_seconds():
             push = await asyncio.to_thread(self._pushed, worker.task_id)
@@ -1113,7 +1182,7 @@ class Rounds:
         if not due:
             return parts
         reason = "; ".join(why for _trigger, why in due)
-        facts = await asyncio.to_thread(self._checkin_facts, worker, look, gate_now)
+        facts = await asyncio.to_thread(self._checkin_facts, worker, look, gate_now, steers)
         ticket.nudges.append(
             serve.Nudge(
                 "checkin",
@@ -1235,13 +1304,53 @@ class Rounds:
         return due
 
     @staticmethod
+    def _person_has_it(
+        look: WorkerLook,
+        steers: list[dict[str, Any]],
+        records: list[tuple[int, dict[str, Any]]],
+        now: datetime,
+        waits: WorkerBudgets,
+    ) -> bool:
+        """A person steered this worker after the last check-in, and it has not answered yet.
+
+        Answered means a progress note since the steer. Not forever: a worker still
+        silent one silence budget after a person's steer is checked on like any other.
+        """
+        if not steers:
+            return False
+        last = steers[-1]
+        checked = max(
+            (
+                int(p.get("after_event_id") or 0)
+                for _id, p in records
+                if p.get("action") == "checkin" and p.get("worker_task_id") == look.task_id
+            ),
+            default=0,
+        )
+        if last["event_id"] <= checked:
+            return False
+        if any(event_id > last["event_id"] for event_id, *_rest in look.progress):
+            return False
+        at = _parse(last["at"])
+        return at is None or (now - at).total_seconds() < waits.quiet_seconds
+
+    @staticmethod
     def _checkin_facts(
-        worker: serve.Worker, look: WorkerLook, gate_now: GateState
+        worker: serve.Worker,
+        look: WorkerLook,
+        gate_now: GateState,
+        steers: list[dict[str, Any]] | None = None,
     ) -> tuple[tuple[str, str], ...]:
         log_lines = "\n".join(
             f"{at} [{phase}] {note}".rstrip() for _id, at, phase, note in look.progress
         )
+        person = "\n".join(f"{s['at']} {s['kind']}: {s['message']}".rstrip() for s in steers or [])
         return (
+            (
+                "direction a person gave this worker from a session (by: person), oldest first; "
+                "it stands unless the record shows it is wrong",
+                person or "(none)",
+            ),
             (
                 "the brief's Goals",
                 brief_goals(worker) or "(the archived brief has no Goals section)",
@@ -1302,6 +1411,7 @@ class Rounds:
             worker_id = int(entry["task_id"])
             if entry.get("status") != "delivered":
                 continue
+            await asyncio.to_thread(observe_pr, worker_id, entry)
             if entry.get("ci_seconds") is not None:
                 await asyncio.to_thread(
                     observe_ci, worker_id, float(entry["ci_seconds"]), str(entry.get("ci") or "")

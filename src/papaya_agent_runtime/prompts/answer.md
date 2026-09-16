@@ -30,6 +30,9 @@ Answer in a way that keeps both true.
       ppy todo add "<the question, in one line>" --task <ticket task id> --blocked-on user
 
   and end the turn. Do not answer a question that is not yours to answer.
+- **A comment asks where the work is** ("status?", "what is it doing?"): reply on the
+  work item from the facts' status line (`ppy status --team` is the same record) and
+  nothing else. Say what it says; add nothing it does not.
 
 Never guess an answer to get the worker moving. End the turn once you have answered,
 steered, or recorded the wait.

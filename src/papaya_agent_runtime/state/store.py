@@ -265,6 +265,12 @@ def dependencies_of(conn: sqlite3.Connection, task_id: int) -> list[int]:
 # --------------------------------------------------------------------------- #
 
 
+#: Who steered, answered or resumed a worker, as the `by` on its events: a person at
+#: an interactive session, or `ppy serve` (its runner, or a manager turn it ran).
+BY_PERSON = "person"
+BY_MANAGER = "manager"
+
+
 def next_seq(conn: sqlite3.Connection, run_id: int | None) -> int:
     row = conn.execute(
         "SELECT COALESCE(MAX(seq), 0) FROM events WHERE run_id IS ?",

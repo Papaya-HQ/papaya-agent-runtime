@@ -732,6 +732,34 @@ After `delivery.merge_after_hours` (24) at one head, the ticket gets one comment
 `ppy repo set <repo> --auto-merge` (off by default; `--merge-method squash|merge|rebase`),
 the runtime merges it instead, and the ticket goes to `done` the way any merge does.
 
+### Copiloting the team from a session
+
+A person can open a session in this checkout while `ppy serve` runs and work beside it:
+
+- `ppy status --team` is the whole team in one picture, one line per item: held tickets
+  with phase and age, each worker with its last tool, how long it has run and its last
+  progress note, delivered pull requests with CI, review and the reconcile lane, blockers,
+  the last round's summary, and what waits on a person. `--json` gives the same facts to
+  a hosted tool or a script. The rounds record a summary line (`round_summary`) and each
+  pull request's state when it changes (`pr_observed`), so both are on the record.
+- `ppy tail [--since 10m] [--follow]` prints the daemon's events one line each: pickups,
+  phase changes, worker notes, check-in decisions, hygiene, pull request attention,
+  blocker changes, deficiencies and round summaries.
+- `ppy steer`, `ppy answer`, `ppy resume` and `ppy stop` go through the same supervisor
+  the daemon runs, and record `by: person` (a turn `serve` launched records
+  `by: manager`). A round leaves a worker a person just steered alone until the worker
+  files a note or one silence budget passes, and any later check-in turn gets the
+  person's direction as a fact that stands.
+
+From Papaya, a comment on a held ticket is the way to reach the work: the answer turn
+reads it with the ticket's status line from the same record. @mentions and agent DMs
+are the hosted agent's, never this machine's. Each held ticket is meant to carry that
+status line as one comment edited in place; the runner has the hook
+(`TicketRunner(status_comment=)`), but nothing is posted until Papaya lets an agent edit
+its own comment (backend #636). Until then the phase comments are the ticket's record.
+Without Papaya, or for a local task with no work item, the status line is never written;
+`ppy status --team` and `ppy tail` work the same either way.
+
 ## Where state lives
 
 All working state is under `.ppy/` (gitignored):
