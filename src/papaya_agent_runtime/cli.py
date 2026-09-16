@@ -28,12 +28,14 @@ def _cmd_capabilities(args: argparse.Namespace) -> int:
     reads no network and no database, so it answers on an unconfigured machine as
     fast as on a working one, and it has no failure mode to report: an absent
     client is `null`, and the exit code is 0 either way.
+
+    The printing itself lives in `capabilities.main`, because `bin/ppy` answers
+    this command from the standard library when the project environment has not
+    been built yet and the two roads must not print different documents.
     """
     from papaya_agent_runtime import capabilities
 
-    data = capabilities.collect()
-    print(json.dumps(data) if args.json else capabilities.render_text(data))
-    return 0
+    return capabilities.main(["--json"] if args.json else [])
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:

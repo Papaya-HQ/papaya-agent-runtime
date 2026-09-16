@@ -131,9 +131,96 @@ def client_home(tmp_path, monkeypatch) -> ClientHome:
 
 
 @pytest.fixture
-def ready(monkeypatch):
-    """Readiness passes, so the runner's own gate is not what a test is measuring."""
+def ready(ppy_home, monkeypatch):
+    """An already-set-up runtime whose readiness passes.
+
+    Both halves matter to every test that is about something else. The config
+    means `serve`'s own first-run setup finds nothing to do, so no test that is
+    measuring a ticket goes probing this machine for signed-in harnesses; the
+    verdict means the runner's readiness gate is not what is being measured.
+    """
+    from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling, save_config
+
+    save_config(
+        MMConfig(
+            manager=ManagerProfile("claude", "opus", "high"),
+            worker=WorkerCeiling("claude", "opus", "medium"),
+        )
+    )
     monkeypatch.setattr(readiness, "check", lambda: readiness.Readiness(state=readiness.READY))
+
+
+def _harness_report(usable: list[str]) -> dict:
+    """What discovery sees on a machine where `usable` are signed in."""
+
+    def make(name: str) -> dict:
+        return {
+            "name": name,
+            "kind": "harness",
+            "path": f"/usr/bin/{name}" if name in usable else None,
+            "version": "1.0.0",
+            "authenticated": name in usable,
+            "available": name in usable,
+            "detail": "" if name in usable else f"run `{name} login`",
+        }
+
+    # In the order given, so a test can put the *other* harness first and prove
+    # that what decided the provider was the connection rather than list position.
+    names = [*usable, *[n for n in ("claude", "codex") if n not in usable]]
+    return {"harnesses": [make(n) for n in names], "requirements": [], "companions": []}
+
+
+@pytest.fixture
+def harnesses(monkeypatch):
+    """Describe this machine to both the setup wizard and readiness.
+
+    Both, because they reach discovery differently: the wizard bound `discover`
+    at import, readiness imports it inside the function. A test that patched one
+    would have `serve` set itself up against a machine readiness does not agree
+    exists.
+    """
+    from papaya_agent_runtime.setup import discovery, wizard
+
+    def signed_in(*usable: str) -> None:
+        report = _harness_report(list(usable))
+        monkeypatch.setattr(discovery, "discover", lambda: report)
+        monkeypatch.setattr(wizard, "discover", lambda: report)
+
+    return signed_in
+
+
+@dataclass
+class FakeDM:
+    """The workspace's channel list, and every message posted into it."""
+
+    channels: list[dict[str, Any]]
+    posts: list[tuple[str, str]] = field(default_factory=list)
+
+
+@pytest.fixture
+def dm(monkeypatch) -> FakeDM:
+    """The client's API module, answering channel calls without a workspace."""
+    from papaya_agent_client import api_client
+
+    fake = FakeDM(
+        channels=[
+            {"id": "chan-team", "kind": "channel", "name": "engineering"},
+            {"id": "chan-dm", "kind": "dm", "name": "Shane"},
+        ]
+    )
+
+    async def list_agent_channels(_api: Any) -> list[dict[str, Any]]:
+        return fake.channels
+
+    async def post_agent_channel_message(
+        _api: Any, channel_id: str, content: str, *, parent_id: str | None = None
+    ) -> dict[str, Any]:
+        fake.posts.append((channel_id, content))
+        return {"id": "msg-1"}
+
+    monkeypatch.setattr(api_client, "list_agent_channels", list_agent_channels)
+    monkeypatch.setattr(api_client, "post_agent_channel_message", post_agent_channel_message)
+    return fake
 
 
 @pytest.fixture
@@ -566,6 +653,109 @@ def test_an_event_whose_repository_cannot_be_resolved_is_declined(
     conn.close()
 
 
+# ── a checkout nobody has ever set up ───────────────────────────────────────
+
+
+def _start(harness: Harness, *, client_home: ClientHome, stderr=None) -> int:
+    """Run `serve` far enough to have set up and listened, then stop it."""
+    stderr = io.StringIO() if stderr is None else stderr
+    options = serve.parse_args(["--working-directory", str(client_home.work_dir)])
+
+    async def scenario() -> int:
+        runner = asyncio.create_task(
+            serve.run(options, stdout=io.StringIO(), stderr=stderr, extra=harness.extra())
+        )
+        await _until(lambda: harness.loop is not None, what="the listener to be built")
+        harness.loop.request_stop()
+        return await runner
+
+    return asyncio.run(scenario())
+
+
+def test_a_checkout_that_was_never_set_up_configures_itself_before_it_listens(
+    ppy_home, client_home, harnesses, dm
+) -> None:
+    """Clone the runtime, point the app at it, connect. That is the whole procedure.
+
+    Until this, a checkout nobody had run `ppy setup` in stayed `no_config`
+    forever: the connection was live, the listener ran, and the first job started
+    a harness in a home with no driver profile, no ceiling and no database.
+    """
+    from papaya_agent_runtime import memory
+    from papaya_agent_runtime.config import load_config
+    from papaya_agent_runtime.paths import config_path, db_path
+
+    # Codex first, so list position would answer `codex` and only the connection
+    # can answer `claude`.
+    harnesses("codex", "claude")
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+    assert not config_path().exists()
+
+    assert _start(harness, client_home=client_home, stderr=stderr) == 0
+
+    cfg = load_config()
+    # This machine connected as a Claude agent, so both roles are Claude: the
+    # runtime does not mix agents behind anybody's back.
+    assert (cfg.manager.provider, cfg.worker.provider) == ("claude", "claude")
+    assert db_path().exists(), "no state database was created"
+    assert memory.repos_root().is_dir() and memory.preferences_path().is_file()
+    assert harness.loop is not None, "the listener never went up"
+    assert "set this runtime up" in stderr.getvalue()
+
+
+def test_a_machine_with_no_harness_still_listens_and_dms_what_needs_the_user(
+    ppy_home, client_home, harnesses, dm
+) -> None:
+    """Blocked is not a reason to refuse to start — it is a reason to say so.
+
+    A manager that would not come up until somebody signed a harness in would be
+    unreachable at exactly the moment they wanted to be told to.
+    """
+    from papaya_agent_runtime.paths import config_path
+
+    harnesses()
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+
+    assert _start(harness, client_home=client_home, stderr=stderr) == 0
+
+    assert harness.loop is not None, "a blocked runtime refused to start"
+    assert not config_path().exists(), "setup wrote a config with no harness to run it"
+    verdict = readiness.check()
+    assert verdict.state == readiness.BLOCKED
+    assert "no_harness" in [p.code for p in verdict.blockers]
+    assert "ppy serve: cannot take work" in stderr.getvalue()
+
+    # One message, in the DM rather than the team channel, addressed to the agent
+    # this machine is connected as, naming the thing only a person can close.
+    assert len(dm.posts) == 1
+    channel_id, text = dm.posts[0]
+    assert channel_id == "chan-dm"
+    assert "@tester" in text
+    assert "Needs you" in text
+    assert "no signed-in coding harness" in text
+
+
+def test_an_unchanged_situation_is_not_dmd_on_every_start(
+    ppy_home, client_home, harnesses, dm
+) -> None:
+    """Otherwise a machine that restarts twice a day teaches its owner to ignore it."""
+    harnesses()
+
+    assert _start(Harness(FakeEvents([])), client_home=client_home) == 0
+    assert _start(Harness(FakeEvents([])), client_home=client_home) == 0
+
+    assert len(dm.posts) == 1, "the second start said the same thing again"
+
+
+def test_the_readiness_report_goes_to_a_dm_and_never_to_a_team_channel() -> None:
+    """A workspace showing this agent no DM gets silence, not a public post."""
+    assert serve.dm_channel_id([{"id": "team", "kind": "channel"}]) is None
+    assert serve.dm_channel_id([{"id": "a", "kind": "channel"}, {"id": "b", "type": "DM"}]) == "b"
+    assert serve.dm_channel_id(None) is None
+
+
 def _raise(exc: Exception):
     def boom(*_args: Any, **_kwargs: Any):
         raise exc
@@ -807,7 +997,8 @@ def test_every_way_a_hold_ends_has_a_phase() -> None:
 # ── the phase machine ───────────────────────────────────────────────────────
 
 
-def _start(harness: Harness, client_home: ClientHome, runner: serve.TicketRunner):
+def _serve_ticket(harness: Harness, client_home: ClientHome, runner: serve.TicketRunner):
+    """`serve.run` as a task, with a runner whose outside world is fake."""
     return asyncio.create_task(
         serve.run(
             serve.parse_args(["--working-directory", str(client_home.work_dir)]),
@@ -847,7 +1038,7 @@ def test_an_assignment_is_briefed_dispatched_watched_reviewed_delivered_and_rele
     harness = Harness(FakeEvents([EVENT]))
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, FakePapaya()))
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
         await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
         (worker,) = workers_in(int(ticket_task()["run_id"]))
         # A worker reporting the way `ppy progress` does.
@@ -910,7 +1101,7 @@ def test_the_items_status_follows_the_work_and_nowhere_else(
     )
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, papaya_api))
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
         await _until(lambda: serve.PHASE_DISPATCHED in history(101), what="the dispatch")
         (worker,) = workers_in(int(ticket_task(101)["run_id"]))
         worker_event(worker, "worker_done", status="worker_done", summary="done")
@@ -948,7 +1139,7 @@ def test_a_blocked_question_runs_the_answer_turn_and_returns_to_dispatched(
     harness = Harness(FakeEvents([EVENT]))
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, FakePapaya()))
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
         await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
         (worker,) = workers_in(int(ticket_task()["run_id"]))
         worker_event(
@@ -994,7 +1185,7 @@ def test_a_turn_that_asks_a_person_holds_blocked_until_the_item_changes(
     harness = Harness(FakeEvents([EVENT]))
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, papaya_api))
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
         await _until(
             lambda: ("item-9", "blocked") in papaya_api.statuses(), what="the wait on a person"
         )
@@ -1034,7 +1225,7 @@ def test_a_brief_turn_that_dispatches_nothing_is_retried_once_then_declined(
     harness = Harness(FakeEvents([EVENT]))
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, FakePapaya()))
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
         await _until(lambda: harness.results, what="the ticket to be handed back")
         harness.loop.request_stop()
         return await runner
@@ -1065,7 +1256,9 @@ def test_a_full_worker_pool_keeps_the_ticket_dispatched_and_held(
     harness = Harness(FakeEvents([EVENT]))
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, FakePapaya(), capacity=lambda: (2, 2)))
+        runner = _serve_ticket(
+            harness, client_home, _runner(turns, FakePapaya(), capacity=lambda: (2, 2))
+        )
         await _until(
             lambda: any("Waiting for a worker slot" in line[2] for line in progress_lines),
             what="the wait for a slot to be reported",
@@ -1126,7 +1319,7 @@ def test_a_ticket_found_in_reviewing_runs_the_review_turn_without_a_new_pickup(
     harness = Harness(FakeEvents([EVENT]))
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, papaya_api))
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
         await _until(lambda: harness.results, what="the resumed ticket to finish")
         harness.loop.request_stop()
         return await runner
@@ -1154,7 +1347,7 @@ def test_manager_turns_get_the_jobs_environment_and_only_the_runtime_directory(
     job_env: dict[str, str] = {}
 
     async def scenario() -> int:
-        runner = _start(harness, client_home, _runner(turns, FakePapaya()))
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya()))
         await _until(lambda: turns.calls, what="the brief turn to launch")
         job_env.update(harness.jobs[0].env)
         harness.jobs[0].stop.set()
