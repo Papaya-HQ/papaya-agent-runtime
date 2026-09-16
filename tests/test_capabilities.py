@@ -99,11 +99,21 @@ def test_an_unreadable_protocol_value_falls_back_to_version_one(monkeypatch) -> 
     assert capabilities.protocol() == 1
 
 
-def test_modes_is_empty_until_there_is_something_to_serve(capsys) -> None:
-    """A mode announced before `ppy serve` exists is a promise the exec cannot keep."""
-    assert capabilities.MODES == ()
+def test_both_modes_are_announced_now_that_serve_can_keep_the_promise(capsys) -> None:
+    """A mode is announced only once the command that serves it exists.
+
+    This list is what a client execs on: reading `supervised` here and finding
+    nothing that speaks the protocol is a connection that hangs rather than one
+    that fails. `ppy serve` speaks both, so both are named — and the check that
+    they are the same two `serve` implements is what keeps this honest.
+    """
+    from papaya_agent_runtime import serve
+
+    assert capabilities.MODES == ("supervised", "terminal")
     assert cli.main(["capabilities", "--json"]) == 0
-    assert _json_output(capsys)["modes"] == []
+    assert _json_output(capsys)["modes"] == ["supervised", "terminal"]
+    assert serve.parse_args(["--supervised"]).supervised is True
+    assert serve.parse_args([]).supervised is False
 
 
 def test_without_json_the_same_fields_print_one_per_line(capsys) -> None:

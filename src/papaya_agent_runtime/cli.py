@@ -500,6 +500,12 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from papaya_agent_runtime.serve import serve
+
+    return serve(list(getattr(args, "listen_args", None) or []))
+
+
 def _registered_repo_origin(repo: str) -> str | None:
     """The base clone's ``origin`` URL for a registered repo, or None if unknowable.
 
@@ -2199,6 +2205,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     track.set_defaults(func=_cmd_track)
 
+    serve_cmd = sub.add_parser(
+        "serve",
+        help=(
+            "run the Papaya manager: this runtime's supervisor and the Papaya client's "
+            "event loop, in one process, until told to stop"
+        ),
+    )
+    serve_cmd.add_argument(
+        "listen_args",
+        nargs=argparse.REMAINDER,
+        help=(
+            "flags the Papaya client passes across its exec: --supervised, --harness, "
+            "--approval-timeout, --working-directory. Unknown `listen` flags are ignored "
+            "with a warning. Run `ppy serve --help` for the full list."
+        ),
+    )
+    serve_cmd.set_defaults(func=_cmd_serve)
+
     supervisor = sub.add_parser("supervisor", help="run and control the supervisor")
     ssub = supervisor.add_subparsers(dest="supervisor_cmd", required=True)
     ssub.add_parser("serve", help="run the supervisor (blocking)")
@@ -2758,8 +2782,15 @@ def _normalize_argv(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(argv if argv is not None else sys.argv[1:])
+    if raw and raw[0] == "serve":
+        # `serve` is handed the Papaya client's own `listen` flags, verbatim,
+        # including ones this runtime does not take. Routing it around the main
+        # parser is what makes "ignored with a warning" possible at all: argparse
+        # would refuse an unknown flag and exit before `serve` could say anything.
+        return _cmd_serve(argparse.Namespace(listen_args=raw[1:]))
     parser = build_parser()
-    args = parser.parse_args(_normalize_argv(list(argv if argv is not None else sys.argv[1:])))
+    args = parser.parse_args(_normalize_argv(raw))
     return args.func(args)
 
 

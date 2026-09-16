@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -90,6 +90,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     merged_sha TEXT,
     merged_at TEXT,
     ends_at TEXT NOT NULL DEFAULT 'done',
+    -- Where this task is in the *manager's* handling of it, which is not the same
+    -- question as `status`. A ticket picked up by `ppy serve` is held for as long
+    -- as its lease lasts and has no worker yet; `phase` is what that hold says.
+    phase TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -345,6 +349,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # The phase at which the worker hands control back. Existing tasks retain
         # the historical behaviour: workers finish with a done report.
         conn.execute("ALTER TABLE tasks ADD COLUMN ends_at TEXT NOT NULL DEFAULT 'done'")
+    if "phase" not in task_cols:
+        # How far `ppy serve` has got with the ticket behind this task. Nullable
+        # rather than defaulted: a task that predates the manager was never picked
+        # up by it, and "no phase" is the honest answer for it.
+        conn.execute("ALTER TABLE tasks ADD COLUMN phase TEXT")
     for col in ("merged_sha", "merged_at"):
         # Where the work landed. Set once, terminal: the heartbeat stops asking
         # the forge about a branch whose merge is already on the record.

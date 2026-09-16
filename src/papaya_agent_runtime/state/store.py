@@ -135,6 +135,33 @@ def set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None
     conn.commit()
 
 
+#: The phases `ppy serve` records while it holds a ticket's lease. `picked_up` is
+#: written the moment the manager takes the work; the other four are how the hold
+#: ended, and they are the client's own vocabulary rather than a second one
+#: invented here — the reason on `Job.stop` is what chooses between them.
+TASK_PHASES = ("picked_up", "released", "handed_back", "stalled", "declined")
+
+
+def set_task_phase(conn: sqlite3.Connection, task_id: int, phase: str) -> None:
+    """Record how far the manager has got with this task's ticket.
+
+    Deliberately separate from :func:`set_task_status`: `status` is the lifecycle
+    the control plane enforces (requested, in_progress, delivered), and a ticket
+    held by `ppy serve` has not entered it yet. Writing the two independently is
+    what lets a held ticket say what it is doing without claiming a worker.
+    """
+    conn.execute(
+        "UPDATE tasks SET phase = ?, updated_at = ? WHERE id = ?",
+        (phase, _now(), task_id),
+    )
+    conn.commit()
+
+
+def task_phase(conn: sqlite3.Connection, task_id: int) -> str | None:
+    row = conn.execute("SELECT phase FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row["phase"] if row else None
+
+
 def update_task_fields(conn: sqlite3.Connection, task_id: int, **fields: object) -> None:
     if not fields:
         return

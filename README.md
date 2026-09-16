@@ -171,6 +171,7 @@ ppy papaya connect                      # sign in and pin this machine to an age
 ppy repo discover                       # repos on the forge that aren't registered yet
 ppy repo add https://github.com/you/your-repo
 ppy repo onboard your-repo              # learn its build, tests, CI gate, conventions
+ppy serve                               # the always-on manager: supervisor + Papaya loop
 ppy supervisor serve                    # per-task runners, durable state
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
@@ -188,12 +189,49 @@ you connect a machine, the client finds this checkout and has to know what it ca
 delegate here; this prints one JSON object — `runtime`, `version`, `client_version`
 (the `papaya-agent-client` release embedded in this checkout), `protocol` (the
 supervised-protocol version that client speaks) and `modes` (the launch modes this
-runtime can serve, empty until `ppy serve` exists) — from local state only, so it
-answers instantly, offline, and on a machine that has never been set up. It never
-fails: a checkout where the client cannot be imported reports `client_version: null`
-and still exits 0. `ppy doctor` and `ppy readiness` show the same embedded client
-version, and readiness warns — without blocking — when the client that launched this
-runtime is newer than the one in the checkout.
+runtime can serve — today `supervised` and `terminal`, both of them `ppy serve`) —
+from local state only, so it answers instantly, offline, and on a machine that has
+never been set up. It never fails: a checkout where the client cannot be imported
+reports `client_version: null` and still exits 0. `ppy doctor` and `ppy readiness`
+show the same embedded client version, and readiness warns — without blocking — when
+the client that launched this runtime is newer than the one in the checkout.
+
+## Running as the Papaya manager
+
+`ppy serve` is the always-on manager. It runs until told to stop, and in one process
+it runs this runtime's own supervisor — the same one `ppy supervisor serve` runs, so
+`ppy dispatch`, `ppy review` and `ppy deliver` from any shell on the machine reach it
+— and the Papaya client's event loop **in-process**, through the client's library
+entry points. There is no copy of the client's cursor, reservation, renewal or
+hand-back code in this repository: the loop is imported and only the way a job is
+executed is this runtime's own.
+
+You do not normally type it. When you connect a machine, the Papaya client finds this
+checkout, reads `ppy capabilities --json`, and execs `ppy serve` with the flags it
+would have passed its own listener: `--supervised`, `--harness`, `--approval-timeout`
+and `--working-directory`. Any other `listen` flag is ignored with one warning line on
+stderr, so a newer client cannot fail to launch an older runtime. Under `--supervised`
+stdout carries the JSON Lines protocol and nothing else — every log line goes to
+stderr — and the opening `hello` carries a `runtime` field naming this runtime and its
+version, so a host never has to infer what answered.
+
+Run it yourself with `./bin/ppy serve` (add `--working-directory <path>` if the
+connection has no directory stored). Only one `serve` or `supervisor serve` may own a
+`PPY_HOME`; a second start refuses and changes nothing.
+
+The lease identity survives restarts. Papaya's reservation is acquire-or-extend and is
+keyed on a session id, so `ppy serve` stores one id per Papaya connection in
+`.ppy/papaya-sessions.json` and passes it back on every start: a restart *extends* the
+leases this machine already holds instead of racing them. Delete that file and the
+next start mints a fresh identity, which means waiting out the leases of the last one.
+
+What a picked-up ticket does today is deliberately small. The manager records the work
+item as a task, writes the phase `picked_up`, and then **holds the lease** until the
+client stops the run — a hand-back from the app, a lease a person released, the stall
+grace expiring, or this process shutting down — at which point it records why
+(`handed_back`, `stalled`, `released`). A ticket it cannot place, because no repository
+resolves or the runtime is not ready to work, is declined so a peer may take it. The
+turns that brief, dispatch, review and deliver come next.
 
 ## Where state lives
 
@@ -208,6 +246,8 @@ All working state is under `.ppy/` (gitignored):
 - `repos/` — read-only base clones. The only repositories work happens in.
 - `runs/` — per-run plans, task packets, results, append-only event logs.
 - `memory/` — durable notes in two tiers, per-instance and per-repo.
+- `papaya-sessions.json` — one listener session id per Papaya connection, so a
+  restarted `ppy serve` extends its own leases rather than racing them.
 - `tools/`, `worktree-pools/`, `run/` — companions, task worktrees, supervisor sockets.
 - `probes/` — raw provider-probe evidence.
 
