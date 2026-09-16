@@ -299,6 +299,19 @@ def _cmd_repo(args: argparse.Namespace) -> int:
                 value is not None for value in changes.values()
             )
             budget_changes = getattr(args, "budget", None) or []
+            if args.default_branch is not None:
+                from papaya_agent_runtime.repos import set_default_branch
+
+                branch = set_default_branch(args.name, args.default_branch)
+                if args.default_branch.strip():
+                    print(
+                        f"{args.name}: default branch pinned to {branch} (the forge's HEAD no "
+                        "longer decides; an empty --default-branch unpins it)"
+                    )
+                else:
+                    print(f"{args.name}: default branch follows the forge again ({branch or '?'})")
+                if not asked and not budget_changes:
+                    return 0
             if budget_changes and not asked:
                 return _repo_set_budgets(args.name, budget_changes)
             settings = (
@@ -332,6 +345,8 @@ def _cmd_repo(args: argparse.Namespace) -> int:
                 f"(branch {added.default_branch}, base {short_sha}, "
                 f"forge {added.forge_url})"
             )
+            for note in added.notes:
+                print(f"  {note}")
             return 0
         if args.repo_cmd == "list":
             repos = list_repos()
@@ -2366,6 +2381,16 @@ def build_parser() -> argparse.ArgumentParser:
             "override how long the runtime waits for KIND in this repo (gate, full_suite, "
             "worker_session, plan, silence, brief_turn, review_turn, ci); it wins over the "
             "budget derived from observations; 0 clears it; repeatable"
+        ),
+    )
+    rset.add_argument(
+        "--default-branch",
+        dest="default_branch",
+        default=None,
+        metavar="BRANCH",
+        help=(
+            "pin the branch workers start from, over the forge's HEAD (registration and "
+            "sync follow the forge otherwise); empty string unpins it"
         ),
     )
     rset.add_argument(

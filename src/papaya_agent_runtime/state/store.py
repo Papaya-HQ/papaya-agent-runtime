@@ -345,6 +345,56 @@ def record_turn_result(
     return int(cur.lastrowid)
 
 
+def close_dead_runner(
+    conn: sqlite3.Connection,
+    *,
+    runner_id: str,
+    run_id: int | None,
+    task_id: int,
+    task_status: str | None,
+    kind: str,
+    payload: dict,
+) -> bool:
+    """Close a runner row with no process behind it, as one commit.
+
+    The row becomes ``exited`` with no exit code (nobody saw one) and
+    ``result_recorded``, so crash reconciliation leaves it alone; ``task_status``,
+    when given, is written with the event. Returns False, changing nothing, when the
+    row is no longer live — its own runner recorded a result in the meantime.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        closed = conn.execute(
+            "UPDATE runners SET status = 'exited', result_recorded = 1 "
+            "WHERE id = ? AND status IN ('starting', 'running')",
+            (runner_id,),
+        ).rowcount
+        if not closed:
+            conn.rollback()
+            return False
+        now = _now()
+        conn.execute(
+            """
+            INSERT INTO events (run_id, task_id, seq, kind, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, task_id, next_seq(conn, run_id), kind, json.dumps(payload), now),
+        )
+        if task_status is not None:
+            conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                (task_status, now, task_id),
+            )
+        conn.commit()
+    except BaseException:
+        with contextlib.suppress(sqlite3.Error):
+            conn.rollback()
+        raise
+    return True
+
+
 def events_after(conn: sqlite3.Connection, run_id: int | None, after_seq: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(

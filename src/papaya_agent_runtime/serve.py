@@ -3558,6 +3558,41 @@ def self_setup(*, stderr) -> None:
     )
 
 
+def keep_state_right(*, stderr) -> None:
+    """Repair state an earlier runtime left wrong, one line per thing repaired.
+
+    Two remedies, beside the config's: runner rows with no process behind them are
+    closed (the supervisor start already did this when this process owns it; here it
+    also covers a start that adopted one), and every base clone is put back on its
+    forge — ``origin`` the forge, not a local checkout, and the default branch the
+    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`). A remedy that
+    cannot finish says why and never stops `serve` from starting.
+    """
+    from papaya_agent_runtime import repos
+    from papaya_agent_runtime.rounds import DEAD_GRACE_SECONDS
+    from papaya_agent_runtime.supervisor import dead_runners
+
+    try:
+        conn = db.init_db()
+        try:
+            closed = dead_runners.close_dead_runners(
+                conn, grace_s=DEAD_GRACE_SECONDS, source="serve start"
+            )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a remedy never stops serve
+        log.warning("[serve] could not close dead runner rows: %s", exc)
+        closed = []
+    for entry in closed:
+        _say(entry.line(), stderr=stderr)
+    try:
+        lines = repos.keep_base_clones_right()
+    except Exception as exc:  # noqa: BLE001 - a remedy never stops serve
+        lines = [f"could not check base clones against their forges: {exc}"]
+    for line in lines:
+        _say(line, stderr=stderr)
+
+
 def keep_config_right(*, stderr) -> None:
     """Migrate the config, apply every safe remedy, and say each change once.
 
@@ -3837,6 +3872,7 @@ async def _run(
     # configured is the silent failure this whole sequence exists to end.
     await asyncio.to_thread(self_setup, stderr=stderr)
     await asyncio.to_thread(keep_config_right, stderr=stderr)
+    await asyncio.to_thread(keep_state_right, stderr=stderr)
     await asyncio.to_thread(announce_deficiencies, stderr=stderr)
     deficiencies.notify()
     # Checked after the runtime has applied its own remedies and before the listener
@@ -4140,6 +4176,29 @@ def _say(line: str, *, stderr) -> None:
     print(f"ppy serve: {line}", file=stderr, flush=True)
 
 
+def close_dead_runners_adopted() -> list[Any]:
+    """Close dead runner rows under a supervisor this process adopted rather than started.
+
+    The adopted supervisor's own runner threads are in another process, so a pid
+    that has only just gone gets the rounds' grace to be recorded by its runner first.
+    """
+    from papaya_agent_runtime.rounds import DEAD_GRACE_SECONDS
+    from papaya_agent_runtime.supervisor import dead_runners
+
+    try:
+        conn = db.init_db()
+    except Exception:  # noqa: BLE001 - a start must not fail on its own bookkeeping
+        return []
+    try:
+        return dead_runners.close_dead_runners(
+            conn, grace_s=DEAD_GRACE_SECONDS, source="supervisor adopt"
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+
+
 def take_supervisor(*, stderr, seams: dict[str, Any] | None = None) -> tuple[Any, int | None]:
     """Own this home's supervisor, adopt a live one of this build, or retire one of another.
 
@@ -4167,6 +4226,8 @@ def take_supervisor(*, stderr, seams: dict[str, Any] | None = None) -> tuple[Any
         else:
             if server.took_over_from:
                 _say(takeover.stale_line(server.took_over_from), stderr=stderr)
+            for closed in server.closed_at_start:
+                _say(closed.line(), stderr=stderr)
             return server, None
         holder = takeover.inspect(home)
         decision = takeover.decide(holder, build)
@@ -4176,6 +4237,8 @@ def take_supervisor(*, stderr, seams: dict[str, Any] | None = None) -> tuple[Any
                 f"build ({holder.build_id}), so its workers keep running",
                 stderr=stderr,
             )
+            for closed in close_dead_runners_adopted():
+                _say(closed.line(), stderr=stderr)
             return None, None
         if decision == takeover.STALE:
             takeover.clear_stale(home, holder.dead_pids)

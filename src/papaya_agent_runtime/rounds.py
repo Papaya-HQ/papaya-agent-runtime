@@ -31,7 +31,11 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    branch kept and nothing posted. On the first round of a process, tickets
    declined because a turn "ended without" doing its job (PAP-213) are offered
    once more, with the earlier worker's branch in the brief's facts.
-3. **Every held ticket's worker** (facts from :mod:`papaya_agent_runtime.health`):
+3. **Every runner row with no process behind it**, whatever its ticket's state, is
+   closed (:mod:`papaya_agent_runtime.supervisor.dead_runners`): its slot comes back
+   and a task still in flight is `worker_stopped` with its session kept. Workers of
+   held tickets are left to the next step, which says it on the ticket.
+   **Every held ticket's worker** (facts from :mod:`papaya_agent_runtime.health`):
    a dead session with no done note is recorded as `worker_stopped`, which the
    runner's existing path sends back to its gate; a question (status `blocked`, or
    a last progress note that asks one) gets the answer turn; a `worker_stopped`
@@ -478,6 +482,26 @@ def gate_state(worker_task_id: int) -> GateState:
         elapsed_seconds=seconds,
         full=bool(started.get("full")),
     )
+
+
+def close_dead_runners(watched: set[int]) -> list[Any]:
+    """Close runner rows with no process behind them, whatever their ticket's state.
+
+    A worker under an ended ticket (`handed_over`, `done`, declined) is never looked
+    at by step 3, and its dead row held a worker slot for three hours on 2026-09-16.
+    Workers of held tickets are left to step 3, which says why they stopped on the
+    ticket; ``watched`` names them. The grace covers a runner in this process between
+    its worker exiting and its result being recorded.
+    """
+    from papaya_agent_runtime.supervisor import dead_runners
+
+    conn = db.init_db()
+    try:
+        return dead_runners.close_dead_runners(
+            conn, grace_s=DEAD_GRACE_SECONDS, skip_tasks=watched, source="rounds"
+        )
+    finally:
+        conn.close()
 
 
 def record_worker_stopped(task_id: int, detail: str) -> None:
@@ -979,7 +1003,11 @@ class Rounds:
         parts = await self._pull_requests(now)
         if not self._standalone():
             parts += await self._reclaim(await asyncio.to_thread(ticket_tasks))
-        for ticket in list(getattr(self._runner, "held", {}).values()):
+        held = list(getattr(self._runner, "held", {}).values())
+        watched = {t.worker.task_id for t in held if getattr(t, "worker", None) is not None}
+        closed = await asyncio.to_thread(close_dead_runners, watched)
+        parts += [entry.line() for entry in closed]
+        for ticket in held:
             parts += await self._look_at(ticket, now)
         if self._last_hygiene is None or (
             (now - self._last_hygiene).total_seconds() >= HYGIENE_EVERY_SECONDS

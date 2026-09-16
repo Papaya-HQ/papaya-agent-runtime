@@ -1856,6 +1856,26 @@ class Supervisor:
     # ------------------------------------------------------------------ #
     # Reconcile
     # ------------------------------------------------------------------ #
+    def close_dead_runners(self, *, grace_s: float = 0.0, source: str = "supervisor") -> list:
+        """Close runner rows with no process behind them, except this process's own.
+
+        An execution this supervisor admitted records its own end, so its task is
+        skipped; every other live row is judged by its pid and heartbeat
+        (:mod:`papaya_agent_runtime.supervisor.dead_runners`). Closing a row is what
+        gives its slot back: admission counts live rows.
+        """
+        from papaya_agent_runtime.supervisor import dead_runners
+
+        with self._lock:
+            own = {e.task_id for e in self._executions.values() if e.task_id is not None}
+        conn = init_db()
+        try:
+            return dead_runners.close_dead_runners(
+                conn, grace_s=grace_s, skip_tasks=own, source=source
+            )
+        finally:
+            conn.close()
+
     def reconcile(self) -> dict:
         """Find half-alive runners and mark them for recovery (fail-closed)."""
         conn = init_db()
