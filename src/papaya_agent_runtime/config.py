@@ -299,6 +299,17 @@ class SelfReportPolicy:
 
 
 @dataclass
+class ForgePolicy:
+    """How this runtime reaches the forge on a person's behalf."""
+
+    # The client id of Papaya's GitHub OAuth app. When set, a machine whose `gh` is
+    # not signed in is signed in through GitHub's device flow: the owner is sent a
+    # code to enter, and the token goes straight into gh's own store. Not a secret.
+    # Empty means the owner is sent the manual `gh auth login` steps instead.
+    github_oauth_client_id: str = ""
+
+
+@dataclass
 class MMConfig:
     manager: ManagerProfile = field(default_factory=ManagerProfile)
     worker: WorkerCeiling = field(default_factory=WorkerCeiling)
@@ -310,6 +321,7 @@ class MMConfig:
     usage: UsagePolicy = field(default_factory=UsagePolicy)
     claude: ClaudeProfile = field(default_factory=ClaudeProfile)
     self_report: SelfReportPolicy = field(default_factory=SelfReportPolicy)
+    forge: ForgePolicy = field(default_factory=ForgePolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -427,6 +439,7 @@ class MMConfig:
             "usage": asdict(self.usage),
             "claude": claude,
             "self_report": asdict(self.self_report),
+            "forge": asdict(self.forge),
         }
 
 
@@ -457,6 +470,7 @@ def _from_dict(data: dict) -> MMConfig:
         usage=UsagePolicy(**data.get("usage", {})),
         claude=ClaudeProfile(**data.get("claude", {})),
         self_report=SelfReportPolicy(**data.get("self_report", {})),
+        forge=ForgePolicy(**data.get("forge", {})),
     )
     return cfg
 

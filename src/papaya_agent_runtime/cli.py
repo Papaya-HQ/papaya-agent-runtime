@@ -560,6 +560,19 @@ def _cmd_readiness(args: argparse.Namespace) -> int:
     return 1 if verdict.state == _readiness.BLOCKED else 0
 
 
+def _cmd_blockers(args: argparse.Namespace) -> int:
+    """What this machine needs from a person, with the commands that do it."""
+    from papaya_agent_runtime import blockers
+    from papaya_agent_runtime import readiness as _readiness
+
+    found = blockers.from_verdict(_readiness.check())
+    if args.json:
+        print(json.dumps({"blockers": found}, indent=2))
+    else:
+        print(blockers.render_text(found))
+    return 1 if found else 0
+
+
 def _cmd_track(args: argparse.Namespace) -> int:
     """Record which tracker record a task belongs to, wherever that tracker is."""
     from papaya_agent_runtime import tracker
@@ -2483,6 +2496,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="clear what has been reported, so the next check speaks again",
     )
     ready.set_defaults(func=_cmd_readiness)
+
+    blockers_cmd = sub.add_parser(
+        "blockers",
+        help="what this machine needs from a person, with the exact commands (exit 1 if any)",
+    )
+    blockers_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+    blockers_cmd.set_defaults(func=_cmd_blockers)
 
     papaya_cmd = sub.add_parser(
         "papaya", help="the Papaya connection: who this runtime is, and establishing it"

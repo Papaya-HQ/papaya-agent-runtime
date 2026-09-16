@@ -994,7 +994,12 @@ def test_supervised_over_a_pipe_says_hello_asks_and_reports_the_outcome(
         host.join(timeout=scale(5.0))
 
     hello = host.of_type("hello")[0]
-    assert hello["runtime"] == {"name": "papaya-agent-runtime", "version": __version__}
+    # A machine with nothing a person has to do says so with an empty list.
+    assert hello["runtime"] == {
+        "name": "papaya-agent-runtime",
+        "version": __version__,
+        "blockers": [],
+    }
     assert hello["protocol"] == 1
 
     request = host.of_type("job.request")[0]

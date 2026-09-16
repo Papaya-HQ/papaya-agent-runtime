@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from papaya_agent_runtime import capabilities, config_changes, papaya, readiness
+from papaya_agent_runtime import blockers, capabilities, config_changes, papaya, readiness
 from papaya_agent_runtime.config import ConfigError, load_config
 from papaya_agent_runtime.paths import config_path, db_path, ppy_home
 from papaya_agent_runtime.providers.capability import LOCAL, record_source, recorded_version
@@ -158,6 +158,7 @@ def collect() -> dict:
         "self_report": deficiencies.summary(),
         "ppy_home": str(home),
         "readiness": verdict.as_dict(),
+        "blockers": blockers.from_verdict(verdict),
         "capabilities": capabilities.collect(),
         "papaya": papaya.status(),
         "venv": venv_interpreter(),
@@ -182,6 +183,11 @@ def render_text(data: dict) -> str:
                 lines.append(f"  WARNING — {problem['summary']}; {problem['fix']}")
     for change in data.get("config_changes") or []:
         lines.append(f"  {change['at']} {config_changes.line(change)}")
+    found = data.get("blockers") or []
+    if found:
+        lines.append("setup needed (a person on this machine; `ppy blockers` for just these):")
+        for line in blockers.render_text(found).splitlines():
+            lines.append(f"  {line}")
     lines.append(f"client:    {capabilities.client_line(data.get('capabilities'))}")
     connection = data.get("papaya") or {}
     if connection:
