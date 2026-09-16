@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any
 
 from papaya_agent_runtime.state import init_db, store
@@ -54,6 +55,7 @@ def record(
     from papaya_agent_runtime import compose
 
     compose.note_project(task_id, note, conn=conn)
+    _observe_timing(conn, task, phase)
     return store.append_event(
         conn,
         kind="worker_progress",
@@ -61,6 +63,64 @@ def record(
         run_id=task["run_id"],
         task_id=task_id,
     )
+
+
+def _parse_stamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _stalled_since(conn: sqlite3.Connection, task_id: int, after_event_id: int) -> bool:
+    """Was this worker found stalled since ``after_event_id``: quiet, stopped, or checked in on?"""
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE id > ? AND ("
+        "(task_id = ? AND kind IN ('worker_quiet', 'worker_stopped')) OR "
+        "(kind = 'ticket_round' AND json_valid(payload) "
+        "AND json_extract(payload, '$.action') = 'checkin' "
+        "AND json_extract(payload, '$.trigger') = 'quiet' "
+        "AND json_extract(payload, '$.worker_task_id') = ?)) LIMIT 1",
+        (after_event_id, task_id, task_id),
+    ).fetchone()
+    return row is not None
+
+
+def _observe_timing(conn: sqlite3.Connection, task: sqlite3.Row, phase: str) -> None:
+    """Keep the silence this note ends and, for the first note past `plan`, the plan phase.
+
+    Silence is measured from the previous note (from dispatch for the first). An
+    interval in which the worker went quiet, stopped, or was checked on for silence
+    is kept flagged ``stall``: it is what the silence budget exists to catch, not a
+    sample of how long this repository's workers normally go between notes.
+    """
+    from papaya_agent_runtime import budgets
+
+    try:
+        now = datetime.now(UTC)
+        task_id = int(task["id"])
+        created = _parse_stamp(task["created_at"])
+        previous = store.progress_events(conn, task_id=task_id)
+        last = previous[0] if previous else None
+        since = _parse_stamp(last["created_at"]) if last is not None else created
+        if since is not None:
+            stalled = _stalled_since(conn, task_id, int(last["id"]) if last is not None else 0)
+            budgets.observe_task(
+                task_id,
+                budgets.SILENCE,
+                (now - since).total_seconds(),
+                outcome=budgets.STALL if stalled else "",
+                at=now,
+                conn=conn,
+            )
+        past_plan = any(_entry(row)["phase"] != "plan" for row in previous)
+        if phase != "plan" and not past_plan and created is not None:
+            budgets.observe_task(
+                task_id, budgets.PLAN, (now - created).total_seconds(), at=now, conn=conn
+            )
+    except (sqlite3.Error, ValueError, TypeError):
+        return
 
 
 def _entry(row: sqlite3.Row) -> dict[str, Any]:

@@ -33,7 +33,9 @@ a hook that says why is more useful than the harness guessing.
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -211,6 +213,28 @@ def _last_lines(text: str, count: int = 20) -> str:
     return "\n".join(lines[-count:])
 
 
+def _observe_push_hook(conn, task, seconds: float, returncode: int) -> None:
+    """A push through a pre-push hook that runs the full suite is a full-suite run."""
+    from papaya_agent_runtime import budgets
+
+    try:
+        repo = conn.execute(
+            "SELECT name, push_hook_runs_full_suite FROM repos WHERE id = ?", (task["repo_id"],)
+        ).fetchone()
+    except (sqlite3.Error, IndexError, KeyError):
+        return
+    if repo is None or not repo["push_hook_runs_full_suite"]:
+        return
+    budgets.observe(
+        repo["name"],
+        budgets.FULL_SUITE,
+        seconds,
+        task_id=int(task["id"]),
+        outcome="pass" if returncode == 0 else "fail",
+        conn=conn,
+    )
+
+
 def push_lease_branch(conn, task_id: int) -> PushResult:
     """Push a task's worktree head to its own lease branch. Never forces.
 
@@ -260,12 +284,14 @@ def push_lease_branch(conn, task_id: int) -> PushResult:
         ["git", "-C", worktree, "rev-parse", "HEAD"], capture_output=True, text=True, check=False
     )
     sha = head.stdout.strip() if head.returncode == 0 else None
+    started = time.monotonic()
     proc = subprocess.run(
         ["git", "-C", worktree, "push", remote, f"HEAD:{branch}"],
         capture_output=True,
         text=True,
         check=False,
     )
+    _observe_push_hook(conn, task, time.monotonic() - started, proc.returncode)
     if proc.returncode != 0:
         return PushResult(
             task_id=task_id,

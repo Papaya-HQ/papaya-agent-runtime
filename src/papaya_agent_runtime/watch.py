@@ -189,11 +189,44 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
     }
     if found["state"] != "OPEN":
         return found  # a merged or closed pull request has nothing left to run
-    code, out = _run_gh(["pr", "checks", str(found["pr"]), "--json", "name,bucket"], cwd=cwd)
+    code, out = _run_gh(
+        ["pr", "checks", str(found["pr"]), "--json", "name,bucket,startedAt,completedAt"], cwd=cwd
+    )
     checks = _load_json(out)
     if isinstance(checks, list):
         found["ci"], found["failing"] = _ci_verdict(checks)
+        settled = all(
+            isinstance(c, dict) and str(c.get("bucket") or "").lower() != "pending" for c in checks
+        )
+        if found["ci"] in ("pass", "fail") and settled:
+            found["ci_seconds"] = ci_wall_seconds(checks)
     return found
+
+
+def ci_wall_seconds(checks: list[dict[str, Any]]) -> float | None:
+    """First check started to last check finished, when the forge reports every stamp."""
+    starts, ends = [], []
+    for check in checks:
+        if not isinstance(check, dict):
+            return None
+        try:
+            started = datetime.fromisoformat(
+                str(check.get("startedAt") or "").replace("Z", "+00:00")
+            )
+            completed = datetime.fromisoformat(
+                str(check.get("completedAt") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+        # GitHub reports a check that never ran with the zero time.
+        if started.year < 2000 or completed.year < 2000:
+            continue
+        starts.append(started)
+        ends.append(completed)
+    if not starts:
+        return None
+    seconds = (max(ends) - min(starts)).total_seconds()
+    return seconds if seconds >= 0 else None
 
 
 def _first_existing(*paths: str | None) -> str | None:

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -252,6 +252,31 @@ CREATE TABLE IF NOT EXISTS readiness_reports (
     fingerprint TEXT PRIMARY KEY,
     state TEXT NOT NULL,
     reported_at TEXT NOT NULL
+);
+
+-- How long things have actually taken, per repository: a gate run, a worker
+-- session, a plan phase, the silence between two progress notes, a manager turn,
+-- a CI run. Written where each one ends, never sampled; `budgets.py` derives every
+-- per-repo wait from it. `outcome` `stall` or `kill` keeps a row out of the derivation.
+CREATE TABLE IF NOT EXISTS repo_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    seconds REAL NOT NULL,
+    at TEXT NOT NULL,
+    task_id INTEGER,
+    outcome TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_repo_observations ON repo_observations(repo, kind, at);
+
+-- A person's word on a budget (`ppy repo set <name> --budget <kind>=<seconds>`): it
+-- wins over whatever the observations derive.
+CREATE TABLE IF NOT EXISTS repo_budget_overrides (
+    repo TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    seconds REAL NOT NULL,
+    set_at TEXT NOT NULL,
+    PRIMARY KEY (repo, kind)
 );
 
 CREATE TABLE IF NOT EXISTS assessment_cycles (
