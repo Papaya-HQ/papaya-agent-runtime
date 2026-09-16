@@ -203,7 +203,8 @@ def test_config_models_preserves_every_unrequested_setting(ppy_home, monkeypatch
     cfg.tools.location = "custom/tools"
     cfg.health.quiet_minutes = 27
     cfg.assessments.completed_runs = 9
-    cfg.claude.allowed_tools = ["Read", "Bash(make:*)"]
+    cfg.claude.extra_tools = ["Bash(go:*)"]
+    cfg.claude.dropped_tools = ["Bash(pnpm:*)"]
     save_config(cfg)
     expected = cfg.to_dict()
     expected["manager"]["model"] = "sonnet"

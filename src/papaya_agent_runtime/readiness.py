@@ -204,8 +204,9 @@ def _config_problems(problems: list[Problem]) -> None:
             )
         )
         return
-    tools = getattr(getattr(cfg, "claude", None), "allowed_tools", None)
-    if tools is not None and str(tools).strip().upper() == "NONE":
+    from papaya_agent_runtime.config import effective_claude_tools
+
+    if not effective_claude_tools(cfg):
         problems.append(
             Problem(
                 code="claude_tools_empty",
@@ -213,6 +214,7 @@ def _config_problems(problems: list[Problem]) -> None:
                     "Claude workers have an empty tool profile, so every Claude dispatch is refused"
                 ),
                 fix="`ppy config claude --reset`",
+                owner=USER,
             )
         )
 
@@ -342,51 +344,82 @@ def gate_programs(commands: list[str]) -> set[str]:
     return programs
 
 
-def _gate_tool_problems(problems: list[Problem]) -> None:
-    """Does the stored Claude profile lack a tool a registered repository's gate runs?
+def gate_tool_needs() -> dict[str, list[str]]:
+    """Every `Bash(<program>:*)` a registered repository's onboarded gate runs, by repository.
 
-    A worker whose allowlist refuses `node --test` spends its review round on a
-    tool verb rather than the work (every JavaScript worker, 2026-09-16). Only a
-    pattern the documented default carries is named, because the fix offered is
-    restoring that default; a repository with no onboarding notes is skipped, since
-    nobody knows its gate yet and `repo_not_onboarded` already says so.
+    A repository with no onboarding notes is skipped, since nobody knows its gate yet
+    and `repo_not_onboarded` already says so.
     """
     from papaya_agent_runtime import memory, repos
-    from papaya_agent_runtime.config import default_claude_allowed_tools, load_config
-    from papaya_agent_runtime.paths import config_path
 
-    if not config_path().exists():
-        return
     try:
-        stored = set(load_config().claude.allowed_tools)
         registered = repos.list_repos()
-    except Exception:  # noqa: BLE001 - a bad config or state db is reported by the other checks
-        return
-    default = set(default_claude_allowed_tools())
-    lacking: dict[str, list[str]] = {}
+    except Exception:  # noqa: BLE001 - an unreadable state db is reported by the other checks
+        return {}
+    needs: dict[str, list[str]] = {}
     for row in registered:
         try:
             notes = memory.repo_notes_path(row["name"]).read_text(encoding="utf-8")
         except OSError:
             continue
         for program in sorted(gate_programs(gate_commands(notes))):
-            pattern = f"Bash({program}:*)"
-            if pattern in default and pattern not in stored:
-                lacking.setdefault(pattern, []).append(row["name"])
-    if not lacking:
+            needs.setdefault(f"Bash({program}:*)", []).append(str(row["name"]))
+    return {pattern: sorted(names) for pattern, names in needs.items()}
+
+
+def _lock_fix(lock: str) -> str:
+    section, _, key = lock.partition(".")
+    return f"`ppy config {section} --unlock {key}` lets the runtime make it"
+
+
+def _gate_tool_problems(problems: list[Problem]) -> None:
+    """Do the effective Claude tools lack one a registered repository's gate runs?
+
+    A worker whose allowlist refuses `node --test` spends its review round on a
+    tool verb rather than the work (every JavaScript worker, 2026-09-16). Only a
+    pattern the code's profile carries is named: with the profile applied from the
+    code, that can only be a pattern somebody dropped. Restoring it is the runtime's
+    own job (`config_changes.apply`, at `ppy serve` start and on every ensure), so
+    this is said as the runtime's item — unless a lock refuses it, which is a
+    person's.
+    """
+    from papaya_agent_runtime import config_changes
+    from papaya_agent_runtime.config import load_config
+    from papaya_agent_runtime.paths import config_path
+
+    if not config_path().exists():
+        return
+    try:
+        cfg = load_config()
+        remedies = [r for r in config_changes.planned(cfg) if r.evidence.get("repositories")]
+    except Exception:  # noqa: BLE001 - a bad config or state db is reported by the other checks
+        return
+    if not remedies:
         return
     needed = "; ".join(
-        f"{pattern} ({', '.join(sorted(names))})" for pattern, names in sorted(lacking.items())
+        f"{r.pattern} ({', '.join(r.evidence['repositories'])})"
+        for r in sorted(remedies, key=lambda r: r.pattern)
     )
+    locks = sorted({lock for r in remedies if (lock := r.lock(cfg)) is not None})
+    summary = (
+        f"Claude workers would be refused a tool a registered repository's gate runs: {needed}"
+    )
+    if locks:
+        problems.append(
+            Problem(
+                code="claude_tools_lack_gate",
+                summary=f"{summary}; not restored because {', '.join(locks)} is locked",
+                fix="; ".join(_lock_fix(lock) for lock in locks),
+                owner=USER,
+                blocking=False,
+            )
+        )
+        return
     problems.append(
         Problem(
             code="claude_tools_lack_gate",
-            summary=(
-                "Claude workers would be refused a tool a registered repository's gate runs: "
-                f"{needed}"
-            ),
-            fix="`ppy config claude --reset`",
-            owner=USER,
+            summary=summary,
+            fix="the runtime restores it when `ppy serve` starts or a repository is ensured",
             blocking=False,
         )
     )
@@ -434,6 +467,62 @@ def _gate_budget_problems(problems: list[Problem]) -> None:
             blocking=False,
         )
     )
+
+
+def _learned_tool_problems(problems: list[Problem]) -> None:
+    """Denied tools: a learned one a lock refused, and ones outside the safe family."""
+    from papaya_agent_runtime import config_changes, tool_learning
+    from papaya_agent_runtime.config import effective_claude_tools, load_config
+    from papaya_agent_runtime.paths import config_path
+
+    if not config_path().exists():
+        return
+    try:
+        cfg = load_config()
+        effective = set(effective_claude_tools(cfg))
+        locked = [(r, lock) for r, lock in config_changes.blocked(cfg) if r.evidence.get("command")]
+        refused = [
+            d
+            for d in tool_learning.refused()
+            if d.get("pattern")
+            and d["pattern"] not in effective
+            and d["pattern"] not in cfg.claude.dropped_tools
+        ]
+    except Exception:  # noqa: BLE001 - a bad config or state db is reported by the other checks
+        return
+    if locked:
+        problems.append(
+            Problem(
+                code="config_locked",
+                summary=(
+                    "the runtime would have changed a locked key: "
+                    + "; ".join(
+                        f"{r.pattern} into {r.key} after a denied `{r.evidence['command']}` "
+                        f"({lock} is locked)"
+                        for r, lock in locked
+                    )
+                ),
+                fix="; ".join(sorted({_lock_fix(lock) for _, lock in locked})),
+                owner=USER,
+                blocking=False,
+            )
+        )
+    if refused:
+        problems.append(
+            Problem(
+                code="claude_tool_denied",
+                summary=(
+                    "workers were denied commands outside the safe family, so nothing was "
+                    "learned: "
+                    + "; ".join(
+                        f"`{d.get('command') or d['pattern']}` ({d['reason']})" for d in refused
+                    )
+                ),
+                fix="; ".join(f"`ppy config claude --allow '{d['pattern']}'`" for d in refused),
+                owner=USER,
+                blocking=False,
+            )
+        )
 
 
 def _papaya_problems(problems: list[Problem]) -> None:
@@ -491,6 +580,7 @@ def check() -> Readiness:
     _harness_problems(problems)
     _repo_problems(problems)
     _gate_tool_problems(problems)
+    _learned_tool_problems(problems)
     _gate_budget_problems(problems)
     _papaya_problems(problems)
     _client_problems(problems)

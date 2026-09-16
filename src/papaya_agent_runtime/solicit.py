@@ -946,7 +946,19 @@ def ensure(spec: str, *, allow_outside: bool = False) -> Ensured:
 
     Idempotent: a repository already registered is onboarded if it never was, and
     otherwise left exactly as it is.
+
+    Afterwards the runtime's config remedies run (`config_changes.apply`): a
+    repository whose gate runs a tool the worker profile had dropped gets it back
+    before its first dispatch, not after a worker is refused it.
     """
+    ensured = _ensure(spec, allow_outside=allow_outside)
+    from papaya_agent_runtime import config_changes
+
+    config_changes.apply(context=f"ensured {ensured.name}")
+    return ensured
+
+
+def _ensure(spec: str, *, allow_outside: bool) -> Ensured:
     existing = _already_registered(spec)
     if existing is not None:
         name = str(existing["name"])

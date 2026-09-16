@@ -10,7 +10,12 @@ from __future__ import annotations
 import json
 import os
 
-from papaya_agent_runtime.config import ConfigError, default_claude_allowed_tools, load_config
+from papaya_agent_runtime.config import (
+    ConfigError,
+    default_claude_allowed_tools,
+    effective_claude_tools,
+    load_config,
+)
 from papaya_agent_runtime.providers.base import (
     ProviderAdapter,
     ProviderEvent,
@@ -31,21 +36,26 @@ def effective_allowed_tools() -> tuple[list[str], str]:
     """The tool patterns a Claude worker will be launched with, and where they came from.
 
     ``PPY_CLAUDE_ALLOWED_TOOLS`` (a comma-separated list) wins when it is set — the
-    escape hatch for a one-off session — otherwise the persisted
-    ``claude.allowed_tools`` config setting decides. Without a config file yet, the
-    documented default profile applies: a worker with no shell is never the answer.
+    escape hatch for a one-off session — otherwise the code's profile with the
+    config's ``claude.extra_tools`` added and ``claude.dropped_tools`` removed. Read
+    on every call, so a tool the runtime learned applies to the very next dispatch.
+    Without a config file yet, the profile applies as it is: a worker with no shell
+    is never the answer.
 
     An empty result is a real answer, not a fallback: a deliberately emptied env var
-    or config list means "no tools", and dispatch refuses rather than quietly
-    launching a worker that cannot run a command.
+    or a profile with everything dropped means "no tools", and dispatch refuses rather
+    than quietly launching a worker that cannot run a command.
     """
     raw = os.environ.get(ALLOWED_TOOLS_ENV)
     if raw is not None:
         return [part.strip() for part in raw.split(",") if part.strip()], ALLOWED_TOOLS_ENV
     try:
-        return list(load_config().claude.allowed_tools), "config claude.allowed_tools"
+        cfg = load_config()
     except ConfigError:
         return list(default_claude_allowed_tools()), "built-in default profile"
+    if cfg.claude.allowed_tools is not None:
+        return effective_claude_tools(cfg), "config claude.allowed_tools (locked)"
+    return effective_claude_tools(cfg), "built-in profile + config deltas"
 
 
 class ClaudeAdapter(ProviderAdapter):
@@ -125,6 +135,15 @@ class ClaudeAdapter(ProviderAdapter):
             session_id=_find(obj, "session_id"),
             text=obj.get("result") if obj.get("type") == "result" else None,
         )
+
+    def permission_denials(self, events: list[ProviderEvent]) -> list[dict]:
+        """The tool calls Claude Code refused, from the turn's ``result`` event."""
+        denials: list[dict] = []
+        for ev in events:
+            if ev.raw.get("type") == "result":
+                found = ev.raw.get("permission_denials") or []
+                denials.extend(d for d in found if isinstance(d, dict))
+        return denials
 
     def parse_usage(self, events: list[ProviderEvent]) -> UsageInfo | None:
         for ev in reversed(events):

@@ -433,8 +433,8 @@ class Supervisor:
                 raise SupervisorError(
                     f"claude worker would have no tools at all ({source} is empty) — it could "
                     "not run a command, commit, or report progress. Restore the profile with "
-                    "`ppy config claude --reset`, or set one with "
-                    "`ppy config claude --allowed-tools 'Read,Edit,Bash(git:*),...'`."
+                    "`ppy config claude --reset`, or add a pattern with "
+                    "`ppy config claude --allow 'Bash(git:*)'`."
                 )
 
         execution = self._admit(conn, limit=self._max_concurrent(provider), task_id=None)

@@ -213,6 +213,16 @@ class RunnerGuardian:
             self._on_exit()
 
         result = self.adapter.result(events, exit_code)
+        denials = self.adapter.permission_denials(events)
+        if denials:
+            from papaya_agent_runtime import tool_learning
+
+            tool_learning.learn(
+                denials,
+                task_id=spec.task_id,
+                run_id=spec.run_id,
+                worktree=spec.worktree_path,
+            )
         if result.usage is not None:
             store.record_usage(
                 conn,

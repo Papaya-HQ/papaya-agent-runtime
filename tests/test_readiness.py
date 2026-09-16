@@ -204,21 +204,23 @@ def test_no_signed_in_harness_at_all_says_that_once_not_twice(ppy_home, monkeypa
     assert codes == ["no_harness"]
 
 
-# ── A stored tool profile that cannot run a repository's gate ───────────────
+# ── A tool profile that cannot run a repository's gate ──────────────────────
 #
 # Every JavaScript worker on 2026-09-16 reported `node --test` denied: the stored
-# profile had been copied from a Python-only manager. A stored profile is a choice,
-# so it is never rewritten; the person is told what to run.
+# profile had been copied from a Python-only manager. The profile is code now, so
+# the only way to lack a gate tool is to have dropped it — and restoring it is the
+# runtime's own job, unless a person locked the key.
 
 
-def _javascript_repo_with_profile(monkeypatch, tools: list[str]) -> None:
+def _javascript_repo_with_profile(monkeypatch, dropped: list[str], locked=()) -> None:
     from papaya_agent_runtime import memory, solicit
     from papaya_agent_runtime.config import MMConfig, save_config
 
     for check in ("_harness_problems", "_papaya_problems", "_repo_problems", "_client_problems"):
         monkeypatch.setattr(readiness, check, lambda problems: None)
     cfg = MMConfig()
-    cfg.claude.allowed_tools = tools
+    cfg.claude.dropped_tools = dropped
+    cfg.claude.locked = list(locked)
     save_config(cfg)
     store.add_repo(
         init_db(),
@@ -239,23 +241,86 @@ def _javascript_repo_with_profile(monkeypatch, tools: list[str]) -> None:
     )
 
 
-def test_a_profile_without_node_warns_for_a_repo_whose_gate_runs_node(
-    ppy_home, monkeypatch
-) -> None:
-    _javascript_repo_with_profile(monkeypatch, ["Read", "Edit", "Bash(git:*)"])
+def test_a_dropped_gate_tool_is_the_runtimes_to_restore(ppy_home, monkeypatch) -> None:
+    from papaya_agent_runtime import config_changes
+    from papaya_agent_runtime.config import effective_claude_tools, load_config
+
+    _javascript_repo_with_profile(monkeypatch, ["Bash(node:*)"])
     verdict = readiness.check()
     assert [p.code for p in verdict.problems] == ["claude_tools_lack_gate"]
     problem = verdict.problems[0]
     assert "Bash(node:*) (web)" in problem.summary
-    assert problem.fix == "`ppy config claude --reset`"
     assert problem.blocking is False
-    assert problem.owner == readiness.USER
+    assert problem.owner == readiness.RUNTIME
     assert verdict.state == readiness.DEGRADED
+
+    (change,) = config_changes.apply(context="test")
+    assert change["key"] == "claude.dropped_tools"
+    assert "Bash(node:*)" in effective_claude_tools(load_config())
+    assert readiness.check().problems == []
+
+
+def test_a_locked_key_is_left_alone_and_named(ppy_home, monkeypatch) -> None:
+    from papaya_agent_runtime import config_changes
+    from papaya_agent_runtime.config import load_config
+
+    _javascript_repo_with_profile(monkeypatch, ["Bash(node:*)"], locked=["dropped_tools"])
+
+    assert config_changes.apply(context="test") == []
+    assert load_config().claude.dropped_tools == ["Bash(node:*)"]
+    (problem,) = readiness.check().problems
+    assert problem.code == "claude_tools_lack_gate"
+    assert "claude.dropped_tools is locked" in problem.summary
+    assert "--unlock dropped_tools" in problem.fix
+    assert problem.owner == readiness.USER
 
 
 def test_a_profile_with_node_says_nothing_about_the_gate(ppy_home, monkeypatch) -> None:
-    _javascript_repo_with_profile(monkeypatch, ["Read", "Edit", "Bash(git:*)", "Bash(node:*)"])
+    _javascript_repo_with_profile(monkeypatch, [])
     assert readiness.check().problems == []
+
+
+def test_a_migrated_list_keeps_one_extra_and_one_dropped_and_names_the_gate_tool(
+    ppy_home, monkeypatch
+) -> None:
+    """Goal 3: a customised copy becomes deltas; readiness names the dropped gate tool."""
+    from papaya_agent_runtime import memory, solicit
+    from papaya_agent_runtime.config import HISTORICAL_CLAUDE_PROFILES, load_config
+
+    for check in ("_harness_problems", "_papaya_problems", "_repo_problems", "_client_problems"):
+        monkeypatch.setattr(readiness, check, lambda problems: None)
+    _label, newest = HISTORICAL_CLAUDE_PROFILES[-1]
+    stored = [t for t in newest if t != "Bash(node:*)"] + ["Bash(go:*)"]
+    path = ppy_home / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "[claude]\nallowed_tools = [" + ", ".join(f'"{t}"' for t in stored) + "]\n",
+        encoding="utf-8",
+    )
+    store.add_repo(
+        init_db(),
+        name="web",
+        origin="https://github.com/acme/web.git",
+        local_path="/l",
+        default_branch="main",
+        base_sha="a" * 40,
+        forge_url="https://github.com/acme/web",
+    )
+    notes = memory.repo_notes_path("web")
+    notes.parent.mkdir(parents=True, exist_ok=True)
+    notes.write_text(
+        f"{solicit.NOTES_MARKER}\n## How it builds and verifies\n\n- test: `node --test`\n"
+        f"{solicit.NOTES_END}\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config()
+
+    assert cfg.claude.extra_tools == ["Bash(go:*)"]
+    assert cfg.claude.dropped_tools == ["Bash(node:*)"]
+    (problem,) = readiness.check().problems
+    assert problem.code == "claude_tools_lack_gate"
+    assert "Bash(node:*) (web)" in problem.summary
 
 
 def test_gate_programs_include_what_a_package_manager_needs() -> None:

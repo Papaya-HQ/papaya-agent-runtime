@@ -7,13 +7,16 @@ import os
 import re
 from pathlib import Path
 
-from papaya_agent_runtime import capabilities, papaya, readiness
+from papaya_agent_runtime import capabilities, config_changes, papaya, readiness
 from papaya_agent_runtime.config import ConfigError, load_config
 from papaya_agent_runtime.paths import config_path, db_path, ppy_home
 from papaya_agent_runtime.providers.capability import LOCAL, record_source, recorded_version
 from papaya_agent_runtime.setup.discovery import discover, usable_harnesses
 
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
+
+#: Readiness findings about the worker tool profile, printed under the readiness line.
+_TOOL_PROBLEMS = ("claude_tools_lack_gate", "claude_tool_denied", "config_locked")
 
 
 def _installed_version(version_str: str | None) -> str | None:
@@ -145,6 +148,10 @@ def collect() -> dict:
             cfg_status["valid"] = False
             cfg_status["error"] = str(exc)
     verdict = readiness.check()
+    try:
+        changes = config_changes.history(limit=10) if config_path().exists() else []
+    except Exception:  # noqa: BLE001 - diagnostics must not crash
+        changes = []
     return {
         "ppy_home": str(home),
         "readiness": verdict.as_dict(),
@@ -157,6 +164,7 @@ def collect() -> dict:
         "usable_harnesses": usable_harnesses(report),
         "capability_drift": _capability_drift(report),
         "repos": _repo_forges(),
+        "config_changes": changes,
     }
 
 
@@ -167,8 +175,10 @@ def render_text(data: dict) -> str:
     if verdict:
         lines.append(f"readiness: {verdict['state']} — see `ppy readiness` for what and whose")
         for problem in verdict.get("problems", []):
-            if problem["code"] == "claude_tools_lack_gate":
-                lines.append(f"  WARNING — {problem['summary']}; run {problem['fix']}")
+            if problem["code"] in _TOOL_PROBLEMS:
+                lines.append(f"  WARNING — {problem['summary']}; {problem['fix']}")
+    for change in data.get("config_changes") or []:
+        lines.append(f"  {change['at']} {config_changes.line(change)}")
     lines.append(f"client:    {capabilities.client_line(data.get('capabilities'))}")
     connection = data.get("papaya") or {}
     if connection:

@@ -3106,6 +3106,36 @@ def self_setup(*, stderr) -> None:
     )
 
 
+def keep_config_right(*, stderr) -> None:
+    """Migrate the config, apply every safe remedy, and say each change once.
+
+    Loading migrates an older file in place; `config_changes.apply` restores dropped
+    gate tools and learns denied safe-family tools. Every change since the last start
+    — including ones a load made between starts — gets one line here, then is marked
+    said. Nothing here can stop `serve` from starting.
+    """
+    from papaya_agent_runtime import config_changes
+    from papaya_agent_runtime.config import ConfigError, load_config
+    from papaya_agent_runtime.paths import config_path
+
+    if not config_path().exists():
+        return
+    try:
+        load_config()
+    except (ConfigError, OSError):
+        return  # readiness says what is wrong with it
+    config_changes.apply(context="serve start")
+    try:
+        entries = config_changes.unannounced()
+        for entry in entries:
+            text = config_changes.line(entry)
+            log.info("[serve] %s", text)
+            print(f"ppy serve: {text}", file=stderr)
+        config_changes.mark_announced(entries)
+    except Exception as exc:  # noqa: BLE001 - saying it must never be why serve did not start
+        log.warning("[serve] Could not read the config history: %s", exc)
+
+
 # ── telling the owner what still needs them ─────────────────────────────────
 
 #: The keys a channel may carry its kind under, and the values that mean this one
@@ -3273,6 +3303,7 @@ async def run(
     # Before anything is said to Papaya: a connection whose runtime has never been
     # configured is the silent failure this whole sequence exists to end.
     await asyncio.to_thread(self_setup, stderr=stderr)
+    await asyncio.to_thread(keep_config_right, stderr=stderr)
     runner = runner or TicketRunner()
     try:
         built = await _build(options, runner, stdout=stdout, extra=extra)

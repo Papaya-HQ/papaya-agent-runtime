@@ -9,6 +9,7 @@ authenticated harnesses.
 from __future__ import annotations
 
 from papaya_agent_runtime.config import (
+    DEFAULT_MODELS,
     REASONING_LEVELS,
     Authority,
     ConfigError,
@@ -124,7 +125,7 @@ def build_config(overrides: dict) -> MMConfig:
 
 
 def _default_model(provider: str) -> str:
-    return {"claude": "opus", "codex": "gpt-5-codex"}.get(provider, "unknown")
+    return DEFAULT_MODELS.get(provider, "unknown")
 
 
 def run_setup(non_interactive: bool = False, overrides: dict | None = None) -> MMConfig:

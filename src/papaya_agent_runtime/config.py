@@ -11,7 +11,7 @@ known, flat-ish schema.
 
 from __future__ import annotations
 
-import os
+import re
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -83,75 +83,179 @@ class AssessmentPolicy:
     max_actions: int = 3
 
 
+#: This checkout's own launcher, wherever the checkout lives. Until 2026-09-16 the
+#: profile carried ``Bash(/abs/path/to/checkout/bin/ppy:*)``, which made every stored
+#: copy of it machine-specific.
+PPY_LAUNCHER_PATTERN = "Bash(*/bin/ppy:*)"
+
+_ABSOLUTE_LAUNCHER = re.compile(r"^Bash\(/.*/bin/ppy:\*\)$")
+
+#: The documented Claude worker tool profile. It lives here and only here: a config
+#: file records what a person added to it or took out of it, never a copy of it.
+#:
+#: Claude Code only gives a worker a shell when it is launched with
+#: ``--allowedTools``. That list used to come *only* from
+#: ``PPY_CLAUDE_ALLOWED_TOOLS`` in the supervisor's own environment and was
+#: persisted nowhere, so every ``ppy supervisor serve`` had to export it first and a
+#: dispatch after a restart silently produced a worker with no shell (2026-09-02).
+#:
+#: The first entries are the profile the Claude Code permission classifier accepted
+#: on 2026-09-02, proved end to end by smoke task 77: progress reporting, uv, a
+#: commit, and a push. A broader list including ``rm``, ``gh`` and ``export`` was
+#: classifier-blocked, so it is deliberately absent — and workers never open PRs or
+#: hold forge credentials anyway.
+#:
+#: The JavaScript toolchain, the file verbs and the read-only text tools arrived on
+#: 2026-09-16, when every worker dispatched into a JavaScript repository reported
+#: ``node --test`` denied and one could not ``cp`` its evidence into place: the list
+#: had been copied from a Python-only manager. Containment is the write boundary,
+#: not this verb list — a worker that may ``cp`` inside its worktree is still refused
+#: outside it.
+CLAUDE_PROFILE: tuple[str, ...] = (
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "Bash(cd:*)",
+    "Bash(git:*)",
+    "Bash(uv:*)",
+    "Bash(make:*)",
+    "Bash(pytest:*)",
+    "Bash(python:*)",
+    "Bash(python3:*)",
+    "Bash(ruff:*)",
+    PPY_LAUNCHER_PATTERN,
+    "Bash(./bin/ppy:*)",
+    "Bash(ppy:*)",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(mkdir:*)",
+    "Bash(jq:*)",
+    "Bash(pnpm:*)",
+    "Bash(node:*)",
+    "Bash(npm:*)",
+    "Bash(npx:*)",
+    "Bash(corepack:*)",
+    "Bash(cp:*)",
+    "Bash(mv:*)",
+    "Bash(tee:*)",
+    "Bash(touch:*)",
+    "Bash(head:*)",
+    "Bash(tail:*)",
+    "Bash(wc:*)",
+    "Bash(sed:*)",
+    "Bash(find:*)",
+    "Bash(sqlite3:*)",
+)
+
+#: Every profile a release has ever written into somebody's ``config.toml``, oldest
+#: first, with the absolute launcher path already folded into
+#: :data:`PPY_LAUNCHER_PATTERN`. Migration recognises a stored list by these, so they
+#: are history: never edit one, append the next.
+HISTORICAL_CLAUDE_PROFILES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "0.x profile of 2026-09-02",
+        (
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "Bash(cd:*)",
+            "Bash(git:*)",
+            "Bash(uv:*)",
+            "Bash(make:*)",
+            "Bash(pytest:*)",
+            "Bash(python:*)",
+            "Bash(ruff:*)",
+            PPY_LAUNCHER_PATTERN,
+            "Bash(./bin/ppy:*)",
+            "Bash(ppy:*)",
+            "Bash(ls:*)",
+            "Bash(cat:*)",
+            "Bash(mkdir:*)",
+            "Bash(jq:*)",
+            "Bash(pnpm:*)",
+        ),
+    ),
+    (
+        "0.x profile of 2026-09-16 (PR 19)",
+        (
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "Bash(cd:*)",
+            "Bash(git:*)",
+            "Bash(uv:*)",
+            "Bash(make:*)",
+            "Bash(pytest:*)",
+            "Bash(python:*)",
+            "Bash(python3:*)",
+            "Bash(ruff:*)",
+            PPY_LAUNCHER_PATTERN,
+            "Bash(./bin/ppy:*)",
+            "Bash(ppy:*)",
+            "Bash(ls:*)",
+            "Bash(cat:*)",
+            "Bash(mkdir:*)",
+            "Bash(jq:*)",
+            "Bash(pnpm:*)",
+            "Bash(node:*)",
+            "Bash(npm:*)",
+            "Bash(npx:*)",
+            "Bash(corepack:*)",
+            "Bash(cp:*)",
+            "Bash(mv:*)",
+            "Bash(tee:*)",
+            "Bash(touch:*)",
+            "Bash(head:*)",
+            "Bash(tail:*)",
+            "Bash(wc:*)",
+            "Bash(sed:*)",
+            "Bash(find:*)",
+            "Bash(sqlite3:*)",
+        ),
+    ),
+)
+
+#: The config file format. 1 (implicit: no key) wrote every default, including a
+#: verbatim copy of the Claude tool profile; 2 writes only what differs from the code.
+CONFIG_VERSION = 2
+
+#: The per-provider model a role gets when the file names none.
+DEFAULT_MODELS = {"claude": "opus", "codex": "gpt-5-codex"}
+
+
 def default_claude_allowed_tools() -> list[str]:
-    """The documented Claude worker tool profile.
+    """The code's Claude worker tool profile (:data:`CLAUDE_PROFILE`)."""
+    return list(CLAUDE_PROFILE)
 
-    Claude Code only gives a worker a shell when it is launched with
-    ``--allowedTools``. That list used to come *only* from
-    ``PPY_CLAUDE_ALLOWED_TOOLS`` in the supervisor's own environment and was
-    persisted nowhere, so every ``ppy supervisor serve`` had to export it first and
-    a dispatch after a restart silently produced a worker with no shell
-    (2026-09-02).
 
-    This is the profile the Claude Code permission classifier accepted on
-    2026-09-02, proved end to end by smoke task 77: progress reporting, uv, a
-    commit, and a push. A broader list including ``rm``, ``gh`` and ``export`` was
-    classifier-blocked, so it is deliberately absent — and workers never open PRs
-    or hold forge credentials anyway.
-
-    The JavaScript toolchain, the file verbs and the read-only text tools arrived
-    on 2026-09-16, when every worker dispatched into a JavaScript repository
-    reported ``node --test`` denied and one could not ``cp`` its evidence into
-    place: the list had been copied from a Python-only manager. Containment is the
-    write boundary, not this verb list — a worker that may ``cp`` inside its
-    worktree is still refused outside it.
-    """
-    from papaya_agent_runtime.manager.launch import repo_root
-
-    return [
-        "Read",
-        "Edit",
-        "Write",
-        "Glob",
-        "Grep",
-        "Bash(cd:*)",
-        "Bash(git:*)",
-        "Bash(uv:*)",
-        "Bash(make:*)",
-        "Bash(pytest:*)",
-        "Bash(python:*)",
-        "Bash(python3:*)",
-        "Bash(ruff:*)",
-        f"Bash({os.path.join(repo_root(), 'bin', 'ppy')}:*)",
-        "Bash(./bin/ppy:*)",
-        "Bash(ppy:*)",
-        "Bash(ls:*)",
-        "Bash(cat:*)",
-        "Bash(mkdir:*)",
-        "Bash(jq:*)",
-        "Bash(pnpm:*)",
-        "Bash(node:*)",
-        "Bash(npm:*)",
-        "Bash(npx:*)",
-        "Bash(corepack:*)",
-        "Bash(cp:*)",
-        "Bash(mv:*)",
-        "Bash(tee:*)",
-        "Bash(touch:*)",
-        "Bash(head:*)",
-        "Bash(tail:*)",
-        "Bash(wc:*)",
-        "Bash(sed:*)",
-        "Bash(find:*)",
-        "Bash(sqlite3:*)",
-    ]
+def normalise_tool(pattern: str) -> str:
+    """One tool pattern, with a machine-specific launcher path made portable."""
+    pattern = pattern.strip()
+    return PPY_LAUNCHER_PATTERN if _ABSOLUTE_LAUNCHER.match(pattern) else pattern
 
 
 @dataclass
 class ClaudeProfile:
-    """Settings that shape a Claude worker's session."""
+    """Settings that shape a Claude worker's session.
 
-    allowed_tools: list[str] = field(default_factory=default_claude_allowed_tools)
+    The tools a worker launches with are :data:`CLAUDE_PROFILE` plus
+    ``extra_tools`` minus ``dropped_tools`` (:func:`effective_claude_tools`), so a
+    new release's profile applies on the next load with nothing to edit.
+    ``locked`` names keys of this table the runtime must never change by itself.
+    ``allowed_tools`` is the pre-delta verbatim list; it only survives loading when
+    a person locked it.
+    """
+
+    extra_tools: list[str] = field(default_factory=list)
+    dropped_tools: list[str] = field(default_factory=list)
+    locked: list[str] = field(default_factory=list)
+    allowed_tools: list[str] | None = None
 
 
 @dataclass
@@ -268,16 +372,26 @@ class MMConfig:
             value = getattr(self.usage, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ConfigError(f"usage.{name} must be a positive integer")
-        if not isinstance(self.claude.allowed_tools, list):
-            raise ConfigError("claude.allowed_tools must be a list of tool patterns")
-        for pattern in self.claude.allowed_tools:
-            if not isinstance(pattern, str) or not pattern.strip():
-                raise ConfigError(
-                    f"claude.allowed_tools holds a bad entry {pattern!r}; each one is a Claude "
-                    "Code tool pattern such as 'Read' or 'Bash(uv:*)'"
-                )
+        for name in ("extra_tools", "dropped_tools", "locked", "allowed_tools"):
+            value = getattr(self.claude, name)
+            if value is None and name == "allowed_tools":
+                continue
+            if not isinstance(value, list):
+                raise ConfigError(f"claude.{name} must be a list of strings")
+            for entry in value:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise ConfigError(
+                        f"claude.{name} holds a bad entry {entry!r}; each one is a Claude "
+                        "Code tool pattern such as 'Read' or 'Bash(uv:*)'"
+                        if name != "locked"
+                        else f"claude.locked holds a bad entry {entry!r}; name a key"
+                    )
 
     def to_dict(self) -> dict:
+        """Every setting, resolved — what the runtime runs with, not what is stored."""
+        claude = asdict(self.claude)
+        if claude["allowed_tools"] is None:
+            del claude["allowed_tools"]
         return {
             "manager": asdict(self.manager),
             "worker": asdict(self.worker),
@@ -287,17 +401,22 @@ class MMConfig:
             "assessments": asdict(self.assessments),
             "health": asdict(self.health),
             "usage": asdict(self.usage),
-            "claude": asdict(self.claude),
+            "claude": claude,
         }
 
 
 def _from_dict(data: dict) -> MMConfig:
     manager = dict(data.get("manager", {}))
     worker = dict(data.get("worker", {}))
+    # A role with no model gets its provider's default model, so setup never has to
+    # write one down for the code's choice to apply.
+    manager.setdefault("provider", ManagerProfile.provider)
+    manager.setdefault("model", DEFAULT_MODELS.get(manager["provider"], ManagerProfile.model))
     # No worker provider means "whoever drives"; the runtime does not mix harnesses
     # unless a person said so. An existing file that names one explicitly is a
     # choice and is loaded verbatim.
-    worker.setdefault("provider", manager.get("provider", ManagerProfile.provider))
+    worker.setdefault("provider", manager["provider"])
+    worker.setdefault("max_model", DEFAULT_MODELS.get(worker["provider"], WorkerCeiling.max_model))
     # A pre-defaults config inherits its former ceiling explicitly. That keeps old
     # custom-model configs loadable and deterministic without guessing a rank.
     worker.setdefault("default_model", worker.get("max_model", WorkerCeiling.max_model))
@@ -317,6 +436,14 @@ def _from_dict(data: dict) -> MMConfig:
 
 
 def load_config(path: Path | None = None) -> MMConfig:
+    """Read the config, migrating an older file in place first.
+
+    A file from before :data:`CONFIG_VERSION` 2 is rewritten once: its verbatim
+    Claude tool list becomes deltas against the code's profile and every value
+    equal to the code's default is removed, so the next release's defaults apply
+    without anyone running anything. Each change is recorded as a ``config_change``
+    event. An unreadable or invalid file is never rewritten.
+    """
     p = path or config_path()
     if not p.exists():
         raise ConfigError(
@@ -324,9 +451,174 @@ def load_config(path: Path | None = None) -> MMConfig:
         )
     with open(p, "rb") as fh:
         data = tomllib.load(fh)
-    cfg = _from_dict(data)
+    migrated, changes = migrate(data)
+    cfg = _from_dict(migrated)
     cfg.validate()
+    if changes:
+        try:
+            save_config(cfg, p)
+        except OSError:  # a read-only home still loads; it migrates on the next writable load
+            return cfg
+        from papaya_agent_runtime import config_changes
+
+        for change in changes:
+            config_changes.record(**change)
     return cfg
+
+
+def migrate(data: dict) -> tuple[dict, list[dict]]:
+    """An older file's contents in today's shape, and what changed on the way.
+
+    Pure: nothing is written. Each change is the keyword arguments of
+    :func:`papaya_agent_runtime.config_changes.record`.
+    """
+    data = {k: (dict(v) if isinstance(v, dict) else v) for k, v in data.items()}
+    version = data.pop("config_version", 1)
+    changes: list[dict] = []
+    claude = data.get("claude")
+    if isinstance(claude, dict) and "allowed_tools" in claude:
+        locked = claude.get("locked") or []
+        if "allowed_tools" not in locked and isinstance(claude["allowed_tools"], list):
+            change = _migrate_allowed_tools(claude)
+            if change is not None:
+                changes.append(change)
+    if isinstance(version, int) and version >= CONFIG_VERSION:
+        return data, changes
+    try:
+        before = _from_dict(data)
+        before.validate()
+    except (ConfigError, TypeError):
+        return data, changes  # load reports it; an invalid file is never rewritten
+    stored = _stored_dict(before)
+    removed = sorted(set(_leaves(data)) - set(_leaves(stored)) - {"config_version"})
+    changes.append(
+        {
+            "key": "config_version",
+            "before": version,
+            "after": CONFIG_VERSION,
+            "why": (
+                "stopped storing the built-in defaults, so a new release's defaults apply; "
+                f"removed {', '.join(removed) if removed else 'nothing'}"
+            ),
+            "evidence": {"removed": removed},
+        }
+    )
+    return stored, changes
+
+
+def _migrate_allowed_tools(claude: dict) -> dict | None:
+    """Turn a stored verbatim tool list into deltas against the code's profile."""
+    stored_raw = [str(t) for t in claude.pop("allowed_tools")]
+    stored = list(dict.fromkeys(normalise_tool(t) for t in stored_raw if t.strip()))
+    current = list(CLAUDE_PROFILE)
+    candidates = [*HISTORICAL_CLAUDE_PROFILES, ("current profile", tuple(current))]
+    # The profile it differs least from; on a tie, the newer one.
+    label, matched = min(
+        reversed(candidates),
+        key=lambda item: len(set(item[1]) ^ set(stored)),
+    )
+    extra = [t for t in stored if t not in matched and t not in current]
+    dropped = [t for t in matched if t not in stored and t in current]
+    claude["extra_tools"] = list(dict.fromkeys([*claude.get("extra_tools", []), *extra]))
+    claude["dropped_tools"] = list(dict.fromkeys([*claude.get("dropped_tools", []), *dropped]))
+    if not claude["extra_tools"]:
+        del claude["extra_tools"]
+    if not claude["dropped_tools"]:
+        del claude["dropped_tools"]
+    if not extra and not dropped:
+        why = f"claude.allowed_tools was a copy of the {label}; removed, the code's profile applies"
+    else:
+        why = (
+            f"claude.allowed_tools was the {label} with changes; kept as extra: "
+            f"{', '.join(extra) or 'nothing'}; kept as dropped: {', '.join(dropped) or 'nothing'}"
+        )
+    return {
+        "key": "claude.allowed_tools",
+        "before": stored_raw,
+        "after": {"extra_tools": extra, "dropped_tools": dropped},
+        "why": why,
+        "evidence": {"matched_profile": label},
+    }
+
+
+def _leaves(data: dict, prefix: str = "") -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            out.update(_leaves(value, f"{prefix}{key}."))
+        else:
+            out[f"{prefix}{key}"] = value
+    return out
+
+
+def _resolved(data: dict) -> dict | None:
+    try:
+        cfg = _from_dict(data)
+        cfg.validate()
+    except (ConfigError, TypeError):
+        return None
+    return cfg.to_dict()
+
+
+def _stored_dict(cfg: MMConfig) -> dict:
+    """What belongs in the file: only the values the code would not arrive at itself.
+
+    A key is kept exactly when removing it would change the loaded config — which
+    covers the plain schema defaults and the resolved ones alike (a worker provider
+    equal to the manager's, a model equal to its provider's default, a
+    ``default_model`` equal to the ceiling).
+    """
+    target = cfg.to_dict()
+    data = {k: (dict(v) if isinstance(v, dict) else v) for k, v in target.items()}
+    for section, values in list(data.items()):
+        if isinstance(values, dict):
+            for key in list(values):
+                trial = {k: (dict(v) if isinstance(v, dict) else v) for k, v in data.items()}
+                del trial[section][key]
+                if _resolved(trial) == target:
+                    del data[section][key]
+            if not data[section]:
+                del data[section]
+        else:
+            trial = dict(data)
+            del trial[section]
+            if _resolved(trial) == target:
+                del data[section]
+    return {"config_version": CONFIG_VERSION, **data}
+
+
+def effective_claude_tools(cfg: MMConfig) -> list[str]:
+    """The code's profile, plus what a person or the runtime added, minus what was dropped."""
+    if cfg.claude.allowed_tools is not None:  # a locked pre-delta list, used verbatim
+        return list(cfg.claude.allowed_tools)
+    dropped = set(cfg.claude.dropped_tools)
+    tools = [t for t in CLAUDE_PROFILE if t not in dropped]
+    tools += [t for t in cfg.claude.extra_tools if t not in tools and t not in dropped]
+    return tools
+
+
+def claude_tool_provenance(cfg: MMConfig) -> list[tuple[str, str]]:
+    """Each tool pattern and where it comes from: ``profile``, ``extra`` or ``dropped``.
+
+    A locked pre-delta list marks its entries ``stored``.
+    """
+    if cfg.claude.allowed_tools is not None:
+        return [(t, "stored") for t in cfg.claude.allowed_tools]
+    dropped = set(cfg.claude.dropped_tools)
+    out = [(t, "dropped" if t in dropped else "profile") for t in CLAUDE_PROFILE]
+    seen = {t for t, _ in out}
+    for tool in cfg.claude.extra_tools:
+        if tool not in seen:
+            out.append((tool, "dropped" if tool in dropped else "extra"))
+            seen.add(tool)
+    return out
+
+
+def is_locked(cfg: MMConfig, key: str) -> bool:
+    """Has a person locked ``section.key`` against the runtime changing it?"""
+    section, _, name = key.partition(".")
+    locked = getattr(getattr(cfg, section, None), "locked", None) or []
+    return name in locked
 
 
 def default_worker_provider() -> str:
@@ -353,7 +645,7 @@ def save_config(cfg: MMConfig, path: Path | None = None) -> Path:
     cfg.validate()
     p = path or config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_dumps_toml(cfg.to_dict()), encoding="utf-8")
+    p.write_text(_dumps_toml(_stored_dict(cfg)), encoding="utf-8")
     return p
 
 

@@ -520,17 +520,33 @@ are the only defence.
 
 All working state is under `.ppy/` (gitignored):
 
-- `config.toml` — driver profile, worker defaults and ceiling, active-worker limit,
-  cost posture, authority, self-assessment cadence, and the tool profile Claude
-  workers launch with (`claude.allowed_tools`; `PPY_CLAUDE_ALLOWED_TOOLS` overrides
-  it for a session). The default profile, which `ppy setup` writes and
-  `ppy config claude --reset` restores, covers Python (`uv`, `python`, `python3`,
-  `pytest`, `ruff`), JavaScript (`node`, `npm`, `npx`, `pnpm`, `corepack`), git, and
-  the everyday file and text verbs (`cp`, `mv`, `tee`, `touch`, `head`, `tail`, `wc`,
-  `sed`, `find`, `sqlite3`, …). Containment, not this list, is the write boundary: a
-  worker allowed `cp` is still refused outside its worktree. A stored profile is kept
-  as written; `ppy doctor` and `ppy readiness` warn when it lacks a tool a registered
-  repository's onboarded gate runs, and name `ppy config claude --reset` as the fix.
+- `config.toml` — only what differs from the code's defaults: driver profile, worker
+  defaults and ceiling, active-worker limit, cost posture, authority, self-assessment
+  cadence, and the *changes* to the Claude worker tool profile. Setup writes nothing
+  but `config_version` and the values a person chose, so a new release's defaults
+  apply on the next start. The tool profile itself is code
+  (`config.CLAUDE_PROFILE`): Python (`uv`, `python`, `python3`, `pytest`, `ruff`),
+  JavaScript (`node`, `npm`, `npx`, `pnpm`, `corepack`), git, the launcher
+  (`Bash(*/bin/ppy:*)`, any checkout path), and the everyday file and text verbs
+  (`cp`, `mv`, `tee`, `touch`, `head`, `tail`, `wc`, `sed`, `find`, `sqlite3`, …).
+  Workers launch with that profile plus `claude.extra_tools` minus
+  `claude.dropped_tools`; `ppy config claude --allow/--deny <pattern>` edits them,
+  `--show` lists every tool marked profile, extra or dropped, `--reset` clears them,
+  and `PPY_CLAUDE_ALLOWED_TOOLS` overrides everything for a session. Containment, not
+  this list, is the write boundary: a worker allowed `cp` is still refused outside
+  its worktree.
+
+  **The runtime keeps this file right by itself.** An older file (a verbatim
+  `claude.allowed_tools` copy, stored defaults) migrates on load, once. At
+  `ppy serve` start and whenever a repository is ensured, a gate tool that was dropped
+  is restored, and a worker's denied command in the safe family
+  (`tool_learning.SAFE_FAMILY`: read-only text tools, the language toolchains, file
+  verbs inside the worktree, `ppy` by any path) is added to `extra_tools` for the next
+  dispatch. A denial outside the family changes nothing and becomes one readiness
+  warning naming the pattern to `--allow`. Every change is a `config_change` event:
+  `ppy config history` lists them, and `ppy serve` start and `ppy doctor` print one
+  line each. `ppy config claude --lock extra_tools` (or `dropped_tools`) stops the
+  runtime changing a key; a change a lock refuses is a readiness warning naming it.
 - `state.db` — SQLite source of truth (repos, runs, tasks, decisions, sessions,
   events, usage, reviews, self-assessment cycles).
 - `repos/` — read-only base clones. The only repositories work happens in.
