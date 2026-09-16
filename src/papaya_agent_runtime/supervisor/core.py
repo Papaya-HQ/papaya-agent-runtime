@@ -1783,8 +1783,8 @@ class Supervisor:
             "usage": store.usage_totals(conn, run_id),
         }
 
-    def _all_terminal(self, run_id: int) -> bool:
-        conn = init_db()
+    @staticmethod
+    def _all_terminal(conn, run_id: int) -> bool:
         tasks = store.list_tasks(conn, run_id)
         if not tasks:
             return False
@@ -1797,21 +1797,31 @@ class Supervisor:
         Without the cursor a caller keeps seeing the same finished worker forever;
         watchers keyed on status strings then produce false "done" ticks. Pass the
         highest ``seq`` already handled to hear only what is new.
+
+        The statuses are read before the events. A worker's turn ends as one commit
+        (status and event together, :func:`store.record_turn_result`), so a run seen
+        terminal already has its event in the next read. Read the other way round,
+        a turn that ended between the two reads answered "all terminal, nothing new"
+        and lost the finished worker, which a busy machine did about one wait in 20.
         """
         deadline = time.monotonic() + timeout
         while True:
             conn = init_db()
-            actionable = [
-                e for e in store.actionable_events(conn, run_id) if int(e["seq"]) > after_seq
-            ]
-            if actionable or self._all_terminal(run_id):
+            try:
+                all_terminal = self._all_terminal(conn, run_id)
+                actionable = [
+                    e for e in store.actionable_events(conn, run_id) if int(e["seq"]) > after_seq
+                ]
+            finally:
+                conn.close()
+            if actionable or all_terminal:
                 return {
                     "run_id": run_id,
                     "actionable": [
                         {"seq": e["seq"], "kind": e["kind"], "payload": e["payload"]}
                         for e in actionable
                     ],
-                    "all_terminal": self._all_terminal(run_id),
+                    "all_terminal": all_terminal,
                 }
             if time.monotonic() > deadline:
                 return {

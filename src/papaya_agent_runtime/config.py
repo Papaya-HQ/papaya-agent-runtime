@@ -332,6 +332,15 @@ class ForgePolicy:
 
 
 @dataclass
+class SweepPolicy:
+    """How `ppy serve`'s sweep reads work Papaya says is kept elsewhere."""
+
+    # Minutes with no reservation, no live job and no word from the holder before
+    # work kept elsewhere counts as idle and is asked for again on every sweep.
+    idle_claim_minutes: int = 15
+
+
+@dataclass
 class MMConfig:
     manager: ManagerProfile = field(default_factory=ManagerProfile)
     worker: WorkerCeiling = field(default_factory=WorkerCeiling)
@@ -346,6 +355,7 @@ class MMConfig:
     forge: ForgePolicy = field(default_factory=ForgePolicy)
     delivery: DeliveryPolicy = field(default_factory=DeliveryPolicy)
     supervisor: SupervisorPolicy = field(default_factory=SupervisorPolicy)
+    sweep: SweepPolicy = field(default_factory=SweepPolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -461,6 +471,9 @@ class MMConfig:
         stop_timeout = self.supervisor.stop_timeout
         if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int) or stop_timeout < 1:
             raise ConfigError("supervisor.stop_timeout must be a positive number of seconds")
+        idle = self.sweep.idle_claim_minutes
+        if isinstance(idle, bool) or not isinstance(idle, int) or idle < 1:
+            raise ConfigError("sweep.idle_claim_minutes must be a positive number of minutes")
 
     def to_dict(self) -> dict:
         """Every setting, resolved — what the runtime runs with, not what is stored."""
@@ -481,6 +494,7 @@ class MMConfig:
             "forge": asdict(self.forge),
             "delivery": asdict(self.delivery),
             "supervisor": asdict(self.supervisor),
+            "sweep": asdict(self.sweep),
         }
 
 
@@ -514,6 +528,7 @@ def _from_dict(data: dict) -> MMConfig:
         forge=ForgePolicy(**data.get("forge", {})),
         delivery=DeliveryPolicy(**data.get("delivery", {})),
         supervisor=SupervisorPolicy(**data.get("supervisor", {})),
+        sweep=SweepPolicy(**data.get("sweep", {})),
     )
     return cfg
 

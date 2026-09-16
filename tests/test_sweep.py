@@ -98,8 +98,45 @@ def assigned(monkeypatch) -> list[dict[str, Any]]:
     return items
 
 
-def _sweeper(built: FakeBuilt, clock: Clock, stderr: io.StringIO | None = None) -> sweep.Sweeper:
-    return sweep.Sweeper(built, stderr=stderr, live_items=set, clock=clock)
+class Reads:
+    """Papaya's comments, reservations and reclaim route, per work item."""
+
+    def __init__(self) -> None:
+        self.thread: dict[str, list[dict[str, Any]]] = {}
+        #: Work item id -> its reservation; an id not here has none.
+        self.reservations: dict[str, dict[str, Any]] = {}
+        self.reclaims: list[str] = []
+        self.reclaim_answer = (sweep.RECLAIM_UNSUPPORTED, "Papaya has no reclaim route yet")
+
+    async def comments(self, work_item_id: str) -> list[dict[str, Any]] | None:
+        return list(self.thread.get(work_item_id, []))
+
+    async def reservation(self, subject: str) -> dict[str, Any] | None:
+        return self.reservations.get(subject.removeprefix("work_item:"))
+
+    async def reclaim(self, work_item_id: str) -> tuple[str, str]:
+        self.reclaims.append(work_item_id)
+        return self.reclaim_answer
+
+
+def _sweeper(
+    built: FakeBuilt,
+    clock: Clock,
+    stderr: io.StringIO | None = None,
+    *,
+    reads: Reads | None = None,
+    **kwargs: Any,
+) -> sweep.Sweeper:
+    return sweep.Sweeper(
+        built,
+        stderr=stderr,
+        live_items=set,
+        clock=clock,
+        reads=reads if reads is not None else Reads(),
+        connection_ids=set,
+        tickets=dict,
+        **kwargs,
+    )
 
 
 def test_an_in_progress_item_touched_ten_minutes_ago_is_in_progress_elsewhere(
@@ -207,13 +244,14 @@ class RoutingEvents:
 
     reserves: list[str] = field(default_factory=list)
     routed_here: set[str] = field(default_factory=set)
+    holder: dict[str, Any] = field(default_factory=lambda: dict(KEPT_IN_PAPAYA))
 
     async def reserve(self, subject: str, session_id: str, **_: Any) -> dict[str, Any]:
         from papaya_agent_client.api_client import SubjectHeld
 
         self.reserves.append(subject)
         if subject not in self.routed_here:
-            raise SubjectHeld(subject, dict(KEPT_IN_PAPAYA), None)
+            raise SubjectHeld(subject, dict(self.holder), None)
         return {"renewed": False}
 
 
@@ -231,17 +269,28 @@ class RoutingLoop(FakeLoop):
         except SubjectHeld:
             return "done"  # the client's `not_routed_here` skip
         self.offered.append(envelope["work_item_id"])
+        self.running_subjects.add(envelope["subject"])
         return sweep.OFFER_PENDING
 
 
 KEPT_FIVE = (
-    "sweep found 5: 5 kept by Engineering Agent in Papaya "
+    "sweep found 5: 5 kept by Engineering Agent in Papaya and being worked "
     "(use Run on this Mac to route one here), 0 offered"
 )
 
+#: A reservation the hosted agent is renewing: evidence somebody is doing the work.
+LIVE_LEASE = {
+    "subject": "work_item:x",
+    "holder": {**KEPT_IN_PAPAYA, "agent_id": "agent-1"},
+    "lease_expires_at": (NOW + timedelta(days=30)).isoformat(),
+}
+
 
 def _five_kept(assigned: list[dict[str, Any]]) -> FakeBuilt:
-    assigned.extend(_item(f"item-{n}", hours=n) for n in range(1, 6))
+    """Five items Papaya keeps with the hosted agent, each under a live reservation."""
+    assigned.extend(
+        {**_item(f"item-{n}", hours=n), "reservation": dict(LIVE_LEASE)} for n in range(1, 6)
+    )
     return FakeBuilt(loop=RoutingLoop())
 
 
@@ -277,7 +326,7 @@ def test_work_papaya_keeps_elsewhere_is_not_asked_for_again_for_thirty_minutes(
     assert _lines(stderr) == [
         f"ppy serve: {KEPT_FIVE}",
         "ppy serve: sweep unchanged: still found 5: 5 kept by Engineering Agent in Papaya "
-        "(use Run on this Mac to route one here), 0 offered",
+        "and being worked (use Run on this Mac to route one here), 0 offered",
     ]
 
 
@@ -331,3 +380,268 @@ def test_picking_an_item_up_forgets_that_papaya_kept_it_elsewhere(ppy_home) -> N
     sweep.forget_declined("item-1")
 
     assert sorted(sweep.kept_items()) == ["item-2"]
+
+
+# ── evidence of work, not claims of ownership ───────────────────────────────
+
+#: The holder Papaya names for a subject its on-call fallback took (the guard window).
+FALLBACK_HOLDER = {
+    "connection_id": "papaya-hosted",
+    "connection_name": "Engineering Agent in Papaya",
+    "session_id": "on-call-fallback",
+}
+
+
+def _hosted_comment(item_id: str, **ago: float) -> dict[str, Any]:
+    """A comment the hosted agent wrote: as the agent, through no connection."""
+    return {
+        "id": f"c-{item_id}",
+        "author_type": "agent",
+        "author_id": "agent-1",
+        "author_actor": {"type": "agent", "id": "agent-1", "via_connection": None},
+        "body": "Looking at this now.",
+        "created_at": _stamp(**ago),
+        "metadata": {},
+    }
+
+
+def test_kept_work_with_no_evidence_of_work_is_offered_again_on_the_next_sweep(
+    ppy_home, assigned
+) -> None:
+    """No reservation, no job and no word from the holder for fifteen minutes: idle."""
+    assigned.extend(
+        [
+            _item("idle", hours=1),
+            {**_item("leased", hours=1), "reservation": dict(LIVE_LEASE)},
+            _item("talking", hours=1),
+            # Left `in_progress` by the fallback an hour ago: recent enough for the
+            # six-hour rule, but nobody is working it.
+            _item("stuck", "in_progress", hours=1),
+        ]
+    )
+    reads = Reads()
+    reads.thread["talking"] = [_hosted_comment("talking", minutes=5)]
+    # Papaya refused all three here half an hour's recheck ago; that memory would
+    # keep every one of them from being asked for again.
+    sweep.remember_kept(
+        {
+            item["id"]: {
+                "updated_at": item["updated_at"],
+                "holder": FALLBACK_HOLDER,
+                "kept_at": NOW.isoformat(),
+            }
+            for item in assigned
+        }
+    )
+    built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
+    built.loop._events.routed_here.add("work_item:idle")
+    clock = Clock()
+    clock.advance(minutes=5)
+
+    result = asyncio.run(_sweeper(built, clock, reads=reads).sweep_once())
+
+    # Only the idle ones are asked for; the leased one and the one its holder spoke on
+    # five minutes ago are being worked. Papaya still refuses the stuck one.
+    assert built.loop._events.reserves == ["work_item:idle", "work_item:stuck"]
+    assert built.loop.offered == ["idle"]
+    assert result.kept == (("Engineering Agent in Papaya", 2),)
+    assert result.idle == (("Engineering Agent in Papaya", 1, 65),)
+    assert result.offered == 1
+    assert "idle" not in sweep.kept_items()
+
+    # Fifteen minutes after the holder last spoke, that one is idle too; a live
+    # reservation still is not; the stuck one is asked for again.
+    clock.advance(minutes=10)
+    later = asyncio.run(_sweeper(built, clock, reads=reads).sweep_once())
+    assert built.loop._events.reserves[2:] == ["work_item:talking", "work_item:stuck"]
+    assert later.kept == (("Engineering Agent in Papaya", 1),)
+    assert later.idle_total == 2
+
+
+def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_on_the_third(
+    ppy_home, assigned, monkeypatch
+) -> None:
+    from papaya_agent_runtime import blockers, deficiencies
+
+    assigned.extend(
+        {**_item(item_id, hours=2), "short_id": item_id} for item_id in ("PAP-219", "PAP-221")
+    )
+    assigned.append({**_item("PAP-222", hours=2), "short_id": "PAP-222"})
+    built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
+    built.loop._events.holder = dict(FALLBACK_HOLDER)
+    published: list[bool] = []
+    clock = Clock()
+    sweeper = _sweeper(built, clock, publish=lambda: published.append(True))
+
+    def idle_blockers() -> list[blockers.Blocker]:
+        ledger = blockers.Ledger.load()
+        return [b for b in ledger.open.values() if b.code == blockers.IDLE_WORK_KEPT]
+
+    def refused_deficiencies() -> list[deficiencies.Deficiency]:
+        return [
+            d
+            for d in deficiencies.ledger(include_all=True)
+            if d.kind == deficiencies.IDLE_WORK_REFUSED
+        ]
+
+    async def sweep_after(minutes: float) -> sweep.SweepResult:
+        clock.advance(minutes=minutes)
+        return await sweeper.sweep_once()
+
+    # First sweep: one blocker naming all three.
+    asyncio.run(sweep_after(0))
+    [blocker] = idle_blockers()
+    assert blocker.title == (
+        "Papaya keeps 3 idle items from this Mac: PAP-219, PAP-221, PAP-222; "
+        "use Run on this Mac, or wait for the guard to lift"
+    )
+    first_seen = blocker.first_seen
+    assert published == [True]
+    # Readiness rounds do not clear what they did not raise.
+    from papaya_agent_runtime import readiness
+
+    blockers.update(readiness.Readiness(state=readiness.READY))
+    assert len(idle_blockers()) == 1
+
+    # Same set: still one blocker, not re-recorded.
+    asyncio.run(sweep_after(5))
+    [same] = idle_blockers()
+    assert (same.title, same.first_seen) == (blocker.title, first_seen)
+    assert published == [True]
+    assert refused_deficiencies() == []
+
+    # PAP-222 was routed here: the blocker is updated to the two left.
+    built.loop._events.routed_here.add("work_item:PAP-222")
+    asyncio.run(sweep_after(5))
+    [changed] = idle_blockers()
+    assert changed.title.startswith("Papaya keeps 2 idle items from this Mac: PAP-219, PAP-221;")
+    assert changed.first_seen == first_seen
+    assert published == [True, True]
+    # The third refusal running of PAP-219 and PAP-221, with no evidence of work.
+    [deficiency] = refused_deficiencies()
+    assert sorted(entry["ticket"] for entry in deficiency.evidence) == ["PAP-219", "PAP-221"]
+    assert all(entry["code"] == "handled_in_papaya" for entry in deficiency.evidence)
+
+    # A fourth refusal does not record it again.
+    asyncio.run(sweep_after(5))
+    assert refused_deficiencies()[0].count == 2
+
+    # Nothing refused any more: the blocker clears.
+    built.loop._events.routed_here.update({"work_item:PAP-219", "work_item:PAP-221"})
+    asyncio.run(sweep_after(5))
+    assert idle_blockers() == []
+    assert published == [True, True, True]
+
+
+def test_the_summary_says_which_kept_work_is_being_worked_and_which_is_idle(
+    ppy_home, assigned
+) -> None:
+    assigned.extend(
+        [
+            {**_item("leased", hours=3), "reservation": dict(LIVE_LEASE)},
+            _item("quiet", minutes=40),
+            _item("quieter", hours=2),
+        ]
+    )
+    built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
+    built.loop._events.holder = dict(FALLBACK_HOLDER)
+
+    result = asyncio.run(_sweeper(built, Clock()).sweep_once())
+
+    assert result.summary() == (
+        "sweep found 3: 1 kept by Engineering Agent in Papaya and being worked, "
+        "2 kept by Engineering Agent in Papaya and idle for 40 minutes "
+        "(use Run on this Mac to route one here), 0 offered"
+    )
+
+
+def test_a_start_reclaims_what_an_earlier_connection_held_and_resumes_the_ticket_at_review(
+    ppy_home, assigned, monkeypatch
+) -> None:
+    """PAP-219: the ticket stalled with its worker done, then the fallback took it."""
+    import test_serve
+    from papaya_agent_runtime import papaya_events, rounds, serve
+    from papaya_agent_runtime.state import store
+    from papaya_agent_runtime.state.db import init_db
+
+    conn = init_db()
+    run_id = store.create_run(conn, "Ticket PAP-219")
+    ticket = store.add_task(conn, run_id=run_id, title="Ticket PAP-219")
+    event = papaya_events.PapayaEvent(
+        id="219",
+        kind="work_item.assigned",
+        subject="work_item:item-219",
+        payload={},
+        work_item_id="item-219",
+    )
+    papaya_events.record_task(conn, ticket, event)
+    for phase in (
+        serve.PHASE_PICKED_UP,
+        serve.PHASE_BRIEFING,
+        serve.PHASE_DISPATCHED,
+        serve.PHASE_STALLED,
+        serve.PHASE_HANDED_OVER,
+    ):
+        serve.record_phase(conn, ticket, phase)
+    conn.close()
+    worker = test_serve.dispatch_worker(run_id)
+    test_serve.worker_event(worker, "worker_done", status="worker_done", summary="Gate green.")
+
+    # The earlier connection's hold, and nothing working the item now.
+    assigned.append(
+        {
+            **_item("item-219", "in_progress", minutes=20),
+            "short_id": "PAP-219",
+            "run_on_this_mac": {"connection_id": "conn-before", "online": False},
+        }
+    )
+    runner = test_serve._runner(test_serve.FakeTurns(), test_serve.FakePapaya())
+    reads = Reads()
+    built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
+    built.loop._events.routed_here.add("work_item:item-219")
+    stderr = io.StringIO()
+    sweeper = sweep.Sweeper(
+        built,
+        stderr=stderr,
+        live_items=set,
+        clock=Clock(),
+        reads=reads,
+        runner=runner,
+        connection_ids=lambda: {"conn-before", "conn-now"},
+        tickets=sweep.ticket_index,
+    )
+
+    result = asyncio.run(sweeper.sweep_once())
+
+    assert reads.reclaims == ["item-219"]
+    assert built.loop.offered == ["item-219"]
+    assert result.offered == 1
+    assert sweeper.reclaim_lines == [
+        f"reclaimed PAP-219 (ticket task {ticket} here; reclaim unsupported: Papaya has no "
+        f"reclaim route yet); resuming ticket task {ticket}",
+        "reclaim on connect: 1 held by an earlier connection, 1 reclaimed, 0 refused",
+    ]
+    # The offer (a new event key, as every offer has) lands on the same ticket task,
+    # at review: its worker is done.
+    offer = papaya_events.PapayaEvent(
+        id="offer-219",
+        kind="work_item.assigned",
+        subject="work_item:item-219",
+        payload={},
+        work_item_id="item-219",
+    )
+    conn = init_db()
+    try:
+        held = runner._record(conn, offer, None)
+    finally:
+        conn.close()
+    assert (held.task_id, held.resume_from, held.reclaimed) == (
+        ticket,
+        serve.PHASE_REVIEWING,
+        True,
+    )
+    # The rounds leave a handed-over ticket to the sweep's evidence.
+    assert rounds.reclaimable(rounds.ticket_tasks()) == []
+    # A second sweep, with Papaya reachable all along, does not reclaim again.
+    asyncio.run(sweeper.sweep_once())
+    assert reads.reclaims == ["item-219"]

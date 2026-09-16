@@ -2928,8 +2928,10 @@ def test_work_papaya_keeps_elsewhere_is_left_alone_until_ppy_sweep_include_kept(
     finally:
         server.stop()
 
+    # Nothing in this test answers Papaya's reservation route, and work that cannot be
+    # shown idle counts as being worked, so the memory holds.
     kept = (
-        "sweep found 2: 2 kept by Engineering Agent in Papaya "
+        "sweep found 2: 2 kept by Engineering Agent in Papaya and being worked "
         "(use Run on this Mac to route one here), 0 offered"
     )
     assert _summaries(stderr)[0] == f"ppy serve: {kept}"

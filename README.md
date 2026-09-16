@@ -501,9 +501,36 @@ item not sent here is refused. The sweep remembers that refusal in
 `.ppy/sweep-kept.json` with the item's `updated_at`. It does not ask again until
 `updated_at` moves, 30 minutes pass, or a person runs `ppy sweep --include-kept`
 (the same flag as `--include-declined`). Picking an item up clears both memories.
+
+A claim is not work, though. Kept work is left alone only while something shows
+somebody doing it: a live reservation on the item, a live agent job, or a comment or
+status change by the holder within `sweep.idle_claim_minutes` (15 by default, in
+`config.toml`). With none of those the item is **idle**: the memory is skipped and the
+sweep asks for it on every sweep. If Papaya still refuses (after its on-call fallback
+takes an item, it refuses the owner's machines for a guard window), the sweep keeps one
+blocker for the owner — "Papaya keeps 3 idle items from this Mac: PAP-219, PAP-221,
+PAP-222; use Run on this Mac, or wait for the guard to lift" — changed when that set
+changes and cleared when it empties. An item refused on three sweeps running with no
+evidence of work is also recorded as an `idle-work-refused` deficiency.
+
+On start, and on the first sweep after Papaya could not be reached, the sweep also
+**takes back what an earlier connection of this runtime held**. That is any open item
+with a ticket task here that was not handed back, declined or finished; a reservation
+or a Run on this Mac hold naming a connection id in `.ppy/papaya-sessions.json`; or an
+item with an on-call fallback note where this runtime's since-revoked connection had
+commented. For each one it calls Papaya's reclaim route
+(`POST /agent-client/workspaces/{id}/work-items/{item}/reclaim`; a server without it
+answers 404 and the offer falls back on `reserve`), then offers the item. The ticket
+resumes from where its task stood: a stalled ticket whose worker is done goes straight
+to review, and a live worker is watched again. It never takes an item that a
+reservation held by somebody else, or a live job, shows being worked. It writes one
+line per item and one summary line (`reclaim on connect: 3 held by an earlier
+connection, 1 reclaimed, 2 refused`).
+
 Each sweep writes one line on stderr saying why it left each item alone, for example
-`sweep found 23: 22 kept by Engineering Agent in Papaya (use Run on this Mac to route
-one here), 1 declined earlier, 0 offered`. Other reasons are `in progress elsewhere`
+`sweep found 23: 4 kept by Engineering Agent in Papaya and being worked, 18 kept by
+Engineering Agent in Papaya and idle for 40 minutes (use Run on this Mac to route one
+here), 1 declined earlier, 0 offered`. Other reasons are `in progress elsewhere`
 and `already taken` (a live task here or another session's hold). A sweep that finds
 exactly what the last one found writes at most once every 30 minutes. Set the cadence with `--sweep-interval SECONDS` or `PPY_SWEEP_INTERVAL`
 (`0` sweeps once, at start), and run `ppy sweep` to have the running `serve` sweep
