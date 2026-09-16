@@ -264,6 +264,8 @@ class FakeEvents:
         self.hand_backs: list[str | None] = []
         #: Subjects another session holds: reserving one is Papaya's 409.
         self.held: set[str] = set()
+        #: Subjects Papaya kept with the agent in Papaya: a 409 naming no machine here.
+        self.not_routed: set[str] = set()
 
     async def patch_connection(self, **fields: Any) -> dict[str, Any]:
         self.connection.append(fields)
@@ -283,6 +285,15 @@ class FakeEvents:
             raise SubjectHeld(
                 subject, {"connection_id": "conn-other", "session_id": "sess-other"}, None
             )
+        if subject in self.not_routed:
+            from papaya_agent_client.api_client import SubjectHeld
+
+            holder = {
+                "connection_id": "papaya-hosted",
+                "connection_name": "Engineering Agent in Papaya",
+                "session_id": "not-routed-to-this-machine",
+            }
+            raise SubjectHeld(subject, holder, None)
         # Always `renewed`: the loop reads `renewed: false` as a lease taken away
         # and stops the run, which is a different test than this one.
         return {"granted_ttl_seconds": 90, "renewed": True}
@@ -2375,7 +2386,7 @@ def test_a_start_sweep_offers_every_open_assigned_item_nothing_has_picked_up(
         "work_item:item-3",
     ]
     assert sorted(_ticket_histories()) == ["item-1", "item-2", "item-3"]
-    assert _summaries(stderr) == ["ppy serve: sweep found 3, offered 3, skipped 0"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 3: 3 offered"]
     # The job a swept item became is the one an event would have become.
     assert harness.jobs[0].event["kind"] == "work_item.assigned"
 
@@ -2399,7 +2410,7 @@ def test_an_item_with_a_live_task_is_not_offered_again(
     assert asyncio.run(scenario()) == 0
 
     assert sorted(_reserved(harness)) == ["work_item:item-1", "work_item:item-3"]
-    assert _summaries(stderr) == ["ppy serve: sweep found 3, offered 2, skipped 1"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 3: 1 already taken, 2 offered"]
 
 
 def test_an_item_whose_only_task_was_handed_back_is_offered_again(
@@ -2420,7 +2431,7 @@ def test_an_item_whose_only_task_was_handed_back_is_offered_again(
     assert asyncio.run(scenario()) == 0
 
     assert _reserved(harness) == ["work_item:item-1"]
-    assert _summaries(stderr) == ["ppy serve: sweep found 1, offered 1, skipped 0"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 1: 1 offered"]
 
 
 def test_an_item_held_by_another_session_is_skipped_and_not_remembered(
@@ -2445,7 +2456,7 @@ def test_an_item_held_by_another_session_is_skipped_and_not_remembered(
 
     assert asyncio.run(scenario()) == 0
 
-    assert _summaries(stderr)[0] == "ppy serve: sweep found 3, offered 2, skipped 1"
+    assert _summaries(stderr)[0] == "ppy serve: sweep found 3: 1 already taken, 2 offered"
     assert _reserved(harness).count("work_item:item-2") == 2
     assert "item-2" not in _ticket_histories()
 
@@ -2480,9 +2491,8 @@ def test_a_full_pool_ends_the_round_and_the_next_sweep_offers_the_rest(
     assert asyncio.run(scenario()) == 0
 
     assert _summaries(stderr) == [
-        "ppy serve: sweep found 2, offered 1, skipped 0; 1 left for the next sweep "
-        "(every slot is busy)",
-        "ppy serve: sweep found 1, offered 1, skipped 0",
+        "ppy serve: sweep found 2: 1 offered; 1 left for the next sweep (every slot is busy)",
+        "ppy serve: sweep found 1: 1 offered",
     ]
     assert _reserved(harness) == ["work_item:item-1", "work_item:item-2"]
 
@@ -2512,7 +2522,7 @@ def test_a_zero_sweep_interval_sweeps_once_at_start_and_never_again(
 
     assert assigned.calls == 1
     assert waits == []
-    assert _summaries(stderr) == ["ppy serve: sweep found 0, offered 0, skipped 0"]
+    assert _summaries(stderr) == ["ppy serve: sweep found 0: 0 offered"]
 
 
 def test_the_sweep_interval_comes_from_the_flag_then_the_environment(monkeypatch) -> None:
@@ -2557,7 +2567,7 @@ def test_ppy_sweep_asks_the_running_serve_and_prints_the_summary(
     finally:
         server.stop()
 
-    assert capsys.readouterr().out.strip() == "sweep found 1, offered 1, skipped 0"
+    assert capsys.readouterr().out.strip() == "sweep found 1: 1 offered"
     assert _reserved(harness) == ["work_item:item-7"]
     assert server.sweep_handler is None, "the handler outlived the listener"
 
@@ -2610,10 +2620,8 @@ def test_a_declined_item_is_not_offered_again_until_asked_by_hand(
     remembered = sweep.declined_items()["item-1"]
     assert remembered["updated_at"] == "2026-09-16T10:00:00Z"
     assert "not in any account" in remembered["reason"]
-    assert _summaries(stderr)[1] == (
-        "ppy serve: sweep found 1, offered 0, skipped 1, 1 declined earlier"
-    )
-    assert capsys.readouterr().out.strip() == "sweep found 1, offered 1, skipped 0"
+    assert _summaries(stderr)[1] == ("ppy serve: sweep found 1: 1 declined earlier, 0 offered")
+    assert capsys.readouterr().out.strip() == "sweep found 1: 1 offered"
     assert _reserved(harness) == ["work_item:item-1", "work_item:item-1"]
 
 
@@ -2640,8 +2648,52 @@ def test_a_declined_item_changed_since_is_offered_again(
 
     assert asyncio.run(scenario()) == 0
 
-    assert _summaries(stderr)[1] == "ppy serve: sweep found 1, offered 1, skipped 0"
+    assert _summaries(stderr)[1] == "ppy serve: sweep found 1: 1 offered"
     assert _reserved(harness) == ["work_item:item-1", "work_item:item-1"]
+
+
+def test_work_papaya_keeps_elsewhere_is_left_alone_until_ppy_sweep_include_kept(
+    ppy_home, client_home, ready, registered_repo, assigned, capsys
+) -> None:
+    """Through the client's real loop: the refusal is seen, remembered, and re-asked by hand."""
+    from papaya_agent_runtime import cli, sweep
+    from papaya_agent_runtime.supervisor.server import SupervisorServer
+
+    assigned.items = [_item(1), _item(2)]
+    harness = Harness(FakeEvents([]))
+    harness.events.not_routed.update({"work_item:item-1", "work_item:item-2"})
+    stderr = io.StringIO()
+    clock = Ticks()
+    server = SupervisorServer()
+    server.start_background()
+
+    async def scenario() -> tuple[int, int]:
+        runner = await _serving(
+            harness, client_home, stderr, sweep_sleep=clock.sleep, server=server
+        )
+        await _until(lambda: len(_summaries(stderr)) == 1, what="the start sweep")
+        # The timed sweep holds the sweeper's lock once it wakes, so the by-hand
+        # request below is answered after it.
+        clock.tick()
+        await _until(lambda: clock.count == 1, what="the timed sweep")
+        exit_code = await asyncio.to_thread(cli.main, ["sweep", "--include-kept"])
+        harness.loop.request_stop()
+        return exit_code, await runner
+
+    try:
+        assert asyncio.run(scenario()) == (0, 0)
+    finally:
+        server.stop()
+
+    kept = (
+        "sweep found 2: 2 kept by Engineering Agent in Papaya "
+        "(use Run on this Mac to route one here), 0 offered"
+    )
+    assert _summaries(stderr)[0] == f"ppy serve: {kept}"
+    assert sorted(sweep.kept_items()) == ["item-1", "item-2"]
+    assert capsys.readouterr().out.strip() == kept
+    # Asked at start, not on the timed sweep, and again by hand.
+    assert sorted(_reserved(harness)) == ["work_item:item-1"] * 2 + ["work_item:item-2"] * 2
 
 
 def test_ppy_sweep_with_nothing_serving_says_so(ppy_home, capsys) -> None:
@@ -2693,6 +2745,4 @@ def test_a_ticket_handed_back_by_its_turns_is_not_swept_into_them_again(
 
     assert turns.names() == [prompts.BRIEF, prompts.BRIEF], "the turns ran again"
     assert "without dispatching" in sweep.declined_items()["item-1"]["reason"]
-    assert _summaries(stderr)[1] == (
-        "ppy serve: sweep found 1, offered 0, skipped 1, 1 declined earlier"
-    )
+    assert _summaries(stderr)[1] == ("ppy serve: sweep found 1: 1 declined earlier, 0 offered")

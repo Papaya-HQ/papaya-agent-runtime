@@ -113,7 +113,7 @@ def test_an_in_progress_item_touched_ten_minutes_ago_is_in_progress_elsewhere(
     assert built.loop.offered == []
     assert (result.found, result.offered, result.skipped) == (1, 0, 1)
     assert result.in_progress_elsewhere == 1
-    assert result.summary() == "sweep found 1, offered 0, skipped 1, 1 in progress elsewhere"
+    assert result.summary() == "sweep found 1: 1 in progress elsewhere, 0 offered"
 
 
 def test_an_in_progress_item_untouched_for_a_day_is_offered_after_the_todo_items(
@@ -166,10 +166,8 @@ def test_identical_sweeps_write_one_summary_until_one_offers_something(ppy_home,
     asyncio.run(scenario())
 
     assert _lines(stderr) == [
-        "ppy serve: sweep found 2, offered 0, skipped 0; 2 left for the next sweep "
-        "(every slot is busy)",
-        "ppy serve: sweep found 2, offered 1, skipped 0; 1 left for the next sweep "
-        "(every slot is busy)",
+        "ppy serve: sweep found 2: 0 offered; 2 left for the next sweep (every slot is busy)",
+        "ppy serve: sweep found 2: 1 offered; 1 left for the next sweep (every slot is busy)",
     ]
 
 
@@ -189,8 +187,147 @@ def test_an_unchanged_sweep_still_says_so_every_half_hour(ppy_home, assigned) ->
 
     asyncio.run(scenario())
 
-    full = (
-        "ppy serve: sweep found 2, offered 0, skipped 0; 2 left for the next sweep "
-        "(every slot is busy)"
-    )
+    full = "ppy serve: sweep found 2: 0 offered; 2 left for the next sweep (every slot is busy)"
     assert _lines(stderr) == [full, "ppy serve: sweep unchanged: still 2 waiting for a slot", full]
+
+
+# ── work Papaya keeps somewhere else ────────────────────────────────────────
+
+#: The holder Papaya names refusing a reserve for work it kept with the hosted agent.
+KEPT_IN_PAPAYA = {
+    "connection_id": "papaya-hosted",
+    "connection_name": "Engineering Agent in Papaya",
+    "session_id": "not-routed-to-this-machine",
+}
+
+
+@dataclass
+class RoutingEvents:
+    """Papaya's reserve: refused as not sent to this machine, unless routed here."""
+
+    reserves: list[str] = field(default_factory=list)
+    routed_here: set[str] = field(default_factory=set)
+
+    async def reserve(self, subject: str, session_id: str, **_: Any) -> dict[str, Any]:
+        from papaya_agent_client.api_client import SubjectHeld
+
+        self.reserves.append(subject)
+        if subject not in self.routed_here:
+            raise SubjectHeld(subject, dict(KEPT_IN_PAPAYA), None)
+        return {"renewed": False}
+
+
+@dataclass
+class RoutingLoop(FakeLoop):
+    """`offer` the way the client's loop does it: reserve, and a refusal is just `done`."""
+
+    _events: RoutingEvents = field(default_factory=RoutingEvents)
+
+    async def offer(self, envelope: dict[str, Any]) -> str:
+        from papaya_agent_client.api_client import SubjectHeld
+
+        try:
+            await self._events.reserve(envelope["subject"], "sess-here")
+        except SubjectHeld:
+            return "done"  # the client's `not_routed_here` skip
+        self.offered.append(envelope["work_item_id"])
+        return sweep.OFFER_PENDING
+
+
+KEPT_FIVE = (
+    "sweep found 5: 5 kept by Engineering Agent in Papaya "
+    "(use Run on this Mac to route one here), 0 offered"
+)
+
+
+def _five_kept(assigned: list[dict[str, Any]]) -> FakeBuilt:
+    assigned.extend(_item(f"item-{n}", hours=n) for n in range(1, 6))
+    return FakeBuilt(loop=RoutingLoop())
+
+
+def test_work_papaya_keeps_elsewhere_is_not_asked_for_again_for_thirty_minutes(
+    ppy_home, assigned
+) -> None:
+    built = _five_kept(assigned)
+    clock = Clock()
+    stderr = io.StringIO()
+    sweeper = _sweeper(built, clock, stderr)
+
+    async def scenario() -> list[sweep.SweepResult]:
+        results = [await sweeper.sweep_once()]
+        clock.advance(minutes=5)
+        results.append(await sweeper.sweep_once())
+        clock.advance(minutes=25)  # thirty minutes after the refusals
+        results.append(await sweeper.sweep_once())
+        return results
+
+    first, second, third = asyncio.run(scenario())
+
+    events = built.loop._events
+    assert len(events.reserves) == 10, "asked five, then none, then five again"
+    assert first.summary() == KEPT_FIVE
+    assert (second.offered, second.kept_total) == (0, 5)
+    assert second.summary() == KEPT_FIVE
+    assert third.summary() == KEPT_FIVE
+    remembered = sweep.kept_items()
+    assert sorted(remembered) == [f"item-{n}" for n in range(1, 6)]
+    assert remembered["item-1"]["holder"]["connection_name"] == "Engineering Agent in Papaya"
+    assert remembered["item-1"]["updated_at"] == _stamp(hours=1)
+    # Said once, and again only when the half hour is up.
+    assert _lines(stderr) == [
+        f"ppy serve: {KEPT_FIVE}",
+        "ppy serve: sweep unchanged: still found 5: 5 kept by Engineering Agent in Papaya "
+        "(use Run on this Mac to route one here), 0 offered",
+    ]
+
+
+def test_kept_work_whose_updated_at_moved_is_asked_for_before_the_thirty_minutes(
+    ppy_home, assigned
+) -> None:
+    built = _five_kept(assigned)
+    clock = Clock()
+    sweeper = _sweeper(built, clock)
+
+    async def scenario() -> sweep.SweepResult:
+        await sweeper.sweep_once()
+        clock.advance(minutes=5)
+        # Someone routed it here from the app, which touches the item.
+        assigned[2]["updated_at"] = _stamp(minutes=-5)
+        built.loop._events.routed_here.add("work_item:item-3")
+        return await sweeper.sweep_once()
+
+    result = asyncio.run(scenario())
+
+    assert built.loop._events.reserves[5:] == ["work_item:item-3"]
+    assert built.loop.offered == ["item-3"]
+    assert (result.offered, result.kept_total) == (1, 4)
+    # Picked up, so nothing is remembered about it any more.
+    assert "item-3" not in sweep.kept_items()
+
+
+def test_include_kept_asks_for_kept_work_regardless(ppy_home, assigned) -> None:
+    built = _five_kept(assigned)
+    sweeper = _sweeper(built, Clock())
+
+    async def scenario() -> sweep.SweepResult:
+        await sweeper.sweep_once()
+        return await sweeper.sweep_once(include_kept=True, by_hand=True)
+
+    result = asyncio.run(scenario())
+
+    assert len(built.loop._events.reserves) == 10
+    assert result.summary() == KEPT_FIVE
+
+
+def test_picking_an_item_up_forgets_that_papaya_kept_it_elsewhere(ppy_home) -> None:
+    sweep.remember_kept(
+        {
+            "item-1": {"updated_at": None, "holder": KEPT_IN_PAPAYA, "kept_at": NOW.isoformat()},
+            "item-2": {"updated_at": None, "holder": KEPT_IN_PAPAYA, "kept_at": NOW.isoformat()},
+        }
+    )
+
+    # What `serve` calls the moment it takes a ticket.
+    sweep.forget_declined("item-1")
+
+    assert sorted(sweep.kept_items()) == ["item-2"]

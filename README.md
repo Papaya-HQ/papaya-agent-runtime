@@ -384,9 +384,17 @@ the round early. A ticket this runtime *declined* leaves no task, so the decline
 remembered in `.ppy/sweep-declined.json` along with the ticket's `updated_at`. The
 sweep leaves that ticket alone until someone changes it (an edit or a comment moves
 `updated_at`) or a person runs `ppy sweep --include-declined`. Without this, the app
-would ask about the same unplaceable ticket every five minutes. Each sweep writes one line on stderr: `sweep found N, offered M,
-skipped K`, plus `, D declined earlier` when any were skipped for that reason. A sweep
-that finds exactly what the last one found writes at most once every 30 minutes. Set the cadence with `--sweep-interval SECONDS` or `PPY_SWEEP_INTERVAL`
+would ask about the same unplaceable ticket every five minutes. Papaya sends work to
+one person's machines and keeps the rest with the agent in Papaya, so a reserve for an
+item not sent here is refused. The sweep remembers that refusal in
+`.ppy/sweep-kept.json` with the item's `updated_at`. It does not ask again until
+`updated_at` moves, 30 minutes pass, or a person runs `ppy sweep --include-kept`
+(the same flag as `--include-declined`). Picking an item up clears both memories.
+Each sweep writes one line on stderr saying why it left each item alone, for example
+`sweep found 23: 22 kept by Engineering Agent in Papaya (use Run on this Mac to route
+one here), 1 declined earlier, 0 offered`. Other reasons are `in progress elsewhere`
+and `already taken` (a live task here or another session's hold). A sweep that finds
+exactly what the last one found writes at most once every 30 minutes. Set the cadence with `--sweep-interval SECONDS` or `PPY_SWEEP_INTERVAL`
 (`0` sweeps once, at start), and run `ppy sweep` to have the running `serve` sweep
 now and print that line.
 

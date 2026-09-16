@@ -26,11 +26,16 @@ What the sweep adds is only the choosing:
   counted as in progress elsewhere; one left untouched for longer is fair game;
 - the most important first (`sweep_order`): priority, then the statuses somebody
   is waiting on, then the oldest;
+- an item Papaya refused to send here — it keeps the work with the agent in
+  Papaya, or with another person's or another machine's runtime — is **kept
+  elsewhere**: remembered with its `updated_at` and not asked for again until
+  that moves or `KEPT_RECHECK_EVERY` (thirty minutes) passes;
 - a full pool ends the round, and the rest wait for the next one.
 
-A sweep says one line on stderr — found, offered, skipped — and nothing on the
-supervised protocol, which is for jobs, not for bookkeeping. A sweep that found
-exactly what the one before it found says so at most every half hour.
+A sweep says one line on stderr — what it found, why it left each one alone,
+what it offered — and nothing on the supervised protocol, which is for jobs, not
+for bookkeeping. A sweep that found exactly what the one before it found says so
+at most every half hour.
 """
 
 from __future__ import annotations
@@ -66,6 +71,12 @@ DEFAULT_STALE_AFTER = 6 * 60 * 60.0
 
 #: How often a sweep that found nothing new may still say so: every thirty minutes.
 UNCHANGED_SUMMARY_EVERY = 30 * 60.0
+
+#: How long an item Papaya kept elsewhere is left alone when nobody changes it: thirty minutes.
+KEPT_RECHECK_EVERY = 30 * 60.0
+
+#: What a person can do about work Papaya keeps elsewhere, said once per summary line.
+ROUTE_HERE_HINT = "use Run on this Mac to route one here"
 
 #: The work item statuses that still want somebody working on them.
 OPEN_STATUSES = frozenset({"todo", "in_progress", "blocked", "changes_requested"})
@@ -144,10 +155,9 @@ def declined_path() -> Path:
     return ppy_home() / "sweep-declined.json"
 
 
-def declined_items() -> dict[str, dict[str, Any]]:
-    """Every remembered decline, `{work item id: {updated_at, reason, declined_at}}`."""
+def _read_items(path: Path) -> dict[str, dict[str, Any]]:
     try:
-        data = json.loads(declined_path().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
@@ -155,12 +165,16 @@ def declined_items() -> dict[str, dict[str, Any]]:
     return {str(key): value for key, value in data.items() if isinstance(value, dict)}
 
 
-def _write_declined(data: dict[str, dict[str, Any]]) -> None:
-    path = declined_path()
+def _write_items(path: Path, data: dict[str, dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temp, path)
+
+
+def declined_items() -> dict[str, dict[str, Any]]:
+    """Every remembered decline, `{work item id: {updated_at, reason, declined_at}}`."""
+    return _read_items(declined_path())
 
 
 def remember_declined(work_item_id: str, *, updated_at: str | None, reason: str) -> None:
@@ -174,17 +188,70 @@ def remember_declined(work_item_id: str, *, updated_at: str | None, reason: str)
             "reason": reason,
             "declined_at": datetime.now(UTC).isoformat(),
         }
-        _write_declined(data)
+        _write_items(declined_path(), data)
 
 
 def forget_declined(work_item_id: str) -> None:
-    """Drop a remembered decline: the ticket was taken, so the memory is stale."""
+    """Drop everything the sweep remembers about a ticket: it was taken, so it is stale.
+
+    That is a remembered decline and a remembered "kept elsewhere" alike — a
+    ticket this machine has just picked up is neither.
+    """
     if not work_item_id:
         return
     with _declined_lock:
         data = declined_items()
         if data.pop(str(work_item_id), None) is not None:
-            _write_declined(data)
+            _write_items(declined_path(), data)
+    forget_kept([work_item_id])
+
+
+# ── the tickets Papaya keeps somewhere else ─────────────────────────────────
+#
+# Papaya routes an item to one person's machines and keeps the rest with the
+# agent in Papaya; a reserve for work that was not sent here is refused
+# (the client's `not_routed_here` skip). The sweep cannot change that routing,
+# and asking again every five minutes only costs a reserve call per item. So a
+# refusal is remembered with the item's `updated_at`, and the item is left alone
+# until that moves, `KEPT_RECHECK_EVERY` passes (routing can change without the
+# item changing), or a person runs `ppy sweep --include-kept`.
+
+
+def kept_path() -> Path:
+    """Where work Papaya keeps elsewhere is remembered: `.ppy/sweep-kept.json`."""
+    return declined_path().with_name("sweep-kept.json")
+
+
+def kept_items() -> dict[str, dict[str, Any]]:
+    """Every remembered refusal, `{work item id: {updated_at, holder, kept_at}}`."""
+    return _read_items(kept_path())
+
+
+def remember_kept(records: Mapping[str, dict[str, Any]]) -> None:
+    """Record, per work item id, who Papaya said keeps it, as the item stood then."""
+    if not records:
+        return
+    with _declined_lock:
+        data = kept_items()
+        data.update({str(key): dict(value) for key, value in records.items()})
+        _write_items(kept_path(), data)
+
+
+def forget_kept(work_item_ids: Any) -> None:
+    """Drop remembered refusals for `work_item_ids`: the items were taken here."""
+    ids = {str(item_id) for item_id in work_item_ids if item_id}
+    if not ids:
+        return
+    with _declined_lock:
+        data = kept_items()
+        if ids & data.keys():
+            _write_items(kept_path(), {key: value for key, value in data.items() if key not in ids})
+
+
+def holder_name(holder: Mapping[str, Any] | None) -> str:
+    """The name Papaya gave the holder of refused work, as a person would recognise it."""
+    holder = holder or {}
+    return str(holder.get("connection_name") or holder.get("connection_id") or "another machine")
 
 
 def _timestamp(value: Any) -> datetime | None:
@@ -215,6 +282,23 @@ def declined_earlier(item: dict[str, Any], remembered: dict[str, Any] | None) ->
     return now is None or now <= then
 
 
+def kept_elsewhere(item: dict[str, Any], remembered: dict[str, Any] | None, *, now: float) -> bool:
+    """Whether Papaya refused `item` here recently and nobody has changed it since.
+
+    Recently is within `KEPT_RECHECK_EVERY` of the refusal, by the sweep's clock:
+    routing can move without the item moving, so the question is asked again
+    after that. A strictly later `updated_at` than the one remembered asks it now.
+    """
+    if remembered is None:
+        return False
+    kept_at = _timestamp(remembered.get("kept_at"))
+    if kept_at is None or now - kept_at.timestamp() >= KEPT_RECHECK_EVERY:
+        return False
+    then = _timestamp(remembered.get("updated_at"))
+    current = _timestamp(item.get("updated_at"))
+    return then is None or current is None or current <= then
+
+
 @dataclass(frozen=True)
 class SweepResult:
     """What one sweep found and did with it."""
@@ -226,19 +310,37 @@ class SweepResult:
     declined_earlier: int = 0
     #: Of `skipped`, `in_progress` items touched too recently to be anybody's but their own.
     in_progress_elsewhere: int = 0
+    #: Of `skipped`, the items Papaya keeps elsewhere, as `(holder name, count)`, most first.
+    kept: tuple[tuple[str, int], ...] = ()
     #: Open items not reached because every slot was busy; the next sweep has them.
     waiting: int = 0
     #: Why the sweep could not ask Papaya at all, when it could not.
     error: str | None = None
 
+    @property
+    def kept_total(self) -> int:
+        return sum(count for _, count in self.kept)
+
+    def _parts(self) -> str:
+        """Why each found item was left alone, then what was offered."""
+        parts = [f"{count} kept by {name}" for name, count in self.kept]
+        if parts:
+            parts[-1] += f" ({ROUTE_HERE_HINT})"
+        if self.declined_earlier:
+            parts.append(f"{self.declined_earlier} declined earlier")
+        if self.in_progress_elsewhere:
+            parts.append(f"{self.in_progress_elsewhere} in progress elsewhere")
+        # Live here already, or held by another session this round.
+        taken = self.skipped - self.kept_total - self.declined_earlier - self.in_progress_elsewhere
+        if taken:
+            parts.append(f"{taken} already taken")
+        parts.append(f"{self.offered} offered")
+        return ", ".join(parts)
+
     def summary(self) -> str:
         if self.error is not None:
             return f"sweep could not list assigned work: {self.error}"
-        line = f"sweep found {self.found}, offered {self.offered}, skipped {self.skipped}"
-        if self.declined_earlier:
-            line += f", {self.declined_earlier} declined earlier"
-        if self.in_progress_elsewhere:
-            line += f", {self.in_progress_elsewhere} in progress elsewhere"
+        line = f"sweep found {self.found}: {self._parts()}"
         if self.waiting:
             line += f"; {self.waiting} left for the next sweep (every slot is busy)"
         return line
@@ -249,7 +351,7 @@ class SweepResult:
             return f"sweep still cannot list assigned work: {self.error}"
         if self.waiting:
             return f"sweep unchanged: still {self.waiting} waiting for a slot"
-        return f"sweep unchanged: still found {self.found}, skipped {self.skipped}"
+        return f"sweep unchanged: still found {self.found}: {self._parts()}"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -258,6 +360,7 @@ class SweepResult:
             "skipped": self.skipped,
             "declined_earlier": self.declined_earlier,
             "in_progress_elsewhere": self.in_progress_elsewhere,
+            "kept": dict(self.kept),
             "waiting": self.waiting,
             "error": self.error,
             "summary": self.summary(),
@@ -402,6 +505,10 @@ class Sweeper:
         self.results: list[SweepResult] = []
         #: When a summary line was last written, or None before the first.
         self._last_written: float | None = None
+        #: Subjects whose reserve Papaya refused as not routed here, with the holder.
+        self._refused: dict[str, dict[str, Any]] = {}
+        #: The listener's events client whose `reserve` is already watched.
+        self._watched: Any = None
 
     @property
     def interval(self) -> float:
@@ -417,17 +524,21 @@ class Sweeper:
             await self.sweep_once()
 
     async def sweep_once(
-        self, *, include_declined: bool = False, by_hand: bool = False
+        self, *, include_declined: bool = False, include_kept: bool = False, by_hand: bool = False
     ) -> SweepResult:
         """One round: list, choose, offer. Never raises; a failure is the result.
 
         `include_declined` offers tickets this runtime declined earlier even when
         nobody has changed them since — the by-hand `ppy sweep --include-declined`.
-        `by_hand` is a person asking, who always gets the line.
+        `include_kept` asks again for items Papaya recently kept elsewhere
+        (`ppy sweep --include-kept`). `by_hand` is a person asking, who always
+        gets the line.
         """
         async with self._lock:
             try:
-                result = await self._sweep(include_declined=include_declined)
+                result = await self._sweep(
+                    include_declined=include_declined, include_kept=include_kept
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - a bad sweep must not end serve
@@ -460,10 +571,40 @@ class Sweeper:
         self._last_written = now
         return result.unchanged_summary()
 
-    async def _sweep(self, *, include_declined: bool) -> SweepResult:
+    def _watch_refusals(self, loop: Any) -> None:
+        """Notice when Papaya refuses a reserve because the work was not sent here.
+
+        `offer` answers that refusal with the same `done` as a lost race or a
+        playbook skip, and the holder it names goes no further than a log line.
+        The reserve call is where it can be seen, so the loop's events client has
+        its `reserve` wrapped once: a `SubjectHeld` the client classifies as
+        `not_routed_here` is noted by subject and raised on unchanged.
+        """
+        events = getattr(loop, "_events", None)
+        reserve = getattr(events, "reserve", None)
+        if reserve is None or events is self._watched:
+            return
+        from papaya_agent_client.api_client import SubjectHeld
+        from papaya_agent_client.listener import SKIP_NOT_ROUTED_HERE, refusal_skip_reason
+
+        refused = self._refused
+
+        async def watched_reserve(subject: str, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await reserve(subject, *args, **kwargs)
+            except SubjectHeld as held:
+                if refusal_skip_reason(held.holder) == SKIP_NOT_ROUTED_HERE:
+                    refused[subject] = dict(held.holder or {})
+                raise
+
+        events.reserve = watched_reserve
+        self._watched = events
+
+    async def _sweep(self, *, include_declined: bool, include_kept: bool) -> SweepResult:
         from papaya_agent_client import api_client
 
         built = self._built
+        self._watch_refusals(built.loop)
         try:
             answer = await api_client.list_assigned_work_items(built.api)
         except asyncio.CancelledError:
@@ -475,12 +616,17 @@ class Sweeper:
         items = sweep_order([item for item in _items(answer) if is_open(item)])
         live = await asyncio.to_thread(self._live_items)
         declined = {} if include_declined else await asyncio.to_thread(declined_items)
+        kept = {} if include_kept else await asyncio.to_thread(kept_items)
         agent_config = getattr(built, "agent_config", None) or {}
         agent_id = str(agent_config.get("agent_id") or "")
         workspace_id = str(agent_config.get("workspace_id") or "")
-        now = datetime.fromtimestamp(self._clock(), UTC)
+        clock_now = self._clock()
+        now = datetime.fromtimestamp(clock_now, UTC)
 
-        offered = skipped = earlier = elsewhere = 0
+        offered = skipped = earlier = elsewhere = waiting = 0
+        kept_by: dict[str, int] = {}
+        newly_kept: dict[str, dict[str, Any]] = {}
+        taken: list[str] = []
         for index, item in enumerate(items):
             item_id = str(item["id"])
             subject = f"work_item:{item_id}"
@@ -506,34 +652,56 @@ class Sweeper:
                 skipped += 1
                 earlier += 1
                 continue
+            remembered = kept.get(item_id)
+            if kept_elsewhere(item, remembered, now=clock_now):
+                name = holder_name((remembered or {}).get("holder"))
+                log.debug("[sweep] %s is kept by %s; not asking again yet", subject, name)
+                skipped += 1
+                kept_by[name] = kept_by.get(name, 0) + 1
+                continue
+            self._refused.pop(subject, None)
             status = await built.loop.offer(
                 envelope_for(item, agent_id=agent_id, workspace_id=workspace_id)
             )
+            refused = self._refused.pop(subject, None)
             if status == OFFER_PENDING:
                 offered += 1
+                taken.append(item_id)
             elif status == OFFER_BLOCKED:
                 # Every slot is busy (or the reserve failed): nothing was taken,
                 # and asking for the rest this round would only be refused again.
                 log.debug("[sweep] %s not offered: no free slot; stopping this round", subject)
-                return SweepResult(
-                    found=len(items),
-                    offered=offered,
-                    skipped=skipped,
-                    declined_earlier=earlier,
-                    in_progress_elsewhere=elsewhere,
-                    waiting=len(items) - index,
-                )
+                waiting = len(items) - index
+                break
+            elif refused is not None:
+                # Papaya sent this work somewhere else: the agent in Papaya, another
+                # person's machines, or another machine that keeps it.
+                name = holder_name(refused)
+                log.debug("[sweep] %s was not sent to this machine (%s has it)", subject, name)
+                skipped += 1
+                kept_by[name] = kept_by.get(name, 0) + 1
+                newly_kept[item_id] = {
+                    "updated_at": item.get("updated_at"),
+                    "holder": refused,
+                    "kept_at": now.isoformat(),
+                }
             else:
-                # Held by another session, routed to another machine, taken over in
-                # Papaya, or not this playbook's to act on. Not ours this round.
+                # Held by another session, taken over in Papaya, or not this
+                # playbook's to act on. Not ours this round.
                 log.debug("[sweep] %s not taken: someone else has it or it is not ours", subject)
                 skipped += 1
+        if newly_kept:
+            await asyncio.to_thread(remember_kept, newly_kept)
+        if taken:
+            await asyncio.to_thread(forget_kept, taken)
         return SweepResult(
             found=len(items),
             offered=offered,
             skipped=skipped,
             declined_earlier=earlier,
             in_progress_elsewhere=elsewhere,
+            kept=tuple(sorted(kept_by.items(), key=lambda pair: (-pair[1], pair[0]))),
+            waiting=waiting,
         )
 
     def sweep_from_thread(
@@ -547,9 +715,14 @@ class Sweeper:
 
         The supervisor socket is served on a thread; the listener, and so every
         offer, lives on the event loop. This is the one crossing between them.
+        `ppy sweep --include-declined` and `--include-kept` are one flag on the
+        wire, so `include_declined` sets aside both memories.
         """
         future = asyncio.run_coroutine_threadsafe(
-            self.sweep_once(include_declined=include_declined, by_hand=True), event_loop
+            self.sweep_once(
+                include_declined=include_declined, include_kept=include_declined, by_hand=True
+            ),
+            event_loop,
         )
         return future.result(timeout=timeout).as_dict()
 
@@ -558,8 +731,10 @@ __all__ = [
     "DEFAULT_STALE_AFTER",
     "DEFAULT_SWEEP_INTERVAL",
     "ENDED_PHASES",
+    "KEPT_RECHECK_EVERY",
     "OPEN_STATUSES",
     "PRIORITY_RANK",
+    "ROUTE_HERE_HINT",
     "STATUS_RANK",
     "SWEEP_INTERVAL_ENV",
     "SWEEP_STALE_AFTER_ENV",
@@ -571,12 +746,18 @@ __all__ = [
     "declined_path",
     "envelope_for",
     "forget_declined",
+    "forget_kept",
+    "holder_name",
     "in_progress_elsewhere",
     "interval_from_env",
     "is_open",
+    "kept_elsewhere",
+    "kept_items",
+    "kept_path",
     "live_work_item_ids",
     "parse_interval",
     "remember_declined",
+    "remember_kept",
     "stale_after_from_env",
     "sweep_order",
 ]

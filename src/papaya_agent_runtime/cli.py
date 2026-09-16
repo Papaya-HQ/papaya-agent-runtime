@@ -2313,11 +2313,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep_cmd.add_argument(
         "--include-declined",
+        "--include-kept",
         dest="include_declined",
         action="store_true",
         help=(
-            "also offer tickets this runtime declined earlier and nobody has changed "
-            "since; the timed sweep leaves those alone"
+            "also offer tickets this runtime declined earlier, and ones Papaya recently "
+            "kept elsewhere, that nobody has changed since; the timed sweep leaves those "
+            "alone. The two spellings are one flag"
         ),
     )
     sweep_cmd.add_argument("--json", action="store_true", help="machine-readable output")
