@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.delivery import DeliveryError, deliver
 from papaya_agent_runtime.review import build_bundle, is_approved_at_head, record_review
@@ -31,12 +31,12 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, want, timeout=15.0):
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if client.task_status(task_id)["task"]["status"] == want:
-            return
-        time.sleep(0.1)
-    raise AssertionError(f"task {task_id} never reached {want}")
+    wait_until(
+        lambda: client.task_status(task_id)["task"]["status"] == want,
+        timeout,
+        what=f"task {task_id} to reach {want}",
+        interval=0.1,
+    )
 
 
 def _completed_task(client, source_repo) -> dict:

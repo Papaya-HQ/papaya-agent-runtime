@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import os
-import time
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import repos, stacks
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.providers.fake import FakeProvider
@@ -35,12 +34,7 @@ def _capture_runs(supervisor: Supervisor, monkeypatch) -> list:
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.01)
-    raise AssertionError("timed out waiting for captured worker")
+    wait_until(predicate, timeout, what="captured worker", interval=0.01)
 
 
 def test_omitted_real_worker_choices_resolve_and_persist_before_start(

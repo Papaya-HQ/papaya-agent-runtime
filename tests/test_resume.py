@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from conftest import scale
+from conftest import wait_until
 from papaya_agent_runtime import repos
 from papaya_agent_runtime.state import init_db
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -29,13 +29,12 @@ def server(ppy_home):
 
 
 def _wait_status(client, task_id, want, timeout=15.0):
-    deadline = time.monotonic() + scale(timeout)
-    while time.monotonic() < deadline:
-        status = client.task_status(task_id)["task"]["status"]
-        if status == want:
-            return True
-        time.sleep(0.1)
-    raise AssertionError(f"task {task_id} never reached {want}")
+    return wait_until(
+        lambda: client.task_status(task_id)["task"]["status"] == want,
+        timeout,
+        what=f"task {task_id} to reach {want}",
+        interval=0.1,
+    )
 
 
 def test_blocked_then_resume_completes(server, source_repo) -> None:

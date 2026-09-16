@@ -30,7 +30,8 @@ jobs:
     # range bought nothing a single pinned version does not.
     name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # TEMPORARY (task 259): 60 for the triple run below. Restore 20 before merge.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +75,17 @@ jobs:
         env:
           PPY_HOME: ${{ runner.temp }}/ppy-home
           PPY_TEST_TIMEOUT_SCALE: "6"
-        run: uv run pytest -q
+        # TEMPORARY (task 259): three full runs in a row, every summary printed, so
+        # the flaky-worker fix is judged on more than one lucky pass. Restore the
+        # single `uv run pytest -q` before merge.
+        run: |
+          failed=0
+          for attempt in 1 2 3; do
+            echo "::group::suite run $attempt"
+            uv run pytest -q -p no:cacheprovider --durations=15 || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
 
   # The single check branch protection points at. Matrix job names carry their
   # parameters ("test (py3.12)"), so requiring them directly means every change to

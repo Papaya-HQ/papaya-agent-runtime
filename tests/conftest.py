@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import sqlite3
 import subprocess
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
 
 import pytest
 
@@ -121,6 +129,47 @@ def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("PPY_SWEEP_INTERVAL", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_supervisor_outlives_its_test(monkeypatch):
+    """Stop every supervisor a test created before the test's environment is undone.
+
+    A supervisor's threads find their database through ``PPY_HOME`` each time they
+    touch it. A test that returned while its worker was still running — routine on a
+    two-core CI runner — left those threads to finish against the *next* test's
+    instance, where task ids restart at 1: an old supervisor resumed, deferred or
+    released the new test's work, and the new test timed out waiting for a state
+    that had already been taken from it (task 259). Requesting ``monkeypatch`` here
+    is what orders this teardown before ``PPY_HOME`` is restored.
+    """
+    from papaya_agent_runtime.supervisor.core import Supervisor
+    from papaya_agent_runtime.supervisor.server import SupervisorServer
+
+    supervisors: list = []
+    servers: list = []
+
+    def tracked(cls, into):
+        real = cls.__init__
+
+        def __init__(self, *args, **kwargs):
+            real(self, *args, **kwargs)
+            into.append(self)
+
+        monkeypatch.setattr(cls, "__init__", __init__)
+
+    tracked(Supervisor, supervisors)
+    tracked(SupervisorServer, servers)
+    yield
+    for server in servers:
+        server.stop()
+    stuck = []
+    for supervisor in supervisors:
+        stuck.extend(supervisor.close(timeout=scale(30)))
+    if stuck:
+        report = state_dump(f"supervisor threads to stop: {[t.name for t in stuck]}")
+        path = _write_dump("supervisor threads to stop", report)
+        pytest.fail(f"supervisor threads still running after the test (dump: {path})\n{report}")
+
+
 @pytest.fixture
 def ppy_home(tmp_path, monkeypatch):
     """Point .ppy state at an isolated temp dir for the test."""
@@ -164,3 +213,129 @@ TIMEOUT_SCALE = float(os.environ.get("PPY_TEST_TIMEOUT_SCALE", "1") or "1")
 def scale(seconds: float) -> float:
     """A polling deadline, stretched for slower machines."""
     return seconds * TIMEOUT_SCALE
+
+
+#: Where a deadline that expired leaves its account of the world. Inside the checkout
+#: and excluded from git, so a CI failure's dump sits next to the log that printed it.
+EVIDENCE_DIR = Path(
+    os.environ.get("PPY_TEST_EVIDENCE_DIR")
+    or Path(__file__).resolve().parent.parent / ".mm-evidence" / "test-timeouts"
+)
+
+
+def wait_until(predicate, timeout: float, *, what: str = "condition", interval: float = 0.05):
+    """Poll ``predicate`` until it is truthy and return its value, or fail explaining why.
+
+    A deadline that expires on a worker lifecycle test used to say only "timed out
+    waiting" — nothing about whether the worker spawned, what it last said, or what
+    the supervisor's threads were doing. Now it writes all of that to
+    :data:`EVIDENCE_DIR` and puts it in the failure, so the next flake explains itself.
+    """
+    deadline = time.monotonic() + scale(timeout)
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(interval)
+    report = state_dump(what)
+    path = _write_dump(what, report)
+    raise AssertionError(f"timed out waiting for {what} (dump: {path})\n{report}")
+
+
+def state_dump(what: str) -> str:
+    """Everything a stuck worker test needs to be diagnosed after the fact."""
+    sections = [f"# timed out waiting for {what}", f"PPY_HOME={os.environ.get('PPY_HOME')}"]
+    sections.append(_dump_database())
+    sections.append(_dump_files())
+    sections.append(_dump_threads())
+    sections.append(_dump_processes())
+    return "\n\n".join(sections)
+
+
+def _dump_database() -> str:
+    from papaya_agent_runtime.paths import db_path
+
+    path = db_path()
+    if not path.exists():
+        return f"## database\n(no database at {path})"
+    lines = [f"## database {path}"]
+    try:
+        # Read-only and without init_db: the dump must not take the write lock it may
+        # be trying to explain.
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            for table, order in (("tasks", "id"), ("runners", "rowid"), ("events", "id")):
+                lines.append(f"### {table}")
+                try:
+                    rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()
+                except sqlite3.Error as exc:
+                    lines.append(f"(could not read: {exc!r})")
+                    continue
+                lines.extend(json.dumps(dict(row), default=str)[:1500] for row in rows)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        lines.append(f"(could not read: {exc!r})")
+    return "\n".join(lines)
+
+
+def _dump_files() -> str:
+    from papaya_agent_runtime.paths import run_dir, runs_dir
+
+    lines = ["## spools and supervisor log"]
+    candidates = sorted(runs_dir().glob("**/events.jsonl")) if runs_dir().exists() else []
+    log = run_dir() / "supervisor.log"
+    if log.exists():
+        candidates.append(log)
+    if not candidates:
+        lines.append("(none)")
+    for file in candidates:
+        lines.append(f"### {file}")
+        text = file.read_text(encoding="utf-8", errors="replace")
+        lines.append(text[-8000:])
+    return "\n".join(lines)
+
+
+def _dump_threads() -> str:
+    names = {t.ident: f"{t.name} (daemon={t.daemon})" for t in threading.enumerate()}
+    lines = ["## threads"]
+    for ident, frame in sys._current_frames().items():
+        lines.append(f"### {names.get(ident, ident)}")
+        lines.append("".join(traceback.format_stack(frame)).rstrip())
+    return "\n".join(lines)
+
+
+def _dump_processes() -> str:
+    lines = [f"## processes (cpu_count={os.cpu_count()}, loadavg={_loadavg()})"]
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid,ppid,stat,etime,pcpu,command", "-g", str(os.getpgrp())],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        out = f"(ps failed: {exc!r})"
+    lines.append(out.rstrip())
+    return "\n".join(lines)
+
+
+def _loadavg() -> str:
+    try:
+        return " ".join(f"{x:.2f}" for x in os.getloadavg())
+    except OSError:
+        return "unknown"
+
+
+def _write_dump(what: str, report: str) -> Path | None:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", os.environ.get("PYTEST_CURRENT_TEST", what))[:120]
+    path = EVIDENCE_DIR / f"{time.strftime('%Y%m%dT%H%M%S')}-{slug.strip('-')}.txt"
+    try:
+        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(report, encoding="utf-8")
+    except OSError:
+        return None
+    return path

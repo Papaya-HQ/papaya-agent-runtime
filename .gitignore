@@ -24,6 +24,8 @@ node_modules/
 
 # Logs and scratch
 *.log
+# Receipts, and the state dumps a test's expired wait writes (tests/conftest.py).
+.mm-evidence/
 
 # OS / editor cruft
 .DS_Store

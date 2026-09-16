@@ -7,6 +7,7 @@ across the codebase.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -261,6 +262,52 @@ def append_event(
         (run_id, task_id, seq, kind, json.dumps(payload), _now()),
     )
     conn.commit()
+    return int(cur.lastrowid)
+
+
+def record_turn_result(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int | None,
+    task_id: int,
+    runner_id: str,
+    task_status: str,
+    kind: str,
+    payload: dict,
+    exit_code: int,
+) -> int:
+    """Record how a worker's turn ended as one commit: task status, event, runner row.
+
+    Written one at a time, a reader could see the task ``blocked`` while its runner
+    row still said ``running``, and a resume sent the moment the status turned was
+    refused as a duplicate of a worker that had already exited (task 259). Together
+    they also keep ``result_recorded`` — the crash-reconciliation boundary — in the
+    same transaction as the state it vouches for.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        now = _now()
+        cur = conn.execute(
+            """
+            INSERT INTO events (run_id, task_id, seq, kind, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, task_id, next_seq(conn, run_id), kind, json.dumps(payload), now),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?", (task_status, now, task_id)
+        )
+        conn.execute(
+            "UPDATE runners SET status = 'exited', exit_code = ?, result_recorded = 1 WHERE id = ?",
+            (exit_code, runner_id),
+        )
+        conn.commit()
+    except BaseException:
+        with contextlib.suppress(sqlite3.Error):
+            conn.rollback()
+        raise
     return int(cur.lastrowid)
 
 

@@ -247,6 +247,10 @@ class Supervisor:
         # Question fingerprints already auto-answered per task; a fingerprint that
         # reappears after its stored answer is escalated instead of looping.
         self._auto_answered: dict[int, set[str]] = {}
+        # Every thread this supervisor started, so ``close`` can wait for all of
+        # them — ``_threads`` keeps only the latest per task.
+        self._started: list[threading.Thread] = []
+        self._closed = False
 
     # ------------------------------------------------------------------ #
     # Dispatch
@@ -671,7 +675,7 @@ class Supervisor:
             process_env=prepared.process_env or {},
         )
         adapter = _adapter_for(provider)
-        runner = RunnerGuardian(adapter)
+        runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
 
         with self._lock:
             self._runners[task_id] = runner
@@ -683,7 +687,7 @@ class Supervisor:
         with self._lock:
             self._threads[task_id] = thread
         self._bind(execution, task_id)
-        thread.start()
+        self._start(thread)
 
         return {
             "run_id": run_id,
@@ -752,6 +756,8 @@ class Supervisor:
         task — pending or live — is refused here, before any side effect.
         """
         with self._lock:
+            if self._closed:
+                raise SupervisorError("the supervisor is closing; it admits no new executions")
             live = store.live_runners(conn)
             if task_id is not None:
                 if any(e.task_id == task_id for e in self._executions.values()):
@@ -944,7 +950,7 @@ class Supervisor:
             process_env=process_env,
         )
         adapter = _adapter_for(spec.provider)
-        runner = RunnerGuardian(adapter)
+        runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
         with self._lock:
             self._runners[task_id] = runner
         thread = threading.Thread(
@@ -969,7 +975,7 @@ class Supervisor:
             task_id=task_id,
         )
         self._bind(execution, task_id)
-        thread.start()
+        self._start(thread)
         return {
             "task_id": task_id,
             "resumed_session": session_id,
@@ -1206,7 +1212,7 @@ class Supervisor:
             args=(task_id, message, [r["runner"] for r in superseded]),
             daemon=True,
         )
-        thread.start()
+        self._start(thread)
         return {
             "mode": "interrupt_resume",
             "task_id": task_id,
@@ -1480,7 +1486,9 @@ class Supervisor:
             finally:
                 # The slot covers the provider process only. Follow-up bookkeeping,
                 # review waits, and checkpoint auto-resume do not retain it. It is
-                # released by identity: this execution's, never "the task's".
+                # released by identity: this execution's, never "the task's". The
+                # runner already released it when the process exited; this covers
+                # a run that never got that far.
                 self._release(execution)
         except Exception as exc:  # noqa: BLE001 - record, never crash the supervisor
             runner.interrupt()
@@ -1767,6 +1775,36 @@ class Supervisor:
             runners = list(self._runners.values())
         for runner in runners:
             runner.interrupt()
+
+    def _start(self, thread: threading.Thread) -> None:
+        thread.start()
+        with self._lock:
+            self._started.append(thread)
+
+    def close(self, timeout: float = 30.0) -> list[threading.Thread]:
+        """Stop every worker this supervisor started and wait for its bookkeeping to end.
+
+        Admission is refused from here on, so a continuation that would have started
+        another worker is deferred instead. Returns the threads still alive at the
+        deadline — empty when the supervisor is truly done.
+
+        A supervisor's threads find the database through ``PPY_HOME`` each time they
+        touch it. One left running after its owner moved on (a test ending, most
+        often) finishes its bookkeeping against whichever instance that variable
+        names by then: on a slow CI runner, the next test's, whose task ids restart
+        at 1 (task 259).
+        """
+        with self._lock:
+            self._closed = True
+        deadline = time.monotonic() + timeout
+        while True:
+            self.shutdown()
+            with self._lock:
+                alive = [t for t in self._started if t.is_alive()]
+            if not alive or time.monotonic() >= deadline:
+                return alive
+            for thread in alive:
+                thread.join(timeout=max(0.0, min(0.2, deadline - time.monotonic())))
 
 
 def _self_contained(conn, task, message: str | None) -> tuple[str | None, bool]:
