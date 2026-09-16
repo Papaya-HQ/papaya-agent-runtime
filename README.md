@@ -356,13 +356,18 @@ It offers each one that has no live task here to the client's loop
 (`ListenerLoop.offer`). An offered ticket goes through the same reservation,
 supervised approval and runner as an event does. A ticket whose earlier task was
 handed back, declined, released or closed counts as not live, so it is offered again.
-One held by another session is skipped quietly until the next sweep. A full pool ends
+One held by another session is skipped quietly until the next sweep. An `in_progress`
+ticket touched in the last six hours (`PPY_SWEEP_STALE_AFTER` seconds) is being worked
+elsewhere and is skipped as `in progress elsewhere`. Items are offered most important
+first: priority (urgent, high, normal, low), then `changes_requested` and `blocked`,
+then `todo`, then `in_progress`, then the oldest `updated_at`. A full pool ends
 the round early. A ticket this runtime *declined* leaves no task, so the decline is
 remembered in `.ppy/sweep-declined.json` along with the ticket's `updated_at`. The
 sweep leaves that ticket alone until someone changes it (an edit or a comment moves
 `updated_at`) or a person runs `ppy sweep --include-declined`. Without this, the app
 would ask about the same unplaceable ticket every five minutes. Each sweep writes one line on stderr: `sweep found N, offered M,
-skipped K`, plus `, D declined earlier` when any were skipped for that reason. Set the cadence with `--sweep-interval SECONDS` or `PPY_SWEEP_INTERVAL`
+skipped K`, plus `, D declined earlier` when any were skipped for that reason. A sweep
+that finds exactly what the last one found writes at most once every 30 minutes. Set the cadence with `--sweep-interval SECONDS` or `PPY_SWEEP_INTERVAL`
 (`0` sweeps once, at start), and run `ppy sweep` to have the running `serve` sweep
 now and print that line.
 

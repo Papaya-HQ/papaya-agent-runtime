@@ -1185,11 +1185,10 @@ def test_the_items_status_follows_the_work_and_nowhere_else(
     assert [s for item, s in statuses if item == delivered] == ["in_progress", "review"]
     assert [s for item, s in statuses if item == handed_back] == ["in_progress", "todo"]
     assert len(statuses) == len(set(statuses)) == 4
-    # The ticket that could not be placed says it was picked up, briefed, and why
-    # it was handed back — the briefing line once, however many attempts it took.
+    # The ticket that could not be placed says it was picked up and is briefing, and
+    # why it was handed back — the pickup line once, however many attempts it took.
     assert [body for item, body in papaya_api.comments() if item == handed_back] == [
-        "Picked up; working in runtime.",
-        "Briefing: choosing the repository and writing the brief.",
+        "Picked up; choosing the repository and writing the brief.",
         "handed back: the manager turn ended 2 times without dispatching a worker; no branch",
     ]
 
@@ -1606,9 +1605,9 @@ def test_each_phase_change_is_one_comment_on_the_ticket_in_order(
 
     worker = workers_in(int(ticket_task()["run_id"]))[0]
     bodies = [body for _item, body in papaya_api.comments()]
+    # Pickup and briefing are one comment: they happen within the same second.
     assert bodies == [
-        "Picked up; working in runtime.",
-        "Briefing: choosing the repository and writing the brief.",
+        "Picked up; choosing the repository and writing the brief.",
         f"Dispatched worker task {worker} in runtime.",
         f"Reviewing worker task {worker} at its head.",
         REPORT,  # the review turn's own, through MCP
@@ -1902,6 +1901,8 @@ def test_a_start_sweep_offers_every_open_assigned_item_nothing_has_picked_up(
     ppy_home, client_home, ready, registered_repo, assigned
 ) -> None:
     assigned.items = [_item(1), _item(2, "in_progress"), _item(3, "changes_requested")]
+    # Started once and untouched for days: left, not in progress elsewhere.
+    assigned.items[1]["updated_at"] = "2026-09-03T09:00:00+00:00"
     # Not open, so not found: a finished ticket is nobody's work.
     assigned.items.append(_item(4, "done"))
     harness = Harness(FakeEvents([]))
