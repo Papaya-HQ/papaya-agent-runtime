@@ -114,13 +114,12 @@ def owners() -> list[str]:
     outside them the person can still name directly.
     """
     found: list[str] = []
-    viewer = _gh_json(["api", "user", "--jq", ".login"])
-    if isinstance(viewer, str) and viewer.strip():
-        found.append(viewer.strip())
-    else:
-        raw = _gh_json(["api", "user"])
-        if isinstance(raw, dict) and raw.get("login"):
-            found.append(str(raw["login"]))
+    # Deliberately NOT `--jq .login`: that prints a bare unquoted string, which is
+    # not JSON, so parsing it raised and discovery could never find anyone's own
+    # account. Ask for the object and read the field here.
+    viewer = _gh_json(["api", "user"])
+    if isinstance(viewer, dict) and viewer.get("login"):
+        found.append(str(viewer["login"]))
     orgs = _gh_json(["api", "user/orgs"])
     if isinstance(orgs, list):
         found.extend(str(o["login"]) for o in orgs if isinstance(o, dict) and o.get("login"))
@@ -508,14 +507,144 @@ def onboard(name: str) -> tuple[Onboarding, Path]:
     return report, write_notes(report)
 
 
+# ── Registering on demand ───────────────────────────────────────────────────
+
+
+class NotYours(SolicitError):
+    """The repository is real, but outside every account this person belongs to."""
+
+
+@dataclass(frozen=True)
+class Ensured:
+    """What `ensure` did, so a caller can say it in one sentence."""
+
+    name: str
+    slug: str
+    registered: bool
+    onboarded: bool
+    notes_path: str = ""
+
+    def sentence(self) -> str:
+        if not self.registered and not self.onboarded:
+            return f"{self.name} was already registered and onboarded."
+        did = []
+        if self.registered:
+            did.append("registered")
+        if self.onboarded:
+            did.append("read how it builds and tests")
+        return f"{self.name} ({self.slug}): {' and '.join(did)}."
+
+
+def _already_registered(spec: str) -> dict | None:
+    """The registered repo this spec names, matched by name or by forge slug."""
+    from papaya_agent_runtime import repos
+
+    wanted = spec.strip().lower()
+    wanted_slug = (repos.forge_slug(spec) or wanted).lower()
+    for row in repos.list_repos():
+        name = str(row.get("name") or "").lower()
+        slug = (repos.forge_slug(row.get("forge_url") or row.get("origin")) or "").lower()
+        if wanted in {name, slug} or wanted_slug in {name, slug}:
+            return row
+        if slug.endswith(f"/{wanted}"):
+            return row
+    return None
+
+
+def _is_onboarded(name: str) -> bool:
+    from papaya_agent_runtime import memory
+
+    path = memory.repo_notes_path(name)
+    try:
+        return path.is_file() and NOTES_MARKER in path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def ensure(spec: str, *, allow_outside: bool = False) -> Ensured:
+    """Make a repository ready to work in, registering it if it is not yet.
+
+    Work that names a repository should not stop because nobody has registered it
+    yet — an assignment arriving while nobody is at the machine has no one to ask.
+    So a repository the *work itself* names, inside an account the person belongs
+    to, is registered on demand: they assigned the work, and registering is a
+    read-only clone plus a row. The destructive step is pushing, and that is gated
+    separately by the review gate and delivery authority.
+
+    The boundary is enforced here rather than described in prose: the candidate has
+    to come back from :func:`candidates`, which only ever reads the signed-in
+    account and its organisations. Anything else raises :class:`NotYours` and is a
+    question for the user. ``allow_outside`` is how an explicit human "yes, that
+    one" gets past it.
+
+    Idempotent: a repository already registered is onboarded if it never was, and
+    otherwise left exactly as it is.
+    """
+    existing = _already_registered(spec)
+    if existing is not None:
+        name = str(existing["name"])
+        slug = forge_slug_of(existing)
+        if _is_onboarded(name):
+            return Ensured(name=name, slug=slug, registered=False, onboarded=False)
+        _, path = onboard(name)
+        return Ensured(name=name, slug=slug, registered=False, onboarded=True, notes_path=str(path))
+
+    match = _match_candidate(spec) if not allow_outside else None
+    if match is None and not allow_outside:
+        raise NotYours(
+            f"{spec!r} is not registered, and it is not in your account or any "
+            "organisation you belong to — so registering it is not mine to assume. "
+            "Give me its URL if you want it taken on."
+        )
+    url = match.url if match is not None else spec
+    slug = match.slug if match is not None else (_slug_from_spec(spec) or spec)
+
+    from papaya_agent_runtime import repos
+
+    added = repos.add_repo(url)
+    _, path = onboard(added.name)
+    return Ensured(
+        name=added.name, slug=slug, registered=True, onboarded=True, notes_path=str(path)
+    )
+
+
+def forge_slug_of(row) -> str:
+    from papaya_agent_runtime import repos
+
+    return repos.forge_slug(row.get("forge_url") or row.get("origin")) or str(row.get("name") or "")
+
+
+def _match_candidate(spec: str) -> Candidate | None:
+    """The discovered repository this spec names, or None when it is not theirs."""
+    wanted = spec.strip().lower()
+    wanted_slug = (_slug_from_spec(spec) or wanted).lower()
+    for candidate in candidates(include_forks=True):
+        if wanted_slug == candidate.slug.lower() or wanted == candidate.name.lower():
+            return candidate
+    return None
+
+
+def _slug_from_spec(spec: str) -> str | None:
+    from papaya_agent_runtime import repos
+
+    slug = repos.forge_slug(spec)
+    if slug:
+        return slug
+    cleaned = spec.strip().strip("/")
+    return cleaned if cleaned.count("/") == 1 else None
+
+
 __all__ = [
     "DEFAULT_LIMIT",
+    "Ensured",
+    "NotYours",
     "NOTES_END",
     "NOTES_MARKER",
     "Candidate",
     "Onboarding",
     "SolicitError",
     "candidates",
+    "ensure",
     "inspect",
     "onboard",
     "owners",

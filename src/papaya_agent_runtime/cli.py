@@ -257,11 +257,34 @@ def _cmd_repo(args: argparse.Namespace) -> int:
             return _repo_discover(args)
         if args.repo_cmd == "onboard":
             return _repo_onboard(args)
+        if args.repo_cmd == "ensure":
+            return _repo_ensure(args)
     except RepoError as exc:
         print(f"repo error: {exc}", file=sys.stderr)
         return 1
     print("no repo subcommand given", file=sys.stderr)
     return 2
+
+
+def _repo_ensure(args: argparse.Namespace) -> int:
+    """Make a repo ready to work in, registering it on demand when it is theirs."""
+    from papaya_agent_runtime.solicit import NotYours, SolicitError, ensure
+
+    try:
+        result = ensure(args.repo, allow_outside=args.allow_outside)
+    except NotYours as exc:
+        print(f"not registered: {exc}", file=sys.stderr)
+        return 2
+    except SolicitError as exc:
+        print(f"could not take it on: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result.__dict__, indent=2))
+        return 0
+    print(result.sentence())
+    if result.notes_path:
+        print(f"  what it builds and tests is in {result.notes_path}")
+    return 0
 
 
 def _repo_discover(args: argparse.Namespace) -> int:
@@ -2050,6 +2073,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="print what would be recorded without writing it",
     )
     onboard_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+    ensure_cmd = rsub.add_parser(
+        "ensure",
+        help="make a repo ready to work in, registering and onboarding it if it is not yet",
+    )
+    ensure_cmd.add_argument(
+        "repo", help="a registered name, an owner/name slug, or a repository URL"
+    )
+    ensure_cmd.add_argument(
+        "--allow-outside",
+        dest="allow_outside",
+        action="store_true",
+        help=(
+            "register even when the repo is outside your account and organisations; "
+            "for an explicit human yes, never for work that merely named it"
+        ),
+    )
+    ensure_cmd.add_argument("--json", action="store_true", help="machine-readable output")
     repo.set_defaults(func=_cmd_repo)
 
     ready = sub.add_parser(

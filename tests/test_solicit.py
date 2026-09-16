@@ -39,8 +39,10 @@ def forge(monkeypatch):
 
     def fake(args: list[str]):
         calls.append(args)
-        if args[:2] == ["api", "user"] and "--jq" in args:
-            return answers.get("viewer", "someone")
+        if args[:2] == ["api", "user"]:
+            # The real call asks for the OBJECT: `--jq .login` prints a bare
+            # unquoted string, which is not JSON and used to raise.
+            return {"login": answers.get("viewer", "someone")}
         if args[:2] == ["api", "user/orgs"]:
             return answers.get("orgs", [])
         if args[0] == "repo" and args[1] == "list":
@@ -261,3 +263,109 @@ def test_onboarding_writes_notes_and_leaves_hand_written_ones_alone(registered) 
     assert "Hand-written: the staging database needs a tunnel." in second
     assert "`make lint`" in second
     assert second.count(solicit.NOTES_MARKER) == 1
+
+
+# ── Registering on demand ───────────────────────────────────────────────────
+#
+# Work that names a repository must not stop because nobody registered it yet: an
+# assignment arriving while nobody is at the machine has no one to ask. The
+# boundary is the person's OWN accounts — they assigned the work, and registering
+# is a read-only clone plus a row, while pushing stays gated by the review gate.
+
+
+def test_a_repo_in_their_orgs_is_taken_on_without_asking(forge, ppy_home, monkeypatch) -> None:
+    forge.answers["viewer"] = "shane"
+    forge.answers["repos"] = [_row("api", owner="acme")]
+    added = []
+    monkeypatch.setattr(solicit, "onboard", lambda name: (None, ppy_home / f"{name}-notes.md"))
+
+    class _Added:
+        name = "api"
+
+    monkeypatch.setattr(
+        "papaya_agent_runtime.repos.add_repo", lambda url: added.append(url) or _Added()
+    )
+
+    result = solicit.ensure("acme/api")
+
+    assert result.registered and result.onboarded
+    assert added == ["https://github.com/acme/api"]
+
+
+def test_a_repo_outside_their_accounts_is_refused_not_assumed(forge, ppy_home) -> None:
+    """Registering someone else's repository is not implied by anything."""
+    forge.answers["viewer"] = "shane"
+    forge.answers["repos"] = [_row("api", owner="acme")]
+    with pytest.raises(solicit.NotYours, match="not mine to assume"):
+        solicit.ensure("stranger/secret")
+
+
+def test_an_explicit_yes_gets_past_the_boundary(forge, ppy_home, monkeypatch) -> None:
+    forge.answers["repos"] = []
+    monkeypatch.setattr(solicit, "onboard", lambda name: (None, ppy_home / "n.md"))
+
+    class _Added:
+        name = "secret"
+
+    monkeypatch.setattr("papaya_agent_runtime.repos.add_repo", lambda url: _Added())
+    result = solicit.ensure("https://github.com/stranger/secret", allow_outside=True)
+    assert result.registered
+
+
+def test_an_already_registered_repo_is_left_alone(forge, ppy_home, monkeypatch) -> None:
+    """Idempotent: nothing is re-cloned, and an onboarded repo is not re-read."""
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    store.add_repo(
+        conn,
+        name="api",
+        origin="https://github.com/acme/api.git",
+        local_path="/l",
+        default_branch="main",
+        base_sha="a",
+        forge_url="https://github.com/acme/api",
+    )
+    monkeypatch.setattr(solicit, "_is_onboarded", lambda name: True)
+    monkeypatch.setattr(
+        "papaya_agent_runtime.repos.add_repo",
+        lambda *a, **k: pytest.fail("must not re-register"),
+    )
+
+    result = solicit.ensure("acme/api")
+
+    assert not result.registered and not result.onboarded
+    assert "already registered" in result.sentence()
+
+
+def test_a_registered_repo_nobody_read_gets_onboarded(forge, ppy_home, monkeypatch) -> None:
+    """Registration without onboarding is the state a first dispatch guesses from."""
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    store.add_repo(
+        conn,
+        name="api",
+        origin="https://github.com/acme/api.git",
+        local_path="/l",
+        default_branch="main",
+        base_sha="a",
+        forge_url="https://github.com/acme/api",
+    )
+    monkeypatch.setattr(solicit, "_is_onboarded", lambda name: False)
+    monkeypatch.setattr(solicit, "onboard", lambda name: (None, ppy_home / "n.md"))
+
+    result = solicit.ensure("api")
+
+    assert not result.registered and result.onboarded
+
+
+def test_owners_reads_the_login_from_the_object_not_a_bare_jq_string(forge) -> None:
+    """`gh api user --jq .login` prints an unquoted string, which is not JSON.
+
+    Parsing it raised, so discovery could never see the person's OWN account —
+    only organisations, and only when one was named explicitly.
+    """
+    forge.answers["viewer"] = "ignored"
+    forge.answers["orgs"] = [{"login": "acme"}]
+    assert solicit.owners()[0] != ""

@@ -119,7 +119,7 @@ talks to a tracker itself; it records which record a task belongs to and renders
 It installs what it can, but these have to exist:
 
 - **macOS or Linux.** Windows is out of scope for v1.
-- **Python 3.12+**, **Git**, and **[uv](https://docs.astral.sh/uv/)**.
+- **Python 3.13+**, **Git**, and **[uv](https://docs.astral.sh/uv/)**.
 - **Node 22+** and the **`gh` CLI** — for companions, discovery, and PR delivery.
 - **A signed-in Claude Code and/or Codex CLI.** It never logs you in. One is enough;
   two lets you run one as the driver and cap workers at the other.

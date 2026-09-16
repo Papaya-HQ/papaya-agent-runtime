@@ -3,7 +3,7 @@ name = "papaya-agent-runtime"
 version = "0.0.0"
 description = "A lightweight, local framework for directing autonomous software work across one or more Git repositories."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 # Zero runtime package dependencies by design.
 # The control plane uses only the Python standard library. Treehouse, gh-axi,
 # and lavish-axi are pinned companion CLIs, not Python libraries.

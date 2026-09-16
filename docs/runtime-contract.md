@@ -230,11 +230,19 @@ the frontend monorepo, the API, …"), never as a table, and never register with
 their word. Discovery reads the forge, not the filesystem: do not scan `~`,
 `~/workspace`, or anywhere else on the machine, and never guess a local path.
 
-**A repo that isn't registered is not a dead end.** If the user names something you
-don't have, find it: if `ppy repo discover` knows it, offer to register it right
-then and do it on a yes. If it's outside their orgs, ask for the URL. Either way the
-answer is never "I don't have that repo" full stop — it is "I don't have it yet;
-want me to take it on?"
+**A repo that isn't registered is not a dead end.** `ppy repo ensure <name-or-slug-or-url>`
+registers and onboards in one idempotent step. When the *work itself* names a
+repository — an assigned item, a ticket, a pull request — and that repository is in
+the user's own account or an organisation they belong to, **take it on without
+asking**. They assigned the work; registering is a read-only clone and a row, and
+the destructive step is pushing, which is gated separately by the review gate and
+delivery authority. Waiting for permission there means an assignment that arrives
+while nobody is at the machine simply stalls, which is the worse failure.
+
+The boundary is enforced in code, not left to your judgement: `ppy repo ensure`
+refuses anything outside those accounts and tells you to ask for a URL. When the
+*user* names something outside them and says yes, `--allow-outside` is that yes.
+Either way the answer is never "I don't have that repo" full stop.
 
 **Onboard every repo the moment it's registered.** Run `ppy repo onboard <name>`.
 It reads the base clone and records how the repo builds, how it tests, what its CI
@@ -457,6 +465,15 @@ nobody should have to give it twice.
 - **Read comments before acting.** New comments on the items you are working are
   instructions you have not read yet. Use `ppy watermark` so a sweep reads what is
   new rather than re-reading everything.
+- **Sweep your own open work, don't wait to be told.** An event stream is not a
+  guarantee: on 2026-09-15 a work item assigned 16 seconds after the machine's only
+  slot filled was skipped, its cursor advanced past it, and it was never picked up —
+  it sat in `todo` for hours with nobody aware. So on your heartbeat, list the items
+  owned by you that are not finished (`todo`, `in_progress`, `blocked`,
+  `changes_requested`), compare them against what is actually in flight here
+  (`ppy status`, `ppy board`), and pick up anything nobody is working. Keyed with
+  `ppy watermark`, an empty sweep is one list call. This is a safety net for work
+  that never reached you, so run it whether or not anything was mentioned.
 - **Propose memories, don't assert them.** A durable fact about the workspace goes
   through the propose path unless it is your own agent memory.
 - **Say what you can take on.** When the user asks, or when you register a new set of
@@ -776,6 +793,7 @@ readable at a glance by someone who just wants to know if it's done.
 | Papaya connection | `ppy papaya status [--json]` (which agent you are), `ppy papaya connect [--harness claude\|codex\|cursor]` (signs in, pins this machine to an agent, installs the harness plugin — the user's only step is clicking Approve in the browser), `ppy papaya context [--refresh]` (your persona, rules and memories as the client sees them). Every state short of connected still builds code |
 | Tracked record | `ppy track <task> --record <id> [--provider linear\|papaya\|notion\|...] [--url <url>] [--title "..."]` records which tracker record a dispatched task belongs to, so the pull request body names it and says where to find it; `--show` reads it back. Papaya is the default only when the workspace has not said otherwise — a workspace that tracks work elsewhere wins, and you learn that from its durable context, never from this flag |
 | Find repositories | `ppy repo discover [--owner <org>] [--limit N] [--top N] [--include-forks] [--json]` — repositories on the forge that are not registered yet, most recently pushed first. Reads the signed-in account and every organization it belongs to; archived repos never appear (they cannot take a pull request) and forks are skipped unless asked for. It only ever *offers*: registration stays `ppy repo add` |
+| Take a repo on | `ppy repo ensure <name\|owner/name\|url> [--allow-outside] [--json]` — registers and onboards in one idempotent step, and is what to call when *work* names a repository you do not have. It refuses anything outside the signed-in account and its organisations, because registering someone else's repository is not implied by anything; `--allow-outside` is an explicit human yes, never an inference |
 | Learn a repository | `ppy repo onboard <name> [--dry-run] [--json]` — reads the registered base clone and records how it builds, how it tests, the commands its CI workflows actually run, which agent contracts it carries, and whether UI work has a design reference — into that repo's durable notes, between markers so hand-written notes survive a re-run. It names what it could not determine; those unknowns are yours to close before the first dispatch |
 | Configure | `ppy setup --non-interactive ...`, `ppy config show|models|authority|assessments|health|claude` |
 | Claude worker tools | `ppy config claude --allowed-tools '...'` / `--reset`; `ppy health` prints the effective profile. `PPY_CLAUDE_ALLOWED_TOOLS` overrides the config for one session; an empty profile makes `ppy dispatch --provider claude` refuse rather than launch a worker with no shell |
