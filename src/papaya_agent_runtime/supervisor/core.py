@@ -861,6 +861,7 @@ class Supervisor:
         *,
         continuation: dict | None = None,
         ends_at: str | None = None,
+        by: str | None = None,
     ) -> dict:
         """Resume a task's provider session (blocked-worker resume / checkpoint steer).
 
@@ -868,8 +869,11 @@ class Supervisor:
         events, or the stored answer — and is written into the ``resumed`` event
         before the runner thread starts. That event is the durable proof of
         consumption (issue #71): a steer or answer counts as delivered when, and
-        only when, a launch carrying it was recorded.
+        only when, a launch carrying it was recorded. ``by`` says who asked
+        (`store.BY_PERSON` or `store.BY_MANAGER`), and is written there too.
         """
+        if by:
+            continuation = {**(continuation or {}), "by": by}
         conn = init_db()
         task = store.get_task(conn, task_id)
         if task is None:
@@ -1176,8 +1180,14 @@ class Supervisor:
         )
         return payload
 
-    def steer_task(self, task_id: int, message: str, *, delivery: str = "append") -> dict:
+    def steer_task(
+        self, task_id: int, message: str, *, delivery: str = "append", by: str | None = None
+    ) -> dict:
         """Steer a task.
+
+        ``by`` is who steered — a person at a session (`store.BY_PERSON`) or `ppy
+        serve` (`store.BY_MANAGER`) — and rides on every event the steer writes, so
+        the rounds can tell a person's direction from their own and leave it alone.
 
         Interrupt steering is offered only when the provider/version proves it
         (capability-gated). Otherwise steering is checkpoint-at-completion: the
@@ -1213,11 +1223,11 @@ class Supervisor:
             return {
                 "mode": "resume",
                 "note": "no live worker turn; resumed the session with the steer",
-                **self.resume_task(task_id, message),
+                **self.resume_task(task_id, message, by=by),
             }
 
         if can_interrupt:
-            return self._interrupt_steer(conn, task, message)
+            return self._interrupt_steer(conn, task, message, by=by)
 
         # Checkpoint steering: queue the message; the checkpoint delivers the queue.
         event_id = store.append_event(
@@ -1228,6 +1238,7 @@ class Supervisor:
                 "mode": "checkpoint_pending",
                 "message": message,
                 "delivery": delivery,
+                **({"by": by} if by else {}),
             },
             run_id=task["run_id"],
             task_id=task_id,
@@ -1274,7 +1285,7 @@ class Supervisor:
     # before resuming anyway (the resume is by session id, so it is safe either way).
     INTERRUPT_DRAIN_SECONDS = 60.0
 
-    def _interrupt_steer(self, conn, task, message: str) -> dict:
+    def _interrupt_steer(self, conn, task, message: str, *, by: str | None = None) -> dict:
         """Interrupt the live turn and resume it with the steer, staying in_progress.
 
         The interrupted process exits nonzero and its adapter reports ``failed``.
@@ -1299,6 +1310,7 @@ class Supervisor:
                 "message": message,
                 "superseded_runners": superseded,
                 "status": "in_progress",
+                **({"by": by} if by else {}),
             },
             run_id=task["run_id"],
             task_id=task_id,
@@ -1306,6 +1318,7 @@ class Supervisor:
         thread = threading.Thread(
             target=self._resume_after_interrupt,
             args=(task_id, message, [r["runner"] for r in superseded]),
+            kwargs={"by": by},
             daemon=True,
         )
         self._start(thread)
@@ -1320,7 +1333,9 @@ class Supervisor:
             ),
         }
 
-    def _resume_after_interrupt(self, task_id: int, message: str, runner_ids: list[str]) -> None:
+    def _resume_after_interrupt(
+        self, task_id: int, message: str, runner_ids: list[str], *, by: str | None = None
+    ) -> None:
         """Wait for the interrupted worker process to die, then resume with the steer."""
         deadline = time.monotonic() + self.INTERRUPT_DRAIN_SECONDS
         while time.monotonic() < deadline:
@@ -1349,6 +1364,7 @@ class Supervisor:
                 "message": message,
                 "delivery": "append",
                 "after": "interrupt",
+                **({"by": by} if by else {}),
             },
             run_id=run_id,
             task_id=task_id,
@@ -1738,6 +1754,7 @@ class Supervisor:
         *,
         scope: str = "run",
         rationale: str | None = None,
+        by: str | None = None,
     ) -> dict:
         """Record the user's answer as a durable decision and resume the task."""
         conn = init_db()
@@ -1757,7 +1774,7 @@ class Supervisor:
             rationale=rationale,
             context=_task_context(conn, task_id),
         )
-        resumed = self.resume_task(task_id, answer)
+        resumed = self.resume_task(task_id, answer, by=by)
         return {"task_id": task_id, "decision_id": decision_id, **resumed}
 
     # ------------------------------------------------------------------ #

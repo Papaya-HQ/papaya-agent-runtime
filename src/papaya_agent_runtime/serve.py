@@ -657,6 +657,8 @@ class Ticket:
     liveness_cursor: int = 0
     #: Where the last turn's transcript is, for the evidence of a self-report.
     last_transcript: str = ""
+    #: The living status line the work item carries now, as last written in place.
+    status_line: str = ""
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -926,7 +928,7 @@ def steer_worker(task_id: int, message: str) -> dict[str, Any]:
     """`ppy steer`, from inside `serve`: through the supervisor this process runs."""
     from papaya_agent_runtime.supervisor.client import SupervisorClient
 
-    resp = SupervisorClient().steer_task(task_id, message)
+    resp = SupervisorClient().steer_task(task_id, message, by=store.BY_MANAGER)
     if not resp.get("ok"):
         raise RuntimeError(str(resp.get("error") or "the supervisor refused the steer"))
     return resp
@@ -942,7 +944,7 @@ def stop_and_resume_worker(task_id: int, message: str) -> dict[str, Any]:
     """
     from papaya_agent_runtime.supervisor.client import SupervisorClient
 
-    resp = SupervisorClient().steer_task(task_id, message, delivery="replace")
+    resp = SupervisorClient().steer_task(task_id, message, delivery="replace", by=store.BY_MANAGER)
     if not resp.get("ok"):
         raise RuntimeError(str(resp.get("error") or "the supervisor refused the steer"))
     return resp
@@ -1063,6 +1065,7 @@ class TicketRunner:
         gate_state=None,
         liveness_seconds: float | None = None,
         uncommitted=None,
+        status_comment=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -1096,6 +1099,11 @@ class TicketRunner:
         self._answering: set[asyncio.Task[Any]] = set()
         #: What is in a worker's worktree and not on its branch, read before a review.
         self._uncommitted = uncommitted or uncommitted_files
+        #: How the living status line is written onto the work item, edited in place:
+        #: ``(ticket, line) -> bool``. ``None`` writes nothing, and is the default until
+        #: Papaya lets an agent edit its own comment (backend #636); until then the phase
+        #: comments stay the ticket's record and nothing new is posted.
+        self._status_comment = status_comment
         #: Every ticket held right now, by its task id: what the rounds walk.
         self.held: dict[int, Ticket] = {}
         #: Work item id -> the task the rounds re-offered it for, so the offer
@@ -1215,6 +1223,33 @@ class TicketRunner:
                 continue
             ticket.liveness_at = self._clock()
             await self._say_alive(ticket)
+            await self.keep_status_line(ticket)
+
+    async def keep_status_line(self, ticket: Ticket) -> bool:
+        """Bring the work item's living status line up to date. Returns whether it wrote.
+
+        One comment, edited in place, and only when the line changed: phase, what the
+        worker is doing, the pull request and its CI, what waits on a person — the facts
+        `ppy status --team` prints, so a hosted agent reading the ticket reads the record.
+
+        Never in standalone mode: with no Papaya connection, or for a local task with no
+        work item behind it, there is nothing to write on and nothing is written.
+        """
+        if self._status_comment is None:
+            return False
+        if not await asyncio.to_thread(status_line_writable, ticket.held.task_id):
+            return False
+        line = await asyncio.to_thread(ticket_status_line, ticket.held.task_id)
+        if not line or line == ticket.status_line:
+            return False
+        try:
+            written = bool(await asyncio.to_thread(self._status_comment, ticket, line))
+        except Exception as exc:  # noqa: BLE001 - a status line must never end a hold
+            log.warning("[serve] Could not write %s's status line: %s", ticket.job.subject, exc)
+            return False
+        if written:
+            ticket.status_line = line
+        return written
 
     async def _say_alive(self, ticket: Ticket, *, stalled: bool = False) -> bool:
         """One liveness line for this ticket, if its worker or gate is active. Never fatal."""
@@ -1724,8 +1759,9 @@ class TicketRunner:
             await self._listen(ticket)
             comments = await self._take_pending(ticket)
             mark = await asyncio.to_thread(_max_event_id)
+            status = await asyncio.to_thread(ticket_status_line, ticket.held.task_id)
             result = await self._turn(
-                ticket, prompts.ANSWER, self._answer_facts(ticket, tail, comments)
+                ticket, prompts.ANSWER, self._answer_facts(ticket, tail, comments, status)
             )
             acted = await asyncio.to_thread(acted_since, worker_id, mark)
             if not acted and await self._wait_on_person(ticket):
@@ -1916,7 +1952,8 @@ class TicketRunner:
         comments = await self._take_pending(ticket)
         if not comments:
             return False
-        await self._turn(ticket, prompts.ANSWER, self._answer_facts(ticket, "", comments))
+        status = await asyncio.to_thread(ticket_status_line, ticket.held.task_id)
+        await self._turn(ticket, prompts.ANSWER, self._answer_facts(ticket, "", comments, status))
         return True
 
     async def _listen(self, ticket: Ticket) -> None:
@@ -2210,13 +2247,19 @@ class TicketRunner:
         }
 
     def _answer_facts(
-        self, ticket: Ticket, tail: str, comments: list[dict[str, Any]] | None = None
+        self,
+        ticket: Ticket,
+        tail: str,
+        comments: list[dict[str, Any]] | None = None,
+        status: str | None = None,
     ) -> dict[str, object]:
         worker = ticket.worker
         trigger = ticket.trigger
         return {
             **_ticket_facts(ticket.held),
             **_worker_facts(worker),
+            # A comment asking where the work is gets answered from this, never invented.
+            "this ticket's status, from the record (`ppy status --team`)": status,
             "the worker's question": (
                 trigger.detail if trigger is not None and trigger.phase == PHASE_BLOCKED else ""
             ),
@@ -3199,6 +3242,30 @@ def pull_request_url(worker_id: int) -> str | None:
         return (_payload(row).get("pr_url") or None) if row is not None else None
     finally:
         conn.close()
+
+
+def status_line_writable(task_id: int) -> bool:
+    """May a status line go on this task's work item? Connected, and a work item behind it."""
+    if not standalone.connected():
+        return False
+    conn = db.init_db()
+    try:
+        return standalone.has_work_item(conn, task_id)
+    except Exception:  # noqa: BLE001 - an unreadable task is not one to write on
+        return False
+    finally:
+        conn.close()
+
+
+def ticket_status_line(task_id: int) -> str | None:
+    """The held ticket's living status line (:func:`team.status_line`); ``None`` if unreadable."""
+    from papaya_agent_runtime import team
+
+    try:
+        return team.status_line(team.snapshot(), task_id)
+    except Exception as exc:  # noqa: BLE001 - a status line must never break a hold
+        log.warning("[serve] Could not read task %d's status line: %s", task_id, exc)
+        return None
 
 
 def open_person_wait(task_id: int) -> tuple[int, str] | None:

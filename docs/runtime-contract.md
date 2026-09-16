@@ -435,6 +435,12 @@ quietly; do not narrate the steps or report diagnostics.
    you have, never the general-purpose default; an unset key means the first
    sweep reads everything, and `ppy watermark clear <key>` asks for a re-read.
 
+10. **Arrive with the team's picture.** Last, `ppy status --team`: held tickets with
+    phase and age, every worker with what it is doing now, delivered pull requests with
+    CI, review and the reconcile lane, blockers, the last round's summary, and what
+    waits on a person. It works whether `ppy serve` is running or not. Summarise it in
+    words in your first reply and ask nothing about it; see **Copilot** below.
+
 Preflight is invisible when it succeeds: the user just sees you open ready, knowing
 who you are and what you can work on.
 
@@ -815,6 +821,33 @@ the tooling set up" is plenty.
 If `ppy doctor` reports capability-matrix **drift** for a provider, re-probe before
 trusting interrupt/resume steering, and tell the user in one sentence.
 
+## Copilot — a person and `ppy serve` working the same team
+
+When `ppy serve` is holding tickets and a person opens a session here, you are their
+copilot on the daemon's team, not a second manager.
+
+- **Arrive with `ppy status --team`** (preflight step 10), and say it in words.
+- **Read the feed before you speak.** `ppy tail --since 10m` prints the daemon's
+  events one line each: pickups, phase changes, worker notes, check-in decisions,
+  hygiene, pull request attention, blockers, deficiencies, round summaries. Run it at
+  every check-in while the person is present, and always before answering "what's
+  going on" — never answer from memory. `--follow` streams.
+- **Steer through `ppy`.** `ppy steer`, `ppy answer`, `ppy resume`, `ppy stop`,
+  `ppy review` and `ppy deliver` act on the same supervisor and state the daemon holds.
+  What you do from a session is recorded `by: person`; the daemon's next round leaves
+  that worker alone until it has answered, and its check-in turn is told the direction
+  stands.
+- **Never hold a ticket the daemon holds.** No second brief, no second dispatch, no
+  comment in its place. A held ticket's phase is in `ppy status --team`.
+- **Act as the agent only when asked.** Posting on a work item or in a channel as the
+  agent is the person's call, not a copilot's habit.
+- **The ticket is the way in.** A comment on a held work item is the only thing that
+  reaches the agent working it from Papaya (its answer turn reads it, with the ticket's
+  status line from the record). @mentions and agent DMs are answered by the hosted
+  agent, never by this machine. So a person in Papaya who wants to reach the work
+  comments on the ticket; `ppy status --team --json` is the same record for a hosted
+  tool or a script.
+
 ## Reporting
 
 Keep the user oriented without making them work: after meaningful steps, give a
@@ -853,9 +886,11 @@ readable at a glance by someone who just wants to know if it's done.
 | Heartbeat | `ppy watch` (background monitor; one line every `--interval` seconds, default 300) — in-flight workers, tasks waiting on you, and for every finished or delivered task whose branch has an open pull request: number, base, CI verdict (naming the failing checks), and mergeability, plus what flipped since the last tick. When the forge reports a PR merged, that tick records the forge's merge commit (including squash merges), tears down the task's compose stack, says so, and retires the PR; a closed-unmerged PR is never recorded. `ppy deliver <task> --merged <sha>` remains the idempotent manual form. `--once` for one line, `--json` for machine output. Without `gh` it says `ci: unknown` rather than failing. It goes quiet on its own after two idle ticks (nothing in flight, nothing owed to you, no pending or failing checks, nothing new) and speaks again the moment that stops being true — leave it running rather than restarting it; `--exit-when-idle` makes it exit instead, for scripts |
 | External sweeps | `ppy watermark get <key>` (the newest comment timestamp already processed on a ticket URL or id; exit 1 and a plain message when unset, so the first sweep reads everything), `ppy watermark set <key> <iso-timestamp> [--note ...]` after the sweep has handled what was newer (stored as UTC; moving it back is allowed and named, for a re-read), `ppy watermark list [--json]`, `ppy watermark clear <key>`. A sweep asks the source only for comments newer than the watermark and runs on the cheapest model |
 | Status (non-blocking) | `ppy run <run_id>`, `ppy task <task_id>` (long form `ppy task show <task_id>`), `ppy status` — snapshot; returns immediately. A task whose turn ended mid-gate shows as `worker_stopped` with the reason named (no done note, unpushed commits, or a backgrounded command killed with the session) — that is work to resume, not work to review. Unpushed commits under a done note are the exception: the harness pushes the lease branch itself and the task lands `worker_done`, unless the remote refuses, and then the reason quotes the refusal |
+| Team picture | `ppy status --team [--json]` — held tickets (phase, age), workers (status, session, last tool and elapsed, last progress note, a person's last steer), delivered pull requests (state, CI, review, reconcile lane), the lane, blockers, the last round's summary, what waits on a person; one line per item, nothing the record does not say. `--json` is the same facts for a hosted tool or a script |
+| Event feed | `ppy tail [--since 10m] [--follow]` — the daemon's events, one line each, oldest first, from the state tables; `--follow` streams new ones until interrupted |
 | Await (blocking primitive) | `ppy wait <run_id> [--timeout]` — scripts/tests only; **not** in a live turn (use `--timeout 0` to drain) |
 | Answer a worker | `ppy answer <task_id> --answer ... [--scope]` |
-| Steer / resume | `ppy steer <task_id> --message ... [--replace]` applies provider-capability-aware steering. `ppy resume <task_id> [--message] [--ends-at review\|done]` defaults to the task's stored terminal phase; an explicit value replaces and persists it. Resume reapplies the task process environment, rebuilds a missing pristine worktree into a fresh lease on the same branch/base, verifies that newly minted or retained lease owns the task path, synchronizes a cascaded branch before launch, and never reuses a released lease identity or a path now owned by another task. On a `worker_stopped` task, a bare resume sends the worker back with what was cut short; see [`task-lifecycle.md`](task-lifecycle.md). |
+| Steer / resume | `ppy steer <task_id> --message ... [--replace]` applies provider-capability-aware steering; `ppy stop <task_id> --message ...` is the replacing steer (stop the current turn, resume with this message alone). From a session these record `by: person`, from a `ppy serve` turn `by: manager`. `ppy resume <task_id> [--message] [--ends-at review\|done]` defaults to the task's stored terminal phase; an explicit value replaces and persists it. Resume reapplies the task process environment, rebuilds a missing pristine worktree into a fresh lease on the same branch/base, verifies that newly minted or retained lease owns the task path, synchronizes a cascaded branch before launch, and never reuses a released lease identity or a path now owned by another task. On a `worker_stopped` task, a bare resume sends the worker back with what was cut short; see [`task-lifecycle.md`](task-lifecycle.md). |
 | Review | `ppy review show <task_id>` (worker report, the capture/receipt paths it named with sizes and openable image lines, the standing approval note, a migration-collision flag when this diff's added migration shares a `down_revision` with another unmerged task's, the layer's place in its stack and the merge order when a stack parent is recorded, then the diffstat), `ppy review approve <task_id> [--note "what you checked"] [--findings ...]`, `ppy review request-changes <task_id> --findings ...`, `ppy review status <task_id>` (also prints the approval note) |
 | Deliver | `ppy deliver <task_id> [--no-pr] [--base ...] [--remote ...] [--title "..."] [--body-file FILE]` — pushes to the repo's registered forge and opens the pull request there (`--remote` overrides); composes the pull request body from the archived brief, reports, approval note, and stack order. It refuses a diff containing commits owned by another open task and names both tasks: keep the native layer PRs and use `ppy stack merge`, never a composition PR. Existing stack-base refusals still apply. `--body-file` and `--title` override generated text. `ppy deliver <task_id> --merged <sha>` idempotently records an externally merged commit, pushes nothing, and takes the task's compose stack down. |
 | Close out / repair | `ppy task close <id> --reason "..."` (terminal `closed`, frees the slot and takes the task's compose stack down), `ppy task set-status <id> <status> --note "..."`, `ppy task push <id>` (push a lease worktree onto its own branch by hand — the manual form of what the harness does for a done-but-unpushed worker; prints the SHA it pushed or the refusal it got), `ppy lease release <task_id> [--reason ...]` |
