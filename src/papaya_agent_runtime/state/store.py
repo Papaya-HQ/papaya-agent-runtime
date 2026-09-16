@@ -138,9 +138,11 @@ def set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None
 
 #: The phases `ppy serve` records while it holds a ticket's lease. The first seven
 #: are how far the work has got, in the order a ticket normally passes through
-#: them (`blocked` is a detour off `dispatched` and back). The last four are how
+#: them (`blocked` is a detour off `dispatched` and back). The next four are how
 #: the hold ended, in the client's own vocabulary rather than a second one
-#: invented here — the reason on `Job.stop` chooses between the first three.
+#: invented here — the reason on `Job.stop` chooses between the first three. The
+#: last two are what the manager's rounds found afterwards: somebody else holds
+#: the ticket now (`handed_over`), or its pull request merged (`done`).
 TASK_PHASES = (
     "picked_up",
     "briefing",
@@ -153,6 +155,8 @@ TASK_PHASES = (
     "handed_back",
     "stalled",
     "declined",
+    "handed_over",
+    "done",
 )
 
 #: The event kind every phase change is also written as, so the order a ticket
@@ -691,15 +695,26 @@ def delete_watermark(conn: sqlite3.Connection, key: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+#: What makes a `worker_progress` event a progress *note* (`ppy progress --phase`).
+#: The runner records every stream line as `worker_<type>`, so a provider's
+#: `{"type": "progress"}` chatter shares the kind but carries no phase. Read as a
+#: note, a line recorded after the done note hid it, and a finished worker was
+#: judged `worker_stopped` whenever the runner read stdout later than the worker
+#: wrote its note (CI, 2026-09-16).
+PROGRESS_NOTE = "kind = 'worker_progress' AND COALESCE(json_extract(payload, '$.phase'), '') != ''"
+
+
 def progress_events(
     conn: sqlite3.Connection, *, task_id: int | None = None, repo_id: int | None = None
 ) -> list[sqlite3.Row]:
-    """Progress reports, newest first, for one task or every task of a repo."""
+    """Progress notes, newest first, for one task or every task of a repo.
+
+    Notes only: a phaseless `worker_progress` stream line is not a report.
+    """
     if task_id is not None:
         return list(
             conn.execute(
-                "SELECT * FROM events WHERE task_id = ? AND kind = 'worker_progress' "
-                "ORDER BY id DESC",
+                f"SELECT * FROM events WHERE task_id = ? AND {PROGRESS_NOTE} ORDER BY id DESC",
                 (task_id,),
             ).fetchall()
         )
@@ -707,14 +722,13 @@ def progress_events(
         return list(
             conn.execute(
                 "SELECT e.* FROM events e JOIN tasks t ON t.id = e.task_id "
-                "WHERE t.repo_id = ? AND e.kind = 'worker_progress' ORDER BY e.id DESC",
+                "WHERE t.repo_id = ? AND e.kind = 'worker_progress' "
+                "AND COALESCE(json_extract(e.payload, '$.phase'), '') != '' ORDER BY e.id DESC",
                 (repo_id,),
             ).fetchall()
         )
     return list(
-        conn.execute(
-            "SELECT * FROM events WHERE kind = 'worker_progress' ORDER BY id DESC"
-        ).fetchall()
+        conn.execute(f"SELECT * FROM events WHERE {PROGRESS_NOTE} ORDER BY id DESC").fetchall()
     )
 
 

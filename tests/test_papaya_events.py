@@ -237,9 +237,9 @@ def test_set_work_item_status_patches_the_item_it_reads() -> None:
     assert request.headers["Authorization"] == "Bearer secret-token"
 
 
-def test_set_work_item_status_refuses_a_status_outside_the_runners_four() -> None:
+def test_set_work_item_status_refuses_a_status_outside_the_runners_own() -> None:
     with pytest.raises(papaya_events.PapayaEventError, match="status must be one of"):
-        papaya_events.set_work_item_status(_event(), "done", environ=_CONNECTED)
+        papaya_events.set_work_item_status(_event(), "archived", environ=_CONNECTED)
 
 
 def test_status_and_comment_without_connection_facts_make_no_call() -> None:

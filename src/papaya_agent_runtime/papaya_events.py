@@ -224,7 +224,9 @@ STATUS_TODO = "todo"
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_REVIEW = "review"
 STATUS_BLOCKED = "blocked"
-WORK_ITEM_STATUSES = (STATUS_TODO, STATUS_IN_PROGRESS, STATUS_REVIEW, STATUS_BLOCKED)
+#: Set once, when the rounds observe the ticket's pull request merged.
+STATUS_DONE = "done"
+WORK_ITEM_STATUSES = (STATUS_TODO, STATUS_IN_PROGRESS, STATUS_REVIEW, STATUS_BLOCKED, STATUS_DONE)
 
 
 def set_work_item_status(

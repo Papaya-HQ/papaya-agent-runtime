@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from typing import Any, TextIO
 
 from papaya_agent_runtime import board, companions, health
-from papaya_agent_runtime.state import init_db
+from papaya_agent_runtime.state import init_db, store
 
 DEFAULT_INTERVAL_SECONDS = 300.0
 
@@ -58,8 +58,9 @@ _SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}\Z")
 
 
 def _latest_phase(conn: sqlite3.Connection, task_id: int) -> str | None:
+    # Notes only (`store.PROGRESS_NOTE`): a phaseless stream line is not the latest phase.
     row = conn.execute(
-        "SELECT payload FROM events WHERE task_id = ? AND kind = 'worker_progress' "
+        f"SELECT payload FROM events WHERE task_id = ? AND {store.PROGRESS_NOTE} "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
@@ -147,7 +148,8 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
             "--state",
             "all",
             "--json",
-            "number,state,mergeable,mergeStateStatus,baseRefName,mergedAt,mergeCommit",
+            "number,state,mergeable,mergeStateStatus,baseRefName,mergedAt,mergeCommit,url,"
+            "reviewDecision",
         ],
         cwd=cwd,
     )
@@ -181,6 +183,9 @@ def _lookup_pr(branch: str, cwd: str | None) -> dict[str, Any]:
             and _SHA_RE.fullmatch(merge_oid)
         ),
         "merge_commit": merge_oid if isinstance(merge_oid, str) else None,
+        "url": row.get("url") if isinstance(row.get("url"), str) else None,
+        # `CHANGES_REQUESTED`, `APPROVED`, `REVIEW_REQUIRED`, or "" with no review.
+        "review": str(row.get("reviewDecision") or "").upper(),
     }
     if found["state"] != "OPEN":
         return found  # a merged or closed pull request has nothing left to run

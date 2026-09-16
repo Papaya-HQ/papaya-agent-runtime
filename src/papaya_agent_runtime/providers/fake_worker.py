@@ -14,6 +14,10 @@ without any model. Behavior is driven by instruction markers:
 - ``NOPUSH`` -> finish without pushing the branch.
 - ``BACKGROUND`` -> make the session's last tool call a backgrounded command, the
   shape that gets killed when the turn ends.
+- ``CHATTER`` -> emit a stream ``progress`` line *after* filing the done note, the way
+  a real session keeps talking once `ppy progress` has run. The runner records that
+  line as a phaseless ``worker_progress`` event newer than the note, which is the
+  ordering a slow runner produced by chance in CI.
 - otherwise -> write a file, commit, push, file a done note, and emit a completed
   result with the head SHA.
 
@@ -102,6 +106,10 @@ def _finish_the_gate(spec: dict, session_id: str) -> None:
         progress.record(
             int(spec["task_id"]), phase="done", note=f"finished {spec['title']}; branch pushed"
         )
+        if "CHATTER" in instructions:
+            # Only once the note is committed: the stream line is newer, always.
+            _emit({"type": "progress", "session_id": session_id, "text": "filed the done note"})
+            time.sleep(0.2)
     if "BACKGROUND" in instructions:
         # The incident's shape: the last thing the session did was hand a long
         # command to the background, and the turn ended waiting for it.

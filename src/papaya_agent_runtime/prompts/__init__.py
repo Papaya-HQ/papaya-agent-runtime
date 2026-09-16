@@ -1,8 +1,10 @@
 """The prompts `ppy serve` gives its manager turns, as reviewed text.
 
-Three turns, three files beside this one: ``brief.md`` (choose the repository, define
+Four turns, four files beside this one: ``brief.md`` (choose the repository, define
 done on the record, brief and dispatch), ``answer.md`` (unblock a worker's question
-or take it to a person) and ``review.md`` (review at head, deliver, report back).
+or take it to a person), ``review.md`` (review at head, deliver, report back) and
+``checkin.md`` (the rounds' look at a running worker: continue, steer, or stop and
+resume, said on one last line the runner acts on).
 
 They instruct; they do not template. Task 222 was closed for generating briefs in
 code, and the rule that came out of it is kept here structurally: the only thing
@@ -21,7 +23,8 @@ from pathlib import Path
 BRIEF = "brief"
 ANSWER = "answer"
 REVIEW = "review"
-TURNS = (BRIEF, ANSWER, REVIEW)
+CHECKIN = "checkin"
+TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN)
 
 #: The skill files every turn prompt names, relative to the runtime directory.
 BRIEF_SKILL = ".agents/skills/brief-a-worker/SKILL.md"
@@ -56,6 +59,14 @@ TEN_MINUTE_RULE = (
     "A command that may run longer than ten minutes must not be run as a tool call; "
     "use `ppy gate run`, or push and let the hook run it. Never background a gate and wait."
 )
+
+#: How a check-in turn says what it decided: its last line starts with this, then
+#: one of the three decisions below (the steer and stop ones carry the message).
+CHECKIN_PREFIX = "CHECK-IN:"
+CHECKIN_CONTINUE = "continue"
+CHECKIN_STEER = "steer"
+CHECKIN_STOP = "stop and resume with"
+CHECKIN_DECISIONS = (CHECKIN_CONTINUE, CHECKIN_STEER, CHECKIN_STOP)
 
 _HERE = Path(__file__).resolve().parent
 
@@ -103,6 +114,12 @@ __all__ = [
     "REPORT_ADDENDUM",
     "BRIEF",
     "BRIEF_SKILL",
+    "CHECKIN",
+    "CHECKIN_CONTINUE",
+    "CHECKIN_DECISIONS",
+    "CHECKIN_PREFIX",
+    "CHECKIN_STEER",
+    "CHECKIN_STOP",
     "REVIEW",
     "REVIEW_SKILL",
     "RUNTIME_DIR",
