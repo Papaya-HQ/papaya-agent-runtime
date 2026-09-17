@@ -690,8 +690,14 @@ def _role(text: str) -> str | None:
     return FULL if full else SCOPED if scoped else None
 
 
+#: A shell environment assignment in front of a command: `CI=1 pnpm exec vitest run`.
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+
+
 def _is_command(span: str) -> bool:
     words = span.strip().lstrip("$ ").split()
+    while words and _ENV_ASSIGNMENT.match(words[0]):
+        words = words[1:]
     if not words:
         return False
     first = words[0]
@@ -1187,6 +1193,50 @@ def _pre_push_hooks(root: Path) -> list[tuple[str, str]]:
     hooks = _pre_commit_pre_push(text) if text else ""
     if hooks.strip():
         found.append((".pre-commit-config.yaml pre-push stage", hooks))
+    found.extend(_agent_push_hooks(root))
+    return found
+
+
+#: An agent harness's settings files a repository commits, whose hooks run for every agent.
+_AGENT_SETTINGS = (".claude/settings.json",)
+_GIT_PUSH = re.compile(r"\bgit\b[^\n]{0,40}\bpush\b")
+
+
+def _agent_push_hooks(root: Path) -> list[tuple[str, str]]:
+    """Hooks an agent harness runs before a tool call that pushes, as (where, what it runs).
+
+    A Claude Code `PreToolUse` hook on Bash that gates `git push` behind a suite is a
+    pre-push hook for every agent working in the repository, workers included: the
+    frontend's `.claude/hooks/verify-before-push.sh` runs `make verify` before any push.
+    A hook counts when its script (or its command, when that is not a file here) names
+    `git push`.
+    """
+    found: list[tuple[str, str]] = []
+    for name in _AGENT_SETTINGS:
+        try:
+            settings = json.loads((root / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        entries = (
+            (settings.get("hooks") or {}).get("PreToolUse") if isinstance(settings, dict) else None
+        )
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get("hooks") or []:
+                command = str((hook or {}).get("command") or "") if isinstance(hook, dict) else ""
+                if not command:
+                    continue
+                script = re.sub(r"\$\{?CLAUDE_PROJECT_DIR\}?/?", "", command.split()[0]).strip(
+                    "\"'"
+                )
+                try:
+                    text = (root / script).read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    text = command
+                said = f"{text}\n{hook.get('statusMessage') or ''}"
+                if _GIT_PUSH.search(said) or re.search(r"before\s+push", said, re.IGNORECASE):
+                    found.append((f"{name} PreToolUse {script or command}", text))
     return found
 
 
@@ -1209,10 +1259,13 @@ def derive_gate_policy(root: Path, report: Onboarding | None = None) -> GatePoli
       one the repository ships through husky, ``.githooks``, lefthook or pre-commit)
       whose text runs a test suite sets the hook flag.
 
-    Whatever the repository does not say stays unknown (:attr:`GatePolicy.unknown`);
-    readiness asks the owner rather than the runtime guessing. A Makefile target or a
-    package script is never a gate by its name alone. ``report`` is accepted for callers
-    that already inspected the repository; nothing here needs it.
+    When the instructions name no full suite, the runtime finds it itself: the checks
+    pull-request CI runs (:func:`_full_suite_from_ci`), else the whole check the build
+    files name (:func:`_full_suite_from_manifest`). Only a repository that gives
+    nothing in any of those places stays unknown (:attr:`GatePolicy.unknown`), and
+    readiness asks its owner. The quick gate is never the full suite again.
+    ``report`` is accepted for callers that already inspected the repository; nothing
+    here needs it.
     """
     policy = GatePolicy()
     for where, text in _pre_push_hooks(root):
@@ -1238,6 +1291,16 @@ def derive_gate_policy(root: Path, report: Onboarding | None = None) -> GatePoli
             policy.evidence.append(
                 f"full suite from {tests[0].source}: the quick gate's only test command"
             )
+    if not full and not policy.full_suite_command:
+        full = _full_suite_from_ci(root)
+        if full:
+            policy.full_suite_command, policy.full_suite_command_source = _joined(full)
+            policy.evidence.extend(f"full suite from CI {d.source}: {d.quote}" for d in full)
+    if not full and not policy.full_suite_command:
+        full = _full_suite_from_manifest(root)
+        if full:
+            policy.full_suite_command, policy.full_suite_command_source = _joined(full)
+            policy.evidence.extend(f"full suite from {d.source}: {d.quote}" for d in full)
     if full and not scoped:
         quick = _quick_gate_from_scripts(root, full)
         if quick:
@@ -1262,6 +1325,14 @@ def _first_group(found: list[Declaration], role: str) -> list[Declaration]:
     """The first group of declarations with ``role``, made only of what that role runs."""
     group: str | None = None
     chosen: list[Declaration] = []
+    if role == FULL:
+        # An e2e suite is part of a full suite, never the whole of it when the same
+        # instructions name another full run ("`vitest run` # full test suite" above
+        # "`pnpm test:e2e` # e2e suite"): the group starts at the first one that is not.
+        group = next(
+            (d.group for d in found if d.role == FULL and d.kind not in ("format", "e2e")),
+            None,
+        )
     for declaration in found:
         if declaration.role != role or declaration.kind == "format":
             continue
@@ -1280,7 +1351,59 @@ def _joined(parts: list[Declaration]) -> tuple[str, str]:
     for part in parts:
         if part.source not in sources:
             sources.append(part.source)
-    return " && ".join(p.command for p in parts), ", ".join(f"{_REPO}{s}" for s in sources)
+    return " && ".join(p.command for p in parts), ", ".join(
+        s if s.startswith(_OBSERVED) else f"{_REPO}{s}" for s in sources
+    )
+
+
+#: What a pull-request workflow step checks, when it is part of the full suite.
+_CI_SUITE_KINDS = frozenset({"lint", "typecheck", "test", "e2e", "verify"})
+#: A workflow expression, which only means something to the CI runner.
+_CI_EXPRESSION = re.compile(r"\S*\$\{\{.*?\}\}\S*")
+
+
+def _full_suite_from_ci(root: Path) -> list[Declaration]:
+    """The checks a pull request's CI runs, when the instructions name no full suite.
+
+    Every single-line `run:` step of a pull-request workflow (and the reusable ones it
+    calls) whose command lints, type checks or tests, in file order, once each, with
+    workflow-only arguments (`--shard=${{ matrix.shard }}/4`) dropped. Installs, builds,
+    deploys and uploads are not checks. A format step counts only when it checks
+    (`ruff format --check`). The source is what the runtime saw: the workflow line.
+    """
+    workflows = pull_request_workflows(root)
+    chosen: list[Declaration] = []
+    seen: set[str] = set()
+    for relative, number, line in _workflow_lines(root):
+        if relative not in workflows:
+            continue
+        match = _RUN_LINE.match(line)
+        if match is None:
+            continue
+        raw = match.group(1).strip()
+        if not raw or raw.startswith("#") or "${{" in raw.split()[0]:
+            continue
+        words = _CI_EXPRESSION.sub(" ", raw).split()
+        command = " ".join(words)
+        if not _is_command(command) or command in seen:
+            continue
+        kind = command_kind(command)
+        if kind == "format" and "--check" not in words:
+            continue
+        if kind != "format" and kind not in _CI_SUITE_KINDS:
+            continue
+        seen.add(command)
+        chosen.append(
+            Declaration(
+                FULL,
+                command,
+                f"{_OBSERVED}{relative}:{number}",
+                raw,
+                kind=kind,
+                group="ci",
+            )
+        )
+    return chosen
 
 
 def _only_test_command(found: list[Declaration], test: Declaration) -> bool:
@@ -1289,6 +1412,67 @@ def _only_test_command(found: list[Declaration], test: Declaration) -> bool:
 
 #: The script (or target) names a quick gate is made of, in order, with alternatives.
 _QUICK_NAMES = (("lint",), ("typecheck", "type-check"), ("test:unit", "test-unit", "test"))
+
+
+def _bare(command: str) -> str:
+    """A command as the program it runs: no env assignments, no package-runner prefix."""
+    words = command.split()
+    while words and _ENV_ASSIGNMENT.match(words[0]):
+        words = words[1:]
+    if (
+        len(words) > 1
+        and words[0] in ("pnpm", "npm", "yarn", "bun", "npx")
+        and words[1]
+        in (
+            "exec",
+            "run",
+        )
+    ):
+        words = words[2:]
+    elif words and words[0] == "npx":
+        words = words[1:]
+    return " ".join(words)
+
+
+#: The Makefile targets a repository's whole check conventionally lives under, in order.
+_FULL_TARGETS = ("verify", "check", "ci", "test")
+
+
+def _full_suite_from_manifest(root: Path) -> list[Declaration]:
+    """The whole check a repository's own build files name, when nothing else says it.
+
+    The last place looked, after the instructions and pull-request CI: its Makefile's
+    `verify`, `check`, `ci` or `test` target, else its package `test` script. The quick
+    gate is then read from the lint, type check and unit targets beside it
+    (:func:`_quick_gate_from_scripts`), never the same suite again.
+    """
+    rules = _make_rules(root)
+    name = next((t for t in _FULL_TARGETS if t in rules), None)
+    if name is not None:
+        return [
+            Declaration(
+                FULL,
+                f"make {name}",
+                f"Makefile:{rules[name][0]}",
+                f"{name}:",
+                kind=command_kind(name),
+                group="Makefile",
+            )
+        ]
+    scripts = _package_scripts(root)
+    if "test" in scripts:
+        command = f"{_node_runner(root)} test"
+        return [
+            Declaration(
+                FULL,
+                command,
+                f"package.json:{scripts['test'][0]}",
+                f'"test": "{scripts["test"][1]}"',
+                kind="test",
+                group="package.json",
+            )
+        ]
+    return []
 
 
 def _quick_gate_from_scripts(root: Path, full: list[Declaration]) -> list[Declaration]:
@@ -1304,9 +1488,13 @@ def _quick_gate_from_scripts(root: Path, full: list[Declaration]) -> list[Declar
     chosen: list[Declaration] = []
     if scripts:
         runner = _node_runner(root)
+        full_bodies = {_bare(part) for c in full_commands for part in c.split("&&")}
         for names in _QUICK_NAMES:
             name = next((n for n in names if n in scripts), None)
             command = f"{runner} {name}" if name else ""
+            if name and _bare(scripts[name][1]) in full_bodies:
+                # `"test": "vitest run"` is the whole suite the instructions call full.
+                continue
             if name and command not in full_commands:
                 line = scripts[name][0]
                 chosen.append(

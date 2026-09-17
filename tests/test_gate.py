@@ -143,7 +143,10 @@ def test_roles_come_from_lead_ins_headings_and_fenced_comments(tmp_path) -> None
     assert policy.full_suite_owner == "supervisor"
 
 
-def test_a_repo_with_targets_but_no_instructions_is_unknown_not_guessed(tmp_path, ppy_home) -> None:
+def test_a_repo_with_targets_but_no_instructions_is_discovered_from_its_build_files(
+    tmp_path, ppy_home
+) -> None:
+    """Shane, 2026-09-17: gates are discovered when a repository is imported, not asked."""
     clone = tmp_path / "clone"
     clone.mkdir()
     _verify_makefile(clone)
@@ -155,9 +158,14 @@ def test_a_repo_with_targets_but_no_instructions_is_unknown_not_guessed(tmp_path
     report, notes = solicit.onboard("app")
 
     stored = _stored()
-    assert (stored.local_gate, stored.full_suite_command) == (None, None)
-    assert report.gate is not None and report.gate.unknown == ["scoped gate", "full suite"]
-    assert "Unknown: scoped gate, full suite" in notes.read_text(encoding="utf-8")
+    assert (stored.full_suite_command, stored.full_suite_command_source) == (
+        "make verify",
+        "repo:Makefile:4",
+    )
+    assert stored.local_gate == "npm run test:unit"
+    assert stored.local_gate != stored.full_suite_command
+    assert report.gate is not None and report.gate.unknown == []
+    assert "Unknown:" not in notes.read_text(encoding="utf-8")
 
 
 def test_onboarding_never_overwrites_a_set_gate_but_an_explicit_one_wins(
@@ -203,7 +211,8 @@ def test_a_repo_that_declares_no_gates_is_a_blocker_asking_its_owner(
         monkeypatch.setattr(readiness, check, lambda problems: None)
     clone = tmp_path / "clone"
     clone.mkdir()
-    _verify_makefile(clone)  # targets to guess from, and no instructions naming them
+    # Nothing anywhere: no instructions, no CI, no build files, no hooks.
+    (clone / "README.md").write_text("An app.\n", "utf-8")
     _register(clone)
     solicit.onboard("app")
     assert _stored().local_gate is None
@@ -222,6 +231,7 @@ def test_a_repo_that_declares_no_gates_is_a_blocker_asking_its_owner(
     )
     assert problem.steps[0] == question
     assert question in problem.summary
+    assert "pull-request CI, its Makefile or package scripts" in problem.summary
     assert "--full-suite-command" in problem.fix
     assert verdict.state == readiness.DEGRADED
 
@@ -448,11 +458,10 @@ def _polyweave_fixture(clone: Path) -> None:
         ),
         (
             _polyweave_fixture,
-            (
-                "pnpm lint && pnpm typecheck && pnpm test",
-                "repo:package.json:4, repo:package.json:3, repo:package.json:5",
-            ),
-            ("pnpm test:e2e", "repo:AGENTS.md:14"),
+            # `pnpm test` is `vitest run`, the suite the block calls full: not a quick gate.
+            ("pnpm lint && pnpm typecheck", "repo:package.json:4, repo:package.json:3"),
+            # An env-prefixed line is a command, and the e2e suite is not the whole run.
+            ("CI=1 pnpm exec vitest run", "repo:AGENTS.md:13"),
         ),
     ],
     ids=["papaya-agent-runtime", "papaya-frontend-monorepo", "papaya-polyweave-agent"],
@@ -542,7 +551,7 @@ def test_a_workflow_that_runs_the_suite_on_pull_requests_makes_ci_the_owner_at_s
     assert lines == ["app: read again: full_suite_owner `ci` (observed:.github/workflows/t.yml:7)"]
 
 
-def test_a_repo_with_no_instructions_still_raises_the_blocker_at_start(
+def test_a_repo_with_no_instructions_is_discovered_at_start_not_asked(
     tmp_path, ppy_home, monkeypatch
 ) -> None:
     _quiet_readiness(monkeypatch)
@@ -554,10 +563,11 @@ def test_a_repo_with_no_instructions_still_raises_the_blocker_at_start(
     _register(clone)
     solicit.onboard("app")
 
-    assert solicit.keep_gate_policies_right() == []
+    solicit.keep_gate_policies_right()
 
-    assert (_stored().local_gate, _stored().full_suite_command) == (None, None)
-    assert _gate_blockers() == ["app"]
+    assert _stored().full_suite_command == "make verify"
+    assert _stored().local_gate == "pnpm lint && pnpm typecheck && pnpm test"
+    assert _gate_blockers() == []
 
 
 def test_readiness_does_not_warn_twice_for_a_repo_nobody_onboarded(ppy_home, monkeypatch) -> None:
@@ -881,3 +891,110 @@ def test_ppy_gate_run_through_the_cli_exits_with_the_gates_verdict(
     assert "local gate green" in out and "2 passed in 0.01s" in out
     assert cli.main(["gate", "run", "other", "--task", str(task_id)]) == 2
     assert "task" in capsys.readouterr().err
+
+
+# ── Discovered, not asked (2026-09-17) ──────────────────────────────────────
+
+
+def test_with_no_declared_full_suite_the_pull_request_ci_checks_are_the_full_suite(
+    tmp_path, ppy_home
+) -> None:
+    clone = tmp_path / "clone"
+    workflows = clone / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "on:\n  pull_request:\njobs:\n  t:\n    steps:\n"
+        "      - run: pnpm install --frozen-lockfile\n"
+        "      - run: pnpm exec tsc --noEmit\n"
+        "      - run: CI=1 pnpm exec vitest run --shard=${{ matrix.shard }}/4\n"
+        "      - run: pnpm exec biome check .\n"
+        "      - run: uv run ruff format --check .\n"
+        "      - run: uv run ruff format .\n"
+        "      - run: pnpm build\n",
+        "utf-8",
+    )
+    (workflows / "deploy.yml").write_text(
+        "on:\n  push:\n    branches: [main]\njobs:\n  d:\n    steps:\n"
+        "      - run: pnpm exec playwright test\n",
+        "utf-8",
+    )
+
+    policy = solicit.derive_gate_policy(clone)
+
+    assert policy.full_suite_command == (
+        "pnpm exec tsc --noEmit && CI=1 pnpm exec vitest run && pnpm exec biome check . "
+        "&& uv run ruff format --check ."
+    )
+    assert policy.full_suite_command_source.startswith("observed:.github/workflows/ci.yml:")
+    assert policy.full_suite_owner == "ci"
+    assert policy.local_gate != policy.full_suite_command
+
+
+def test_an_e2e_suite_named_before_the_full_suite_is_not_the_full_suite(tmp_path) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    (clone / "AGENTS.md").write_text(
+        "## Commands\n\n```bash\n"
+        "pnpm test:e2e                 # e2e suite\n"
+        "FOO=bar pnpm exec vitest run  # full test suite\n"
+        "```\n",
+        "utf-8",
+    )
+
+    policy = solicit.derive_gate_policy(clone)
+
+    assert (policy.full_suite_command, policy.full_suite_command_source) == (
+        "FOO=bar pnpm exec vitest run",
+        "repo:AGENTS.md:5",
+    )
+
+
+def _claude_push_hook(clone: Path, script: str) -> None:
+    hooks_dir = clone / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "before-push.sh").write_text(script, "utf-8")
+    (clone / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/before-push.sh",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        "utf-8",
+    )
+
+
+def test_a_committed_claude_hook_that_runs_the_suite_before_git_push_is_a_push_hook(
+    tmp_path,
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    make_git_repo(clone)
+    _claude_push_hook(
+        clone, "#!/bin/sh\n# if the command is `git push`, run make verify first\nmake verify\n"
+    )
+
+    policy = solicit.derive_gate_policy(clone)
+
+    assert policy.push_hook_runs_full_suite
+    assert any(".claude/settings.json PreToolUse" in e for e in policy.evidence)
+
+
+def test_a_claude_hook_that_only_lints_on_push_is_not_a_full_suite_hook(tmp_path) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    make_git_repo(clone)
+    _claude_push_hook(clone, "#!/bin/sh\n# before git push\nruff check .\n")
+
+    assert not solicit.derive_gate_policy(clone).push_hook_runs_full_suite
