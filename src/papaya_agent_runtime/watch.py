@@ -535,8 +535,13 @@ def tick(
     now: datetime | None = None,
     previous_prs: dict[str, dict[str, Any]] | None = None,
     settled_prs: dict[str, dict[str, Any]] | None = None,
+    repairs: list[str] | None = None,
 ) -> dict[str, Any]:
-    """One snapshot of team state, plus the events that arrived since ``since_event_id``."""
+    """One snapshot of team state, plus the events that arrived since ``since_event_id``.
+
+    ``repairs`` are the lines of the pull request repair step the running heartbeat took
+    just before this tick (:func:`repair_step`); a snapshot never acts itself.
+    """
     conn = conn or init_db()
     now = now or datetime.now(UTC)
     in_flight = health.check(conn, now=now)
@@ -591,6 +596,7 @@ def tick(
         "in_flight": in_flight,
         "needs_me": needs_me,
         "checkins": checkins,
+        "repairs": list(repairs or []),
         "new_events": new_events,
         "last_event_id": last_id,
         "open_todos": len(board.open_todos(conn)),
@@ -601,6 +607,24 @@ def tick(
     }
     snapshot["idle"] = is_idle(snapshot)
     return snapshot
+
+
+def repair_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
+    """Repair delivered pull requests no live ticket covers, when no `ppy serve` does it.
+
+    Serve's rounds run `supervision.repair_untracked` every round; a session's heartbeat
+    runs the same step on its own cadence only while no serve is running, so the two
+    never act on the same pull request. Never raises.
+    """
+    try:
+        if supervision.serve_running():
+            return []
+        entries = pr_states(conn, conversation=True)
+        if not any(e.get("status") == "delivered" for e in entries):
+            return []
+        return supervision.repair_untracked(entries, now, steer=supervision.steer_worker)
+    except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
+        return [f"could not check delivered pull requests: {exc}"]
 
 
 def is_idle(snapshot: dict[str, Any]) -> bool:
@@ -617,6 +641,8 @@ def is_idle(snapshot: dict[str, Any]) -> bool:
     otherwise never fall quiet.
     """
     if snapshot["in_flight"] or snapshot["needs_me"] or snapshot.get("checkins"):
+        return False
+    if snapshot.get("repairs"):
         return False
     if snapshot["new_events"] or snapshot["pr_changes"] or snapshot.get("recorded_merges"):
         return False
@@ -650,6 +676,8 @@ def render(snapshot: dict[str, Any]) -> str:
     )
     new = ", ".join(f"{k}×{v}" for k, v in sorted(snapshot["new_events"].items())) or "none"
     line = f"TEAM {when} — {in_flight} | needs me: {needs}"
+    if snapshot.get("repairs"):
+        line += " | repair: " + "; ".join(_clip(r, 120) for r in snapshot["repairs"])
     if snapshot.get("checkins"):
         line += " | check in: " + "; ".join(
             f"t{c['task_id']} ({_clip(c['reason'], 90)})" for c in snapshot["checkins"]
@@ -682,6 +710,7 @@ def run(
     out: TextIO | None = None,
     sleep=time.sleep,
     clock=None,
+    repair=None,
 ) -> int:
     """Print a tick now and then every ``interval`` seconds until interrupted.
 
@@ -701,13 +730,16 @@ def run(
         # work in flight; this is how it knows.
         owed.mark_watch_running()
         try:
-            return _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock)
+            return _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock, repair=repair)
         finally:
             owed.clear_watch_mark()
     return _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock, once=True)
 
 
-def _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock, *, once=False) -> int:
+def _loop(
+    conn, interval, as_json, exit_when_idle, out, sleep, clock, *, once=False, repair=None
+) -> int:
+    repair = repair or repair_step
     # The first tick reports the current state, not the whole event history.
     since = max_event_id(conn)
     previous: dict[str, dict[str, Any]] | None = None
@@ -719,12 +751,14 @@ def _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock, *, once=Fa
         out.flush()
 
     while True:
+        moment = clock() if clock else datetime.now(UTC)
         snapshot = tick(
             conn,
             since_event_id=since,
             previous_prs=previous,
             settled_prs=settled,
-            now=clock() if clock else None,
+            now=moment,
+            repairs=[] if once else repair(conn, moment),
         )
         since = snapshot["last_event_id"]
         previous = pr_index(snapshot["prs"])

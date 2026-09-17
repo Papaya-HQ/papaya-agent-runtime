@@ -187,3 +187,123 @@ def test_a_persons_fresh_steer_holds_the_check_in_back_in_both_modes(
 
     assert rounds.Rounds._person_has_it(look, steer, [], NOW, rounds.worker_budgets(None))
     assert supervision.worker_checkins(now=NOW) == []
+
+
+# ── pull request repair ─────────────────────────────────────────────────────
+
+
+def _delivered(conn, *, ticket_phase: str | None = None) -> int:
+    from papaya_agent_runtime import papaya_events
+
+    run_id = store.create_run(conn, "r")
+    worker = store.add_task(conn, run_id=run_id, title="build")
+    store.set_task_status(conn, worker, "delivered")
+    store.append_event(
+        conn, kind="delivered", payload={"task_id": worker}, run_id=run_id, task_id=worker
+    )
+    if ticket_phase is not None:
+        ticket = store.add_task(conn, run_id=run_id, title="ticket")
+        store.set_task_phase(conn, ticket, ticket_phase)
+        store.set_task_env(
+            conn, ticket, papaya_events.PAPAYA_EVENT_METADATA, json.dumps({"work_item_id": "w"})
+        )
+    return worker
+
+
+def _red(worker: int, head: str = "h1") -> dict:
+    return {
+        "known": True,
+        "task_id": worker,
+        "pr": 12,
+        "url": "https://github.com/o/r/pull/12",
+        "status": "delivered",
+        "state": "OPEN",
+        "ci": "fail",
+        "failing": ["unit"],
+        "head": head,
+        "base": "main",
+    }
+
+
+def test_a_red_pull_request_with_no_ticket_is_repaired_once_on_the_reserve_lane(ppy_home) -> None:
+    from papaya_agent_runtime import reconcile
+
+    conn = init_db()
+    worker = _delivered(conn)
+    steered: list[tuple[int, str]] = []
+
+    lines = supervision.repair_untracked(
+        [_red(worker)], NOW, steer=lambda t, m: steered.append((t, m)), pr_details=lambda t, e: {}
+    )
+
+    assert steered and steered[0][0] == worker and "CI failing on PR #12" in steered[0][1]
+    assert any("repairing" in line for line in lines)
+    assert len(reconcile.open_lane()) == 1
+    # The same fingerprint is not raised again while the attempt runs.
+    supervision.repair_untracked(
+        [_red(worker)], NOW, steer=lambda t, m: steered.append((t, m)), pr_details=lambda t, e: {}
+    )
+    assert len(steered) == 1
+
+
+def test_a_live_tickets_pull_request_is_left_to_its_ticket(ppy_home) -> None:
+    conn = init_db()
+    worker = _delivered(conn, ticket_phase="reviewing")
+    steered: list = []
+
+    supervision.repair_untracked(
+        [_red(worker)], NOW, steer=lambda t, m: steered.append(t), pr_details=lambda t, e: {}
+    )
+
+    assert steered == []
+
+
+def test_a_handed_over_tickets_pull_request_is_repaired_like_one_with_no_ticket(ppy_home) -> None:
+    conn = init_db()
+    worker = _delivered(conn, ticket_phase="handed_over")
+    steered: list = []
+
+    supervision.repair_untracked(
+        [_red(worker)], NOW, steer=lambda t, m: steered.append(t), pr_details=lambda t, e: {}
+    )
+
+    assert steered == [worker]
+
+
+def test_two_failed_repairs_at_one_head_wait_on_the_manager(ppy_home) -> None:
+    from papaya_agent_runtime import reconcile
+
+    conn = init_db()
+    worker = _delivered(conn)
+    run = lambda: supervision.repair_untracked(  # noqa: E731
+        [_red(worker)], NOW, steer=lambda t, m: None, pr_details=lambda t, e: {}
+    )
+    for _ in range(2):
+        run()
+        [attempt] = reconcile.open_lane()
+        reconcile.record(
+            worker,
+            reconcile.FINISHED,
+            started_event_id=attempt.started_event_id,
+            fingerprint=attempt.payload.get("fingerprint"),
+            outcome=reconcile.OUTCOME_FAILED,
+        )
+    run()
+
+    items = [i for i in owed.collect(init_db()) if i.task_id == worker]
+    assert items and items[0].status == "pr_needs_a_person"
+
+
+def test_the_heartbeat_repairs_only_while_no_serve_is_running(ppy_home, monkeypatch) -> None:
+    conn = init_db()
+    calls: list = []
+    monkeypatch.setattr(watch, "pr_states", lambda c, **k: [{"status": "delivered"}])
+    monkeypatch.setattr(
+        supervision, "repair_untracked", lambda entries, now, **k: calls.append(entries) or ["x"]
+    )
+
+    monkeypatch.setattr(supervision, "serve_running", lambda: True)
+    assert watch.repair_step(conn, NOW) == [] and calls == []
+
+    monkeypatch.setattr(supervision, "serve_running", lambda: False)
+    assert watch.repair_step(conn, NOW) == ["x"]

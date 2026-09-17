@@ -103,6 +103,7 @@ _WORDS = {
     "blocked": "is asking a question",
     "needs_recovery": "lost its process",
     "failed": "failed",
+    "pr_needs_a_person": "has a pull request that needs a person",
 }
 
 _NEXT = {
@@ -232,6 +233,21 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
                 next_step=next_step,
                 seconds=_seconds(now, row["updated_at"]),
                 ticket_task_id=tickets.get(int(row["run_id"])),
+            )
+        )
+    from papaya_agent_runtime import supervision
+
+    for task_id, reasons in supervision.prs_needing_a_person():
+        owed.append(
+            Owed(
+                task_id=task_id,
+                status="pr_needs_a_person",
+                title="",
+                repo=None,
+                reason=f"its pull request could not be repaired twice at the same head: {reasons}",
+                next_step=f"read `ppy review show {task_id}` and decide: fix by hand, or close it",
+                seconds=None,
+                ticket_task_id=None,
             )
         )
     return owed
