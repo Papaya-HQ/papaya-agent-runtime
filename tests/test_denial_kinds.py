@@ -151,6 +151,44 @@ def test_a_live_permission_denied_line_carries_the_command_its_tool_use_ran() ->
     assert adapter.live_denial(events[1], events) == _denial(command, "toolu_9")
 
 
+def test_a_live_denial_whose_line_carries_a_refusal_message_string_is_read() -> None:
+    """The harness's permission_denied line has a string ``message``; tasks 22 and 23's
+    runners crashed reading it as an object on their first denial (2026-09-17)."""
+    command = "find . -maxdepth 1 -type d"
+    events = [
+        ProviderEvent(
+            kind="assistant",
+            raw={
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_7",
+                            "name": "Bash",
+                            "input": {"command": command},
+                        }
+                    ]
+                },
+            },
+        ),
+        ProviderEvent(kind="system", raw={"type": "system", "message": "status text"}),
+        ProviderEvent(
+            kind="system",
+            raw={
+                "type": "system",
+                "subtype": "permission_denied",
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_7",
+                "decision_reason_type": "subcommandResults",
+                "message": "This Bash command contains multiple operations.",
+            },
+        ),
+    ]
+    adapter = ClaudeAdapter()
+    assert adapter.live_denial(events[2], events) == _denial(command, "toolu_7")
+
+
 # ── steering the worker ─────────────────────────────────────────────────────
 
 

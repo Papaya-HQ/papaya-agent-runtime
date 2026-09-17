@@ -155,8 +155,13 @@ class ClaudeAdapter(ProviderAdapter):
         tool_use_id = raw.get("tool_use_id")
         tool_input: dict = {}
         for earlier in reversed(events):
-            content = (earlier.raw.get("message") or {}).get("content")
-            if earlier.raw.get("type") != "assistant" or not isinstance(content, list):
+            # Only an assistant line's message is an object: the permission_denied line
+            # itself carries the harness's refusal text as a string `message`.
+            message = earlier.raw.get("message")
+            if earlier.raw.get("type") != "assistant" or not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
                 continue
             use = next(
                 (
