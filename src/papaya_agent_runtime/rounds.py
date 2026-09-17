@@ -1326,9 +1326,9 @@ class Rounds:
 
         The same plan a session's heartbeat and hooks make; serve says it through its
         own connection: the work item comments with this connection's credentials, the
-        DM through the listener's client (`serve._post_dm`), the desktop where there is
-        one. Never raises: a person who could not be reached this round is reached the
-        next.
+        message through the listener's client (`outreach.say_in_workspace`: the DM, or a
+        channel with the owner mentioned). Never raises: a person who could not be
+        reached this round is reached the next.
         """
         try:
             found, lines = await asyncio.to_thread(_outreach_plan, now, serve._where())
@@ -1340,7 +1340,9 @@ class Rounds:
                 landed[item] = await asyncio.to_thread(
                     outreach.post_ticket, item, body, environ=env
                 )
-            dm_landed = bool(found.dm) and await serve._post_dm(self._built, found.dm)
+            dm_landed = bool(found.dm) and await outreach.say_in_workspace(
+                getattr(self._built, "api", None), found.dm
+            )
             return lines + await asyncio.to_thread(_outreach_deliver, found, now, landed, dm_landed)
         except Exception as exc:  # noqa: BLE001 - the rounds keep going
             log.warning("[rounds] Could not reach the person things wait on: %s", exc)

@@ -391,7 +391,7 @@ def test_serve_rounds_say_it_through_their_own_connection(home, monkeypatch) -> 
     store.add_todo(conn, "confirm the pill copy table", task_id=ticket, blocked_on="user")
     said: dict[str, list] = {"dm": [], "tickets": []}
 
-    async def post_dm(built, text):
+    async def say(api, text):
         said["dm"].append(text)
         return True
 
@@ -399,7 +399,7 @@ def test_serve_rounds_say_it_through_their_own_connection(home, monkeypatch) -> 
         said["tickets"].append((item, body, environ))
         return True
 
-    monkeypatch.setattr(rounds.serve, "_post_dm", post_dm)
+    monkeypatch.setattr(outreach, "say_in_workspace", say)
     monkeypatch.setattr(rounds.serve, "_where", lambda: "reptar")
     monkeypatch.setattr(outreach, "post_ticket", post_ticket)
 
@@ -458,6 +458,88 @@ def test_capability_requests_leave_the_blocker_dm_to_outreach(home) -> None:
         "capability_request_pending",
         "forge_unauthenticated",
     }
+
+
+class FakeApi:
+    """The agent-token client, answering channels, whoami and members from canned rows."""
+
+    agent_config = {"workspace_id": "ws"}
+
+    def __init__(self, channels, *, owner_id="u-shane", members=None):
+        self.channels = channels
+        self.owner_id = owner_id
+        self.members = members or [
+            {"id": "u-shane", "handle": "shanewolf", "display_name": "Shane Wolf", "role": "owner"}
+        ]
+        self.posted: list[tuple[str, dict]] = []
+
+    async def request_json(self, method, path, **kwargs):
+        if path.endswith("/channels") and method == "GET":
+            return self.channels
+        if path == "/agent-client/me":
+            return {"connection": {"owner_id": self.owner_id}}
+        if path.endswith("/members"):
+            return {"result": self.members}
+        if "/messages" in path and method == "POST":
+            self.posted.append((path, kwargs.get("json") or {}))
+            return {"id": "m1"}
+        raise AssertionError(path)
+
+
+def test_the_message_goes_to_the_dm_when_there_is_one() -> None:
+    api = FakeApi([{"id": "dm1", "channel_type": "agent_private", "is_member": True}])
+    assert asyncio.run(outreach.say_in_workspace(api, "Waiting on you: x")) is True
+    assert api.posted == [
+        ("/workspaces/ws/channels/dm1/messages", {"content": "Waiting on you: x"})
+    ]
+
+
+def test_without_a_dm_the_message_goes_to_a_member_channel_with_the_owner_mentioned() -> None:
+    channels = [
+        {
+            "id": "c-team",
+            "name": "team",
+            "channel_type": "public",
+            "is_member": True,
+            "member_count": 7,
+        },
+        {
+            "id": "c-bugs",
+            "name": "bugs",
+            "channel_type": "public",
+            "is_member": True,
+            "member_count": 4,
+        },
+        {"id": "c-x", "name": "x", "channel_type": "public", "is_member": False, "member_count": 1},
+    ]
+    api = FakeApi(channels)
+    assert asyncio.run(outreach.say_in_workspace(api, "Waiting on you: x")) is True
+    path, payload = api.posted[0]
+    assert path == "/workspaces/ws/channels/c-bugs/messages"
+    assert payload["content"].startswith("@shanewolf — Waiting on you: x")
+    assert payload["mentions"] == [
+        {"type": "user", "id": "u-shane", "handle": "shanewolf", "display_name": "Shane Wolf"}
+    ]
+
+
+def test_the_fallback_channel_can_be_named(monkeypatch) -> None:
+    channels = [
+        {"id": "c-team", "name": "team", "is_member": True, "member_count": 7},
+        {"id": "c-bugs", "name": "bugs", "is_member": True, "member_count": 4},
+    ]
+    monkeypatch.setenv(outreach.CHANNEL_ENV, "Team")
+    assert outreach.fallback_channel_id(channels, wanted="Team") == "c-team"
+    api = FakeApi(channels)
+    asyncio.run(outreach.say_in_workspace(api, "x"))
+    assert api.posted[0][0].endswith("/c-team/messages")
+    assert outreach.fallback_channel_id([{"id": "c", "is_member": False}]) is None
+
+
+def test_nothing_to_post_into_is_not_said(monkeypatch) -> None:
+    api = FakeApi([{"id": "c", "name": "n", "is_member": False}])
+    assert asyncio.run(outreach.say_in_workspace(api, "x")) is False
+    assert api.posted == []
+    assert asyncio.run(outreach.say_in_workspace(None, "x")) is False
 
 
 def test_the_desktop_notification_is_off_unless_asked_for(monkeypatch) -> None:
