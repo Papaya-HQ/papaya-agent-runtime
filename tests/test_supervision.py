@@ -307,3 +307,92 @@ def test_the_heartbeat_repairs_only_while_no_serve_is_running(ppy_home, monkeypa
 
     monkeypatch.setattr(supervision, "serve_running", lambda: False)
     assert watch.repair_step(conn, NOW) == ["x"]
+
+
+# ── merge follow-up ─────────────────────────────────────────────────────────
+
+
+def _merged_entry(worker: int) -> dict:
+    return {
+        "known": True,
+        "task_id": worker,
+        "pr": 12,
+        "url": "https://github.com/o/r/pull/12",
+        "status": "delivered",
+        "state": "MERGED",
+        "merged": True,
+    }
+
+
+def test_a_merge_asks_the_workspace_once_until_its_rule_is_known(ppy_home) -> None:
+    from papaya_agent_runtime.config import MMConfig, load_config, save_config
+
+    conn = init_db()
+    worker = _delivered(conn, ticket_phase="handed_over")
+    said: list = []
+    post = lambda ticket, body, status: said.append((body, status))  # noqa: E731
+
+    supervision.merged_step([_merged_entry(worker)], post=post)
+    supervision.merged_step([_merged_entry(worker)], post=post)
+
+    [(body, status)] = said
+    assert "Should it move to done" in body and status is None
+
+    save_config(MMConfig())
+    cfg = load_config()
+    cfg.delivery.merged_status = "verified"
+    save_config(cfg)
+    second = _delivered(conn, ticket_phase="released")
+    supervision.merged_step([_merged_entry(second)], post=post)
+    assert said[-1] == (
+        "Merged: https://github.com/o/r/pull/12. Moved to verified, as this workspace asked.",
+        "verified",
+    )
+
+
+def test_a_held_tickets_merge_is_its_runners(ppy_home) -> None:
+    from papaya_agent_runtime import rounds
+
+    conn = init_db()
+    worker = _delivered(conn, ticket_phase="reviewing")
+    ticket = rounds.ticket_for_worker(worker)
+    said: list = []
+    supervision.merged_step(
+        [_merged_entry(worker)], post=lambda *a: said.append(a), held={ticket.task_id}
+    )
+    assert said == []
+
+
+def test_the_green_clock_records_then_says_or_merges() -> None:
+    entry = {"ci": "pass", "head": "h1", "mergeable": "MERGEABLE"}
+    start = (1, {"action": "green", "worker_task_id": 5, "head": "h1", "at": NOW.isoformat()})
+    later = NOW + timedelta(hours=25)
+
+    assert supervision.green_clock(5, entry, [], NOW, hours=24, auto_merge=False) == "record"
+    assert supervision.green_clock(5, entry, [start], NOW, hours=24, auto_merge=False) == "nothing"
+    assert supervision.green_clock(5, entry, [start], later, hours=24, auto_merge=False) == "say"
+    assert supervision.green_clock(5, entry, [start], later, hours=24, auto_merge=True) == "merge"
+    said = (2, {"action": "green_unmerged", "worker_task_id": 5})
+    assert (
+        supervision.green_clock(5, entry, [start, said], later, hours=24, auto_merge=False)
+        == "nothing"
+    )
+    assert (
+        supervision.green_clock(5, {**entry, "ci": "fail"}, [], NOW, hours=24, auto_merge=False)
+        == "nothing"
+    )
+
+
+def test_the_heartbeat_follows_up_merges_only_without_serve(ppy_home, monkeypatch) -> None:
+    conn = init_db()
+    calls: list = []
+    monkeypatch.setattr(watch, "pr_states", lambda c, **k: [{"known": True}])
+    monkeypatch.setattr(supervision, "merged_step", lambda entries, **k: calls.append("m") or ["m"])
+    monkeypatch.setattr(
+        supervision, "green_step", lambda entries, now, **k: calls.append("g") or []
+    )
+
+    monkeypatch.setattr(supervision, "serve_running", lambda: True)
+    assert watch.merge_step(conn, NOW) == [] and calls == []
+    monkeypatch.setattr(supervision, "serve_running", lambda: False)
+    assert watch.merge_step(conn, NOW) == ["m"] and calls == ["m", "g"]

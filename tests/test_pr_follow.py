@@ -299,7 +299,8 @@ def test_green_and_unmerged_for_a_day_comments_once_or_merges(
     if auto_merge:
         assert merges == [(worker, "rebase")]
         assert phase(ticket) == serve.PHASE_DONE
-        assert world.comments() == [f"Merged: {url}. Done."]
+        [said] = world.comments()
+        assert said.startswith(f"Merged: {url}.") and "Should it move" in said
     else:
         assert merges == []
         assert world.comments() == [f"PR {worker} has been green and unmerged for a day: {url}"]

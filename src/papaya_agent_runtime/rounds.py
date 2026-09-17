@@ -8,8 +8,10 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
 `health.rounds_interval`) a round walks the board, in this order:
 
 1. **Pull requests.** For each delivered worker whose ticket is not held: a merged
-   pull request moves the ticket to `done` with one comment (and its worktree is
-   cleaned up at once). Otherwise its reasons (:mod:`papaya_agent_runtime.reconcile`:
+   pull request is followed up once (`supervision.merged_step`): its work item moves
+   to the status this workspace said (`delivery.merged_status`), or, with no rule yet,
+   one comment asks which, and its worktree is cleaned up at once. Otherwise its
+   reasons (:mod:`papaya_agent_runtime.reconcile`:
    conflicts, a branch behind a base that requires up-to-date branches, red CI, CI
    pending past the repository's CI budget, a review asking for changes, reviewer
    threads and comments since the last push) and its head make a fingerprint. A new
@@ -1578,10 +1580,13 @@ class Rounds:
             ticket = await asyncio.to_thread(self._ticket_of, worker_id, tickets)
             if ticket is None or ticket.task_id in held:
                 continue
-            if ticket.phase in (serve.PHASE_DONE, serve.PHASE_HANDED_OVER):
-                continue
             if entry.get("merged") is True or entry.get("state") == "MERGED":
-                said[worker_id] = "; ".join(await self._merged(ticket, worker_id, entry, now))
+                # Handed over or not: the same follow-up a session's heartbeat makes.
+                lines = await self._merged(ticket, worker_id, entry, now)
+                if lines:
+                    said[worker_id] = "; ".join(lines)
+                continue
+            if ticket.phase in (serve.PHASE_DONE, serve.PHASE_HANDED_OVER):
                 continue
             if entry.get("state") != "OPEN":
                 continue
@@ -1780,22 +1785,15 @@ class Rounds:
         """
         from papaya_agent_runtime import reconcile
 
-        mergeable = entry.get("mergeable") != "CONFLICTING" and entry.get("merge_state") != "DIRTY"
-        if entry.get("ci") != "pass" or not mergeable:
-            return None
         records = await asyncio.to_thread(round_records, ticket.task_id)
         head = entry.get("head")
-        since = next(
-            (
-                _parse(p.get("at"))
-                for _id, p in records
-                if p.get("action") == "green"
-                and p.get("worker_task_id") == worker_id
-                and p.get("head") == head
-            ),
-            None,
+        hours = await asyncio.to_thread(reconcile.merge_after_hours)
+        auto, method = await asyncio.to_thread(reconcile.merge_policy, worker_id)
+        # The decision a session's heartbeat makes too (`supervision.green_clock`).
+        decision = supervision.green_clock(
+            worker_id, entry, records, now, hours=hours, auto_merge=auto
         )
-        if since is None:
+        if decision == supervision.GREEN_RECORD:
             await asyncio.to_thread(
                 record_round,
                 ticket.task_id,
@@ -1805,15 +1803,14 @@ class Rounds:
                 at=now.isoformat(),
             )
             return None
-        hours = await asyncio.to_thread(reconcile.merge_after_hours)
-        if (now - since).total_seconds() < hours * 3600:
+        if decision == supervision.GREEN_NOTHING:
             return None
         where = entry.get("url") or f"PR #{entry['pr']}"
-        auto, method = await asyncio.to_thread(reconcile.merge_policy, worker_id)
-        if auto and not _done_before(records, "merge_failed", worker_task_id=worker_id, head=head):
+        if decision == supervision.GREEN_MERGE:
             result = await asyncio.to_thread(self._merge, worker_id, entry, method)
             if getattr(result, "merged", False):
-                return "; ".join(await self._merged(ticket, worker_id, entry, now))
+                merged = {**entry, "merged": True, "state": "MERGED"}
+                return "; ".join(await self._merged(ticket, worker_id, merged, now))
             await asyncio.to_thread(
                 record_round,
                 ticket.task_id,
@@ -1825,8 +1822,6 @@ class Rounds:
             return (
                 f"worker task {worker_id}: could not merge {where}: {getattr(result, 'detail', '')}"
             )
-        if _done_before(records, "green_unmerged", worker_task_id=worker_id):
-            return None
         await asyncio.to_thread(
             record_round, ticket.task_id, "green_unmerged", worker_task_id=worker_id
         )
@@ -1895,12 +1890,15 @@ class Rounds:
     async def _merged(
         self, ticket: Ticket, worker_id: int, entry: dict[str, Any], now: datetime
     ) -> list[str]:
-        where = entry.get("url") or f"PR #{entry['pr']}"
-        await asyncio.to_thread(
-            _set_phase, ticket.task_id, serve.PHASE_DONE, f"Worker task {worker_id} merged: {where}"
-        )
-        await self._post(ticket, f"Merged: {where}. Done.", status=papaya_events.STATUS_DONE)
-        parts = [f"ticket task {ticket.task_id}'s pull request merged: done"]
+        """Follow up a merged pull request once (`supervision.merged_step`), then clean up."""
+        loop = asyncio.get_running_loop()
+
+        def post(target: Ticket, body: str, status: str | None) -> None:
+            asyncio.run_coroutine_threadsafe(self._post(target, body, status=status), loop).result()
+
+        parts = await asyncio.to_thread(supervision.merged_step, [entry], post=post)
+        if not parts:
+            return []
         return parts + await self._hygiene(worker_id, now)
 
     async def _clean_if_merged(self, ticket: Ticket) -> list[str]:

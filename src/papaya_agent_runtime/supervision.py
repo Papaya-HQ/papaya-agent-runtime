@@ -658,3 +658,210 @@ def prs_needing_a_person() -> list[tuple[int, str]]:
         return found
     finally:
         conn.close()
+
+
+# ── merge follow-up and the green-unmerged clock ────────────────────────────
+
+
+#: The round record, on a ticket's task, that its merged pull request was followed up.
+MERGED_FOLLOWUP = "merged_followup"
+
+
+def merged_status_rule() -> str:
+    """The status this workspace said a merged work item moves to; empty when not said."""
+    try:
+        from papaya_agent_runtime.config import load_config
+        from papaya_agent_runtime.paths import config_path
+
+        if config_path().exists():
+            return str(load_config().delivery.merged_status or "").strip()
+    except Exception:  # noqa: BLE001 - an unreadable config is the same as no rule
+        return ""
+    return ""
+
+
+def merged_message(where: str, rule: str) -> tuple[str, str | None]:
+    """The comment and the status for a merged pull request. No I/O.
+
+    With no rule it moves nothing and asks: statuses differ per workspace, and the answer
+    becomes this workspace's rule (`ppy config delivery --merged-status <status>`).
+    """
+    if rule:
+        return f"Merged: {where}. Moved to {rule}, as this workspace asked.", rule
+    return (
+        f"Merged: {where}. The change is on main, so this item is out of date. Should it "
+        "move to done, or to another status this workspace uses (for example until it is "
+        "verified on staging)? Say which and I will do that for every merged pull request "
+        "from now on.",
+        None,
+    )
+
+
+def _merged(entry: dict[str, Any]) -> bool:
+    return entry.get("merged") is True or entry.get("state") == "MERGED"
+
+
+def merged_step(entries: list[dict[str, Any]], *, post, held: set[int] | None = None) -> list[str]:
+    """Follow up every merged pull request whose ticket has not been, once. Returns lines.
+
+    ``post(ticket, body, status)`` says it on the work item (serve through its connection,
+    a session through :func:`papaya.agent_env`). The ticket's local phase becomes done.
+    Both modes call it; a held ticket is its runner's. Never raises.
+    """
+    from papaya_agent_runtime import rounds, serve
+
+    lines: list[str] = []
+    try:
+        tickets = {t.run_id: t for t in rounds.ticket_tasks()}
+        rule = merged_status_rule()
+        for entry in entries:
+            if not entry.get("known") or entry.get("pr") is None or not _merged(entry):
+                continue
+            worker_id = int(entry["task_id"])
+            ticket = rounds.ticket_for_worker(worker_id)
+            if ticket is None or ticket.run_id not in tickets:
+                continue
+            if held and ticket.task_id in held:
+                continue
+            records = rounds.round_records(ticket.task_id)
+            if rounds._done_before(records, MERGED_FOLLOWUP, worker_task_id=worker_id):
+                continue
+            where = entry.get("url") or f"PR #{entry['pr']}"
+            body, status = merged_message(where, rule)
+            post(ticket, body, status)
+            rounds.record_round(ticket.task_id, MERGED_FOLLOWUP, worker_task_id=worker_id)
+            rounds._set_phase(
+                ticket.task_id, serve.PHASE_DONE, f"Worker task {worker_id} merged: {where}"
+            )
+            lines.append(
+                f"ticket task {ticket.task_id}'s pull request merged: "
+                + (f"moved to {status}" if status else "asked what it moves to")
+            )
+    except Exception as exc:  # noqa: BLE001 - a round or a heartbeat never ends on this
+        lines.append(f"could not follow up merged pull requests: {exc}")
+    return lines
+
+
+GREEN_NOTHING = "nothing"
+GREEN_RECORD = "record"
+GREEN_SAY = "say"
+GREEN_MERGE = "merge"
+
+
+def green_clock(
+    worker_id: int,
+    entry: dict[str, Any],
+    records: list[tuple[int, dict[str, Any]]],
+    now: datetime,
+    *,
+    hours: float,
+    auto_merge: bool,
+) -> str:
+    """What a green, mergeable, unrequested pull request needs. No I/O.
+
+    The clock starts the first time it is seen green at its head (``record``). Past
+    ``hours`` it is merged when the repository opted into auto-merge and no merge at
+    this head failed (``merge``), else said once (``say``).
+    """
+    from papaya_agent_runtime import rounds
+
+    mergeable = entry.get("mergeable") != "CONFLICTING" and entry.get("merge_state") != "DIRTY"
+    if entry.get("ci") != "pass" or not mergeable:
+        return GREEN_NOTHING
+    head = entry.get("head")
+    since = next(
+        (
+            _parse(p.get("at"))
+            for _id, p in records
+            if p.get("action") == "green"
+            and p.get("worker_task_id") == worker_id
+            and p.get("head") == head
+        ),
+        None,
+    )
+    if since is None:
+        return GREEN_RECORD
+    if (now - since).total_seconds() < hours * 3600:
+        return GREEN_NOTHING
+    if auto_merge and not rounds._done_before(
+        records, "merge_failed", worker_task_id=worker_id, head=head
+    ):
+        return GREEN_MERGE
+    if rounds._done_before(records, "green_unmerged", worker_task_id=worker_id):
+        return GREEN_NOTHING
+    return GREEN_SAY
+
+
+def green_step(entries: list[dict[str, Any]], now: datetime, *, post, merge) -> list[str]:
+    """Run the green-unmerged clock on every open delivered pull request a live ticket owns.
+
+    The heartbeat's half of serve's `Rounds._green`, for a session with no serve running:
+    record when it first went green, then merge (auto-merge repositories) or say it once.
+    ``post(ticket, body, status)``; ``merge(worker_id, entry, method)``. Never raises.
+    """
+    from papaya_agent_runtime import reconcile, rounds
+
+    lines: list[str] = []
+    try:
+        hours = reconcile.merge_after_hours()
+        for entry in entries:
+            if not entry.get("known") or entry.get("pr") is None:
+                continue
+            if entry.get("status") != "delivered" or entry.get("state") != "OPEN":
+                continue
+            worker_id = int(entry["task_id"])
+            owner, live = _owner(worker_id)
+            if live is None:
+                continue
+            ticket = rounds.ticket_for_worker(worker_id)
+            if ticket is None:
+                continue
+            if pr_attention(worker_id, entry, now).action != PR_GREEN:
+                continue
+            records = rounds.round_records(owner)
+            auto, method = reconcile.merge_policy(worker_id)
+            decision = green_clock(worker_id, entry, records, now, hours=hours, auto_merge=auto)
+            head = entry.get("head")
+            where = entry.get("url") or f"PR #{entry['pr']}"
+            if decision == GREEN_RECORD:
+                rounds.record_round(
+                    owner, "green", worker_task_id=worker_id, head=head, at=now.isoformat()
+                )
+            elif decision == GREEN_MERGE:
+                result = merge(worker_id, entry, method)
+                if getattr(result, "merged", False):
+                    lines += merged_step([{**entry, "merged": True}], post=post)
+                else:
+                    rounds.record_round(
+                        owner,
+                        "merge_failed",
+                        worker_task_id=worker_id,
+                        head=head,
+                        detail=getattr(result, "detail", ""),
+                    )
+                    lines.append(f"worker task {worker_id}: could not merge {where}")
+            elif decision == GREEN_SAY:
+                rounds.record_round(owner, "green_unmerged", worker_task_id=worker_id)
+                span = "a day" if hours == 24 else f"{hours} hours"
+                post(
+                    ticket,
+                    f"PR {entry['pr']} has been green and unmerged for {span}: {where}",
+                    None,
+                )
+                lines.append(f"worker task {worker_id}'s {where} green and unmerged for {span}")
+    except Exception as exc:  # noqa: BLE001 - a heartbeat never ends on this
+        lines.append(f"could not run the green-unmerged clock: {exc}")
+    return lines
+
+
+def post_as_agent(ticket: Any, body: str, status: str | None) -> None:
+    """Say one line on a ticket's work item as this machine's agent, from a session."""
+    from papaya_agent_runtime import papaya, papaya_events
+
+    env = papaya.agent_env()
+    if not env.get("PAPAYA_AGENT_TOKEN"):
+        raise RuntimeError("this machine is not connected to a Papaya agent")
+    event = ticket.event()
+    if status is not None:
+        papaya_events.set_work_item_status(event, status, environ=env)
+    papaya_events.post_work_item_comment(event, body, environ=env)

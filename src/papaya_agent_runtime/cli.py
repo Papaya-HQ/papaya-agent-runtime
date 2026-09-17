@@ -266,6 +266,28 @@ def _cmd_config(args: argparse.Namespace) -> int:
             return _config_claude(args)
         if args.config_cmd == "capabilities":
             return _config_capabilities(args)
+        if args.config_cmd == "delivery":
+            from papaya_agent_runtime import config_changes
+            from papaya_agent_runtime.config import save_config
+
+            cfg = load_config()
+            if args.merged_status is not None:
+                before = cfg.delivery.merged_status
+                cfg.delivery.merged_status = args.merged_status.strip()
+                save_config(cfg)
+                config_changes.record(
+                    key="delivery.merged_status",
+                    before=before,
+                    after=cfg.delivery.merged_status,
+                    why="this workspace said what a merged work item moves to",
+                )
+            rule = cfg.delivery.merged_status
+            print(
+                f"a merged pull request moves its work item to {rule}"
+                if rule
+                else "a merged pull request's work item is not moved: the runtime asks"
+            )
+            return 0
         if args.config_cmd == "history":
             from papaya_agent_runtime import config_changes
 
@@ -2538,6 +2560,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop the runtime changing a key by itself (extra_tools, dropped_tools)",
     )
     claude_cfg.add_argument("--unlock", action="append", metavar="KEY")
+    delivery_cfg = csub.add_parser(
+        "delivery", help="what happens to a work item when its pull request merges"
+    )
+    delivery_cfg.add_argument(
+        "--merged-status",
+        default=None,
+        metavar="STATUS",
+        help="the status this workspace wants a merged item in (empty string: ask each time)",
+    )
     caps_cfg = csub.add_parser(
         "capabilities",
         help="what this machine grants a worker that asks, without a person or never",

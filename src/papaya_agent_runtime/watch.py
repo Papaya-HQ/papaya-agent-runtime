@@ -643,6 +643,28 @@ def listen_step(now: datetime) -> list[str]:
         return [f"could not read work item changes: {exc}"]
 
 
+def merge_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
+    """Follow up merged pull requests and run the green-unmerged clock, when no serve does.
+
+    The same `supervision.merged_step` and `supervision.green_clock` serve's rounds run,
+    said on the work item through this machine's connection. Never raises.
+    """
+    try:
+        if supervision.serve_running():
+            return []
+        entries = pr_states(conn)
+        if not entries:
+            return []
+        from papaya_agent_runtime import rounds
+
+        lines = supervision.merged_step(entries, post=supervision.post_as_agent)
+        return lines + supervision.green_step(
+            entries, now, post=supervision.post_as_agent, merge=rounds._default_merge
+        )
+    except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
+        return [f"could not follow up merged pull requests: {exc}"]
+
+
 def is_idle(snapshot: dict[str, Any]) -> bool:
     """Is there nothing for the manager to watch right now?
 
@@ -757,6 +779,7 @@ def _loop(
 ) -> int:
     # A test that replaces the repair step replaces every step that reaches out.
     listen = listen_step if repair is None else (lambda now: [])
+    merges = merge_step if repair is None else (lambda conn, now: [])
     repair = repair or repair_step
     # The first tick reports the current state, not the whole event history.
     since = max_event_id(conn)
@@ -776,7 +799,7 @@ def _loop(
             previous_prs=previous,
             settled_prs=settled,
             now=moment,
-            repairs=[] if once else [*repair(conn, moment), *listen(moment)],
+            repairs=[] if once else [*repair(conn, moment), *listen(moment), *merges(conn, moment)],
         )
         since = snapshot["last_event_id"]
         previous = pr_index(snapshot["prs"])

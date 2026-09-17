@@ -687,8 +687,11 @@ the config; 300 by default) it walks the board on the same event loop. It holds 
 sweep's lock, so a round and a sweep never overlap. In order, a round:
 
 1. **Reads the forge** for delivered tickets, and follows each pull request until it
-   merges (below). A merged pull request moves the ticket to `done` with one comment
-   and cleans up its worktree at once.
+   merges (below). A merged pull request is followed up once: its work item moves to
+   the status this workspace set (`ppy config delivery --merged-status <status>`), or,
+   until one is set, a single comment says it merged and asks which status it should
+   move to (statuses differ per workspace). Its worktree is cleaned up at once. A
+   session's heartbeat does the same while no `ppy serve` runs.
 2. **Takes back what it was working and no longer holds.** On start, and after a lost
    lease, every ticket in a working phase is re-reserved under the persisted session
    id and resumed from its recorded phase. A worker that is still running is watched,

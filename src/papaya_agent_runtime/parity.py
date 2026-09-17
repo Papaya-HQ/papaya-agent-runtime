@@ -121,14 +121,12 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "merged_followup",
-        GAP,
+        SHARED,
         "a merged pull request updates its work item and cleans its worktree; a green one "
         "left unmerged is said or auto-merged",
         serve=("Rounds._merged", "Rounds._clean_if_merged", "Rounds._green"),
-        heal=(
-            "comment and ask the workspace (its rule once learned), and the green-unmerged "
-            "clock, from the heartbeat too"
-        ),
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.watch",),
     ),
     Capability(
         "work_item_changes",
@@ -280,7 +278,6 @@ CAPABILITIES: tuple[Capability, ...] = (
 #: may join it — a new supervision capability is built shared from the start.
 KNOWN_GAPS = frozenset(
     {
-        "merged_followup",
         "turn_obligations",
         "full_suite_before_review",
         "hygiene",
