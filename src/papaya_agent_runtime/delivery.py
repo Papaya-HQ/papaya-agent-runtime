@@ -57,10 +57,41 @@ def extract_pr_url(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def _lookup_pr_url(tool: str, branch: str, forge_slug: str | None, cwd: str) -> str | None:
-    """A bounded follow-up: ask the forge which open PR has this head branch.
+def pr_number(url: str | None) -> int | None:
+    """The number at the end of a pull request URL, or None."""
+    tail = str(url or "").rstrip("/").rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
 
-    Used only when creation reported success without a readable URL. Plain
+
+def gh_error(proc: subprocess.CompletedProcess) -> str:
+    """What `gh` said when it failed, verbatim: stderr, else stdout, else the exit code.
+
+    On PAP-222 (2026-09-17) the phase line read "PR creation failed" and nothing else:
+    the reason had been cut to what fit, and a tool that reports on stdout left nothing.
+    """
+    said = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+    return said or f"exit status {proc.returncode} with no output"
+
+
+def _record_pr_failure(task, error: str, *, updating: bool) -> None:
+    from papaya_agent_runtime import deficiencies
+
+    deficiencies.record(
+        deficiencies.DELIVERY_FAILED,
+        "could not update the open pull request" if updating else "could not open a pull request",
+        evidence={
+            "task_id": int(task["id"]),
+            "run_id": task["run_id"],
+            "error": error,
+        },
+    )
+
+
+def _lookup_pr_url(tool: str, branch: str, forge_slug: str | None, cwd: str) -> str | None:
+    """Ask the forge which open PR has this head branch.
+
+    Asked before creating one, so a second delivery updates the pull request that
+    is open, and again when creation reported success without a readable URL. Plain
     ``gh`` answers in JSON; ``gh-axi`` answers in its own text, which is searched
     for a URL the same way the creation output was.
     """
@@ -271,11 +302,32 @@ def deliver(
 
     pr_url: str | None = None
     pr_exists = False
+    pr_updated = False
+    pr_error: str | None = None
     note = "pushed" if pushed else "no-op"
     if open_pr:
         tool = _pr_tool()
+        existing = _lookup_pr_url(tool, branch, forge_slug, worktree) if tool is not None else None
         if tool is None:
             note = "pushed; no gh/gh-axi found, PR not opened"
+        elif existing:
+            # A second delivery of the same task — the reconcile lane fixing a red
+            # pull request — updates the one that is open. Creating another is what
+            # `gh` refuses, and on PAP-222 that refusal read as "PR creation failed".
+            pr_url, pr_exists = existing, True
+            number = pr_number(existing)
+            name = f"PR #{number}" if number else existing
+            edit = [tool, "pr", "edit", str(number or existing), "--body"]
+            edit.append(_pr_body(task_id, head, body_file))
+            if forge_slug:
+                edit += ["--repo", forge_slug]
+            proc = _run(edit, cwd=worktree)
+            if proc.returncode == 0:
+                pr_updated = True
+                note = f"pushed; {name} updated"
+            else:
+                pr_error = gh_error(proc)
+                note = f"pushed; {name} is open but its body could not be refreshed: {pr_error}"
         else:
             argv = [
                 tool,
@@ -316,7 +368,10 @@ def deliver(
                     note = "pushed; a PR for this branch was already open"
                 else:
                     pr_url = None
-                    note = f"pushed; PR creation failed: {proc.stderr.strip()[:200]}"
+                    pr_error = gh_error(proc)
+                    note = f"pushed; PR creation failed: {pr_error}"
+        if pr_error is not None:
+            _record_pr_failure(task, pr_error, updating=pr_exists)
 
     requires_up_to_date = None
     if pr_exists and forge_slug:
@@ -336,6 +391,9 @@ def deliver(
             "head_sha": head,
             "pr_url": pr_url,
             "pr_exists": pr_exists,
+            "pr_updated": pr_updated,
+            "pr_error": pr_error,
+            "note": note,
             "remote": remote,
             "forge": forge_slug,
             "base": base,

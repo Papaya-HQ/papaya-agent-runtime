@@ -79,6 +79,8 @@ RUNTIME_CI_RED = "runtime-ci-red"
 IDLE_WORK_REFUSED = "idle-work-refused"
 #: A turn did what its prompt tells it not to do for this agent (`propose_memory` on a shared one).
 PROMPT_DEFECT = "prompt-defect"
+#: `ppy deliver` pushed, and then `gh` refused to open or update the pull request.
+DELIVERY_FAILED = "delivery-failed"
 
 #: Ledger statuses: below its threshold; ready for an issue; an issue exists.
 WATCHING = "watching"
@@ -277,6 +279,21 @@ KINDS: dict[str, Kind] = {
         remedy=(
             "Reword the prompt's instruction where the turn met it, or move the fact nearer "
             "the step that needs it."
+        ),
+    ),
+    DELIVERY_FAILED: Kind(
+        title="`ppy deliver` pushed, and the pull request step failed",
+        happened=(
+            "`ppy deliver` pushed the branch and then {detail}. `gh`'s own words are the "
+            "error in the evidence."
+        ),
+        instead=(
+            "Recorded the delivery with the push and `gh`'s error, and put the error in the "
+            "delivery's note and the ticket's phase line."
+        ),
+        remedy=(
+            "Read `gh`'s error: missing auth or permission is a blocker a person closes; "
+            "anything else is a delivery bug."
         ),
     ),
 }
@@ -1038,7 +1055,8 @@ class Reporter:
         `serve` runs this at start. Each `worker-denial` row whose denials all classify
         as `command_shape` or `policy_refusal` today leaves the ledger, and so does each
         `turn-report` row whose every occurrence came from a check-in a later fix made
-        impossible (:func:`fixed_checkin`); if it has an open issue, the issue gets one
+        impossible (:func:`fixed_checkin`) or that a named fix answered before it landed
+        (:func:`fixed_turn_report`); if it has an open issue, the issue gets one
         comment saying so and is closed. A row whose issue cannot be closed now (no
         `gh`, self-reporting off) stays as it is and is tried again at the next start.
         """
@@ -1068,7 +1086,7 @@ class Reporter:
             ]
             for deficiency in rows:
                 if deficiency.kind == TURN_REPORT:
-                    body = fixed_checkin(conn, deficiency)
+                    body = fixed_checkin(conn, deficiency) or fixed_turn_report(deficiency)
                     if body is None:
                         continue
                 else:
@@ -1496,6 +1514,80 @@ def fixed_checkin(conn: Any, deficiency: Deficiency) -> str | None:
     )
 
 
+@dataclass(frozen=True)
+class ReportFix:
+    """A fix to what one `turn-report` row described, as the ledger can recognise it."""
+
+    #: The row's fingerprint under every scheme it may be keyed by: the normalised
+    #: detail, and the reduced turn-report form (`tool|error|repo`) rows are rekeyed to.
+    fingerprints: frozenset[str]
+    #: Occurrences at or before this moment came from the code the fix replaced; a row
+    #: with a later one is a recurrence and stays open.
+    before: str
+    #: What the fix changed, for the one comment on the issue it closes.
+    note: str
+
+
+_PAP_222_FIXED_AT = "2026-09-17T02:00:00+00:00"
+
+#: `turn-report` rows a fix has answered, closed from the fix at `serve` start.
+FIXED_TURN_REPORTS: tuple[ReportFix, ...] = (
+    ReportFix(
+        # "`ppy review show 21` compared against an older starting commit (3f3c0181)"
+        fingerprints=frozenset({"74fccc066045a150", "af2aa9532fde4fce"}),
+        before=_PAP_222_FIXED_AT,
+        note=(
+            "`ppy review show` diffed from the task's dispatch-time base, so a branch rebased "
+            "onto a newer main showed main's commits as the worker's. It now fetches the "
+            "branch the pull request targets and diffs from HEAD's merge-base with it, and "
+            "names the base it used; the review turn gets the same range as a fact."
+        ),
+    ),
+    ReportFix(
+        # "task 21's worktree slot had been reset to the base commit after delivery"
+        fingerprints=frozenset({"ecfb07ec73b22d9a", "7ba58c5a7c72a5b0"}),
+        before=_PAP_222_FIXED_AT,
+        note=(
+            "Hygiene removed a delivered task's worktree while its pull request was open, and "
+            "the reconcile lane rebuilt it at the base commit. A delivered task's slot is now "
+            "kept while its pull request is open (`kept: PR #N open`), and a rebuilt worktree "
+            "for a delivered task is checked out at the pull request's head from the forge, "
+            "never at the base."
+        ),
+    ),
+    ReportFix(
+        # "`ppy deliver 21` reported "PR creation failed" with no reason"
+        fingerprints=frozenset({"73e968fea9ac0d8e", "c4b7a8dab0a58df5"}),
+        before=_PAP_222_FIXED_AT,
+        note=(
+            "`ppy deliver` always tried to create a pull request and cut `gh`'s refusal "
+            "short. It now looks for the open pull request on the branch first and updates "
+            "it (`PR #N updated`), and a genuine failure carries `gh`'s error verbatim in the "
+            "delivery note, the ticket's phase line and a `delivery-failed` deficiency."
+        ),
+    ),
+)
+
+
+def fixed_turn_report(deficiency: Deficiency) -> str | None:
+    """The closing comment for a `turn-report` row a fix in :data:`FIXED_TURN_REPORTS` answers."""
+    if deficiency.kind != TURN_REPORT or not deficiency.evidence:
+        return None
+    for fix in FIXED_TURN_REPORTS:
+        if deficiency.fingerprint not in fix.fingerprints:
+            continue
+        cutoff = datetime.fromisoformat(fix.before)
+        for entry in deficiency.evidence:
+            try:
+                at = datetime.fromisoformat(str(entry.get("at") or ""))
+            except ValueError:
+                return None
+            if at.tzinfo is None or at > cutoff:
+                return None
+        return "closing: fixed.\n\n" + fix.note
+    return None
+
+
 def record_gate_past_tool_cap(task_id: int, run_id: int | None, command: str | None) -> None:
     """A worker stopped on a backgrounded command with no `ppy gate run` on record."""
     try:
@@ -1523,7 +1615,9 @@ def record_gate_past_tool_cap(task_id: int, run_id: int | None, command: str | N
 
 
 __all__ = [
+    "DELIVERY_FAILED",
     "FIXED_CHECKINS",
+    "FIXED_TURN_REPORTS",
     "GATE_PAST_TOOL_CAP",
     "KINDS",
     "LABEL",

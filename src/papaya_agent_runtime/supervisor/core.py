@@ -1138,8 +1138,32 @@ class Supervisor:
                 check=False,
             )
 
+        from papaya_agent_runtime import reconcile
+
         started_from = None
-        if kept_locally:
+        if reconcile.is_reconciliation(conn, task_id):
+            # A delivered task's work is its pull request. The forge's head is the
+            # truth — a local branch can be stale after a rebase pushed from elsewhere
+            # — and the base commit is never an answer (PAP-222, 2026-09-17).
+            remote = _repos.upstream_remote(repo_row)
+            for refspec, label in reconcile.pr_head_sources(conn, task):
+                fetched = git("fetch", "--quiet", remote, refspec).returncode == 0
+                if fetched and git("reset", "--hard", "--quiet", "FETCH_HEAD").returncode == 0:
+                    head = git("rev-parse", "HEAD").stdout.strip()
+                    started_from = f"{label} at {head[:8]} (from {remote})"
+                    break
+            if started_from is None:
+                head = git("rev-parse", "HEAD").stdout.strip() if kept_locally else ""
+                if not kept_locally or head == (task["base_sha"] or lease.base_sha):
+                    raise SupervisorError(
+                        f"task {task_id}: its worktree is gone and its pull request head could "
+                        f"not be fetched from {remote}; refusing to rebuild it at the base commit"
+                    )
+                started_from = (
+                    f"branch {branch} at {head[:8]} (kept in the base clone; the pull request "
+                    f"head could not be fetched from {remote})"
+                )
+        elif kept_locally:
             head = git("rev-parse", "HEAD").stdout.strip()
             started_from = f"branch {branch} at {head[:8]} (kept in the base clone)"
         elif branch:

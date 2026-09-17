@@ -1445,6 +1445,8 @@ def _cmd_review(args: argparse.Namespace) -> int:
                 f"task {bundle.task_id}: {bundle.base_sha[:8]}..{bundle.head_sha[:8]} "
                 f"({bundle.files_changed} file(s))"
             )
+            if getattr(bundle, "base_from", ""):
+                print(f"base: {bundle.base_from}")
             print(bundle.diffstat or "(no changes)")
             return 0
         if args.review_cmd == "approve":

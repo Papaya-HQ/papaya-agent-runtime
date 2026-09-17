@@ -245,6 +245,23 @@ def _no_real_self_reports(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_forge_in_reclaim(monkeypatch):
+    """Keep worktree reclamation from asking the real forge about a pull request.
+
+    A delivered task's slot is kept while its pull request is open (task 288), and a
+    record older than one round is refreshed with `gh`. Unfaked, any test that
+    delivers with a PR URL and then prunes would call GitHub. The forge answers "no
+    pull request for this branch" here; a test of the rule sets `reclaim.lookup_pr`.
+    """
+    from papaya_agent_runtime.worktree import reclaim
+
+    monkeypatch.setattr(
+        reclaim, "lookup_pr", lambda branch, cwd: {"known": True, "pr": None, "ci": "none"}
+    )
+    monkeypatch.setattr(reclaim, "_asked", {})
+
+
+@pytest.fixture(autouse=True)
 def _no_supervisor_outlives_its_test(monkeypatch):
     """Stop every supervisor a test created before the test's environment is undone.
 
