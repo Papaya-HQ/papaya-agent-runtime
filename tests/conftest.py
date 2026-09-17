@@ -176,6 +176,13 @@ def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
     # Likewise a shell that set its own sweep cadence: `serve.parse_args` reads it,
     # and a test of the default must not depend on the developer's environment.
     monkeypatch.delenv("PPY_SWEEP_INTERVAL", raising=False)
+    # A manager turn the runtime launched carries `PPY_MANAGER_TURN`, which
+    # `hooks._headless_turn` reads to keep a headless turn out of the owed and ledger
+    # lanes. Inherited by the suite, it silently turned off the owed stop reasons:
+    # `test_stop_blocks_once_when_work_is_open_and_no_next_step` failed on a laptop
+    # inside a supervised session while CI, which has no such env, stayed green.
+    monkeypatch.delenv("PPY_MANAGER_TURN", raising=False)
+    monkeypatch.delenv("PPY_MANAGER_SESSION", raising=False)
 
 
 class HealthyMachine:
