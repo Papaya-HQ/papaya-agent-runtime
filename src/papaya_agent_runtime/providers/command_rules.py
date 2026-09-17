@@ -49,11 +49,13 @@ These are not style preferences — anything else is denied before it runs.
 - No redirection (`>`, `>>`, `<`, `2>&1`). To write a file, use the file-writing
   tool, not a shell redirect.
 - `cd` is its own call. Never prefix another command with it.
-- Run the authoritative verification suite **in the foreground** —
+- {gate_tiers_rule}
+- Run the scoped gate **in the foreground** —
   never as a background task. A backgrounded command is killed when your turn
-  ends, so a suite you left running in the background never finished and its
+  ends, so a gate you left running in the background never finished and its
   result is worthless. A tool call is capped at ten minutes and anything longer is moved to
   the background for you: {ten_minute_rule}
+- {full_suite_refusal}
 - {push_milestone_rule}
 - {pr_follow_rule}
 - Push with exactly `git push origin HEAD:{branch}`.
@@ -63,6 +65,27 @@ These are not style preferences — anything else is denied before it runs.
 """
     + FLAGGED_RULE
 )
+
+#: Why a worker's full-suite tool call is refused: said in the rules before it happens,
+#: and again in the steer after it does (`tool_learning.policy_rule`).
+FULL_SUITE_REFUSAL = (
+    "The repository's full suite is refused as a tool call: it runs once, at the head that "
+    "will be delivered, under the supervisor or in CI. Your last check before handing back "
+    "is the scoped gate."
+)
+
+#: The program name a full-suite denial is recorded under (`tool_learning`).
+FULL_SUITE_PROGRAM = "full suite"
+
+
+def denied_tools(full_suite_command: str | None) -> list[str]:
+    """The Claude patterns a worker is refused on top of its allowlist: the full suite.
+
+    The exact command only. A prefix pattern would also refuse a targeted run that
+    starts the same way (`uv run pytest tests/test_x.py` under `uv run pytest`).
+    """
+    command = " ".join((full_suite_command or "").split())
+    return [f"Bash({command})"] if command else []
 
 
 def command_rules(provider: str, branch: str | None = None, environment: str | None = None) -> str:
@@ -85,6 +108,8 @@ def command_rules(provider: str, branch: str | None = None, environment: str | N
     rules = _CLAUDE_RULES.format(
         branch=branch or "<your task branch>",
         ten_minute_rule=prompts.TEN_MINUTE_RULE,
+        gate_tiers_rule=prompts.GATE_TIERS_RULE,
+        full_suite_refusal=FULL_SUITE_REFUSAL,
         push_milestone_rule=prompts.PUSH_MILESTONE_RULE,
         pr_follow_rule=prompts.PR_FOLLOW_RULE,
     )

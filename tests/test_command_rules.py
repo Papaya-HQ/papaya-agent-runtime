@@ -90,6 +90,37 @@ def test_the_brief_the_environment_block_and_the_rules_carry_the_push_milestone_
         assert flat(prompts.TEN_MINUTE_RULE) in flat(text), where
 
 
+def test_every_worker_facing_text_names_the_three_gate_tiers():
+    """2026-09-17: the full suite ran at every milestone, every hand-back and the review."""
+    from papaya_agent_runtime import environment
+
+    def flat(text: str) -> str:
+        return " ".join(text.split())
+
+    block = environment.render(
+        environment.RepoEnvironment(repo="app"), task_id=7, evidence_path="/tmp/wt/.ppy-evidence"
+    )
+    texts = {
+        "brief.md": prompts.load(prompts.BRIEF),
+        "review.md": prompts.load(prompts.REVIEW),
+        "checkin.md": prompts.load(prompts.CHECKIN),
+        "environment block": block,
+        "command rules": command_rules("claude", "ppy/task-7-abc"),
+    }
+    for where, text in texts.items():
+        assert flat(prompts.GATE_TIERS_RULE) in flat(text), where
+    # The milestone push waits on the scoped gate, and says so.
+    assert "(the scoped gate, never the full suite)" in prompts.PUSH_MILESTONE_RULE
+    assert "make verify" not in prompts.PUSH_MILESTONE_RULE
+    # The brief turn quotes the repository's own words and never guesses a gate.
+    brief = flat(prompts.load(prompts.BRIEF))
+    assert "quoting the repository's own words and naming the file each came from" in brief
+    assert "do not guess one" in brief
+    # The review turn never reruns a full suite already recorded at the head.
+    review = flat(prompts.load(prompts.REVIEW))
+    assert "Do not run `ppy gate run --full` again at a head that has one" in review
+
+
 def test_the_block_falls_back_to_a_readable_branch_placeholder():
     assert "HEAD:<your task branch>" in command_rules("claude")
 

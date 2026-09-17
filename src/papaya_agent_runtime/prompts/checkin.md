@@ -36,7 +36,10 @@ Judge the direction against both.
   continues. Work only in its worktree is lost to a restart. The facts give the forge's
   tip of the branch (read as the rounds looked), the worktree's HEAD and the last push
   the runtime recorded, so you can see why this fired. The rule it was briefed with:
-  Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green, and in any case before starting a run that may exceed ten minutes (a full suite, `make verify`, a build). The commit message says which goal; the push goes to your task's lease branch.
+  Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green (the scoped gate, never the full suite), and in any case before starting a run that may exceed ten minutes (a build, a long scoped gate). The commit message says which goal; the push goes to your task's lease branch.
+- **Running the full suite** (its log or tool calls show the repository's full suite at a
+  milestone or before handing back): steer it back to the tiers it was briefed with:
+  Check in three tiers. Targeted checks while you work: the tests nearest your change, chosen from the repository's own guidance and your diff, as often as you like. The scoped gate before you hand back: the quick gate the repository names, never the full suite. The full suite once, at the head that will be delivered: run by the supervisor (`ppy gate run --full`) or by CI when CI runs it; never by a worker as a tool call, and never at a milestone.
 - **Carrying on would only waste its work** (it is building the wrong thing, or wedged
   in a loop): stop it and resume it with what to do instead.
 - **A person steered it** (the facts list direction given `by: person` from a session):

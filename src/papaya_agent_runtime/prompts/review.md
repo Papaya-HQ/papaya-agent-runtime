@@ -31,10 +31,16 @@ against the brief's Goals, not against what you would have built.
   commit and push it or discard it; what is not on the branch is not reviewed, and is
   never approved on the worker's word. The runtime sends a worker back for this itself
   first; if the facts below carry the finding, that did not work, so steer with it.
-- Run the brief's verification gate at that head yourself: `ppy gate run --task <worker
-  task id>` (add `--full` for the full suite). A worker's pasted summary is not a gate.
-  The worker ran it first and its result is on the record; your run is a re-check, and
-  `ppy gate run` records it against the head it ran at.
+- Check at that head in the same three tiers the worker was briefed with:
+  Check in three tiers. Targeted checks while you work: the tests nearest your change, chosen from the repository's own guidance and your diff, as often as you like. The scoped gate before you hand back: the quick gate the repository names, never the full suite. The full suite once, at the head that will be delivered: run by the supervisor (`ppy gate run --full`) or by CI when CI runs it; never by a worker as a tool call, and never at a milestone.
+- Re-check the **scoped gate** yourself: `ppy gate run --task <worker task id>`. A
+  worker's pasted summary is not a gate. The worker ran it first and its result is on
+  the record; your run is a re-check, and `ppy gate run` records it against the head.
+- **The full suite runs once per head.** When the facts below carry `the full suite at
+  this head`, it has already run at this head: read that record and decide on it. Do not
+  run `ppy gate run --full` again at a head that has one. When the repository's full
+  suite belongs to CI, deliver on a green scoped gate; the runtime follows CI on the pull
+  request and brings a red run back to the worker.
 - A failure you suspect was already on the base is settled with `ppy gate run --task <worker
   task id> --baseline <base sha>` (add `--full` to match), which gates that commit in a
   scratch worktree with a database of its own. Never check a baseline out and run its suite

@@ -26,7 +26,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -570,12 +570,14 @@ def _runner(
     gate_state=None,
     uncommitted=lambda _task_id: [],
     agent_record=lambda _env: None,
+    full_suite=lambda _task_id: None,
 ) -> serve.TicketRunner:
     from papaya_agent_runtime import rounds
 
     return serve.TicketRunner(
         # Papaya's agent record is not asked for; a test that needs one passes it.
         agent_record=agent_record,
+        full_suite=full_suite,
         # No supervisor answers in these tests; a liveness check never asks the socket.
         gate_state=gate_state or (lambda _task_id: rounds.GateState(False, "no gate running")),
         uncommitted=uncommitted,
@@ -2340,6 +2342,48 @@ def test_a_stopped_worker_whose_head_has_a_green_gate_goes_to_review(
     # Reviewed as finished work, not as a failure to steer on.
     assert "what stopped the worker" not in review
     assert any("its local gate green" in d for _s, _p, d in progress_lines)
+
+
+def test_the_review_turn_reads_the_full_suite_run_once_at_the_head_and_is_told_not_to_rerun(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """The full suite runs once per head, before the review turn, never inside it."""
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+    full = _recorded(0, "10432 passed in 961.00s")
+    full = gate.Verdict(
+        gate.GREEN,
+        full.head_sha,
+        replace(full.result, command="make verify", full=True),
+    )
+    asked: list[int] = []
+
+    def full_suite(task_id: int) -> gate.Verdict:
+        asked.append(task_id)
+        return full
+
+    runner = _runner(turns, FakePapaya(), full_suite=full_suite)
+
+    async def scenario() -> int:
+        task = _serve_ticket(harness, client_home, runner)
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(worker, "worker_done", status="worker_done", summary="scoped gate green")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    (worker,) = workers_in(int(ticket_task()["run_id"]))
+    assert asked == [worker]
+    review = " ".join(turns.calls[1].prompt.split())
+    fact = review.partition(f"- {serve.FULL_SUITE_FACT}: ")[2].partition(" - ")[0]
+    assert full.result.line() in fact
+    assert "already run once at this head; do not run it again" in fact
+    assert "Do not run `ppy gate run --full` again at a head that has one" in review
 
 
 def test_a_worker_whose_head_has_a_red_gate_is_steered_with_the_summary(

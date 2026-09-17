@@ -51,6 +51,34 @@ The run id is what ties the worker to this ticket. If `--strict` refuses, fix th
 and dispatch again. The reviewer will hold the work to
 `{runtime_dir}/.agents/skills/review-a-worker/SKILL.md`, so brief for that.
 
+### The verification section: the repository's words, not yours
+
+The repository owns its gates; this runtime does not prescribe them. Before you write
+the brief's verification section, read what the repository itself says about testing:
+its agent instructions (`AGENTS.md`, `CLAUDE.md`), `CONTRIBUTING.md` or a docs testing
+page, its `Makefile` or package scripts, and its CI workflows under `.github/workflows/`.
+`ppy repo set <repo>` (with no options) prints what is recorded, each gate answer with
+the file and line the repository says it in, and `ppy memory show --repo <repo>` has
+the onboarding notes. Then write four things, quoting the repository's own words and naming
+the file each came from:
+
+- **Targeted checks** while working: what the repository says to run as you change code.
+  The worker picks the exact tests from that guidance and its own diff.
+- **Scoped gate** before handing back: the quick gate the repository names. Never the
+  full suite.
+- **Full suite**: the command the repository names for the complete run.
+- **Who runs the full suite**: CI when the workflows run it; otherwise the supervisor,
+  once, at the head that will be delivered (`ppy gate run --full`). Never the worker.
+
+Every brief carries the tiers in these words:
+Check in three tiers. Targeted checks while you work: the tests nearest your change, chosen from the repository's own guidance and your diff, as often as you like. The scoped gate before you hand back: the quick gate the repository names, never the full suite. The full suite once, at the head that will be delivered: run by the supervisor (`ppy gate run --full`) or by CI when CI runs it; never by a worker as a tool call, and never at a milestone.
+
+If the repository says nothing you can quote for the scoped gate or the full suite, do
+not guess one (a `make verify` because a Makefile has it is a guess). Ask on the work
+item which command is the quick gate and which is the full suite, set the item to
+`blocked`, and end the turn; the runtime's readiness report asks the owner the same
+question.
+
 If dispatch is refused because worker capacity is full, keep the brief where it is and
 end the turn. The runtime keeps holding the ticket and calls this turn back when a slot
 frees; dispatch the brief you already wrote then.
@@ -64,7 +92,7 @@ message whose first line is `WAITING: <what you are waiting for>`, and the runti
 this turn again later with the tail of this one.
 
 Every brief tells its worker when its work reaches the remote, in these words:
-Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green, and in any case before starting a run that may exceed ten minutes (a full suite, `make verify`, a build). The commit message says which goal; the push goes to your task's lease branch.
+Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green (the scoped gate, never the full suite), and in any case before starting a run that may exceed ten minutes (a build, a long scoped gate). The commit message says which goal; the push goes to your task's lease branch.
 Your rounds check: a worker with nothing on the remote after
 `health.push_by_minutes` gets a check-in.
 

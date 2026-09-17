@@ -1333,8 +1333,11 @@ def _results_at(conn: Any, task_id: int, head: str) -> list[GateResult]:
     return found
 
 
-def verdict(task_id: int) -> Verdict:
-    """The newest recorded gate result at the task's current head commit."""
+def verdict(task_id: int, *, full: bool | None = None) -> Verdict:
+    """The newest recorded gate result at the task's current head commit.
+
+    ``full`` narrows it to the full suite (``True``) or the scoped gate (``False``).
+    """
     conn = init_db()
     try:
         task = store.get_task(conn, task_id)
@@ -1345,6 +1348,8 @@ def verdict(task_id: int) -> Verdict:
         results = _results_at(conn, task_id, head)
     finally:
         conn.close()
+    if full is not None:
+        results = [r for r in results if r.full == full]
     if not results:
         return Verdict(NONE, head)
     result = results[0]
@@ -1359,6 +1364,40 @@ def repeated_line(repeated: tuple[GateResult, ...]) -> str:
         f"the {newest.label} is red {len(repeated)} times at {newest.head_sha[:8]} with the "
         f"same failures ({what}); the runtime is not running it again"
     )
+
+
+def full_suite_once(
+    task_id: int,
+    *,
+    run: Callable[..., int] | None = None,
+    out: Callable[[str], None] = lambda _line: None,
+) -> Verdict | None:
+    """The full suite at a task's head, run once: before delivery, by the supervisor.
+
+    ``None`` when the full suite is not the supervisor's (CI runs it, or nothing is
+    recorded). A result already recorded at this head is returned as it is and never
+    run again; otherwise `ppy gate run --full` runs it (attaching to one already going)
+    until it has a result.
+    """
+    conn = init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        row = (
+            conn.execute("SELECT * FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+            if task is not None
+            else None
+        )
+    finally:
+        conn.close()
+    if row is None or not environment.for_repo(row).supervisor_runs_full_suite:
+        return None
+    recorded = verdict(task_id, full=True)
+    if recorded.state != NONE or not recorded.head_sha:
+        return recorded
+    run = run or run_from_cli
+    while run(task_id=task_id, repo=None, full=True, out=out) == STILL_RUNNING:
+        pass
+    return verdict(task_id, full=True)
 
 
 __all__ = [
@@ -1378,6 +1417,7 @@ __all__ = [
     "Gates",
     "Verdict",
     "free_memory_mb",
+    "full_suite_once",
     "gate_settings",
     "learned_seconds",
     "memory_needed",

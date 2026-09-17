@@ -70,9 +70,24 @@ TEN_MINUTE_RULE = (
 #: a test holds all three to it.
 PUSH_MILESTONE_RULE = (
     "Commit and push at milestones, not once at the end: after each goal in the brief lands "
-    "and its scoped gate is green, and in any case before starting a run that may exceed ten "
-    "minutes (a full suite, `make verify`, a build). The commit message says which goal; the "
-    "push goes to your task's lease branch."
+    "and its scoped gate is green (the scoped gate, never the full suite), and in any case "
+    "before starting a run that may exceed ten minutes (a build, a long scoped gate). The "
+    "commit message says which goal; the push goes to your task's lease branch."
+)
+
+#: The three tiers of checking, named the same way in every worker-facing text: the
+#: brief, the environment block, the command rules and the review prompt. On 2026-09-17
+#: a backend's recorded local gate was its sixteen-minute full suite, so every milestone,
+#: every hand-back and the review ran it: six runs over two tickets. Which commands fill
+#: each tier is the repository's to say (its AGENTS.md, CONTRIBUTING, Makefile, CI); the
+#: tiers themselves are the runtime's rule, and a test holds every text to this one.
+GATE_TIERS_RULE = (
+    "Check in three tiers. Targeted checks while you work: the tests nearest your change, "
+    "chosen from the repository's own guidance and your diff, as often as you like. The "
+    "scoped gate before you hand back: the quick gate the repository names, never the full "
+    "suite. The full suite once, at the head that will be delivered: run by the supervisor "
+    "(`ppy gate run --full`) or by CI when CI runs it; never by a worker as a tool call, "
+    "and never at a milestone."
 )
 
 #: How any turn says the runtime itself, not the repository, got in its way: a line
@@ -175,6 +190,7 @@ __all__ = [
     "CHECKIN_PREFIX",
     "CHECKIN_STEER",
     "CHECKIN_STOP",
+    "GATE_TIERS_RULE",
     "MEMORY_RULE",
     "REVIEW",
     "PR_FOLLOW_RULE",

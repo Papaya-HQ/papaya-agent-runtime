@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -56,8 +56,13 @@ CREATE TABLE IF NOT EXISTS repos (
     push_hook_runs_full_suite INTEGER,
     local_gate TEXT,
     full_suite_owner TEXT,
-    -- The command `ppy gate run --full` runs (onboarding derives it).
+    -- The command `ppy gate run --full` runs (the repository declares it).
     full_suite_command TEXT,
+    -- Where each gate answer came from: `<file>:<line>` the repository says it in,
+    -- `person` (`ppy repo set`), or `heuristic` (the old derivation, cleared at start).
+    local_gate_source TEXT,
+    full_suite_command_source TEXT,
+    full_suite_owner_source TEXT,
     evidence_dir TEXT,
     db_url_template TEXT,
     test_db_url_template TEXT,
@@ -444,6 +449,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("auto_merge", "INTEGER"),
         ("merge_method", "TEXT"),
         ("default_branch_locked", "INTEGER"),
+        ("local_gate_source", "TEXT"),
+        ("full_suite_command_source", "TEXT"),
+        ("full_suite_owner_source", "TEXT"),
     ):
         # The per-repo environment block (issue #60). Unset means the default, so
         # every already-registered repo gets the evidence-directory and local/CI

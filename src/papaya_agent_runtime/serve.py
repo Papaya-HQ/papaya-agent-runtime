@@ -660,6 +660,9 @@ class Ticket:
     dirty_steers: int = 0
     #: The uncommitted-work finding at the last review, for the review turn; empty when clean.
     uncommitted: str = ""
+    #: The full suite recorded at the worker's head (run once, by the supervisor, before
+    #: the review turn), as one line; empty when CI owns it or none is recorded.
+    full_suite: str = ""
     #: What the manager's rounds noticed and the ticket's loop has not acted on yet.
     nudges: list[Nudge] = field(default_factory=list)
     #: The turn running for this ticket right now, if one is.
@@ -1080,6 +1083,7 @@ class TicketRunner:
         uncommitted=None,
         status_comment=None,
         agent_record=None,
+        full_suite=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -1113,6 +1117,9 @@ class TicketRunner:
         self._answering: set[asyncio.Task[Any]] = set()
         #: What is in a worker's worktree and not on its branch, read before a review.
         self._uncommitted = uncommitted or uncommitted_files
+        #: `gate.full_suite_once`'s seam: the full suite at a worker's head, run at most
+        #: once per head, or ``None`` when it is not the supervisor's to run.
+        self._full_suite = full_suite or full_suite_at_head
         #: How the living status line is written onto the work item, edited in place:
         #: ``(ticket, line) -> bool``. ``None`` writes nothing, and is the default until
         #: Papaya lets an agent edit its own comment (backend #636); until then the phase
@@ -1880,6 +1887,8 @@ class TicketRunner:
                 # The review turn would approve and then fail to open the pull
                 # request with a gh error nobody sees. The branch is kept.
                 return HandBack(blockers.DECLINE_REASON, setup=True)
+            if not failure:
+                await self._full_suite_before_review(ticket)
             mark = await asyncio.to_thread(_max_event_id)
             # Taken before the turn and after the runner's own comment: nothing but
             # the turn writes on the item while it runs, so a new agent comment
@@ -1910,6 +1919,31 @@ class TicketRunner:
             if isinstance(outcome, HandBack):
                 return outcome
             tail = outcome
+
+    async def _full_suite_before_review(self, ticket: Ticket) -> None:
+        """Run the full suite once at the worker's head, when it is the supervisor's.
+
+        The review turn reads the record and never starts another full run at a head
+        that has one; a repository whose CI runs its full suite is delivered on a green
+        scoped gate and CI is followed on the pull request.
+        """
+        worker = ticket.worker
+        if worker is None:
+            return
+        try:
+            recorded = await asyncio.to_thread(self._full_suite, worker.task_id)
+        except Exception as exc:  # noqa: BLE001 - the review turn decides without it
+            log.warning(
+                "[serve] Could not run worker task %d's full suite: %s", worker.task_id, exc
+            )
+            recorded = None
+        result = recorded.result if recorded is not None else None
+        ticket.full_suite = (
+            f"{result.line()} at {result.head_sha[:8]} (already run once at this head; "
+            "do not run it again)"
+            if result is not None
+            else ""
+        )
 
     async def _delivery_blocked(self, ticket: Ticket) -> bool:
         """Does a blocker make a pull request for this ticket's repository impossible?"""
@@ -2391,6 +2425,7 @@ class TicketRunner:
             **_worker_facts(ticket.worker),
             "what stopped the worker": trigger.detail if trigger and trigger.failure else "",
             "the worker's recorded gate at its head": ticket.recorded_gate,
+            FULL_SUITE_FACT: ticket.full_suite,
             "finding: the gate is red twice the same way": ticket.repeated_red,
             "finding: uncommitted work": ticket.uncommitted,
             "previous attempt's transcript (tail)": tail,
@@ -3088,6 +3123,15 @@ def _stalled_resume(ticket_task_id: int) -> str | None:
         conn.close()
 
 
+#: The review turn's fact for the full suite run once at the worker's head.
+FULL_SUITE_FACT = "the full suite at this head"
+
+
+def full_suite_at_head(worker_task_id: int) -> Any:
+    """`gate.full_suite_once`, with its progress in the serve log."""
+    return gate.full_suite_once(worker_task_id, out=lambda line: log.info("[serve] %s", line))
+
+
 def default_gate_state(worker_task_id: int) -> Any:
     """`rounds.gate_state`: the worker's gate as the supervisor has it now."""
     from papaya_agent_runtime import rounds
@@ -3746,11 +3790,13 @@ def self_setup(*, stderr) -> None:
 def keep_state_right(*, stderr) -> None:
     """Repair state an earlier runtime left wrong, one line per thing repaired.
 
-    Two remedies, beside the config's: runner rows with no process behind them are
+    Three remedies, beside the config's: runner rows with no process behind them are
     closed (the supervisor start already did this when this process owns it; here it
-    also covers a start that adopted one), and every base clone is put back on its
+    also covers a start that adopted one), every base clone is put back on its
     forge — ``origin`` the forge, not a local checkout, and the default branch the
-    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`). A remedy that
+    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`) — and every gate
+    answer the old heuristics guessed is dropped for what the repository itself
+    declares (`solicit.clear_heuristic_gate_policies`). A remedy that
     cannot finish says why and never stops `serve` from starting.
     """
     from papaya_agent_runtime import repos
@@ -3775,6 +3821,12 @@ def keep_state_right(*, stderr) -> None:
     except Exception as exc:  # noqa: BLE001 - a remedy never stops serve
         lines = [f"could not check base clones against their forges: {exc}"]
     for line in lines:
+        _say(line, stderr=stderr)
+    # The repository owns its gates: an answer the old heuristics guessed is dropped,
+    # and the repository's own instructions are read again (`solicit`).
+    from papaya_agent_runtime import solicit
+
+    for line in solicit.clear_heuristic_gate_policies():
         _say(line, stderr=stderr)
 
 
