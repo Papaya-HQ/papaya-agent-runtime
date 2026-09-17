@@ -264,3 +264,61 @@ def test_a_tool_that_fails_with_nothing_on_stderr_still_gives_a_reason(
     record_review(approved_task, "approved")
     result = deliver(approved_task, push=True, open_pr=True)
     assert result.note == "pushed; PR creation failed: exit status 4 with no output"
+
+
+GH_AXI_LIST = """count: 1
+pull_requests[1]{number,title,state,author,draft,review}:
+  72,"do work",open,gizm0duck,no,none
+help[2]:
+  Run `gh-axi pr view 72 -R gizm0duck/papaya-agent-runtime` to view details
+"""
+
+
+@pytest.fixture
+def on_a_forge(monkeypatch):
+    """The task's repository has a real forge, so a PR number names a URL."""
+    monkeypatch.setattr(
+        delivery, "_forge_for_task", lambda conn, task: ("origin", "gizm0duck/papaya-agent-runtime")
+    )
+
+
+def test_a_list_naming_only_the_number_still_finds_the_open_pull_request(
+    monkeypatch, approved_task, on_a_forge
+) -> None:
+    """`gh-axi pr list` prints the number and no URL; the PR is still findable.
+
+    Searching that output for a URL found none, so delivery went on to create a
+    second pull request, which the forge refused — and a delivery that had in fact
+    landed was recorded as "PR creation failed" (2026-09-17, task 37).
+    """
+    calls = _stub_tool(
+        monkeypatch, "/x/gh-axi", {"list": (0, GH_AXI_LIST, ""), "edit": (0, "", "")}
+    )
+    result = deliver(approved_task, push=True, open_pr=True)
+    assert result.pr_url == PR
+    assert result.pr_exists is True
+    assert _delivered_event(approved_task)["pr_updated"] is True
+    # It never tried to create a second one.
+    assert [c[2] for c in calls] == ["list", "edit"]
+    assert _delivered_event(approved_task)["pr_url"] == PR
+
+
+def test_a_refusal_that_hides_the_url_falls_back_to_looking_it_up(
+    monkeypatch, approved_task, on_a_forge
+) -> None:
+    """A wrapper can swallow the URL out of "already exists"; the branch still names it."""
+    calls = _stub_tool(
+        monkeypatch,
+        "/x/gh-axi",
+        {
+            # Empty the first time (so delivery creates), then the real row.
+            "list": [(0, "count: 0\n", ""), (0, GH_AXI_LIST, "")],
+            "create": (1, "", 'error: "a pull request for branch "x" already exists:"'),
+        },
+    )
+    result = deliver(approved_task, push=True, open_pr=True)
+    assert result.pr_url == PR
+    assert result.pr_exists is True
+    assert _delivered_event(approved_task)["pr_error"] is None
+    assert "already open" in result.note
+    assert [c[2] for c in calls] == ["list", "create", "list"]

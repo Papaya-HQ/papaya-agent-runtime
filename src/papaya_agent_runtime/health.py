@@ -368,9 +368,13 @@ def describe_claude_tools(profile: dict[str, Any]) -> str:
     )
 
 
-def humanize(seconds: int | None) -> str:
+def humanize(seconds: float | None) -> str:
+    # Callers hand this both ints (event ages) and floats (`running_seconds`), so it
+    # rounds once here rather than at every call site: a float reached the `h%02dm`
+    # format and crashed `ppy status --team` (2026-09-17).
     if seconds is None:
         return "never heard from"
+    seconds = int(seconds)
     if seconds < 90:
         return f"{seconds}s"
     minutes = seconds // 60

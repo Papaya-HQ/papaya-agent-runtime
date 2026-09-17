@@ -136,6 +136,10 @@ DEFAULT_PLAN_IDLE_MINUTES = 5
 #: it is doing.
 PLAN_HARD_FACTOR = supervision.PLAN_HARD_FACTOR
 
+#: Events that start a worker session. A check-in measures the session in front of
+#: it from the newest of these, not from when the task was first created.
+SESSION_START_KINDS = ("dispatched", "resumed")
+
 #: How long a worker with no live session must have been silent before it is dead
 #: rather than between a runner exiting and its result being recorded.
 DEAD_GRACE_SECONDS = 2 * 60.0
@@ -297,13 +301,23 @@ class WorkerLook:
     last_acted_id: int
     #: When the worker's session last made or ran a tool call, from its provider stream.
     last_tool_at: datetime | None = None
+    #: When the session running right now started: the newest dispatch or resume.
+    session_started_at: datetime | None = None
 
     @property
     def latest_phase(self) -> str | None:
         return self.progress[-1][2] if self.progress else None
 
     def running_seconds(self, now: datetime) -> float:
-        return (now - self.created_at).total_seconds() if self.created_at else 0.0
+        """How long the CURRENT session has been going, not how old the task is.
+
+        A check-in asks whether this worker is still heading where the brief asked,
+        which is a question about the session in front of it. Measured from the
+        task's creation instead, a fresh reconciler picked up on a task delivered
+        hours ago is past its midpoint the moment it starts (2026-09-17, task 30).
+        """
+        since = self.session_started_at or self.created_at
+        return (now - since).total_seconds() if since else 0.0
 
     def tool_idle_seconds(self, now: datetime) -> float:
         """Since the last tool call; since dispatch for a worker that has made none."""
@@ -333,10 +347,13 @@ def look_at_worker(task_id: int, *, now: datetime, quiet_after: timedelta) -> Wo
         question = stopped = None
         last_acted = 0
         last_tool_at: datetime | None = None
+        session_started_at: datetime | None = None
         for row in rows:
             kind, payload = str(row["kind"]), _payload(row)
             if _is_tool_activity(kind, payload):
                 last_tool_at = _parse(row["created_at"]) or last_tool_at
+            if kind in SESSION_START_KINDS:
+                session_started_at = _parse(row["created_at"]) or session_started_at
             if kind == "worker_progress" and payload.get("phase"):
                 progress.append(
                     (
@@ -365,6 +382,7 @@ def look_at_worker(task_id: int, *, now: datetime, quiet_after: timedelta) -> Wo
             stopped=stopped,
             last_acted_id=last_acted,
             last_tool_at=last_tool_at,
+            session_started_at=session_started_at,
         )
     finally:
         conn.close()
