@@ -106,6 +106,7 @@ from papaya_agent_runtime import (
     deficiencies,
     health,
     lanes,
+    outreach,
     papaya_events,
     serve,
     supervision,
@@ -509,6 +510,40 @@ def person_wait_since(ticket_task_id: int) -> tuple[int, str, datetime | None] |
             (ticket_task_id,),
         ).fetchone()
         return (int(row["id"]), str(row["text"]), _parse(row["created_at"])) if row else None
+    finally:
+        conn.close()
+
+
+def _outreach_said(key: str) -> bool:
+    conn = db.init_db()
+    try:
+        return outreach.was_said(conn, key)
+    finally:
+        conn.close()
+
+
+def _outreach_plan(now: datetime, host: str) -> tuple[outreach.Plan, list[str]]:
+    """The outreach plan for this round, read on the thread that owns the connection."""
+    conn = db.init_db()
+    try:
+        return outreach.plan(conn, now=now, host=host)
+    finally:
+        conn.close()
+
+
+def _outreach_deliver(
+    found: outreach.Plan, now: datetime, tickets: dict[str, bool], dm_landed: bool
+) -> list[str]:
+    """Record what serve's own posting landed, through the shared procedure."""
+    conn = db.init_db()
+    try:
+        return outreach.deliver(
+            conn,
+            found,
+            now=now,
+            ticket=lambda item, _body: tickets.get(item, False),
+            dm=lambda _text: dm_landed,
+        )
     finally:
         conn.close()
 
@@ -1238,6 +1273,7 @@ class Rounds:
             parts += await self._look_at(ticket, now)
         parts += await self._owed_lane(now, watched)
         parts += await self._ledger_lane(now)
+        parts += await self._outreach_lane(now)
         parts += await self._deficiency_lane(now)
         if self._last_hygiene is None or (
             (now - self._last_hygiene).total_seconds() >= HYGIENE_EVERY_SECONDS
@@ -1284,6 +1320,33 @@ class Rounds:
         if not due:
             return []
         return await self._turns.take_up_ledger(due)
+
+    async def _outreach_lane(self, now: datetime) -> list[str]:
+        """Everything waiting on a person is said to them, and again on a clock (`outreach`).
+
+        The same plan a session's heartbeat and hooks make; serve says it through its
+        own connection: the work item comments with this connection's credentials, the
+        message through the listener's client (`outreach.say_in_workspace`: the DM, or a
+        channel with the owner mentioned). Never raises: a person who could not be
+        reached this round is reached the next.
+        """
+        try:
+            found, lines = await asyncio.to_thread(_outreach_plan, now, serve._where())
+            if not found:
+                return lines
+            env = self._papaya_env()
+            landed: dict[str, bool] = {}
+            for item, body in found.tickets.items():
+                landed[item] = await asyncio.to_thread(
+                    outreach.post_ticket, item, body, environ=env
+                )
+            dm_landed = bool(found.dm) and await outreach.say_in_workspace(
+                getattr(self._built, "api", None), found.dm
+            )
+            return lines + await asyncio.to_thread(_outreach_deliver, found, now, landed, dm_landed)
+        except Exception as exc:  # noqa: BLE001 - the rounds keep going
+            log.warning("[rounds] Could not reach the person things wait on: %s", exc)
+            return [f"could not reach the person things wait on: {exc}"]
 
     async def _deficiency_lane(self, now: datetime) -> list[str]:
         """Open recorded deficiencies as issues on the clock (`lanes.deficiency_step`)."""
@@ -1650,7 +1713,12 @@ class Rounds:
         if _done_before(records, "waiting_on_you", todo_id=todo_id):
             return []
         await asyncio.to_thread(record_round, task_id, "waiting_on_you", todo_id=todo_id)
-        await self._runner._say(ticket, f"waiting_on_you:{todo_id}", f"waiting on you: {question}")
+        # The outreach lane says the question on the ticket and in the DM the moment it
+        # is recorded, and again on its clock; this status line is not a second comment.
+        if not await asyncio.to_thread(_outreach_said, f"todo:{todo_id}"):
+            await self._runner._say(
+                ticket, f"waiting_on_you:{todo_id}", f"waiting on you: {question}"
+            )
         if ticket.phase != serve.PHASE_BLOCKED:
             await self._runner._enter(ticket, serve.PHASE_BLOCKED, f"Waiting on you: {question}")
         else:

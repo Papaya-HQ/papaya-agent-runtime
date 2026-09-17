@@ -160,6 +160,10 @@ def test_stop_needs_a_next_step_against_each_owed_task(home, monkeypatch) -> Non
     board.add(
         "decide whether the fix is worth a redo", task_id=task_id, blocked_on="user", conn=conn
     )
+    # The decision is chased through Papaya (`outreach`); not connected, the turn is
+    # held once so the ask goes in the reply, then it ends.
+    held = hooks.handle_hook_stdin("Stop", "{}")
+    assert held["decision"] == "block" and "waiting on a person" in held["reason"]
     assert "decision" not in hooks.handle_hook_stdin("Stop", "{}")
 
 

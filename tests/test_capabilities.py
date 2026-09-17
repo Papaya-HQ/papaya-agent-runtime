@@ -14,6 +14,7 @@ import importlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from conftest import scale
-from papaya_agent_runtime import capabilities, cli
+from papaya_agent_runtime import capabilities, cli, version
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,7 +60,13 @@ def test_capabilities_json_is_one_object_with_exactly_the_contracted_keys(capsys
 
     assert set(data) == {"runtime", "version", "client_version", "protocol", "modes"}
     assert data["runtime"] == "papaya-agent-runtime"
-    assert isinstance(data["version"], str) and data["version"]
+    # Derived from this checkout's git tags, never a literal — the desktop machine
+    # card prints it verbatim. `tests/test_version.py` holds the derivation itself;
+    # what belongs here is that what comes out is a version a reader can parse.
+    assert data["version"] == version.version()
+    assert re.fullmatch(r"\d+\.\d+\.\d+(\.post\d+)?(\+[0-9a-z.]+)?", data["version"]), data[
+        "version"
+    ]
     assert data["client_version"] is None or isinstance(data["client_version"], str)
     assert isinstance(data["protocol"], int) and not isinstance(data["protocol"], bool)
     assert isinstance(data["modes"], list)

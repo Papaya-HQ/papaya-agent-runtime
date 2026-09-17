@@ -11,9 +11,15 @@ So the runtime says what it is, on one command it owns. `ppy capabilities --json
 is the only thing anybody should ever read to learn this, and the shape it prints is
 a contract:
 
-    {"runtime": "papaya-agent-runtime", "version": "0.0.0",
+    {"runtime": "papaya-agent-runtime", "version": "0.1.3.post2+gabc1234",
      "client_version": "0.15.1", "protocol": 1,
      "modes": ["supervised", "terminal"]}
+
+`version` is derived from the checkout's git tags rather than written down (see
+`version.py`), because the desktop displays this string verbatim on the machine
+card and a literal in a file would name the same build on every machine forever.
+It is always a valid PEP 440 version, so a reader may parse it; `0.0.0` and
+`0.0.0+g<sha7>` are what an untagged or un-gitted checkout honestly is.
 
 Two properties make it usable at connect time, and both are constraints on what may
 ever be added here. It reads **local state only** — no network, no harness probe, no

@@ -380,6 +380,10 @@ def test_a_session_turn_does_not_end_while_a_turn_or_a_next_step_is_its_to_take(
     # Deferred with reasons, both are a person's or another task's now.
     board.add("wait for the requester", task_id=done, blocked_on="user", conn=conn)
     board.block(todo_id, "task:1", conn=conn)
+    # The decision waiting on a person is chased through Papaya (`outreach`); with this
+    # machine not connected, the turn is held once so the ask goes in the reply.
+    held = hooks.handle_hook_stdin("Stop", "{}")
+    assert held["decision"] == "block" and "waiting on a person" in held["reason"]
     assert "decision" not in hooks.handle_hook_stdin("Stop", "{}")
 
 
