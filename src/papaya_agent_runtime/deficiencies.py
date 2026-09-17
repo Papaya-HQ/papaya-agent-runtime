@@ -82,7 +82,8 @@ IDLE_WORK_REFUSED = "idle-work-refused"
 WATCHING = "watching"
 PENDING = "pending"
 REPORTED = "reported"
-#: A `worker-denial` row whose denials a later classifier says were never profile gaps.
+#: A `worker-denial` row whose denials a later classifier says were never profile gaps,
+#: or a `turn-report` row about a check-in a later fix made impossible.
 RECLASSIFIED = "reclassified"
 
 
@@ -930,13 +931,14 @@ class Reporter:
         return done
 
     def reclassify(self) -> list[str]:
-        """Close what the denial kinds say was never a profile gap. Never raises.
+        """Close what a later classifier or fix says is no longer the runtime's. Never raises.
 
         `serve` runs this at start. Each `worker-denial` row whose denials all classify
-        as `command_shape` or `policy_refusal` today leaves the ledger; if it has an
-        open issue, the issue gets one comment saying so and is closed. A row whose
-        issue cannot be closed now (no `gh`, self-reporting off) stays as it is and is
-        tried again at the next start.
+        as `command_shape` or `policy_refusal` today leaves the ledger, and so does each
+        `turn-report` row whose every occurrence came from a check-in a later fix made
+        impossible (:func:`fixed_checkin`); if it has an open issue, the issue gets one
+        comment saying so and is closed. A row whose issue cannot be closed now (no
+        `gh`, self-reporting off) stays as it is and is tried again at the next start.
         """
         with self._lock:
             try:
@@ -958,14 +960,20 @@ class Reporter:
             rows = [
                 Deficiency.from_row(r)
                 for r in conn.execute(
-                    "SELECT * FROM deficiencies WHERE kind = ? AND status != ?",
-                    (WORKER_DENIAL, RECLASSIFIED),
+                    "SELECT * FROM deficiencies WHERE kind IN (?, ?) AND status != ?",
+                    (WORKER_DENIAL, TURN_REPORT, RECLASSIFIED),
                 )
             ]
             for deficiency in rows:
-                kinds = denial_kinds(conn, deficiency)
-                if not kinds or tool_learning.PROFILE_GAP in kinds:
-                    continue
+                if deficiency.kind == TURN_REPORT:
+                    body = fixed_checkin(conn, deficiency)
+                    if body is None:
+                        continue
+                else:
+                    kinds = denial_kinds(conn, deficiency)
+                    if not kinds or tool_learning.PROFILE_GAP in kinds:
+                        continue
+                    body = reclassified_body(kinds)
                 if deficiency.status == REPORTED and deficiency.issue_url:
                     if repo is None:
                         config = self._settings()
@@ -974,7 +982,7 @@ class Reporter:
                         continue
                     url = deficiency.issue_url
                     if (self._forge.state(url) or "") != "CLOSED":
-                        if not self._forge.close(url, reclassified_body(kinds)):
+                        if not self._forge.close(url, body):
                             continue
                         done.append(f"closed {url}")
                 conn.execute(
@@ -1183,6 +1191,75 @@ def reclassified_body(kinds: Iterable[str]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class CheckinFix:
+    """A fix to one check-in trigger, as the ledger can recognise what came before it."""
+
+    #: A field every record of the trigger has carried since the fix; a record of the
+    #: trigger without it was made by the code the fix replaced.
+    marker: str
+    #: What the fix changed, for the one comment on the issue it closes.
+    note: str
+
+
+#: Check-in triggers a fix has changed, so a turn's report that one of them was wrong
+#: before the fix is closed from the fix rather than left open.
+FIXED_CHECKINS: dict[str, CheckinFix] = {
+    "push": CheckinFix(
+        marker="head_sha",
+        note=(
+            'The push check-in used to measure "nothing pushed" from the commit date of the '
+            "remote-tracking ref's tip, not from when that tip reached the forge, so a push "
+            "that landed minutes ago read as the commit's age. It now asks the forge with "
+            "`git ls-remote` every round, records when a round first sees a new tip, compares "
+            "that tip with the worktree's HEAD, and never fires for a HEAD that is on the "
+            "forge. Its record and the check-in facts carry the forge's tip, the HEAD and the "
+            "last recorded push."
+        ),
+    ),
+}
+
+
+def fixed_checkin(conn: Any, deficiency: Deficiency) -> str | None:
+    """The closing comment for a `turn-report` about a check-in a later fix made impossible.
+
+    Every occurrence must come from a check-in turn, and the round record that started
+    that check-in (the newest `checkin` for its worker at or before the occurrence)
+    must name only triggers in :data:`FIXED_CHECKINS` and lack each one's marker. An
+    occurrence the ledger cannot tie to such a record keeps the issue open.
+    """
+    if deficiency.kind != TURN_REPORT or not deficiency.evidence:
+        return None
+    notes: list[str] = []
+    for entry in deficiency.evidence:
+        task_id, worker, upto = (
+            entry.get("task_id"),
+            entry.get("worker_task_id"),
+            entry.get("event_id"),
+        )
+        if entry.get("turn") != "checkin" or not all(
+            isinstance(v, int) for v in (task_id, worker, upto)
+        ):
+            return None
+        row = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = 'ticket_round' AND id <= ? "
+            "AND json_valid(payload) AND json_extract(payload, '$.action') = 'checkin' "
+            "AND json_extract(payload, '$.worker_task_id') = ? ORDER BY id DESC LIMIT 1",
+            (task_id, upto, worker),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload"])
+        fixes = [FIXED_CHECKINS.get(t) for t in str(payload.get("trigger") or "").split(",")]
+        if not fixes or any(fix is None or fix.marker in payload for fix in fixes):
+            return None
+        notes += [fix.note for fix in fixes if fix is not None and fix.note not in notes]
+    return (
+        "closing: the check-in this turn reported on cannot fire that way any more.\n\n"
+        + "\n\n".join(notes)
+    )
+
+
 def record_gate_past_tool_cap(task_id: int, run_id: int | None, command: str | None) -> None:
     """A worker stopped on a backgrounded command with no `ppy gate run` on record."""
     try:
@@ -1210,6 +1287,7 @@ def record_gate_past_tool_cap(task_id: int, run_id: int | None, command: str | N
 
 
 __all__ = [
+    "FIXED_CHECKINS",
     "GATE_PAST_TOOL_CAP",
     "KINDS",
     "LABEL",
@@ -1226,6 +1304,7 @@ __all__ = [
     "UNHANDLED_EXCEPTION",
     "WATCHING",
     "WORKER_DENIAL",
+    "CheckinFix",
     "Deficiency",
     "GhForge",
     "Reporter",
@@ -1234,6 +1313,7 @@ __all__ = [
     "comment_body",
     "denial_kinds",
     "fingerprint",
+    "fixed_checkin",
     "github_slug",
     "issue_body",
     "ledger",

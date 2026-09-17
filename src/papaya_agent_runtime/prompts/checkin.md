@@ -33,7 +33,9 @@ Judge the direction against both.
   on without asking.
 - **Nothing pushed** (the reason says "nothing pushed in N minutes"): steer it, whatever
   else is true, to commit what is green and push it to its lease branch before it
-  continues. Work only in its worktree is lost to a restart. The rule it was briefed with:
+  continues. Work only in its worktree is lost to a restart. The facts give the forge's
+  tip of the branch (read as the rounds looked), the worktree's HEAD and the last push
+  the runtime recorded, so you can see why this fired. The rule it was briefed with:
   Commit and push at milestones, not once at the end: after each goal in the brief lands and its scoped gate is green, and in any case before starting a run that may exceed ten minutes (a full suite, `make verify`, a build). The commit message says which goal; the push goes to your task's lease branch.
 - **Carrying on would only waste its work** (it is building the wrong thing, or wedged
   in a loop): stop it and resume it with what to do instead.

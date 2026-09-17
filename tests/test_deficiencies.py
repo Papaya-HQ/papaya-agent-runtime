@@ -539,3 +539,89 @@ def test_an_exception_is_recorded_with_its_traceback_and_recording_never_raises(
 
     monkeypatch.setattr(deficiencies, "_record", lambda *a, **k: 1 / 0)
     assert deficiencies.record(deficiencies.TURN_REPORT, "anything") is None
+
+
+# ── turn reports a later fix answered ──────────────────────────────────────
+
+
+def _checkin_report(
+    ticket: int, run_id: int, worker: int, detail: str, **round_record: Any
+) -> None:
+    """A round's check-in record, then the check-in turn's `RUNTIME:` line about it."""
+    conn = init_db()
+    try:
+        store.append_event(
+            conn,
+            kind="ticket_round",
+            payload={
+                "task_id": ticket,
+                "action": "checkin",
+                "worker_task_id": worker,
+                **round_record,
+            },
+            run_id=run_id,
+            task_id=ticket,
+        )
+        event_id = int(conn.execute("SELECT MAX(id) FROM events").fetchone()[0])
+    finally:
+        conn.close()
+    deficiencies.record(
+        deficiencies.TURN_REPORT,
+        detail,
+        evidence={
+            "turn": "checkin",
+            "task_id": ticket,
+            "worker_task_id": worker,
+            "run_id": run_id,
+            "event_id": event_id,
+        },
+    )
+
+
+def test_a_turn_report_about_a_push_checkin_the_fix_made_impossible_closes_with_one_comment(
+    ppy_home,
+) -> None:
+    """#46: the report was opened by the pre-fix push trigger, and the fix closes it."""
+    conn = init_db()
+    run_id = store.create_run(conn, "run 9")
+    ticket, worker, other = (store.add_task(conn, run_id=run_id, title=t) for t in "twx")
+    conn.close()
+    pre_fix = {"trigger": "push", "reason": "nothing pushed in 47 minutes", "remote_sha": "fc0cbdc"}
+    _checkin_report(
+        ticket, run_id, worker, "the check-in for task 18 said nothing was pushed", **pre_fix
+    )
+    # Not answered by the fix: a quiet check-in, and a push check-in the fixed trigger made.
+    _checkin_report(ticket, run_id, other, "the quiet check-in read no gate", trigger="quiet")
+    _checkin_report(
+        ticket,
+        run_id,
+        other,
+        "the push check-in after the fix was still wrong",
+        **{**pre_fix, "head_sha": "0e0b511", "last_push_at": "2026-09-16T23:55:00+00:00"},
+    )
+    gh = FakeGh()
+    reporter = _reporter(gh)
+    reporter.flush()
+    urls = {issue["title"].split(": ", 1)[-1]: url for url, issue in gh.issues.items()}
+    assert len(urls) == 3
+
+    assert reporter.reclassify() == [
+        f"closed {urls['the check-in for task 18 said nothing was pushed']}"
+    ]
+    assert reporter.reclassify() == []
+
+    closed = gh.issues[urls["the check-in for task 18 said nothing was pushed"]]
+    (comment,) = closed["comments"]
+    assert closed["state"] == "CLOSED"
+    assert comment.startswith("closing: the check-in this turn reported on cannot fire that way")
+    assert "git ls-remote" in comment
+    for detail in (
+        "the quiet check-in read no gate",
+        "the push check-in after the fix was still wrong",
+    ):
+        assert (gh.issues[urls[detail]]["state"], gh.issues[urls[detail]]["comments"]) == (
+            "OPEN",
+            [],
+        )
+    statuses = {d.detail: d.status for d in deficiencies.ledger(include_all=True)}
+    assert statuses["the check-in for task 18 said nothing was pushed"] == deficiencies.RECLASSIFIED

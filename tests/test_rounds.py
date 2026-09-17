@@ -384,33 +384,206 @@ def test_a_long_session_with_nothing_on_the_remote_gets_a_push_checkin_and_a_pus
     assert "commit what is green and push" in turns.calls[1].prompt
 
 
-def test_push_state_reads_the_lease_branch_against_origin(ppy_home, tmp_path) -> None:
-    origin = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+def _clone_beside_a_forge(tmp_path: Path) -> tuple[Path, Path, Path, Any]:
+    """A clone whose `origin` is not the forge, the #46 shape.
+
+    The forge is a bare repository the clone reaches through a second remote, `forge`;
+    its `origin` is a stale copy that is never pushed to. Returns the forge, the stale
+    origin, the clone and a `git` helper that runs in the clone.
+    """
+    forge, stale = tmp_path / "forge.git", tmp_path / "stale.git"
+    for bare in (forge, stale):
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
     worktree = Path(make_git_repo(tmp_path / "wt"))
 
-    def git(*args: str) -> None:
-        subprocess.run(["git", "-C", str(worktree), *args], check=True, capture_output=True)
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(worktree), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
 
-    git("remote", "add", "origin", str(origin))
+    git("remote", "add", "origin", str(stale))
+    git("remote", "add", "forge", str(forge))
+    return forge, stale, worktree, git
+
+
+def _forge_and_worktree(tmp_path: Path, *, forge_url: bool = True) -> tuple[int, Path, Any]:
+    """A worker task in a clone beside a forge registered as its repo's `forge_url`."""
+    forge, stale, worktree, git = _clone_beside_a_forge(tmp_path)
     conn = init_db()
     try:
+        repo_id = store.add_repo(
+            conn,
+            name="pushed",
+            origin=str(stale),
+            local_path=str(worktree),
+            default_branch="main",
+            base_sha=None,
+            forge_url=str(forge) if forge_url else None,
+        )
         run_id = store.create_run(conn, "push")
-        task_id = store.add_task(conn, run_id=run_id, title="worker")
+        task_id = store.add_task(conn, run_id=run_id, title="worker", repo_id=repo_id)
         store.update_task_fields(conn, task_id, branch="ppy/task-1", worktree_path=str(worktree))
     finally:
         conn.close()
+    return task_id, worktree, git
 
-    assert rounds.push_state(task_id) == rounds.PushState(None, None, True)
-    git("push", "-q", "origin", "HEAD:ppy/task-1")
-    state = rounds.push_state(task_id)
-    assert state is not None and state.remote_sha and state.remote_at is not None
-    assert not state.unpushed
+
+@pytest.mark.parametrize("head", ["on-the-forge", "ahead-of-the-forge"])
+def test_a_worker_whose_head_is_on_the_forge_is_never_nudged_to_push(
+    ppy_home, client_home, ready, registered_repo, assigned, pruned, tmp_path, head
+) -> None:
+    """#46: fifty minutes with no progress note, and a HEAD the forge already has.
+
+    The clone's `origin` is not the forge (the backend's was rewritten by hand), so
+    the worktree's `refs/remotes/origin/<branch>` never moves; the rounds read the
+    forge itself. A HEAD one commit past the forge's tip is still nudged.
+    """
+    forge, _stale, worktree, git = _clone_beside_a_forge(tmp_path)
+    git("push", "-q", "forge", "HEAD:ppy/task-1")
+    pushed_sha = git("rev-parse", "HEAD")
+    if head == "ahead-of-the-forge":
+        (worktree / "goal.py").write_text("x = 1\n")
+        git("add", "-A")
+        git("commit", "-qm", "goal 1, not pushed")
+    head_sha = git("rev-parse", "HEAD")
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            worker = working_worker(turn.run_id, note="Implementing goal 1.")
+            conn = init_db()
+            try:
+                store.update_repo_fields(conn, "runtime", forge_url=str(forge))
+                store.update_task_fields(
+                    conn, worker, branch="ppy/task-1", worktree_path=str(worktree)
+                )
+            finally:
+                conn.close()
+        elif turn.name == prompts.CHECKIN:
+            return "CHECK-IN: continue"
+        return None
+
+    turns, timer, clock = FakeTurns(act), Timer(), WallClock()
+    harness = Harness(FakeEvents([EVENT]))
+    seams = {**_seams(timer, clock, pruned), "pushed": rounds.push_state}
+
+    def seen() -> list[dict[str, Any]]:
+        return [
+            p
+            for p in events_of(int(ticket_task()["id"]), rounds.ROUND_EVENT)
+            if p["action"] == "push_seen"
+        ]
+
+    async def scenario() -> None:
+        task = _serve(harness, client_home, _runner(turns, FakePapaya()), seams)
+        await _dispatched(timer)
+        # A round sees the forge's tip; the next is fifty minutes on, with no progress
+        # note in between, so a quiet check-in is due whatever the push trigger says.
+        for _ in range(10):
+            await timer.round()
+            if seen():
+                break
+        clock.advance(minutes=50)
+        await timer.round()
+        await _until(lambda: checkins(), what="the fifty-minute check-in")
+        await asyncio.sleep(scale(0.2))
+        harness.loop.request_stop()
+        assert await task == 0
+
+    asyncio.run(scenario())
+
+    (record,) = checkins()
+    triggers = record["trigger"].split(",")
+    if head == "on-the-forge":
+        assert "push" not in triggers
+        assert "nothing pushed" not in record["reason"]
+        assert "remote_sha" not in record
+    ticket = int(ticket_task()["id"])
+    (first_seen,) = seen()
+    assert first_seen["remote_sha"] == pushed_sha
+    if head == "on-the-forge":
+        return
+    assert "push" in triggers
+    assert record["remote_sha"] == pushed_sha
+    assert record["head_sha"] == head_sha
+    assert record["last_push_at"] == first_seen["at"]
+    prompt = turns.calls[1].prompt
+    assert f"the lease branch's tip on the forge (read now): {pushed_sha}" in prompt
+    assert f"the worktree's HEAD: {head_sha}" in prompt
+    assert first_seen["at"] in prompt
+    (round_record,) = [
+        p for p in events_of(ticket, rounds.ROUND_EVENT) if p.get("trigger") == "push"
+    ]
+    assert (round_record["remote_sha"], round_record["head_sha"]) == (pushed_sha, head_sha)
+
+
+def test_the_push_clock_runs_from_when_the_push_was_seen_not_from_the_commit_date() -> None:
+    """#46's cause: the tip was committed 47 minutes before the check, pushed ten minutes after.
+
+    The rounds used the tip's commit date as the last push. The last push is when a
+    round first saw that tip on the forge.
+    """
+    start = datetime(2026, 9, 16, 23, 7, tzinfo=UTC)
+    look = rounds.WorkerLook(
+        task_id=18,
+        status="in_progress",
+        branch="ppy/task-18",
+        created_at=start,
+        verdict="alive",
+        silent_seconds=0,
+        last_event_id=10638,
+        progress=[],
+        question=None,
+        stopped=None,
+        last_acted_id=0,
+    )
+    seen_at = datetime(2026, 9, 16, 23, 55, tzinfo=UTC)
+    seen = {"worker_task_id": 18, "remote_sha": "fc0cbdc", "at": seen_at.isoformat()}
+    records = [(1, {"action": rounds.PUSH_SEEN, **seen})]
+    ahead = rounds.PushState("fc0cbdc", "0e0b511", True)
+    waits = rounds.WorkerBudgets(10**6, 10**6, 10**6)
+
+    def push_due(now: datetime) -> list[str]:
+        due = rounds.Rounds._checkins_due(look, now, records, waits, ahead)
+        return [why for trigger, why in due if trigger == "push"]
+
+    assert push_due(datetime(2026, 9, 17, 0, 32, tzinfo=UTC)) == []
+    assert push_due(seen_at + timedelta(minutes=45)) == ["nothing pushed in 45 minutes"]
+    on_forge = rounds.PushState("fc0cbdc", "fc0cbdc", False)
+    later = seen_at + timedelta(hours=3)
+    assert rounds.Rounds._checkins_due(look, later, records, waits, on_forge) == []
+
+
+def test_push_state_asks_the_forge_and_compares_with_head(ppy_home, tmp_path) -> None:
+    task_id, worktree, git = _forge_and_worktree(tmp_path)
+    head = git("rev-parse", "HEAD")
+
+    assert rounds.push_state(task_id) == rounds.PushState(None, head, True)
+    git("push", "-q", "forge", "HEAD:ppy/task-1")
+    # `origin` never saw the push, and its remote-tracking ref does not exist: the
+    # forge is what is asked.
+    assert rounds.push_state(task_id) == rounds.PushState(head, head, False)
+    # Uncommitted files are not a push to nag about.
     (worktree / "new.py").write_text("x = 1\n")
-    assert rounds.push_state(task_id).unpushed
+    assert not rounds.push_state(task_id).unpushed
     git("add", "-A")
     git("commit", "-qm", "goal 1")
-    assert rounds.push_state(task_id).unpushed
+    ahead = git("rev-parse", "HEAD")
+    assert rounds.push_state(task_id) == rounds.PushState(head, ahead, True)
+    git("push", "-q", "forge", "HEAD:ppy/task-1")
+    # A HEAD behind the forge's tip is on the forge too.
+    git("reset", "-q", "--hard", "HEAD~1")
+    assert rounds.push_state(task_id) == rounds.PushState(ahead, head, False)
+
+
+def test_push_state_without_a_forge_url_asks_origin_and_an_unreachable_forge_is_unknown(
+    ppy_home, tmp_path
+) -> None:
+    task_id, _worktree, git = _forge_and_worktree(tmp_path, forge_url=False)
+    head = git("rev-parse", "HEAD")
+    git("push", "-q", "origin", "HEAD:ppy/task-1")
+    assert rounds.push_state(task_id) == rounds.PushState(head, head, False)
+    git("remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    assert rounds.push_state(task_id) is None
 
 
 def test_a_dead_session_with_no_done_note_takes_the_worker_stopped_path_in_one_round(
@@ -540,7 +713,9 @@ def test_a_person_steer_from_a_session_is_not_undone_by_the_next_round(
         await timer.round()
         await asyncio.sleep(scale(0.2))
         assert checkins() == [] and turns.names() == [prompts.BRIEF]
-        assert not events_of(int(ticket_task()["id"]), rounds.ROUND_EVENT)
+        # The round still notes the forge's tip (`push_seen`); it acts on nothing.
+        acted = events_of(int(ticket_task()["id"]), rounds.ROUND_EVENT)
+        assert [p for p in acted if p["action"] != rounds.PUSH_SEEN] == []
         # A silence budget later with nothing from the worker, the round checks in, and
         # the check-in turn is told what the person said.
         clock.advance(minutes=6)

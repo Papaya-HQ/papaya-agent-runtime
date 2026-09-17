@@ -148,8 +148,9 @@ A worktree is one machine's disk; a restart strands whatever is only there. Ever
 brief, every worker's environment block and the Claude command rules carry one rule,
 word for word (`prompts.PUSH_MILESTONE_RULE`): commit and push after each goal in the
 brief lands with its scoped gate green, and in any case before a run that may exceed ten
-minutes. `ppy serve`'s rounds check in on a worker whose branch has nothing new on the
-remote after `health.push_by_minutes` (below). The review reads the remote branch, never
+minutes. `ppy serve`'s rounds check in on a worker whose HEAD is not on the forge and
+whose branch has had nothing new there for `health.push_by_minutes` (below). The review
+reads the remote branch, never
 the worktree: a worker that says done with uncommitted files is sent back with
 "uncommitted work in the worktree: <n> files" to commit and push or discard them, and
 is reviewed once its branch holds the work.
@@ -627,14 +628,24 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
      budget, has run for half its worker-session budget, or has run
      `health.push_by_minutes` (45) with nothing new on its remote lease branch. Without
      history the first three are `health.quiet_minutes`, `health.plan_minutes` and
-     `health.checkin_after` (20). The push one says "nothing pushed in N minutes", comes
-     back after every further `push_by_minutes` with no push, and the turn steers the
-     worker to commit what is green and push before it continues; a worker whose branch
-     is up to date is never nudged for it. The turn
+     `health.checkin_after` (20). For the push one, every round asks the forge for the
+     lease branch (`git ls-remote` against the repository's `forge_url`, or the
+     worktree's `origin` when it has none), never a remote-tracking ref, and records when
+     it first sees a new tip (`push_seen`): that is the last push. The push check-in
+     fires when the worktree's HEAD is neither that tip nor behind it and no new tip has
+     landed for `push_by_minutes` since the session started or the last push. A worker
+     whose HEAD is on the forge is never nudged for it, whatever else it is doing, and
+     uncommitted files do not count (the review deals with those). After a restart, a tip
+     no round has seen yet counts as pushed when first seen, so a check-in can come late
+     but not wrong. It says "nothing pushed in N minutes", comes back after every further
+     `push_by_minutes` with no push, and the turn steers the worker to commit what is
+     green and push before it continues. The turn
      reads the brief's Goals and the whole progress log, then ends with one line:
      `CHECK-IN: continue`, `CHECK-IN: steer <message>` or
      `CHECK-IN: stop and resume with <message>`. The decision and why the check ran are
-     recorded on the ticket (`ticket_checkin`).
+     recorded on the ticket (`ticket_checkin`). A push check-in's record and its turn's
+     facts also carry what the round saw: the forge's tip (`remote_sha`), the worktree's
+     HEAD (`head_sha`) and the last recorded push (`last_push_at`).
    - **Gate running.** A worker whose gate is running under the supervisor is not
      silent, and is left alone.
    - **Person wait.** A question that has waited 15 minutes on a person is said once on
@@ -702,7 +713,11 @@ the signals, recorded where they already happen:
   steered once with the rule it broke. A denial is recorded once per tool call, and a
   retry of the same line within a minute is the same denial. At start, `serve`
   re-classifies older `worker-denial` rows, and comments on and closes any issue whose
-  denials were never profile gaps.
+  denials were never profile gaps. It closes a `turn-report` issue the same way, with
+  one comment, when every occurrence came from a check-in a later fix made impossible:
+  the round record that started the check-in names only fixed triggers
+  (`deficiencies.FIXED_CHECKINS`) and lacks the field each fix added (for `push`,
+  `head_sha`).
 - **Something crashes.** An exception escapes `serve`, a ticket's hold, a round, the
   sweep or the supervisor's worker thread. It is recorded with the traceback.
 - **A steer doesn't stick.** A check-in steers one ticket twice for the same reason.
