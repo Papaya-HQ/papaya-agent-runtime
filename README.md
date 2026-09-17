@@ -1056,3 +1056,6 @@ make fmt         # ruff format
 make test-live   # opt-in: spawn real Claude/Codex probes
 make probe       # re-run the provider capability matrix
 ```
+
+The version is a git tag, read back out of the checkout, and every merge to `main`
+tags the next patch — see [`docs/versioning.md`](docs/versioning.md).

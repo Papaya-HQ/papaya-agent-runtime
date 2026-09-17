@@ -13,11 +13,20 @@ import json
 import os
 import sys
 
-from papaya_agent_runtime import __version__
 from papaya_agent_runtime.lifecycle import TASK_STATUSES
 
 
 def _cmd_version(args: argparse.Namespace) -> int:
+    """The build somebody is running, derived from this checkout's tags.
+
+    Imported here rather than at module scope so that importing the CLI — which
+    every `ppy` command does, whatever it was asked for — does not spend a
+    `git describe` on a number only this command prints. It is the same value
+    `ppy capabilities --json` reports and the same one `serve` sends in `hello`,
+    because all three read `papaya_agent_runtime.__version__`.
+    """
+    from papaya_agent_runtime import __version__
+
     print(f"papaya-agent-runtime {__version__}")
     return 0
 
