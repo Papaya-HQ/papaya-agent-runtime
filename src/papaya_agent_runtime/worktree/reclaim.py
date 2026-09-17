@@ -124,14 +124,25 @@ def _stamp_age(stamp: object, now: datetime) -> float | None:
     return (now - parsed).total_seconds()
 
 
-def _refresh_after() -> float:
-    """How old a pull request record may be before the forge is asked again: one round."""
-    try:
-        from papaya_agent_runtime import rounds
+#: One round when nothing says otherwise (`rounds.DEFAULT_ROUNDS_INTERVAL`).
+_ROUND_SECONDS = 300.0
 
-        return rounds.interval_from_env() or rounds.DEFAULT_ROUNDS_INTERVAL
+
+def _refresh_after() -> float:
+    """How old a pull request record may be before the forge is asked again: one round.
+
+    Read the way `rounds.interval_from_env` reads it, without importing the rounds
+    (and `serve` with them) into every `ppy worktree list`.
+    """
+    try:
+        raw = os.environ.get("PPY_ROUNDS_INTERVAL", "").strip()
+        if raw:
+            return float(raw) or _ROUND_SECONDS
+        from papaya_agent_runtime.config import load_config
+
+        return float(load_config().health.rounds_interval) or _ROUND_SECONDS
     except Exception:  # noqa: BLE001 - a bad interval setting is not a reason to prune
-        return 300.0
+        return _ROUND_SECONDS
 
 
 def open_pull_request(
@@ -239,10 +250,41 @@ def _read_forge(task: Any, repo: Any) -> dict[str, Any] | None:
 
 
 def _observe(task_id: int, entry: dict[str, Any]) -> None:
-    try:
-        from papaya_agent_runtime import rounds
+    """Write the forge read as the PR watch record, in `rounds.observe_pr`'s shape."""
+    import json
 
-        rounds.observe_pr(task_id, entry)
+    from papaya_agent_runtime import team
+
+    observed = {
+        "task_id": task_id,
+        "pr": entry.get("pr"),
+        "url": entry.get("url"),
+        "state": entry.get("state"),
+        "merged": bool(entry.get("merged")),
+        "ci": entry.get("ci"),
+        "review": entry.get("review") or None,
+        "head": entry.get("head"),
+    }
+    try:
+        conn = init_db()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM events WHERE task_id = ? AND kind = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id, team.PR_OBSERVED_EVENT),
+            ).fetchone()
+            if row is not None and json.loads(row["payload"]) == observed:
+                return
+            task = store.get_task(conn, task_id)
+            store.append_event(
+                conn,
+                kind=team.PR_OBSERVED_EVENT,
+                payload=observed,
+                run_id=task["run_id"] if task is not None else None,
+                task_id=task_id,
+            )
+        finally:
+            conn.close()
     except Exception:  # noqa: BLE001 - the record is a cache; the answer stands without it
         pass
 

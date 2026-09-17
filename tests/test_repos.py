@@ -501,6 +501,8 @@ def test_delivery_pushes_and_opens_the_pr_on_the_registered_forge(
 
     def fake_run(argv, cwd=None):
         calls.append(argv)
+        if argv[:3] == ["gh", "pr", "list"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")  # no open PR yet
         return SimpleNamespace(returncode=0, stdout="https://github.com/pr/1\n", stderr="")
 
     monkeypatch.setattr(delivery, "_run", fake_run)

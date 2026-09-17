@@ -168,6 +168,8 @@ def test_deliver_defaults_the_pr_base_to_the_recorded_stack(ppy_home, monkeypatc
 
     def fake_run(argv, cwd=None):
         calls.append(argv)
+        if argv[:3] == ["gh", "pr", "list"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")  # no open PR yet
         return SimpleNamespace(returncode=0, stdout="https://example/pr/1\n", stderr="")
 
     monkeypatch.setattr(delivery, "_run", fake_run)
