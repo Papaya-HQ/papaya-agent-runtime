@@ -140,6 +140,87 @@ class Identity:
         return self.name or "an unnamed Papaya agent"
 
 
+#: What `agent:` says in a turn's facts: one person's agent, or one a workspace shares.
+AGENT_PERSONAL = "personal"
+AGENT_SHARED = "shared"
+#: What `memory:` says: where a turn keeps a durable fact.
+MEMORY_PAPAYA = "papaya"
+MEMORY_REPO_NOTES_ONLY = "repo-notes-only"
+
+
+@dataclass(frozen=True)
+class AgentKind:
+    """Whether the connected agent is shared, and so where its turns may keep memory.
+
+    Papaya refuses a machine-extracted agent-scoped memory on a shared agent, because
+    that memory would be visible to the whole workspace (backend `polyweave_memory`).
+    Only a personal agent's turns may call `propose_memory`; a shared agent's durable
+    facts go to the repository's memory notes instead.
+    """
+
+    agent: str
+
+    @property
+    def memory(self) -> str:
+        return MEMORY_PAPAYA if self.agent == AGENT_PERSONAL else MEMORY_REPO_NOTES_ONLY
+
+    def facts(self) -> dict[str, str]:
+        return {"agent": self.agent, "memory": self.memory}
+
+
+def agent_kind_of(record: object) -> AgentKind | None:
+    """The kind of agent Papaya's agent record describes, or ``None`` when it does not say.
+
+    ``ownership_scope`` is ``personal`` or ``workspace``; a workspace agent is shared.
+    """
+    scope = record.get("ownership_scope") if isinstance(record, dict) else None
+    if scope == "personal":
+        return AgentKind(AGENT_PERSONAL)
+    if scope == "workspace":
+        return AgentKind(AGENT_SHARED)
+    return None
+
+
+def agent_kinds_path() -> Path:
+    """Where the kind of each agent this runtime has served as is kept: `.ppy/agent-kinds.json`."""
+    from papaya_agent_runtime.paths import ppy_home
+
+    return ppy_home() / "agent-kinds.json"
+
+
+def _agent_kinds() -> dict:
+    try:
+        data = json.loads(agent_kinds_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def remember_agent_kind(agent_id: str, kind: AgentKind) -> None:
+    """Keep what Papaya said this agent is, for readiness and the next start. Never raises."""
+    if not agent_id:
+        return
+    known = _agent_kinds()
+    if (known.get(agent_id) or {}).get("agent") == kind.agent:
+        return
+    known[agent_id] = {"agent": kind.agent}
+    path = agent_kinds_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(known, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return
+
+
+def known_agent_kind(agent_id: str | None) -> AgentKind | None:
+    """What this runtime last learned the agent ``agent_id`` is, or ``None``."""
+    entry = _agent_kinds().get(agent_id or "")
+    agent = entry.get("agent") if isinstance(entry, dict) else None
+    return AgentKind(agent) if agent in (AGENT_PERSONAL, AGENT_SHARED) else None
+
+
 def installed() -> str | None:
     """The path to `papaya-agent`, or None when it is not on the PATH yet."""
     return shutil.which(CLI)
@@ -333,12 +414,19 @@ def context(*, refresh: bool = False) -> dict | None:
 
 
 __all__ = [
+    "AGENT_PERSONAL",
+    "AGENT_SHARED",
     "BOOTSTRAP",
     "CLI",
     "CLIENT_HOME_ENV",
     "CONNECT_TIMEOUT",
     "HOME_ENV",
+    "MEMORY_PAPAYA",
+    "MEMORY_REPO_NOTES_ONLY",
+    "AgentKind",
     "Identity",
+    "agent_kind_of",
+    "agent_kinds_path",
     "candidate_homes",
     "client_home",
     "config_path",
@@ -347,6 +435,8 @@ __all__ = [
     "context",
     "identity",
     "installed",
+    "known_agent_kind",
+    "remember_agent_kind",
     "signed_in",
     "status",
 ]

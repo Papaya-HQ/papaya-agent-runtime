@@ -569,10 +569,13 @@ def _runner(
     gate_verdict=None,
     gate_state=None,
     uncommitted=lambda _task_id: [],
+    agent_record=lambda _env: None,
 ) -> serve.TicketRunner:
     from papaya_agent_runtime import rounds
 
     return serve.TicketRunner(
+        # Papaya's agent record is not asked for; a test that needs one passes it.
+        agent_record=agent_record,
         # No supervisor answers in these tests; a liveness check never asks the socket.
         gate_state=gate_state or (lambda _task_id: rounds.GateState(False, "no gate running")),
         uncommitted=uncommitted,

@@ -28,8 +28,9 @@ because its name sounds right is a guess.
 5. **Still unsure.** Post the candidates on the work item, with what each one has going
    for it, and ask which. Set the item's status to `blocked` and end the turn. The
    runtime holds the ticket and runs this turn again when someone replies.
-6. **Once placed.** Propose a memory under your identity that says which kind of ticket
-   goes to this repository, and add the mapping to that repository's notes.
+6. **Once placed.** Add which kind of ticket goes to this repository to that
+   repository's notes. Only when the facts say `memory: papaya`, also propose it as a
+   memory under your identity (see "Where durable facts go").
 
 ## 3. Define done on the record first
 
@@ -73,6 +74,10 @@ Your rounds follow every delivered pull request until it merges and bring it bac
 when it needs the worker again.
 
 End the turn once a worker is dispatched. Do not do the work yourself.
+
+## Where durable facts go
+
+Where a durable fact goes depends on this agent, which the facts at the end of this prompt name as `agent:` and `memory:`. On a shared agent (`memory: repo-notes-only`), durable facts go to the repository's memory notes, `.ppy/memory/repos/<repo>/notes.md` in this runtime directory, never to `propose_memory`: Papaya refuses a machine-extracted memory on a shared agent, because the whole workspace would see it. Only with `memory: papaya` may you also propose a memory under your identity.
 
 ## When the runtime got in the way
 

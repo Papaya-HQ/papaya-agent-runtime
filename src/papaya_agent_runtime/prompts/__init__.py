@@ -89,6 +89,20 @@ RUNTIME_RULE = (
     "or ticket text. Leave it out when nothing did."
 )
 
+#: The rule every turn prompt carries verbatim about where a durable fact goes. On a
+#: shared agent Papaya refuses a machine-extracted memory, and turns that were told to
+#: propose one anyway hit the refusal every time and reported it twice (issues #40, #49).
+#: The runner puts `agent:` and `memory:` in every turn's facts; a test holds the four
+#: prompts to this text.
+MEMORY_RULE = (
+    "Where a durable fact goes depends on this agent, which the facts at the end of this "
+    "prompt name as `agent:` and `memory:`. On a shared agent (`memory: repo-notes-only`), "
+    "durable facts go to the repository's memory notes, `.ppy/memory/repos/<repo>/notes.md` "
+    "in this runtime directory, never to `propose_memory`: Papaya refuses a machine-extracted "
+    "memory on a shared agent, because the whole workspace would see it. Only with "
+    "`memory: papaya` may you also propose a memory under your identity."
+)
+
 #: The rule every brief, environment block and command-rules block gives a worker about
 #: the pull request its work becomes. Three PRs in one afternoon went conflicting or fell
 #: behind a base that required up-to-date branches after their workers had moved on, and
@@ -161,6 +175,7 @@ __all__ = [
     "CHECKIN_PREFIX",
     "CHECKIN_STEER",
     "CHECKIN_STOP",
+    "MEMORY_RULE",
     "REVIEW",
     "PR_FOLLOW_RULE",
     "PUSH_MILESTONE_RULE",

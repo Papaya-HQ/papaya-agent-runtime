@@ -16,8 +16,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import test_serve
-from papaya_agent_runtime import cli, deficiencies, papaya_events, prompts, serve
+from papaya_agent_runtime import cli, deficiencies, papaya, papaya_events, prompts, readiness, serve
 from papaya_agent_runtime.setup import doctor
 from papaya_agent_runtime.state import store
 from papaya_agent_runtime.state.db import init_db
@@ -480,9 +482,238 @@ def test_fingerprints_ignore_what_varies_between_occurrences() -> None:
     assert first == again != other
 
 
-def test_a_readiness_finding_the_runtime_owns_and_cannot_close_is_recorded() -> None:
-    from papaya_agent_runtime import readiness
+#: The two ledger details behind issues #40 and #49, verbatim: one cause, two sentences.
+ISSUE_40 = (
+    "propose_memory rejected an agent-scoped proposal for agent dfe335d3 (machine-extracted "
+    "memory is only allowed on a personal agent), and its provenance field accepts no "
+    "work-item source type, so the routing memory from step 6 could not be proposed."
+)
+ISSUE_49 = (
+    "propose_memory refused an agent-scoped proposal for agent dfe335d3 because it is a "
+    "shared agent, and it rejects `work_item` as a provenance source type. The dispatch "
+    "step's instruction to propose a routing memory can't be followed for this identity."
+)
 
+
+def test_two_wordings_of_one_refusal_fingerprint_the_same_and_other_causes_do_not() -> None:
+    first = deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_40)
+    assert first == deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_49)
+    # Issues #46 and #47 are other causes and stay apart from it and from each other.
+    push = (
+        "the check-in for task 18 said nothing had been pushed in 47 minutes, but the branch "
+        "head on the remote is already fc0cbdcec"
+    )
+    gate = "gate run for task 19 shared the local test database with other in-flight tasks"
+    others = {deficiencies.fingerprint(deficiencies.TURN_REPORT, line) for line in (push, gate)}
+    assert len(others) == 2 and first not in others
+    # The cause is the tool, the refusal and the repository, not the sentence around them.
+    assert deficiencies.reduce_turn_report(ISSUE_49) == "propose_memory|agent-scop proposal|"
+    in_api = deficiencies.reduce_turn_report("`ppy gate` raised TimeoutError in repo `api`")
+    assert in_api == "ppy gate|TimeoutError|api"
+    assert deficiencies.fingerprint(
+        deficiencies.TURN_REPORT, "propose_memory refused an agent-scoped proposal in repo api"
+    ) != deficiencies.fingerprint(
+        deficiencies.TURN_REPORT, "propose_memory refused an agent-scoped proposal in repo web"
+    )
+
+
+def test_a_recurrence_worded_differently_climbs_the_count_and_comments_once(ppy_home) -> None:
+    gh = FakeGh()
+    reporter = _reporter(gh)
+    deficiencies.record(deficiencies.TURN_REPORT, ISSUE_40)
+    reporter.flush()
+    deficiencies.record(deficiencies.TURN_REPORT, ISSUE_49)
+    reporter.flush()
+
+    (row,) = deficiencies.ledger()
+    assert (row.count, row.reported_count) == (2, 2)
+    (issue,) = gh.created()
+    assert len(issue["comments"]) == 1
+
+
+def _legacy_row(conn, key: str, detail: str, url: str | None, at: str) -> None:
+    """A turn report as a build before reduced fingerprints wrote it."""
+    title = f"{deficiencies.KINDS[deficiencies.TURN_REPORT].title}: {detail}"[:117] + "..."
+    status = deficiencies.REPORTED if url else deficiencies.PENDING
+    conn.execute(
+        "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
+        "count, evidence, issue_url, status, opened_at, reported_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+        (
+            key,
+            deficiencies.TURN_REPORT,
+            title,
+            detail,
+            at,
+            at,
+            json.dumps([{"at": at, "turn": "brief", "n": 1}]),
+            url,
+            status,
+            at if url else None,
+            1 if url else 0,
+        ),
+    )
+
+
+def test_start_closes_a_later_duplicate_turn_report_with_a_comment_and_keeps_the_first(
+    ppy_home,
+) -> None:
+    gh = FakeGh()
+    first = gh(["issue", "create", "--title", "#40", "--label", "turn-report"], "body")[1].strip()
+    second = gh(["issue", "create", "--title", "#49", "--label", "turn-report"], "body")[1].strip()
+    other = gh(["issue", "create", "--title", "#47", "--label", "turn-report"], "body")[1].strip()
+    gate = "gate run for task 19 shared the local test database with other in-flight tasks"
+    conn = init_db()
+    _legacy_row(conn, "f19d7924154a6890", ISSUE_40, first, "2026-09-16T23:07:00+00:00")
+    _legacy_row(conn, "6aafd5304c096dfb", ISSUE_49, second, "2026-09-17T00:55:00+00:00")
+    _legacy_row(conn, "a7de56f88af0c0a8", gate, other, "2026-09-16T23:30:00+00:00")
+    conn.commit()
+    conn.close()
+    gh.calls.clear()
+
+    reporter = _reporter(gh)
+    done = reporter.merge_duplicates()
+
+    assert done == [f"closed {second} as a duplicate of {first}"]
+    assert gh.issues[second]["state"] == "CLOSED"
+    (comment,) = gh.issues[second]["comments"]
+    assert comment.startswith("duplicate of #1")
+    assert gh.issues[first]["state"] == "OPEN" and gh.issues[first]["comments"] == []
+    assert gh.issues[other]["state"] == "OPEN" and gh.issues[other]["comments"] == []
+
+    rows = {row.issue_url: row for row in deficiencies.ledger(include_all=True)}
+    assert set(rows) == {first, other}
+    kept = rows[first]
+    assert kept.fingerprint == deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_49)
+    assert (kept.count, kept.reported_count, kept.status) == (2, 2, deficiencies.REPORTED)
+    assert [e["n"] for e in kept.evidence] == [1, 2]
+
+    # Nothing more at the next start, and the next occurrence is one comment on the kept issue.
+    assert reporter.merge_duplicates() == []
+    deficiencies.record(deficiencies.TURN_REPORT, ISSUE_49)
+    reporter.flush()
+    assert len(gh.issues[first]["comments"]) == 1
+    assert len(gh.issues) == 3
+
+
+def test_a_duplicate_whose_issue_cannot_close_is_left_for_the_next_start(ppy_home) -> None:
+    gh = FakeGh()
+    first = gh(["issue", "create", "--title", "#40", "--label", "turn-report"], "body")[1].strip()
+    second = gh(["issue", "create", "--title", "#49", "--label", "turn-report"], "body")[1].strip()
+    conn = init_db()
+    _legacy_row(conn, "f19d7924154a6890", ISSUE_40, first, "2026-09-16T23:07:00+00:00")
+    _legacy_row(conn, "6aafd5304c096dfb", ISSUE_49, second, "2026-09-17T00:55:00+00:00")
+    conn.commit()
+    conn.close()
+
+    def refuse_close(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+        if args[:2] == ["issue", "close"]:
+            return 1, "", "HTTP 502"
+        return gh(args, stdin)
+
+    broken = deficiencies.Reporter(
+        forge=deficiencies.GhForge(run=refuse_close),
+        config=deficiencies.Settings(repo=RUNTIME_REPO),
+    )
+    assert broken.merge_duplicates() == []
+    assert {row.issue_url for row in deficiencies.ledger(include_all=True)} == {first, second}
+
+    assert _reporter(gh).merge_duplicates() == [f"closed {second} as a duplicate of {first}"]
+    (row,) = deficiencies.ledger(include_all=True)
+    assert (row.issue_url, row.count) == (first, 2)
+
+
+def test_a_turn_on_a_shared_agent_is_told_where_facts_go_and_papaya_is_asked_once(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    gh, papaya_api = FakeGh(), FakePapaya()
+    reads: list[dict[str, str]] = []
+
+    def agent_record(env: dict[str, str]) -> dict[str, Any]:
+        reads.append(env)
+        return {"id": "agent-1", "ownership_scope": "workspace"}
+
+    def review(turn: Turn) -> str:
+        _deliver(turn)
+        # A turn that reached for it anyway, and said so.
+        return f"Delivered.\nRUNTIME: {ISSUE_49}"
+
+    turns = _review_ticket(review, papaya_api)
+    runner = _runner(turns, papaya_api, agent_record=agent_record)
+
+    assert _serve_with(Harness(FakeEvents([EVENT])), client_home, runner, _reporter(gh)) == 0
+
+    brief, reviewed = turns.calls
+    assert brief.name == prompts.BRIEF
+    for turn in (brief, reviewed):
+        assert "- agent: shared" in turn.prompt
+        assert "- memory: repo-notes-only" in turn.prompt
+        assert prompts.MEMORY_RULE in turn.prompt
+    assert ".ppy/memory/repos/<repo>/notes.md" in prompts.MEMORY_RULE
+    assert "never to `propose_memory`" in prompts.MEMORY_RULE
+    # One read for the connection, however many turns it launches.
+    assert len(reads) == 1
+    assert papaya.known_agent_kind("agent-1") == papaya.AgentKind(papaya.AGENT_SHARED)
+
+    # The refusal the prompt already accounts for is a prompt defect, not a turn report.
+    (row,) = deficiencies.ledger(include_all=True)
+    assert row.kind == deficiencies.PROMPT_DEFECT
+    assert row.evidence[0]["turn"] == "review"
+
+
+def _unreadable(_env: dict[str, str]) -> dict[str, Any]:
+    raise papaya_events.PapayaEventError("Papaya could not be reached")
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [(lambda _env: {"ownership_scope": "personal"}, ("personal", "papaya")), (_unreadable, None)],
+    ids=["personal", "unreadable"],
+)
+def test_a_personal_agent_may_propose_memory_and_an_unreadable_record_adds_no_facts(
+    ppy_home, client_home, ready, registered_repo, record, expected
+) -> None:
+    papaya_api = FakePapaya()
+    turns = _review_ticket(_deliver, papaya_api)
+    runner = _runner(turns, papaya_api, agent_record=record)
+
+    harness = Harness(FakeEvents([EVENT]))
+    assert _serve_with(harness, client_home, runner, _reporter(FakeGh())) == 0
+
+    brief = turns.calls[0].prompt
+    if expected is None:
+        assert "- memory:" not in brief and "- agent:" not in brief
+    else:
+        assert f"- agent: {expected[0]}" in brief and f"- memory: {expected[1]}" in brief
+
+
+def test_every_turn_prompt_says_where_durable_facts_go() -> None:
+    for turn in prompts.TURNS:
+        assert prompts.MEMORY_RULE in prompts.load(turn), turn
+    step = prompts.load(prompts.BRIEF).split("6. **Once placed.**", 1)[1].split("\n\n", 1)[0]
+    assert "Only when the facts say `memory: papaya`" in step
+
+
+def test_readiness_notes_a_shared_agent_as_info_and_never_a_blocker(ppy_home, client_home) -> None:
+    problems: list[readiness.Problem] = []
+    readiness._papaya_problems(problems)
+    assert readiness.MEMORY_UNAVAILABLE_SHARED_AGENT not in [p.code for p in problems]
+
+    papaya.remember_agent_kind("agent-1", papaya.AgentKind(papaya.AGENT_SHARED))
+    problems = []
+    readiness._papaya_problems(problems)
+    (note,) = [p for p in problems if p.code == readiness.MEMORY_UNAVAILABLE_SHARED_AGENT]
+    assert note.info and not note.blocking and not note.steps
+    verdict = readiness.Readiness(state=readiness.READY, problems=problems)
+    assert verdict.blockers == [] and verdict.warnings == [] and note in verdict.notes
+
+    papaya.remember_agent_kind("agent-1", papaya.AgentKind(papaya.AGENT_PERSONAL))
+    problems = []
+    readiness._papaya_problems(problems)
+    assert readiness.MEMORY_UNAVAILABLE_SHARED_AGENT not in [p.code for p in problems]
+
+
+def test_a_readiness_finding_the_runtime_owns_and_cannot_close_is_recorded() -> None:
     theirs = readiness.Problem("no_harness", "no harness", "sign in", owner=readiness.USER)
     ours = readiness.Problem("config_invalid", "cannot read it", "`ppy setup`")
     warning = readiness.Problem("repo_not_onboarded", "x", "y", blocking=False)
