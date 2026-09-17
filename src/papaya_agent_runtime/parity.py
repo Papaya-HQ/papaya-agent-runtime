@@ -78,7 +78,7 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "worker_checkins",
-        GAP,
+        SHARED,
         "a live worker silent past its budget, planning too long, or not pushing gets a check-in",
         serve=(
             "Rounds._checkins_due",
@@ -88,11 +88,12 @@ CAPABILITIES: tuple[Capability, ...] = (
             "Rounds._checkin_facts",
             "TicketRunner._checkin",
         ),
-        heal="a shared due-check-ins list the heartbeat names and the Stop hook holds a turn to",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.watch", "papaya_agent_runtime.hooks"),
     ),
     Capability(
         "gate_followup",
-        GAP,
+        SHARED,
         "a stopped or done worker is judged by its recorded gate: steered to run, fix or commit",
         serve=(
             "Rounds._stopped_without_gate",
@@ -100,7 +101,8 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._stop_regating",
             "TicketRunner._back_to_commit",
         ),
-        heal="owed items carry the gate verdict and the steer to send, for both modes",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.owed", "papaya_agent_runtime.cli"),
     ),
     Capability(
         "pull_request_repair",
@@ -273,8 +275,6 @@ CAPABILITIES: tuple[Capability, ...] = (
 #: may join it — a new supervision capability is built shared from the start.
 KNOWN_GAPS = frozenset(
     {
-        "worker_checkins",
-        "gate_followup",
         "pull_request_repair",
         "merged_followup",
         "work_item_changes",

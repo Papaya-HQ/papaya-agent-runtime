@@ -79,7 +79,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from papaya_agent_runtime import deficiencies, health, papaya_events, serve, sweep
+from papaya_agent_runtime import deficiencies, health, papaya_events, serve, supervision, sweep
 from papaya_agent_runtime.state import db, store
 
 log = logging.getLogger("papaya_agent_runtime.rounds")
@@ -102,7 +102,7 @@ DEFAULT_PLAN_IDLE_MINUTES = 5
 
 #: Past this many plan budgets, a worker still planning gets the plan check-in whatever
 #: it is doing.
-PLAN_HARD_FACTOR = 3
+PLAN_HARD_FACTOR = supervision.PLAN_HARD_FACTOR
 
 #: How long a worker with no live session must have been silent before it is dead
 #: rather than between a runner exiting and its result being recorded.
@@ -1431,103 +1431,15 @@ class Rounds:
         waits: WorkerBudgets | None = None,
         push: PushState | None = None,
     ) -> list[tuple[str, str]]:
-        waits = waits or worker_budgets(None)
-        due: list[tuple[str, str]] = []
-        mine = [
-            payload
-            for _id, payload in records
-            if payload.get("action") == "checkin" and payload.get("worker_task_id") == look.task_id
-        ]
-        running = look.running_seconds(now)
-        if look.verdict == "quiet":
-            episode = [p for p in mine if p.get("trigger") == "quiet"]
-            if not any(int(p.get("after_event_id") or 0) >= look.last_event_id for p in episode):
-                due.append(
-                    (
-                        "quiet",
-                        f"silent for {health.humanize(look.silent_seconds)} "
-                        "with its session still alive, past its "
-                        f"{health.humanize(int(waits.quiet_seconds))} silence budget "
-                        f"({waits.sources[0]})",
-                    )
-                )
-        plan_after = waits.plan_seconds
-        if (
-            look.latest_phase in (None, "plan")
-            and running >= plan_after
-            and not any(p.get("trigger") == "plan" for p in mine)
-        ):
-            # Planning too long is no plan *and* no progress (#55): a worker still making
-            # tool calls is doing the setup its brief asked for, and is left to it until
-            # it is past three plan budgets.
-            idle = look.tool_idle_seconds(now)
-            if running >= PLAN_HARD_FACTOR * plan_after:
-                due.append(
-                    (
-                        "plan",
-                        f"still planning after {health.humanize(int(running))}, past "
-                        f"{PLAN_HARD_FACTOR} times its {int(plan_after // 60)}m plan budget; "
-                        "it should commit to a plan or say what blocks it",
-                    )
-                )
-            elif look.latest_phase is None and idle >= waits.plan_idle_seconds:
-                due.append(
-                    (
-                        "plan",
-                        f"no plan note after {health.humanize(int(running))}, longer than "
-                        f"{int(plan_after // 60)}m, and no tool call for "
-                        f"{health.humanize(int(idle))}; it should commit to a plan or say what "
-                        "blocks it",
-                    )
-                )
-        checkin_after = waits.midpoint_seconds
-        if running >= checkin_after and not any(p.get("trigger") == "midpoint" for p in mine):
-            due.append(
-                (
-                    "midpoint",
-                    f"running for {health.humanize(int(running))}: time to check it is still "
-                    "heading where the brief asked",
-                )
-            )
-        if push is not None and push.unpushed and look.created_at is not None:
-            # HEAD is not on the forge, and the forge's tip has not moved since the
-            # session started or since a round first saw it there. A tip's commit date
-            # is not when it was pushed: a push can land long after the commit.
-            pushed_at = max(
-                look.created_at,
-                last_push_at(records, look.task_id, push.remote_sha) or look.created_at,
-            )
-            since = pushed_at
-            for p in mine:
-                at = _parse(p.get("at"))
-                if p.get("trigger") == "push" and p.get("remote_sha") == push.remote_sha and at:
-                    since = max(since, at)
-            if (now - since).total_seconds() >= _push_by_seconds():
-                minutes = int((now - pushed_at).total_seconds() // 60)
-                due.append(("push", f"nothing pushed in {minutes} minutes"))
-        return due
+        """The shared decision (`supervision.checkins_due`); a session reads the same."""
+        return supervision.checkins_due(look, now, records, waits, push)
 
     @staticmethod
     def _plan_reminder(
         look: WorkerLook, now: datetime, waits: WorkerBudgets | None = None
     ) -> str | None:
-        """The one line a check-in's facts carry for a busy worker with no plan note yet.
-
-        Past its plan budget but still making tool calls, the worker is not stuck, so
-        this is never a check-in of its own: it rides along on one that is due anyway.
-        """
-        waits = waits or worker_budgets(None)
-        running = look.running_seconds(now)
-        if look.latest_phase is not None or running < waits.plan_seconds:
-            return None
-        idle = look.tool_idle_seconds(now)
-        if idle >= waits.plan_idle_seconds:
-            return None
-        return (
-            f"no plan note yet after {health.humanize(int(running))}, while still working "
-            f"(last tool call {health.humanize(int(idle))} ago); a `continue, note` can "
-            "remind it to post one"
-        )
+        """The shared line (`supervision.plan_reminder`)."""
+        return supervision.plan_reminder(look, now, waits)
 
     async def _saw_push(
         self,
@@ -1559,28 +1471,8 @@ class Rounds:
         now: datetime,
         waits: WorkerBudgets,
     ) -> bool:
-        """A person steered this worker after the last check-in, and it has not answered yet.
-
-        Answered means a progress note since the steer. Not forever: a worker still
-        silent one silence budget after a person's steer is checked on like any other.
-        """
-        if not steers:
-            return False
-        last = steers[-1]
-        checked = max(
-            (
-                int(p.get("after_event_id") or 0)
-                for _id, p in records
-                if p.get("action") == "checkin" and p.get("worker_task_id") == look.task_id
-            ),
-            default=0,
-        )
-        if last["event_id"] <= checked:
-            return False
-        if any(event_id > last["event_id"] for event_id, *_rest in look.progress):
-            return False
-        at = _parse(last["at"])
-        return at is None or (now - at).total_seconds() < waits.quiet_seconds
+        """The shared decision (`supervision.person_has_it`)."""
+        return supervision.person_has_it(look, steers, records, now, waits)
 
     @staticmethod
     def _checkin_facts(

@@ -1,0 +1,402 @@
+"""The supervision decisions both modes make about a worker, in one place.
+
+`ppy serve` and an interactive session supervise the same workers (`parity`), so the
+decision of what a worker needs is made here and each mode only acts on it: serve's
+rounds and ticket runner steer or queue a turn; a session sees the same decision on
+the heartbeat (`ppy watch`), in the session hooks and in `ppy checkin`.
+
+Two decisions live here so far:
+
+- **Gate follow-up** (:func:`decide_gate`, :func:`decide_commit`,
+  :func:`gate_followup`): a worker that stopped or said done is judged by its
+  recorded gate at head and by what its worktree holds that its branch does not.
+  Green is reviewable; red is sent back with the gate's summary; no gate after a stop
+  is sent back to `ppy gate run`; the same red twice is a person's decision;
+  uncommitted work is sent back to commit or discard.
+- **Check-ins** (:func:`checkins_due`, :func:`plan_reminder`, :func:`person_has_it`,
+  :func:`worker_checkins`, :func:`record_checkin`): a live worker silent past its
+  budget, planning too long, running past its midpoint, or not pushing is checked on,
+  once per episode, and a person's fresh steer holds the check-in back.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from papaya_agent_runtime import health
+
+#: Gate follow-up actions.
+REVIEW = "review"
+STEER = "steer"
+PERSON = "person"
+
+#: Past this many plan budgets, a worker still planning gets the plan check-in whatever
+#: it is doing.
+PLAN_HARD_FACTOR = 3
+
+
+# ── gate follow-up ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class GateFollowup:
+    """What a stopped or done worker needs, judged by its record."""
+
+    #: :data:`REVIEW`, :data:`STEER` or :data:`PERSON`.
+    action: str
+    #: One line saying why, for a person or a turn.
+    line: str
+    #: The steer to send, for :data:`STEER`.
+    message: str = ""
+
+
+def decide_gate(recorded: Any, *, stopped: bool, detail: str, worker_id: int) -> GateFollowup:
+    """Judge a worker by its recorded gate at head (a `gate.Verdict`). No I/O.
+
+    - the same red twice: a person's decision (re-running cannot change it);
+    - green: reviewable;
+    - red: sent back with the gate's summary;
+    - none after a stop: sent back to run `ppy gate run`;
+    - none after a done note: reviewable (the review re-checks).
+    """
+    from papaya_agent_runtime import gate, serve
+
+    if recorded.state == gate.RED and recorded.repeated:
+        return GateFollowup(PERSON, gate.repeated_line(recorded.repeated))
+    if recorded.state == gate.GREEN and recorded.result is not None:
+        return GateFollowup(REVIEW, recorded.result.line())
+    if recorded.state == gate.NONE and not stopped:
+        return GateFollowup(REVIEW, "no gate result recorded at its head")
+    message = serve.gate_steer_message(detail, worker_id, recorded.result)
+    if recorded.result is not None:
+        return GateFollowup(STEER, recorded.result.line(), message)
+    return GateFollowup(STEER, "stopped with no gate result recorded at its head", message)
+
+
+def decide_commit(files: list[str] | None, branch: str | None) -> GateFollowup | None:
+    """Uncommitted work in the worktree is sent back; ``None`` when there is none."""
+    from papaya_agent_runtime import serve
+
+    if not files:
+        return None
+    return GateFollowup(
+        STEER, serve.uncommitted_finding(files), serve.uncommitted_steer_message(files, branch)
+    )
+
+
+def gate_followup(worker_task_id: int, *, stopped: bool, detail: str = "") -> GateFollowup:
+    """Read a worker's record and decide: uncommitted work first, then its gate. Never raises."""
+    from papaya_agent_runtime import gate, serve
+    from papaya_agent_runtime.state import init_db, store
+
+    try:
+        conn = init_db()
+        try:
+            task = store.get_task(conn, worker_task_id)
+        finally:
+            conn.close()
+        branch = task["branch"] if task is not None else None
+        commit = decide_commit(serve.uncommitted_files(worker_task_id), branch)
+        if commit is not None:
+            return commit
+        recorded = gate.verdict(worker_task_id)
+    except Exception:  # noqa: BLE001 - an unreadable record decides nothing
+        return GateFollowup(REVIEW, "its gate record could not be read")
+    return decide_gate(recorded, stopped=stopped, detail=detail, worker_id=worker_task_id)
+
+
+# ── check-ins ───────────────────────────────────────────────────────────────
+
+
+def _parse(stamp: object) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def checkins_due(
+    look: Any,
+    now: datetime,
+    records: list[tuple[int, dict[str, Any]]],
+    waits: Any = None,
+    push: Any = None,
+) -> list[tuple[str, str]]:
+    """The check-ins a live worker is due, as ``(trigger, why)``. No I/O.
+
+    ``look`` is a `rounds.WorkerLook`, ``records`` the round records of the task that
+    owns the worker's check-ins, ``waits`` its `rounds.WorkerBudgets`, ``push`` its
+    `rounds.PushState` (``None`` when the forge was not read).
+    """
+    from papaya_agent_runtime import rounds
+
+    waits = waits or rounds.worker_budgets(None)
+    due: list[tuple[str, str]] = []
+    mine = [
+        payload
+        for _id, payload in records
+        if payload.get("action") == "checkin" and payload.get("worker_task_id") == look.task_id
+    ]
+    running = look.running_seconds(now)
+    if look.verdict == "quiet":
+        episode = [p for p in mine if p.get("trigger") == "quiet"]
+        if not any(int(p.get("after_event_id") or 0) >= look.last_event_id for p in episode):
+            due.append(
+                (
+                    "quiet",
+                    f"silent for {health.humanize(look.silent_seconds)} "
+                    "with its session still alive, past its "
+                    f"{health.humanize(int(waits.quiet_seconds))} silence budget "
+                    f"({waits.sources[0]})",
+                )
+            )
+    plan_after = waits.plan_seconds
+    if (
+        look.latest_phase in (None, "plan")
+        and running >= plan_after
+        and not any(p.get("trigger") == "plan" for p in mine)
+    ):
+        # Planning too long is no plan *and* no progress (#55): a worker still making
+        # tool calls is doing the setup its brief asked for, and is left to it until
+        # it is past three plan budgets.
+        idle = look.tool_idle_seconds(now)
+        if running >= PLAN_HARD_FACTOR * plan_after:
+            due.append(
+                (
+                    "plan",
+                    f"still planning after {health.humanize(int(running))}, past "
+                    f"{PLAN_HARD_FACTOR} times its {int(plan_after // 60)}m plan budget; "
+                    "it should commit to a plan or say what blocks it",
+                )
+            )
+        elif look.latest_phase is None and idle >= waits.plan_idle_seconds:
+            due.append(
+                (
+                    "plan",
+                    f"no plan note after {health.humanize(int(running))}, longer than "
+                    f"{int(plan_after // 60)}m, and no tool call for "
+                    f"{health.humanize(int(idle))}; it should commit to a plan or say what "
+                    "blocks it",
+                )
+            )
+    checkin_after = waits.midpoint_seconds
+    if running >= checkin_after and not any(p.get("trigger") == "midpoint" for p in mine):
+        due.append(
+            (
+                "midpoint",
+                f"running for {health.humanize(int(running))}: time to check it is still "
+                "heading where the brief asked",
+            )
+        )
+    if push is not None and push.unpushed and look.created_at is not None:
+        # HEAD is not on the forge, and the forge's tip has not moved since the
+        # session started or since a round first saw it there. A tip's commit date
+        # is not when it was pushed: a push can land long after the commit.
+        pushed_at = max(
+            look.created_at,
+            rounds.last_push_at(records, look.task_id, push.remote_sha) or look.created_at,
+        )
+        since = pushed_at
+        for p in mine:
+            at = _parse(p.get("at"))
+            if p.get("trigger") == "push" and p.get("remote_sha") == push.remote_sha and at:
+                since = max(since, at)
+        if (now - since).total_seconds() >= rounds._push_by_seconds():
+            minutes = int((now - pushed_at).total_seconds() // 60)
+            due.append(("push", f"nothing pushed in {minutes} minutes"))
+    return due
+
+
+def plan_reminder(look: Any, now: datetime, waits: Any = None) -> str | None:
+    """The one line a check-in carries for a busy worker with no plan note yet. No I/O.
+
+    Past its plan budget but still making tool calls, the worker is not stuck, so this
+    is never a check-in of its own: it rides along on one that is due anyway.
+    """
+    from papaya_agent_runtime import rounds
+
+    waits = waits or rounds.worker_budgets(None)
+    running = look.running_seconds(now)
+    if look.latest_phase is not None or running < waits.plan_seconds:
+        return None
+    idle = look.tool_idle_seconds(now)
+    if idle >= waits.plan_idle_seconds:
+        return None
+    return (
+        f"no plan note yet after {health.humanize(int(running))}, while still working "
+        f"(last tool call {health.humanize(int(idle))} ago); a `continue, note` can "
+        "remind it to post one"
+    )
+
+
+def person_has_it(
+    look: Any,
+    steers: list[dict[str, Any]],
+    records: list[tuple[int, dict[str, Any]]],
+    now: datetime,
+    waits: Any,
+) -> bool:
+    """A person steered this worker after the last check-in, and it has not answered yet.
+
+    Answered means a progress note since the steer. Not forever: a worker still silent
+    one silence budget after a person's steer is checked on like any other. No I/O.
+    """
+    if not steers:
+        return False
+    last = steers[-1]
+    checked = max(
+        (
+            int(p.get("after_event_id") or 0)
+            for _id, p in records
+            if p.get("action") == "checkin" and p.get("worker_task_id") == look.task_id
+        ),
+        default=0,
+    )
+    if last["event_id"] <= checked:
+        return False
+    if any(event_id > last["event_id"] for event_id, *_rest in look.progress):
+        return False
+    at = _parse(last["at"])
+    return at is None or (now - at).total_seconds() < waits.quiet_seconds
+
+
+@dataclass(frozen=True)
+class CheckinDue:
+    """A live worker due a check-in, as a session is shown it."""
+
+    worker_task_id: int
+    #: The task its check-in records live on: its live ticket's task, else the worker.
+    owner_task_id: int
+    #: The ticket task `ppy serve` works it under, when that ticket is still live.
+    ticket_task_id: int | None
+    due: tuple[tuple[str, str], ...]
+    after_event_id: int
+    #: The forge's tip of its branch when a push check-in is due (what a push record keys on).
+    remote_sha: str | None = None
+
+    @property
+    def reason(self) -> str:
+        return "; ".join(why for _trigger, why in self.due)
+
+    @property
+    def triggers(self) -> str:
+        return ",".join(trigger for trigger, _why in self.due)
+
+    def line(self) -> str:
+        return (
+            f"worker task {self.worker_task_id} is due a check-in ({self.reason}): read "
+            f"`ppy progress {self.worker_task_id}`, then steer it or "
+            f'`ppy checkin {self.worker_task_id} --ok "<what you saw>"`'
+        )
+
+
+def _owner(worker_task_id: int) -> tuple[int, int | None]:
+    from papaya_agent_runtime import owed
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        task = store.get_task(conn, worker_task_id)
+        live = owed._live_tickets(conn) if task is not None else {}
+    finally:
+        conn.close()
+    ticket = live.get(int(task["run_id"])) if task is not None else None
+    return (ticket if ticket is not None else worker_task_id), ticket
+
+
+def checkin_for(worker_task_id: int, *, now: datetime, push_state=None) -> CheckinDue | None:
+    """The check-in a live worker is due right now, read from the record, or ``None``.
+
+    The same decision serve's rounds make for a held ticket's worker: none while its
+    gate runs under the supervisor, none while a person's fresh steer stands.
+    """
+    from papaya_agent_runtime import rounds
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        task = store.get_task(conn, worker_task_id)
+        repo = None
+        if task is not None and task["repo_id"] is not None:
+            row = conn.execute("SELECT name FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+            repo = str(row["name"]) if row else None
+    finally:
+        conn.close()
+    if task is None or task["status"] != "in_progress" or task["phase"] is not None:
+        return None
+    waits = rounds.worker_budgets(repo)
+    look = rounds.look_at_worker(
+        worker_task_id, now=now, quiet_after=timedelta(seconds=waits.quiet_seconds)
+    )
+    if look is None or look.verdict is None:
+        return None
+    if rounds.gate_state(worker_task_id).running:
+        return None
+    owner, ticket = _owner(worker_task_id)
+    records = rounds.round_records(owner)
+    steers = rounds.person_steers(worker_task_id)
+    if person_has_it(look, steers, records, now, waits):
+        return None
+    push = (push_state or rounds.push_state)(worker_task_id)
+    due = checkins_due(look, now, records, waits, push)
+    if not due:
+        return None
+    remote = push.remote_sha if push is not None else None
+    return CheckinDue(worker_task_id, owner, ticket, tuple(due), look.last_event_id, remote)
+
+
+def worker_checkins(*, now: datetime | None = None, push_state=None) -> list[CheckinDue]:
+    """Every live worker due a check-in, ticket or not. Never raises."""
+    from papaya_agent_runtime.state import init_db
+
+    now = now or datetime.now(UTC)
+    try:
+        conn = init_db()
+        try:
+            ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM tasks WHERE phase IS NULL AND status = 'in_progress' "
+                    "ORDER BY id"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        found = []
+        for task_id in ids:
+            due = checkin_for(task_id, now=now, push_state=push_state)
+            if due is not None:
+                found.append(due)
+        return found
+    except Exception:  # noqa: BLE001 - a heartbeat or hook never fails on its evidence
+        return []
+
+
+def record_checkin(worker_task_id: int, *, note: str, now: datetime | None = None) -> list[str]:
+    """Record that a session checked on a worker, for every trigger due. Returns them.
+
+    The same `checkin` round record serve writes when it queues its check-in turn, so
+    the episode is not raised again by either mode.
+    """
+    from papaya_agent_runtime import rounds
+
+    now = now or datetime.now(UTC)
+    due = checkin_for(worker_task_id, now=now)
+    if due is None:
+        return []
+    for trigger, why in due.due:
+        rounds.record_round(
+            due.owner_task_id,
+            "checkin",
+            worker_task_id=worker_task_id,
+            trigger=trigger,
+            reason=why,
+            after_event_id=due.after_event_id,
+            by="person",
+            note=note,
+            **({"at": now.isoformat(), "remote_sha": due.remote_sha} if trigger == "push" else {}),
+        )
+    return [trigger for trigger, _why in due.due]

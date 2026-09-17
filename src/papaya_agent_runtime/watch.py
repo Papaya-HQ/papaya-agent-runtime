@@ -35,7 +35,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any, TextIO
 
-from papaya_agent_runtime import board, companions, health, owed
+from papaya_agent_runtime import board, companions, health, owed, supervision
 from papaya_agent_runtime.state import init_db, store
 
 DEFAULT_INTERVAL_SECONDS = 300.0
@@ -571,6 +571,11 @@ def tick(
         )
     # The same list every surface reads (`owed`): failures included, with why and what next.
     needs_me = [{"id": item.task_id, **item.public()} for item in owed.collect(conn, now=now)]
+    # The check-ins serve's rounds would queue, for every live worker (`supervision`).
+    checkins = [
+        {"task_id": c.worker_task_id, "reason": c.reason, "ticket_task_id": c.ticket_task_id}
+        for c in supervision.worker_checkins(now=now)
+    ]
     new_events: dict[str, int] = {}
     last_id = since_event_id
     for row in conn.execute(
@@ -585,6 +590,7 @@ def tick(
         "at": now.isoformat(timespec="seconds"),
         "in_flight": in_flight,
         "needs_me": needs_me,
+        "checkins": checkins,
         "new_events": new_events,
         "last_event_id": last_id,
         "open_todos": len(board.open_todos(conn)),
@@ -610,7 +616,7 @@ def is_idle(snapshot: dict[str, Any]) -> bool:
     does not hold the watch open; a machine that cannot see the forge would
     otherwise never fall quiet.
     """
-    if snapshot["in_flight"] or snapshot["needs_me"]:
+    if snapshot["in_flight"] or snapshot["needs_me"] or snapshot.get("checkins"):
         return False
     if snapshot["new_events"] or snapshot["pr_changes"] or snapshot.get("recorded_merges"):
         return False
@@ -644,6 +650,10 @@ def render(snapshot: dict[str, Any]) -> str:
     )
     new = ", ".join(f"{k}×{v}" for k, v in sorted(snapshot["new_events"].items())) or "none"
     line = f"TEAM {when} — {in_flight} | needs me: {needs}"
+    if snapshot.get("checkins"):
+        line += " | check in: " + "; ".join(
+            f"t{c['task_id']} ({_clip(c['reason'], 90)})" for c in snapshot["checkins"]
+        )
     segments = [s for s in (describe_pr(e) for e in snapshot.get("prs", [])) if s]
     if segments:
         line += " | prs: " + "; ".join(segments)

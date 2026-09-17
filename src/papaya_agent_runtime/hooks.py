@@ -296,6 +296,13 @@ def owed_stop_reasons(conn) -> list[str]:
             "against them. Take each up now, or record the next step against the task so it "
             'survives compaction: `ppy todo add --task <id> "..."`.\n' + listed
         )
+    from papaya_agent_runtime import supervision
+
+    # Serve's rounds check in on its held tickets' workers; a session checks the rest.
+    due = [c for c in supervision.worker_checkins() if c.ticket_task_id is None]
+    if due:
+        listed = "\n".join(f"- {c.line()}" for c in due)
+        reasons.append(f"{len(due)} worker task(s) are due a check-in:\n{listed}")
     in_flight = owed.running_count(conn) + sum(1 for item in items if not item.serve_owns)
     if in_flight and not owed.watch_running():
         reasons.append(
