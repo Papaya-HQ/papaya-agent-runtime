@@ -395,7 +395,15 @@ quietly; do not narrate the steps or report diagnostics.
    difference between a first dispatch that knows the test command and one that
    guesses.
 
-9. **Arm the heartbeat.** Start `./bin/ppy watch` as a background monitor in your
+9. **Arm the heartbeat.** This is enforced, not advice: the session-start hook lists
+   every worker waiting on you (finished, stopped, failed, asking, lost its process —
+   the same list `ppy watch`, `ppy status --team` and readiness read, from
+   `owed.py`), and the Stop hook refuses to end a turn while a worker runs or waits
+   with no heartbeat alive, or while a waiting worker has no next step recorded
+   against it (`ppy todo add --task <id> "..."`). A worker nobody takes up within
+   fifteen minutes and no live ticket covers becomes a person's blocker, which
+   `ppy serve` reports to them, so a machine with no session open still tells
+   somebody. Start `./bin/ppy watch` as a background monitor in your
    harness (it prints one line of team state now and every five minutes: who is
    in flight and alive, which tasks are waiting on you, the *open* pull requests
    your delivered work is sitting in with their CI verdict and mergeability, what

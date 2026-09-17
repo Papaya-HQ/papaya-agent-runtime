@@ -355,6 +355,17 @@ def _waiting(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+    from papaya_agent_runtime import owed
+
+    for item in owed.overdue(owed.collect(conn, now=now)):
+        waiting.append(
+            {
+                "todo_id": None,
+                "task_id": item.task_id,
+                "text": _clip(item.line(), 160),
+                "seconds": item.seconds,
+            }
+        )
     for row in _ticket_rows(conn):
         if row["phase"] != "needs_a_person":
             continue

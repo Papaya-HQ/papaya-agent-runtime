@@ -118,13 +118,15 @@ def readiness_context() -> str | None:
     after every compaction, so the verdict is in front of the model whatever it was
     launched to do.
     """
-    from papaya_agent_runtime import readiness
+    from papaya_agent_runtime import owed, readiness
 
     verdict = readiness.check()
     if verdict.state == readiness.READY:
         return None
     lines = [f"RUNTIME READINESS: {verdict.state} — {readiness.headline(verdict)}"]
     for problem in verdict.problems:
+        if problem.code == owed.PROBLEM_CODE:
+            continue  # the owed-work block says these, with the heartbeat, in one place
         if problem.info:
             continue  # said by the invitation, once, not as a gap
         who = "yours to fix now" if problem.owner == readiness.RUNTIME else "needs the user"
@@ -193,10 +195,72 @@ def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | 
             parts.append(invite)
     with contextlib.suppress(Exception):
         parts.append(handoff.render_session_context(handoff.collect(conn)))
+    with contextlib.suppress(Exception):
+        parts.append(owed_context(conn))
     assessment = assessments.hook_context(conn)
     if assessment:
         parts.append(assessment)
     return "\n\n".join(p for p in parts if p) or None
+
+
+def _headless_turn() -> bool:
+    from papaya_agent_runtime.manager.launch import MANAGER_TURN_ENV
+
+    return bool(os.environ.get(MANAGER_TURN_ENV))
+
+
+def owed_context(conn) -> str | None:
+    """Every worker waiting on the manager, and whether a heartbeat will hear the next one.
+
+    An interactive session is the manager for everything no live ticket covers, so it
+    starts (and restarts after a compaction) with the list and the one command that
+    keeps it current. A headless `ppy serve` turn works one ticket and is not told.
+    """
+    from papaya_agent_runtime import owed
+
+    if _headless_turn():
+        return None
+    items = owed.collect(conn)
+    running = owed.running_count(conn)
+    lines: list[str] = []
+    mine = [item for item in items if not item.serve_owns]
+    if mine:
+        lines.append(f"WORKERS WAITING ON YOU ({len(mine)}) — take each up before new work:")
+        lines.extend(f"- {item.line()}" for item in mine)
+    if (mine or running) and not owed.watch_running():
+        lines.append(
+            "NO HEARTBEAT IS RUNNING. Start `./bin/ppy watch` now as a background monitor "
+            "(Claude Code: the Monitor tool; Codex: a background terminal) and relay its "
+            "lines. Without it a worker that finishes, stops or crashes waits unheard "
+            "until someone asks."
+        )
+    return "\n".join(lines) or None
+
+
+def owed_stop_reasons(conn) -> list[str]:
+    """Why an interactive turn may not end yet: owed work with no next step, no heartbeat."""
+    from papaya_agent_runtime import owed
+
+    if _headless_turn():
+        return []
+    items = owed.collect(conn)
+    reasons: list[str] = []
+    untracked = owed.untracked(conn, items)
+    if untracked:
+        listed = "\n".join(f"- {item.line()}" for item in untracked)
+        reasons.append(
+            f"{len(untracked)} worker task(s) are waiting on you with no next step recorded "
+            "against them. Take each up now, or record the next step against the task so it "
+            'survives compaction: `ppy todo add --task <id> "..."`.\n' + listed
+        )
+    in_flight = owed.running_count(conn) + sum(1 for item in items if not item.serve_owns)
+    if in_flight and not owed.watch_running():
+        reasons.append(
+            f"{in_flight} worker task(s) are running or waiting on you and no heartbeat is "
+            "running to hear what happens next. Start `./bin/ppy watch` as a background "
+            "monitor (Claude Code: the Monitor tool) before ending the turn."
+        )
+    return reasons
 
 
 def stop_block_reason(conn, payload: dict[str, Any] | None = None) -> str | None:
@@ -220,6 +284,8 @@ def stop_block_reason(conn, payload: dict[str, Any] | None = None) -> str | None
     if os.environ.get("PPY_DEV"):
         return None
     reasons: list[str] = []
+    with contextlib.suppress(Exception):  # a hook must never break the harness
+        reasons.extend(owed_stop_reasons(conn))
     open_tasks = conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE status IN "
         "('requested','in_progress','worker_done','worker_stopped','blocked',"

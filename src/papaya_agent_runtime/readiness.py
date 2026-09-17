@@ -1196,6 +1196,48 @@ def setup_blocker(
     return None
 
 
+def _owed_problems(problems: list[Problem]) -> None:
+    """A worker waiting on the manager past the grace, with no live ticket covering it.
+
+    `ppy serve` works a held ticket's workers itself. Anything else (a worker
+    dispatched by hand, a ticket that ended) is the interactive manager's, and when no
+    manager takes it up within `owed.GRACE_SECONDS` it is a person's: said here, so the
+    blocker watch tells them whichever way this runtime is running. One problem per
+    task and status, so a change of status is news again.
+    """
+    from papaya_agent_runtime import owed
+    from papaya_agent_runtime.paths import db_path
+    from papaya_agent_runtime.state import init_db
+
+    if not db_path().exists():
+        return
+    try:
+        conn = init_db()
+        try:
+            items = owed.overdue(owed.collect(conn))
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - a verdict never fails on its own evidence
+        return
+    for item in items:
+        problems.append(
+            Problem(
+                code=owed.PROBLEM_CODE,
+                summary=item.line(),
+                fix=item.next_step,
+                owner=USER,
+                blocking=False,
+                title=f"Worker task {item.task_id} is waiting on its manager",
+                steps=(
+                    f"worker task {item.task_id}: {item.reason}",
+                    f"take it up from a manager session in the runtime directory: {item.next_step}",
+                    "the runtime clears this once the task moves on",
+                ),
+                scope=f"task:{item.task_id}:{item.status}",
+            )
+        )
+
+
 def check() -> Readiness:
     """The verdict for this instance."""
     problems: list[Problem] = []
@@ -1211,6 +1253,7 @@ def check() -> Readiness:
     _papaya_problems(problems)
     _client_problems(problems)
     _machine_problems(problems)
+    _owed_problems(problems)
     if any(p.blocking for p in problems):
         state = BLOCKED
     elif any(not p.info for p in problems):

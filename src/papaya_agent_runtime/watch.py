@@ -35,13 +35,13 @@ import time
 from datetime import UTC, datetime
 from typing import Any, TextIO
 
-from papaya_agent_runtime import board, companions, health
+from papaya_agent_runtime import board, companions, health, owed
 from papaya_agent_runtime.state import init_db, store
 
 DEFAULT_INTERVAL_SECONDS = 300.0
 
 # Statuses that mean "the manager owes this task an action" right now.
-NEEDS_ME = ("worker_done", "worker_stopped", "blocked", "needs_recovery")
+NEEDS_ME = owed.OWED_STATUSES
 
 # Statuses whose work has left the worktree, so a pull request may exist for it.
 PR_TRACKED = ("worker_done", "delivered")
@@ -55,6 +55,11 @@ GH_TIMEOUT_SECONDS = 30.0
 # The `gh pr checks --json bucket` values that mean the run is not green.
 CI_BAD_BUCKETS = ("fail", "cancel")
 _SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}\Z")
+
+
+def _clip(text: object, width: int) -> str:
+    one = " ".join(str(text or "").split())
+    return one if len(one) <= width else one[: width - 1] + "…"
 
 
 def _latest_phase(conn: sqlite3.Connection, task_id: int) -> str | None:
@@ -564,14 +569,8 @@ def tick(
                 "note": result.note,
             }
         )
-    marks = ",".join("?" for _ in NEEDS_ME)
-    needs_me = [
-        dict(r)
-        for r in conn.execute(
-            f"SELECT id, status, title FROM tasks WHERE status IN ({marks}) ORDER BY id",
-            NEEDS_ME,
-        ).fetchall()
-    ]
+    # The same list every surface reads (`owed`): failures included, with why and what next.
+    needs_me = [{"id": item.task_id, **item.public()} for item in owed.collect(conn, now=now)]
     new_events: dict[str, int] = {}
     last_id = since_event_id
     for row in conn.execute(
@@ -635,7 +634,14 @@ def render(snapshot: dict[str, Any]) -> str:
         in_flight = f"in flight {len(parts)}: " + "; ".join(parts)
     else:
         in_flight = "no workers in flight"
-    needs = ", ".join(f"t{r['id']} {r['status']}" for r in snapshot["needs_me"]) or "none"
+    needs = (
+        "; ".join(
+            f"t{r['id']} {r['status']}"
+            + (f" ({_clip(r['reason'], 90)})" if r.get("reason") else "")
+            for r in snapshot["needs_me"]
+        )
+        or "none"
+    )
     new = ", ".join(f"{k}×{v}" for k, v in sorted(snapshot["new_events"].items())) or "none"
     line = f"TEAM {when} — {in_flight} | needs me: {needs}"
     segments = [s for s in (describe_pr(e) for e in snapshot.get("prs", [])) if s]
@@ -680,6 +686,18 @@ def run(
     """
     out = out or sys.stdout  # resolved per call so harness capture sees the ticks
     conn = init_db()
+    if not once:
+        # The Stop hook asks whether a heartbeat is armed before a turn may end with
+        # work in flight; this is how it knows.
+        owed.mark_watch_running()
+        try:
+            return _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock)
+        finally:
+            owed.clear_watch_mark()
+    return _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock, once=True)
+
+
+def _loop(conn, interval, as_json, exit_when_idle, out, sleep, clock, *, once=False) -> int:
     # The first tick reports the current state, not the whole event history.
     since = max_event_id(conn)
     previous: dict[str, dict[str, Any]] | None = None

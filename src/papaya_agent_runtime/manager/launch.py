@@ -342,6 +342,10 @@ def prepare_turn_tools(
     )
 
 
+#: Set in a headless manager turn's environment (never in an interactive session).
+MANAGER_TURN_ENV = "PPY_MANAGER_TURN"
+
+
 def build_launch(
     *,
     config: MMConfig | None,
@@ -376,6 +380,12 @@ def build_launch(
     prefixes = [bin_dir, str(tools_bin_dir())]
     env["PATH"] = os.pathsep.join([*prefixes, env.get("PATH", "")])
     env["PPY_MANAGER_SESSION"] = "1"
+    if turn is not None:
+        # A headless `ppy serve` turn owns one ticket; the session hooks hold an
+        # interactive manager to everything owed, and a turn only to its own work.
+        env[MANAGER_TURN_ENV] = "1"
+    else:
+        env.pop(MANAGER_TURN_ENV, None)
 
     prov, mdl, rsn = resolve_profile(config, provider, model, reasoning)
     seed = turn if turn is not None else _seed_prompt(objective, configured=config is not None)
