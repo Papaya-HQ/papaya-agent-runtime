@@ -400,3 +400,261 @@ def record_checkin(worker_task_id: int, *, note: str, now: datetime | None = Non
             **({"at": now.isoformat(), "remote_sha": due.remote_sha} if trigger == "push" else {}),
         )
     return [trigger for trigger, _why in due.due]
+
+
+# ── pull request repair ─────────────────────────────────────────────────────
+
+
+#: Pull request repair actions (:func:`pr_attention`).
+PR_QUEUE = "queue"
+PR_PERSON = "needs_a_person"
+PR_GREEN = "green"
+PR_NOTHING = "nothing"
+
+
+@dataclass(frozen=True)
+class PrAttention:
+    """What one open, delivered pull request needs this round."""
+
+    action: str
+    reasons: tuple[Any, ...] = ()
+    fingerprint: str = ""
+
+    @property
+    def summary(self) -> str:
+        return "; ".join(r.text for r in self.reasons)
+
+
+def pr_attention(worker_task_id: int, entry: dict[str, Any], now: datetime) -> PrAttention:
+    """Decide what an open delivered pull request needs, from the forge and the lane record.
+
+    Its reasons and head make a fingerprint. A new fingerprint is queued for the reserve
+    lane; the same one is not raised again unless the lane's attempt at it failed, once.
+    Two failures at one fingerprint are a person's. No reasons at all is green.
+    """
+    from papaya_agent_runtime import reconcile
+
+    past = reconcile.history(worker_task_id)
+    if past.open_attempt() is not None:
+        return PrAttention(PR_NOTHING)
+    budget = reconcile.ci_budget_seconds(worker_task_id)
+    reasons = reconcile.reasons_for(
+        entry,
+        requires_up_to_date=past.requires_up_to_date,
+        ci_budget_seconds=budget,
+        now=now,
+    )
+    if not reasons:
+        return PrAttention(PR_GREEN)
+    fp = reconcile.fingerprint(reasons, entry.get("head"))
+    decision = past.decide(fp)
+    if decision == reconcile.NEEDS_A_PERSON:
+        return PrAttention(PR_PERSON, tuple(reasons), fp)
+    if decision == "queue":
+        return PrAttention(PR_QUEUE, tuple(reasons), fp)
+    return PrAttention(PR_NOTHING, tuple(reasons), fp)
+
+
+def record_needs_a_person(worker_task_id: int, attention: PrAttention, entry: dict, now) -> None:
+    from papaya_agent_runtime import reconcile
+
+    reconcile.record(
+        worker_task_id,
+        reconcile.NEEDS_A_PERSON,
+        fingerprint=attention.fingerprint,
+        head=entry.get("head"),
+        reasons=[r.text for r in attention.reasons],
+        at=now.isoformat(),
+    )
+
+
+def record_queued(
+    worker_task_id: int,
+    attention: PrAttention,
+    entry: dict,
+    now: datetime,
+    ticket_task_id: int | None,
+) -> None:
+    from papaya_agent_runtime import reconcile
+
+    reasons = list(attention.reasons)
+    reconcile.record(
+        worker_task_id,
+        reconcile.QUEUED,
+        fingerprint=attention.fingerprint,
+        head=entry.get("head"),
+        rank=reconcile.rank_of(reasons),
+        keys=[r.key for r in reasons],
+        reasons=[r.text for r in reasons],
+        summary=attention.summary,
+        pr=entry.get("pr"),
+        url=entry.get("url"),
+        base=entry.get("base"),
+        created_at=entry.get("created_at"),
+        ticket_task_id=ticket_task_id,
+        threads=list(entry.get("threads") or []),
+        comments=list(entry.get("comments") or []),
+        at=now.isoformat(),
+    )
+
+
+def start_repair(
+    queued: dict[str, Any], entry: dict[str, Any], now: datetime, *, details: dict, steer
+) -> None:
+    """Start one queued repair on the reserve lane by steering its worker.
+
+    A steer on a delivered task is admitted in the reserve lane and starts a fresh
+    reconciler session from the attention recorded here (`reconcile.reconciler_brief`),
+    so no turn is needed to compose it.
+    """
+    from papaya_agent_runtime import reconcile, rounds
+
+    worker_id = int(queued.get("task_id") or 0)
+    summary = str(queued.get("summary") or "")
+    rounds.record_pr_attention(
+        worker_id,
+        summary,
+        list(queued.get("reasons") or []),
+        fingerprint=queued.get("fingerprint"),
+        head=queued.get("head"),
+        pr=queued.get("pr"),
+        url=queued.get("url"),
+        base=queued.get("base"),
+        threads=queued.get("threads") or [],
+        comments=queued.get("comments") or [],
+        **details,
+    )
+    reconcile.record(
+        worker_id,
+        reconcile.STARTED,
+        fingerprint=queued.get("fingerprint"),
+        head=queued.get("head"),
+        pr=queued.get("pr"),
+        url=queued.get("url"),
+        ticket_task_id=None,
+        at=now.isoformat(),
+    )
+    where = queued.get("url") or f"PR #{queued.get('pr')}"
+    steer(worker_id, f"Your delivered pull request {where} needs attention: {summary}")
+
+
+def steer_worker(worker_task_id: int, message: str) -> None:
+    """Steer a worker through the supervisor, as the manager."""
+    from papaya_agent_runtime.state import store
+    from papaya_agent_runtime.supervisor.client import SupervisorClient
+
+    SupervisorClient().steer_task(worker_task_id, message, by=store.BY_MANAGER)
+
+
+def serve_running() -> bool:
+    """Is a `ppy serve` process running this instance's supervisor right now?
+
+    The heartbeat does the steps serve's rounds do only when no serve is there to do
+    them, so the two never act on the same pull request.
+    """
+    import json
+    import os
+
+    from papaya_agent_runtime.paths import run_dir
+
+    try:
+        data = json.loads((run_dir() / "supervisor.json").read_text(encoding="utf-8"))
+        pid = int(data.get("pid") or 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    if data.get("role") != "serve" or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _no_live_ticket(worker_task_id: int) -> bool:
+    return _owner(worker_task_id)[1] is None
+
+
+def repair_untracked(
+    entries: list[dict[str, Any]],
+    now: datetime,
+    *,
+    steer,
+    pr_details=None,
+    room: int | None = None,
+) -> list[str]:
+    """Repair every open delivered pull request no live ticket covers. Returns lines.
+
+    The ticket path in `ppy serve` goes through a review turn; this is everything else:
+    work dispatched from a session, and tickets that ended (handed over, done, stalled).
+    Both modes call it: serve's rounds each round, and the heartbeat when no serve is
+    running. Never raises.
+    """
+    from papaya_agent_runtime import reconcile
+
+    lines: list[str] = []
+    try:
+        mine: dict[int, dict[str, Any]] = {}
+        for entry in entries:
+            if not entry.get("known") or entry.get("pr") is None:
+                continue
+            if entry.get("status") != "delivered" or entry.get("state") != "OPEN":
+                continue
+            worker_id = int(entry["task_id"])
+            if not _no_live_ticket(worker_id):
+                continue
+            mine[worker_id] = entry
+            attention = pr_attention(worker_id, entry, now)
+            if attention.action == PR_PERSON:
+                record_needs_a_person(worker_id, attention, entry, now)
+                lines.append(
+                    f"worker task {worker_id}'s pull request needs a person: {attention.summary}"
+                )
+            elif attention.action == PR_QUEUE:
+                record_queued(worker_id, attention, entry, now, None)
+                lines.append(f"worker task {worker_id}: {attention.summary} (queued for repair)")
+        busy = len(reconcile.open_lane())
+        free = (reconcile.reconcile_slots() if room is None else room) - busy
+        for _event_id, queued in reconcile.merge_readiness_order(reconcile.pending_queue()):
+            worker_id = int(queued.get("task_id") or 0)
+            if worker_id not in mine or queued.get("ticket_task_id") is not None:
+                continue
+            if free <= 0:
+                break
+            free -= 1
+            details = (pr_details or reconcile.pr_details)(worker_id, mine[worker_id])
+            start_repair(queued, mine[worker_id], now, details=details, steer=steer)
+            lines.append(f"worker task {worker_id}: repairing ({queued.get('summary')})")
+    except Exception as exc:  # noqa: BLE001 - a repair step never ends a round or a tick
+        lines.append(f"could not check delivered pull requests: {exc}")
+    return lines
+
+
+def prs_needing_a_person() -> list[tuple[int, str]]:
+    """Delivered pull requests the lane gave up on at their current fingerprint."""
+    from papaya_agent_runtime import reconcile
+    from papaya_agent_runtime.state import init_db
+
+    conn = init_db()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT task_id FROM events WHERE kind = ?", (reconcile.NEEDS_A_PERSON,)
+        ).fetchall()
+        found = []
+        for row in rows:
+            task_id = int(row["task_id"])
+            status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if status is None or status["status"] != "delivered":
+                continue
+            past = reconcile.history(task_id, conn)
+            marked = past.marked[-1][1] if past.marked else {}
+            later = [i for i, _p in past.queued if past.marked and i > past.marked[-1][0]]
+            if marked and not later:
+                found.append((task_id, "; ".join(marked.get("reasons") or [])))
+        return found
+    finally:
+        conn.close()

@@ -1060,6 +1060,7 @@ class Rounds:
         pushed: Callable[[int], PushState | None] | None = None,
         runtime_repo: Callable[[], str | None] | None = None,
         pr_details: Callable[[int, dict[str, Any]], dict[str, Any]] | None = None,
+        steer_worker: Callable[[int, str], Any] | None = None,
         merge: Callable[[int, dict[str, Any], str], Any] | None = None,
     ) -> None:
         self._built = built
@@ -1080,6 +1081,8 @@ class Rounds:
         #: The runtime's own GitHub repository (`owner/name`), whose red CI is a deficiency.
         self._runtime_repo = runtime_repo or deficiencies.runtime_repo
         self._pr_details = pr_details or _default_pr_details
+        #: How a repair with no ticket reaches its worker: a steer, admitted in the lane.
+        self._steer_worker = steer_worker or supervision.steer_worker
         self._merge = merge or _default_merge
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
@@ -1573,7 +1576,16 @@ class Rounds:
             await self._start_attempts(tickets, by_worker, current, now)
         ).items():
             said[worker_id] = line
-        return [line for line in said.values() if line]
+        # Pull requests no held ticket covers (dispatched from a session, or a ticket
+        # that ended): the same repair step a session's heartbeat runs without serve.
+        lines = await asyncio.to_thread(
+            supervision.repair_untracked,
+            entries,
+            now,
+            steer=self._steer_worker,
+            pr_details=self._pr_details,
+        )
+        return [line for line in said.values() if line] + lines
 
     async def _follow(
         self,
@@ -1590,33 +1602,19 @@ class Rounds:
         at it failed, once. Two failures at one fingerprint are a person's. No reasons
         at all is the green-and-unmerged clock.
         """
-        from papaya_agent_runtime import reconcile
 
-        past = await asyncio.to_thread(reconcile.history, worker_id)
-        if past.open_attempt() is not None:
-            return None
-        budget = await asyncio.to_thread(reconcile.ci_budget_seconds, worker_id)
-        reasons = reconcile.reasons_for(
-            entry,
-            requires_up_to_date=past.requires_up_to_date,
-            ci_budget_seconds=budget,
-            now=now,
-        )
-        if not reasons:
+        # The decision a session's heartbeat makes too (`supervision.pr_attention`).
+        attention = await asyncio.to_thread(supervision.pr_attention, worker_id, entry, now)
+        if attention.action == supervision.PR_GREEN:
             return await self._green(ticket, worker_id, entry, now)
-        fp = reconcile.fingerprint(reasons, entry.get("head"))
+        if not attention.reasons:
+            return None
+        reasons, fp = list(attention.reasons), attention.fingerprint
         current[worker_id] = fp
-        decision = past.decide(fp)
-        summary = "; ".join(r.text for r in reasons)
-        if decision == reconcile.NEEDS_A_PERSON:
+        summary = attention.summary
+        if attention.action == supervision.PR_PERSON:
             await asyncio.to_thread(
-                reconcile.record,
-                worker_id,
-                reconcile.NEEDS_A_PERSON,
-                fingerprint=fp,
-                head=entry.get("head"),
-                reasons=[r.text for r in reasons],
-                at=now.isoformat(),
+                supervision.record_needs_a_person, worker_id, attention, entry, now
             )
             where = entry.get("url") or f"PR #{entry['pr']}"
             await asyncio.to_thread(
@@ -1632,29 +1630,13 @@ class Rounds:
                 "still needs attention:\n" + "\n".join(f"- {r.text}" for r in reasons),
             )
             return f"worker task {worker_id}'s pull request needs a person: {summary}"
-        if decision != "queue":
+        if attention.action != supervision.PR_QUEUE:
             return None
         if entry.get("ci") == "fail":
             # Raised when the attention is, not when the lane gets to it.
             await asyncio.to_thread(self._runtime_ci_red, worker_id, ticket, entry)
         await asyncio.to_thread(
-            reconcile.record,
-            worker_id,
-            reconcile.QUEUED,
-            fingerprint=fp,
-            head=entry.get("head"),
-            rank=reconcile.rank_of(reasons),
-            keys=[r.key for r in reasons],
-            reasons=[r.text for r in reasons],
-            summary=summary,
-            pr=entry.get("pr"),
-            url=entry.get("url"),
-            base=entry.get("base"),
-            created_at=entry.get("created_at"),
-            ticket_task_id=ticket.task_id,
-            threads=list(entry.get("threads") or []),
-            comments=list(entry.get("comments") or []),
-            at=now.isoformat(),
+            supervision.record_queued, worker_id, attention, entry, now, ticket.task_id
         )
         return f"worker task {worker_id}: {summary} (queued for the reconcile lane)"
 

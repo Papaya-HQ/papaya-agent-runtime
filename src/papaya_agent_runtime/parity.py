@@ -106,25 +106,29 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "pull_request_repair",
-        GAP,
+        SHARED,
         "a delivered pull request that is red, conflicted, behind or reviewed is repaired",
         serve=(
             "Rounds._pull_requests",
             "Rounds._follow",
             "Rounds._start_attempts",
             "Rounds._finish_attempts",
-            "Rounds._green",
             "Rounds._runtime_ci_red",
             "Rounds._forge_states",
         ),
-        heal="every delivered pull request, ticket or not, in one attention list both modes act on",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.watch", "papaya_agent_runtime.owed"),
     ),
     Capability(
         "merged_followup",
         GAP,
-        "a merged pull request updates its work item and cleans its worktree",
-        serve=("Rounds._merged", "Rounds._clean_if_merged"),
-        heal="comment and ask the workspace (its rule once learned), from the heartbeat too",
+        "a merged pull request updates its work item and cleans its worktree; a green one "
+        "left unmerged is said or auto-merged",
+        serve=("Rounds._merged", "Rounds._clean_if_merged", "Rounds._green"),
+        heal=(
+            "comment and ask the workspace (its rule once learned), and the green-unmerged "
+            "clock, from the heartbeat too"
+        ),
     ),
     Capability(
         "work_item_changes",
@@ -275,7 +279,6 @@ CAPABILITIES: tuple[Capability, ...] = (
 #: may join it — a new supervision capability is built shared from the start.
 KNOWN_GAPS = frozenset(
     {
-        "pull_request_repair",
         "merged_followup",
         "work_item_changes",
         "turn_obligations",

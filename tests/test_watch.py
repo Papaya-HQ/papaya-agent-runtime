@@ -384,7 +384,7 @@ def test_run_stops_polling_a_pull_request_once_it_has_landed(home, tmp_path, mon
             raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        watch.run(interval=300, out=out, sleep=fake_sleep)
+        watch.run(interval=300, out=out, sleep=fake_sleep, repair=lambda conn, now: [])
     assert [c[1] for c in calls] == ["list"]  # three ticks, one query, then silence
     assert "prs:" not in out.getvalue()
 
@@ -457,7 +457,7 @@ def test_run_compares_each_tick_with_the_one_before_it(home, tmp_path, monkeypat
             raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        watch.run(interval=300, out=out, sleep=fake_sleep)
+        watch.run(interval=300, out=out, sleep=fake_sleep, repair=lambda conn, now: [])
     lines = out.getvalue().strip().splitlines()
     assert "ci pending" in lines[0] and "changed:" not in lines[0]
     assert "changed: PR #779 ci pending -> pass" in lines[1]
