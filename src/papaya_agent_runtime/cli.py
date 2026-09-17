@@ -8,6 +8,7 @@ as milestones land. M1 provides: setup, config, doctor, repo, status, version.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -531,7 +532,7 @@ def _repo_onboard(args: argparse.Namespace) -> int:
         return 1
     if args.json:
         payload = {**report.__dict__, "notes_path": str(path)}
-        payload["gate"] = report.gate.__dict__ if report.gate is not None else None
+        payload["gate"] = dataclasses.asdict(report.gate) if report.gate is not None else None
         print(json.dumps(payload, indent=2))
         return 0
     stack = ", ".join(report.stacks) or "stack not recognised"

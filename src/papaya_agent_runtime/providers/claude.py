@@ -82,6 +82,8 @@ class ClaudeAdapter(ProviderAdapter):
         allowed, _source = effective_allowed_tools()
         if allowed:
             argv += ["--allowedTools", ",".join(allowed)]
+        if spec.denied_tools:
+            argv += ["--disallowedTools", ",".join(spec.denied_tools)]
         return argv
 
     def start(self, spec: TaskSpec) -> list[str]:

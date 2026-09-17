@@ -77,6 +77,21 @@ REPO_COLUMNS = (
     "merge_method",
 )
 
+#: The gate answers a repository gives (or a person overrides), each with a
+#: ``<column>_source`` beside it: where the repository says it (``AGENTS.md:12``), or
+#: :data:`SOURCE_PERSON`. :data:`SOURCE_HEURISTIC` marks a value the runtime once
+#: guessed, which the start remedy clears (`solicit.clear_heuristic_gate_policies`).
+GATE_ANSWERS = ("local_gate", "full_suite_command", "full_suite_owner")
+SOURCE_PERSON = "person"
+SOURCE_HEURISTIC = "heuristic"
+#: Who may run the full suite, besides CI: the supervisor, once at the delivered head.
+OWNER_SUPERVISOR = "supervisor"
+
+
+def source_column(answer: str) -> str:
+    return f"{answer}_source"
+
+
 #: How `gh pr merge` may merge a pull request on a repo that opted into `auto_merge`.
 MERGE_METHODS = ("squash", "merge", "rebase")
 DEFAULT_MERGE_METHOD = "squash"
@@ -211,6 +226,24 @@ class RepoEnvironment:
     needs_elevated_localhost: bool = False
     auto_merge: bool = False
     merge_method: str = DEFAULT_MERGE_METHOD
+    local_gate_source: str | None = None
+    full_suite_command_source: str | None = None
+    full_suite_owner_source: str | None = None
+
+    @property
+    def supervisor_runs_full_suite(self) -> bool:
+        """Does the runtime run the full suite once before delivery (rather than CI)?"""
+        return bool(self.full_suite_command) and self.full_suite_owner.lower().startswith(
+            OWNER_SUPERVISOR
+        )
+
+    def sourced(self, answer: str) -> str:
+        """A gate answer with where it came from, or ``unknown``."""
+        value = getattr(self, answer)
+        if not value:
+            return "unknown"
+        source = getattr(self, source_column(answer))
+        return f"`{value}` ({source})" if source else f"`{value}`"
 
     @property
     def compose_file(self) -> str | None:
@@ -238,9 +271,10 @@ class RepoEnvironment:
                 if self.push_hook_runs_full_suite
                 else "no"
             ),
-            f"local gate: {self.local_gate or 'not set (the brief names the suite)'}; "
-            f"full suite owner: {self.full_suite_owner}; "
-            f"full suite: {self.full_suite_command or 'not set'}",
+            f"scoped gate: {self.sourced('local_gate')}; "
+            f"full suite: {self.sourced('full_suite_command')}; "
+            f"full suite owner: {self.full_suite_owner}"
+            + (f" ({self.full_suite_owner_source})" if self.full_suite_owner_source else ""),
             f"evidence directory: {self.evidence_dir} (inside each worktree, excluded from git)",
             "database URL templates: "
             + (
@@ -288,12 +322,29 @@ def for_repo(row) -> RepoEnvironment:
         needs_elevated_localhost=bool(_cell(row, "needs_elevated_localhost")),
         auto_merge=bool(_cell(row, "auto_merge")),
         merge_method=str(_cell(row, "merge_method") or "").strip() or DEFAULT_MERGE_METHOD,
+        **{
+            source_column(answer): str(_cell(row, source_column(answer)) or "").strip() or None
+            for answer in GATE_ANSWERS
+        },
     )
 
 
-def set_fields(conn: sqlite3.Connection, name: str, **values) -> None:
-    """Store the environment columns ``ppy repo set`` passed. Only named ones change."""
+def set_fields(
+    conn: sqlite3.Connection, name: str, *, sources: dict[str, str] | None = None, **values
+) -> None:
+    """Store the environment columns ``ppy repo set`` passed. Only named ones change.
+
+    A gate answer is stored with its source: ``sources[answer]`` when the caller read
+    it from the repository, otherwise :data:`SOURCE_PERSON`. Clearing one clears its
+    source too.
+    """
     fields = {}
+    for answer in GATE_ANSWERS:
+        if values.get(answer) is not None:
+            given = str(values[answer]).strip()
+            fields[source_column(answer)] = (
+                ((sources or {}).get(answer) or SOURCE_PERSON) if given else None
+            )
     for key, value in values.items():
         if key not in REPO_COLUMNS:
             raise RepoEnvironmentError(f"{key!r} is not an environment setting")
@@ -604,23 +655,40 @@ def render(
         "under `/private/tmp`: that path is not reachable from your shell, and tests "
         "never write receipts at all (they use `tmp_path`)."
     )
-    gate = f"`{env.local_gate}`" if env.local_gate else "the scoped suite the brief names"
-    owner = "CI" if env.full_suite_owner.lower() == "ci" else env.full_suite_owner
+    lines.append(f"- **Three tiers:** {prompts.GATE_TIERS_RULE}")
     lines.append(
-        f"- **Local gate: {gate}.** That is what you run before handing the task back, in the "
-        "foreground, waiting for it to finish: never in the background, and never end your "
-        "session with it still running, because a backgrounded command dies with the "
-        "session and its result is lost. The full "
-        f"suite belongs to {owner}; do not run it here — a run that outlasts your tool "
-        "timeout is killed part-way and leaves the database poisoned for the next run."
+        "- **Targeted checks:** the repository says how to test what you change (its "
+        "`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `Makefile` or package scripts); pick the "
+        "tests nearest your diff from that, and run them as often as you like."
+    )
+    if env.local_gate:
+        scoped = f"{env.sourced('local_gate')}"
+    else:
+        scoped = "not recorded for this repository (the brief quotes the repository's own)"
+    lines.append(
+        f"- **Scoped gate: {scoped}.** That is what you run before handing the task back, in "
+        "the foreground, waiting for it to finish: never in the background, and never end "
+        "your session with it still running, because a backgrounded command dies with the "
+        "session and its result is lost."
+    )
+    full = env.sourced("full_suite_command") if env.full_suite_command else "not recorded"
+    owner = (
+        "CI runs it on your pull request"
+        if not env.supervisor_runs_full_suite
+        else "the supervisor runs it once, at the head that will be delivered"
+    )
+    lines.append(
+        f"- **Full suite: {full}.** {owner}. Do not run it here: "
+        f"{command_rules_full_suite_refusal()} A run that outlasts your tool timeout is "
+        "killed part-way and can leave the database poisoned for the next run."
     )
     lines.append(
         f"- **Gates longer than a tool call:** {prompts.TEN_MINUTE_RULE} "
-        f"`ppy gate run --task {task_id}` runs the local gate (`--full` for the full suite) "
-        "as the supervisor's own process, prints a progress line every minute, and records "
-        "the result against your head commit; the manager reads that record, not your note. "
-        "If it answers that the gate is still running, run the same command again: it "
-        "attaches to the run already going rather than starting another."
+        f"`ppy gate run --task {task_id}` runs the scoped gate as the supervisor's own "
+        "process, prints a progress line every minute, and records the result against your "
+        "head commit; the manager reads that record, not your note. If it answers that the "
+        "gate is still running, run the same command again: it attaches to the run already "
+        "going rather than starting another."
     )
     if gate_timing:
         lines.append(
@@ -639,7 +707,7 @@ def render(
     )
     if env.local_gate:
         assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in resolved.items())
-        lines.append(f"- **Exact local gate:** `{assignments} {env.local_gate}`")
+        lines.append(f"- **Exact scoped gate:** `{assignments} {env.local_gate}`")
     if compose_project:
         port_text = (
             f" and host port **{db_port}** (`{env.db_port_variable}`)"
@@ -692,15 +760,15 @@ def render(
     if env.source_line_ceiling:
         lines.append(
             f"- **Source ceiling:** no source file may exceed {env.source_line_ceiling} lines; "
-            "run the repository's harness check before the local gate."
+            "run the repository's harness check before the scoped gate."
         )
     if env.push_hook_runs_full_suite:
         target = f"`{branch}`" if branch else "your lease branch"
         ending = (
-            "Stop at the code-level gates (the local gate, lint, format), commit, and "
+            "Stop at the code-level gates (the scoped gate, lint, format), commit, and "
             + finish_instruction(task_id, ends_at)
             if ends_at == "review"
-            else "Stop at the code-level gates (the local gate, lint, format), commit, and file "
+            else "Stop at the code-level gates (the scoped gate, lint, format), commit, and file "
             f'your done report with `ppy progress {task_id} --phase done --note "..."` naming the '
             "head SHA from `git rev-parse HEAD`."
         )
@@ -719,6 +787,19 @@ def render(
             "- **Review handoff:** commit, do not push, and " + finish_instruction(task_id, ends_at)
         )
     return "\n".join(lines) + "\n"
+
+
+def denied_tools(repo_row) -> list[str]:
+    """What a worker in this repository is refused on top of its allowlist."""
+    from papaya_agent_runtime.providers.command_rules import denied_tools as patterns
+
+    return patterns(for_repo(repo_row).full_suite_command) if repo_row is not None else []
+
+
+def command_rules_full_suite_refusal() -> str:
+    from papaya_agent_runtime.providers.command_rules import FULL_SUITE_REFUSAL
+
+    return FULL_SUITE_REFUSAL
 
 
 def evidence_path_for(repo_row, worktree: str | None) -> str | None:

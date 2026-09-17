@@ -314,6 +314,30 @@ def _is_duplicate(conn, task_id: int | None, tool_use_id: str, command: str | No
     return False
 
 
+def _full_suite_verdict(
+    conn, task_id: int | None, tool: str, command: str | None
+) -> Verdict | None:
+    """A refusal of the task's repository's full suite: the policy, not a profile gap."""
+    from papaya_agent_runtime.providers.command_rules import FULL_SUITE_PROGRAM
+
+    if tool != "Bash" or task_id is None or not command:
+        return None
+    row = conn.execute(
+        "SELECT r.full_suite_command FROM tasks t JOIN repos r ON r.id = t.repo_id WHERE t.id = ?",
+        (task_id,),
+    ).fetchone()
+    full = " ".join(str((row["full_suite_command"] if row else "") or "").split())
+    if not full or " ".join(command.split()) != full:
+        return None
+    return Verdict(
+        "",
+        False,
+        "the repository's full suite runs once at the delivered head, not as a tool call",
+        POLICY_REFUSAL,
+        FULL_SUITE_PROGRAM,
+    )
+
+
 def record(
     denials: Iterable[dict],
     *,
@@ -334,7 +358,9 @@ def record(
             tool_use_id = str(denial.get("tool_use_id") or "")
             if _is_duplicate(conn, task_id, tool_use_id, command):
                 continue
-            verdict = classify(tool, command, worktree)
+            verdict = _full_suite_verdict(conn, task_id, tool, command) or classify(
+                tool, command, worktree
+            )
             payload = {
                 "tool": tool,
                 "tool_use_id": tool_use_id or None,
@@ -453,6 +479,13 @@ def shape_steer_message(commands: list[str], branch: str | None) -> str:
 
 def policy_rule(program: str) -> str:
     """The rule a refused ``program`` broke, in one sentence."""
+    from papaya_agent_runtime.providers.command_rules import (
+        FULL_SUITE_PROGRAM,
+        FULL_SUITE_REFUSAL,
+    )
+
+    if program == FULL_SUITE_PROGRAM:
+        return FULL_SUITE_REFUSAL
     if program in ENVIRONMENT_FORBIDS:
         return (
             f"A worker does not run `{program}` here: when this repository has a database "

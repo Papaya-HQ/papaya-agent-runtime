@@ -348,29 +348,53 @@ def _repo_problems(problems: list[Problem]) -> None:
                 blocking=False,
             )
         )
-    ungated = sorted(
-        str(row["name"])
-        for row in registered
-        if row["name"] not in unread and not solicit.has_gate_policy(row)
-    )
-    if ungated:
-        # PAP-213: with no local gate and no push hook on record, a worker is told
-        # "local gate: not set" and runs whatever the brief names as a tool call,
-        # however long it is. Onboarding derives one where the repository has any.
+    for row in sorted(registered, key=lambda r: str(r["name"])):
+        name = str(row["name"])
+        missing = [] if name in unread else solicit.gate_unknowns(row)
+        if not missing:
+            continue
+        # The repository owns its gates. When its own instructions do not say which
+        # command is the quick gate and which is the full suite, the runtime asks the
+        # owner rather than guessing (a guessed `make verify` became every worker's
+        # local gate on 2026-09-17).
+        question = gate_question(name, missing)
         problems.append(
             Problem(
                 code="repo_without_gate_policy",
-                summary=(
-                    f"no gate policy for {', '.join(ungated)}: no local gate and no pre-push "
-                    "hook on record, so workers there are not told what to run"
-                ),
+                summary=f"{name} does not say its {' or its '.join(missing)}: {question}",
                 fix=(
-                    "`ppy repo onboard <name>` derives one; if the repository has no test "
-                    'target, `ppy repo set <name> --local-gate "<command>"`'
+                    f"say it in {name}'s AGENTS.md (then `ppy repo onboard {name}`), or "
+                    f'`ppy repo set {name} --local-gate "<quick gate>" '
+                    '--full-suite-command "<full suite>"`'
                 ),
+                owner=USER,
                 blocking=False,
+                title="A repository does not say how its work is gated",
+                steps=(
+                    question,
+                    f"write the answer into {name}'s AGENTS.md, e.g. \"run `<quick gate>` while "
+                    'working, `<full suite>` before a PR", then: '
+                    f"ppy repo onboard {name}",
+                    f'or record it here only: ppy repo set {name} --local-gate "<quick gate>" '
+                    '--full-suite-command "<full suite>"',
+                    AFTER,
+                ),
+                scope=name,
             )
         )
+
+
+def gate_question(name: str, missing: list[str]) -> str:
+    """The exact question a repository's owner is asked about its unknown gates."""
+    asks = []
+    if "scoped gate" in missing:
+        asks.append(
+            f"which command is {name}'s quick gate (lint, type check and the touched tests, "
+            "run before handing work back)"
+        )
+    if "full suite" in missing:
+        asks.append(f"which command is {name}'s full suite (run once before a pull request)")
+    return "; and ".join(asks)[:1].upper() + "; and ".join(asks)[1:] + "?"
 
 
 #: The onboarding sections whose commands are a repository's gate.

@@ -172,13 +172,19 @@ def worker_budgets(repo: str | None) -> WorkerBudgets:
         quiet = budgets.budget(repo, budgets.SILENCE, conn=conn)
         plan = budgets.budget(repo, budgets.PLAN, conn=conn)
         session = budgets.budget(repo, budgets.WORKER_SESSION, conn=conn)
+        # The scoped gate, never the full suite: a worker runs only the scoped gate, so
+        # the midpoint never lands before one scoped gate could have finished.
+        scoped = budgets.budget(repo, budgets.GATE, conn=conn)
     finally:
         if conn is not None:
             conn.close()
+    midpoint = session.seconds / 2
+    if scoped.derived:
+        midpoint = max(midpoint, scoped.seconds)
     return WorkerBudgets(
         quiet_seconds=quiet.seconds,
         plan_seconds=plan.seconds,
-        midpoint_seconds=session.seconds / 2,
+        midpoint_seconds=midpoint,
         sources=(quiet.source, plan.source, session.source),
     )
 

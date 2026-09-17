@@ -92,11 +92,39 @@ the brief, answer, review and check-in prompts send durable facts to
   for agents, whether UI work has a design reference to match — and writes that into
   the repository's durable notes, where the next brief and the next worker both read
   it. It names what it couldn't determine, so the unknown gets asked about instead of
-  guessed at. It also records the repository's **gate policy**: whether its pre-push
-  hook runs the suite, a scoped local gate from its own quicker targets (`make
-  test-unit`, a `test:unit` script, else its test command; `--local-gate` to choose
-  one yourself), its full suite, and who owns that (CI, the hook, or the supervisor).
-  A repository with neither a local gate nor a hook is a readiness warning.
+  guessed at. It also records the repository's **gate policy**, and **the repository
+  owns it**: only what the repository itself declares is recorded. Its agent
+  instructions (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, a docs testing page) are
+  read for the command they say to run while working (the scoped gate) and the one
+  they say to run before a pull request (the full suite), each stored with the file
+  and line it came from (`AGENTS.md:5`). The full suite's owner is `ci` when a CI
+  workflow runs that command (with the workflow line), else `supervisor`. A Makefile
+  target named `verify` is never taken for a gate by its name. Whatever the repository
+  does not say is **unknown**, and readiness raises a blocker to the owner with the
+  exact question ("which command is the quick gate, which is the full suite?").
+  `ppy repo set <name> --local-gate "..." --full-suite-command "..."` records a
+  person's answer (source `person`), which a later onboarding never replaces. At
+  `ppy serve` start, every stored answer the runtime's old heuristics guessed is
+  dropped (logged, and a `config_change` event) and the repository is read again.
+
+## Three tiers of checking
+
+Every worker-facing text (the brief, the environment block, the command rules, the
+review and check-in prompts) names the same three tiers:
+
+- **Targeted checks** while working: the tests nearest the change, chosen by the worker
+  from the repository's own guidance and its diff, as often as it likes.
+- **The scoped gate** before handing back, and at every milestone push: the quick gate
+  the repository names. Never the full suite.
+- **The full suite once**, at the head that will be delivered. When CI runs it, delivery
+  proceeds on a green scoped gate and the pull request is followed until CI is green.
+  When the supervisor owns it, `ppy serve` runs `ppy gate run --full` at the worker's
+  head before the review turn, once per head, and gives the review turn that record
+  with the instruction not to run it again. A worker's full-suite tool call is refused
+  (`--disallowedTools`) and steered with the reason.
+
+The rounds' midpoint check-in never lands before one scoped gate (its `gate` budget,
+not `full_suite`) could have finished.
 
 ## Gates longer than a tool call
 

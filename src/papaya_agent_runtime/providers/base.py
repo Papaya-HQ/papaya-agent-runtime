@@ -33,6 +33,9 @@ class TaskSpec:
     environment: str | None = None
     # Resolved task-scoped values overlaid on the child process environment.
     process_env: dict[str, str] = field(default_factory=dict)
+    # Tool patterns refused on top of the allowlist: the repository's full suite,
+    # which runs once at the delivered head, never as a worker's tool call.
+    denied_tools: list[str] = field(default_factory=list)
 
 
 @dataclass

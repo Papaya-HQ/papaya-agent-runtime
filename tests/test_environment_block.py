@@ -15,7 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from papaya_agent_runtime import cli, compose, environment, memory, progress, repos, review
+from papaya_agent_runtime import (
+    cli,
+    compose,
+    environment,
+    memory,
+    progress,
+    prompts,
+    repos,
+    review,
+)
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
 from papaya_agent_runtime.providers.base import TaskSpec
 from papaya_agent_runtime.providers.claude import ClaudeAdapter
@@ -80,7 +89,10 @@ def test_repo_set_records_the_environment_and_shows_it(ppy_home, source_repo, ca
     out = capsys.readouterr().out
     assert "compose stack: docker-compose.test.yml; database port from 54000 + task id" in out
     assert "push hook runs the full suite: yes" in out
-    assert "local gate: make test-backend; full suite owner: ci" in out
+    assert (
+        "scoped gate: `make test-backend` (person); full suite: unknown; full suite owner: ci"
+        in out
+    )
 
     env = environment.for_repo(init_db().execute("SELECT * FROM repos").fetchone())
     assert env.compose_file == "docker-compose.test.yml"
@@ -134,14 +146,22 @@ def _env(**kwargs) -> environment.RepoEnvironment:
 
 def test_the_block_for_a_repo_without_a_compose_stack_names_evidence_and_the_gate() -> None:
     text = environment.render(
-        _env(local_gate="make test-backend"), task_id=12, evidence_path="/wt/12/.ppy-evidence"
+        _env(
+            local_gate="make test-backend",
+            local_gate_source="AGENTS.md:12",
+            full_suite_command="make verify",
+            full_suite_command_source="AGENTS.md:13",
+        ),
+        task_id=12,
+        evidence_path="/wt/12/.ppy-evidence",
     )
     assert text.startswith(f"## {environment.HEADING}")
     assert "`/wt/12/.ppy-evidence/`" in text
     assert "Never write receipts under `/private/tmp`" in text
     assert "`ppy review show` lists that directory" in text
-    assert "Local gate: `make test-backend`" in text
-    assert "The full suite belongs to CI" in text
+    assert "Scoped gate: `make test-backend` (AGENTS.md:12)" in text
+    assert "Full suite: `make verify` (AGENTS.md:13).** CI runs it on your pull request" in text
+    assert " ".join(prompts.GATE_TIERS_RULE.split()) in " ".join(text.split())
     assert "tool timeout" in text
     assert "Private database stack" not in text
     assert "COMPOSE_PROJECT_NAME" not in text
@@ -206,7 +226,7 @@ def test_the_block_renders_one_exact_gate_with_urls_sandbox_and_source_ceiling(p
         f"RUFF_CACHE_DIR={environment.task_cache_dir(12) / 'ruff'} "
         f"MYPY_CACHE_DIR={environment.task_cache_dir(12) / 'mypy'} make test"
     )
-    assert text.count(f"**Exact local gate:** `{gate}`") == 1
+    assert text.count(f"**Exact scoped gate:** `{gate}`") == 1
     assert "localhost database access and Git object writes may require" in text
     assert "no source file may exceed 1000 lines" in text
     assert "Receipts are `.txt` files" in text
@@ -503,7 +523,7 @@ def test_a_dispatched_claude_brief_carries_the_block_for_this_task(
     assert prompt.index(environment.HEADING) < prompt.index("THE BRIEF BODY")
     assert f"COMPOSE_PROJECT_NAME=task_{task_id} PAPAYA_DB_PORT={54000 + task_id}" in prompt
     assert f"{spec.worktree_path}/.ppy-evidence/" in prompt
-    assert "Local gate: `make test-backend`" in prompt
+    assert "Scoped gate: `make test-backend` (person)" in prompt
     assert f"pushes `{spec.branch}` on your behalf" in prompt
     polluted = {
         "PATH": "/usr/bin",

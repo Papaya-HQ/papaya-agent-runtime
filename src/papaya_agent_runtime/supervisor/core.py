@@ -690,6 +690,7 @@ class Supervisor:
             memory_preamble=memory.worker_context(repo, task_id=task_id, ends_at=ends_at),
             environment=prepared.block,
             process_env=prepared.process_env or {},
+            denied_tools=environment.denied_tools(repo_row),
         )
         adapter = _adapter_for(provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
@@ -1027,6 +1028,7 @@ class Supervisor:
                 branch=task["branch"],
                 environment=prepared.block if prepared is not None else None,
                 process_env=(prepared.process_env if prepared is not None else None) or process_env,
+                denied_tools=environment.denied_tools(repo_row),
             )
             session_id = None
         else:
@@ -1044,6 +1046,7 @@ class Supervisor:
                 resume_session_id=session_id,
                 steer_message=packet,
                 process_env=process_env,
+                denied_tools=environment.denied_tools(repo_row),
             )
         adapter = _adapter_for(spec.provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
