@@ -113,7 +113,7 @@ def build_config(overrides: dict) -> MMConfig:
             default_reasoning=overrides.get(
                 "worker_default_reasoning", overrides.get("worker_max_reasoning", "medium")
             ),
-            max_concurrent=overrides.get("worker_max_concurrent", 2),
+            max_concurrent=overrides.get("worker_max_concurrent", WorkerCeiling.max_concurrent),
         ),
         cost_posture=overrides.get("cost_posture", "lean"),
         authority=Authority(

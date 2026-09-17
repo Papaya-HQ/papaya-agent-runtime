@@ -844,6 +844,42 @@ def test_a_checkout_that_was_never_set_up_configures_itself_before_it_listens(
     assert memory.repos_root().is_dir() and memory.preferences_path().is_file()
     assert harness.loop is not None, "the listener never went up"
     assert "set this runtime up" in stderr.getvalue()
+    assert (cfg.worker.max_concurrent, cfg.worker.reconcile_slots) == (3, 1)
+    assert "(up to 3 at once, plus 1 for pull-request fixes)" in stderr.getvalue()
+
+
+@pytest.mark.parametrize("configured", [None, 5])
+def test_the_listener_declares_the_configured_worker_count_as_its_subjects(
+    ppy_home, client_home, ready, configured
+) -> None:
+    """Papaya is told the tickets this machine holds at once, and the loop holds that many.
+
+    The loop used to be built without it, so it took the client's own default
+    whatever `worker.max_concurrent` said.
+    """
+    from papaya_agent_runtime.config import load_config, save_config
+
+    if configured is not None:
+        cfg = load_config()
+        cfg.worker.max_concurrent = configured
+        save_config(cfg)
+    workers = load_config().worker.max_concurrent
+    assert workers == (configured or 3)
+    harness = Harness(FakeEvents([]))
+    options = serve.parse_args(["--working-directory", str(client_home.work_dir)])
+
+    async def scenario() -> int:
+        runner = asyncio.create_task(
+            serve.run(options, stdout=io.StringIO(), stderr=io.StringIO(), extra=harness.extra())
+        )
+        await _until(lambda: harness.events.connection, what="the capabilities to be announced")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert harness.events.connection[0]["capabilities"]["max_concurrent_subjects"] == workers
+    assert harness.loop.max_concurrent == workers
 
 
 def test_a_machine_with_no_harness_still_listens_and_dms_what_needs_the_user(
@@ -2635,10 +2671,13 @@ async def _serving(
     sweep_sleep=None,
     server=None,
     runner: serve.TicketRunner | None = None,
-    max_concurrent: int = 3,
+    max_concurrent: int | None = None,
 ) -> asyncio.Task[int]:
+    """`serve.run` sweeping; the pool is the config's worker count unless `max_concurrent`."""
     options = serve.parse_args(["--working-directory", str(client_home.work_dir), *args])
-    extra = {**harness.extra(), "max_concurrent": max_concurrent}
+    extra = harness.extra()
+    if max_concurrent is not None:
+        extra["max_concurrent"] = max_concurrent
     return asyncio.create_task(
         serve.run(
             options,
@@ -2793,6 +2832,29 @@ def test_a_full_pool_ends_the_round_and_the_next_sweep_offers_the_rest(
         "ppy serve: sweep found 1: 1 offered",
     ]
     assert _reserved(harness) == ["work_item:item-1", "work_item:item-2"]
+
+
+def test_a_default_pool_sweeps_three_tickets_and_leaves_the_fourth(
+    ppy_home, client_home, ready, registered_repo, assigned
+) -> None:
+    """Three workers by default, so the sweep fills three slots from one round."""
+    assigned.items = [_item(1), _item(2), _item(3), _item(4)]
+    harness = Harness(FakeEvents([]))
+    stderr = io.StringIO()
+
+    async def scenario() -> int:
+        runner = await _serving(harness, client_home, stderr)
+        await _until(lambda: len(_summaries(stderr)) == 1, what="the start sweep")
+        await _until(lambda: len(harness.jobs) == 3, what="three swept jobs")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert _summaries(stderr) == [
+        "ppy serve: sweep found 4: 3 offered; 1 left for the next sweep (every slot is busy)",
+    ]
+    assert _reserved(harness) == ["work_item:item-1", "work_item:item-2", "work_item:item-3"]
 
 
 def test_a_zero_sweep_interval_sweeps_once_at_start_and_never_again(

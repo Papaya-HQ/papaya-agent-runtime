@@ -800,7 +800,7 @@ delivery records the new head.
 
 PR fixes have their own capacity, the **reconcile lane** (`worker.reconcile_slots`,
 default 1). The supervisor admits a run of any task that was ever delivered only in the
-lane, never in a ticket slot (`worker.max_concurrent`), and never admits a first dispatch
+lane, never in a ticket slot (`worker.max_concurrent`, default 3), and never admits a first dispatch
 there. So a fix starts with every ticket slot busy, and new tickets never wait behind
 fixes. The lane takes one pull request at a time. The queue is ordered by how close
 each is to merging (behind only, then conflicts, then CI, then reviewers) and then by
@@ -909,16 +909,19 @@ ppy config models \
   --worker-provider codex \
   --worker-default-model gpt-5.6-sol --worker-default-reasoning high \
   --worker-max-model gpt-5.6-sol --worker-max-reasoning xhigh \
-  --worker-max-concurrent 2
+  --worker-max-concurrent 3
 ```
 
 Changing the driver profile affects the next launch; it cannot change the model of a
 running chat. The recognized Codex safety order is Luna < Terra < Sol < Astra; an
 unknown custom name is accepted only when it exactly matches the configured ceiling.
 
-`worker.max_concurrent` is an admission cap for normal operation under one supervisor
-per `.ppy` home. It counts active provider executions, not completed worktrees
-awaiting review. This iteration provides no cross-process lock, distributed
+`worker.max_concurrent` (default 3) is an admission cap for normal operation under one
+supervisor per `.ppy` home. It counts active provider executions, not completed
+worktrees awaiting review. `ppy serve` declares the same number to Papaya as the
+tickets it holds at once, and the reconcile lane (`worker.reconcile_slots`, default 1)
+is on top of it. A version-1 `config.toml` that stored the old default of 2 drops it on
+migration and gets 3; a 2 a person set after that is kept. This iteration provides no cross-process lock, distributed
 scheduler, or durable automatic-continuation retries; do not run multiple supervisors
 for one home. The cap is an operational guardrail, not a dollar budget.
 
