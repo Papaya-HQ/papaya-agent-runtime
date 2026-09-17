@@ -35,6 +35,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 #: The command `papaya-agent connect` installs onto the PATH.
 CLI = "papaya-agent"
@@ -457,6 +458,26 @@ def agent_env() -> dict[str, str]:
         "PAPAYA_WORKSPACE_ID": str(agent.get("workspace_id") or ""),
         "PAPAYA_AGENT_TOKEN": str(agent.get("client_token") or ""),
     }
+
+
+def agent_api() -> Any | None:
+    """An agent-token API client for this connection, or ``None`` when not connected.
+
+    The same client `ppy serve` builds for its listener, for the things a session says
+    as the agent between turns (the owner's DM). Built from the client's own config, so
+    it needs no network to answer "is there one".
+    """
+    found = _best()
+    if found is None:
+        return None
+    who, home = found
+    config = _read_config(home)
+    agent = (config.get("agents") or {}).get(who.agent_id)
+    if not agent:
+        return None
+    from papaya_agent_client.api_client import AgentTokenApi
+
+    return AgentTokenApi(config, agent)
 
 
 # ── Papaya tools in an interactive session ──────────────────────────────────

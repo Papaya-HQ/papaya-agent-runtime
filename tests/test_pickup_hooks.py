@@ -84,6 +84,11 @@ def test_stop_blocks_once_when_work_is_open_and_no_next_step(ppy_home, monkeypat
         blocked_on="user",
         conn=conn,
     )
+    # That decision is chased through Papaya (`outreach`). Not connected, nothing
+    # remote reaches the person, so the turn is held once with the ask for the reply.
+    held = hooks.handle_hook_stdin("Stop", "{}")
+    assert held["decision"] == "block"
+    assert "wait for the requester's word on the API shape" in held["reason"]
     assert "decision" not in hooks.handle_hook_stdin("Stop", "{}")
 
 
