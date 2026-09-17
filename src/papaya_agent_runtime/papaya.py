@@ -439,6 +439,26 @@ def context(*, refresh: bool = False) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def agent_env() -> dict[str, str]:
+    """The API url, workspace and token a `ppy serve` job would carry, from this connection.
+
+    What lets a session read and write work items the way serve's rounds do
+    (`rounds.Rounds._env_from_connection` is the same three values). Empty when this
+    machine is not connected.
+    """
+    found = _best()
+    if found is None:
+        return {}
+    who, home = found
+    config = _read_config(home)
+    agent = (config.get("agents") or {}).get(who.agent_id) or {}
+    return {
+        "PAPAYA_API_URL": os.environ.get("PAPAYA_API_URL") or str(config.get("server_url") or ""),
+        "PAPAYA_WORKSPACE_ID": str(agent.get("workspace_id") or ""),
+        "PAPAYA_AGENT_TOKEN": str(agent.get("client_token") or ""),
+    }
+
+
 # ── Papaya tools in an interactive session ──────────────────────────────────
 
 #: The MCP server name, the same one `ppy serve`'s turns load.

@@ -132,7 +132,7 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "work_item_changes",
-        GAP,
+        SHARED,
         "comments and edits on a work item being worked reach the manager",
         serve=(
             "TicketRunner._comments",
@@ -142,7 +142,8 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._take_pending",
             "TicketRunner._mark_read",
         ),
-        heal="a shared work-item change check for every tracked task (comments and edits)",
+        shared="papaya_agent_runtime.workitems",
+        interactive=("papaya_agent_runtime.watch", "papaya_agent_runtime.owed"),
     ),
     Capability(
         "turn_obligations",
@@ -280,7 +281,6 @@ CAPABILITIES: tuple[Capability, ...] = (
 KNOWN_GAPS = frozenset(
     {
         "merged_followup",
-        "work_item_changes",
         "turn_obligations",
         "full_suite_before_review",
         "hygiene",

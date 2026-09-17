@@ -627,6 +627,22 @@ def repair_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
         return [f"could not check delivered pull requests: {exc}"]
 
 
+def listen_step(now: datetime) -> list[str]:
+    """Hear comments and edits on tracked work items, when no `ppy serve` does it. Never raises."""
+    from papaya_agent_runtime import papaya, workitems
+
+    try:
+        if supervision.serve_running():
+            return []
+        env = papaya.agent_env()
+        if not env.get("PAPAYA_AGENT_TOKEN"):
+            return []
+        who = papaya.identity()
+        return workitems.check_untracked(env=env, agent_id=who.agent_id if who else None)
+    except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
+        return [f"could not read work item changes: {exc}"]
+
+
 def is_idle(snapshot: dict[str, Any]) -> bool:
     """Is there nothing for the manager to watch right now?
 
@@ -739,6 +755,8 @@ def run(
 def _loop(
     conn, interval, as_json, exit_when_idle, out, sleep, clock, *, once=False, repair=None
 ) -> int:
+    # A test that replaces the repair step replaces every step that reaches out.
+    listen = listen_step if repair is None else (lambda now: [])
     repair = repair or repair_step
     # The first tick reports the current state, not the whole event history.
     since = max_event_id(conn)
@@ -758,7 +776,7 @@ def _loop(
             previous_prs=previous,
             settled_prs=settled,
             now=moment,
-            repairs=[] if once else repair(conn, moment),
+            repairs=[] if once else [*repair(conn, moment), *listen(moment)],
         )
         since = snapshot["last_event_id"]
         previous = pr_index(snapshot["prs"])

@@ -144,6 +144,7 @@ from papaya_agent_runtime import (
     supervision,
     sweep,
     takeover,
+    workitems,
 )
 from papaya_agent_runtime.paths import papaya_sessions_path, ppy_home
 from papaya_agent_runtime.state import db, store
@@ -2115,6 +2116,20 @@ class TicketRunner:
             if is_own_comment(comment, agent_id) or str(comment.get("id")) in queued:
                 continue
             ticket.pending.append(comment)
+        # Edits to the spec (description, criteria, status...) reach the answer turn like
+        # a comment: the same check a session's heartbeat runs (`workitems.edits`).
+        try:
+            hydrated = await asyncio.to_thread(
+                papaya_events.hydrate_work_item,
+                ticket.held.event,
+                environ=ticket.job.env,
+                **self._opener_kwargs(),
+            )
+        except papaya_events.PapayaEventError:
+            return
+        item = hydrated.payload.get("work_item") if hydrated.payload else None
+        for change in await asyncio.to_thread(workitems.edits, task_id, item):
+            ticket.pending.append(change.as_comment())
 
     async def _take_pending(self, ticket: Ticket) -> list[dict[str, Any]]:
         """Hand the queued comments to a turn: one progress line each, then recorded."""

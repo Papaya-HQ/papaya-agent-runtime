@@ -79,7 +79,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from papaya_agent_runtime import deficiencies, health, papaya_events, serve, supervision, sweep
+from papaya_agent_runtime import (
+    deficiencies,
+    health,
+    papaya_events,
+    serve,
+    supervision,
+    sweep,
+    workitems,
+)
 from papaya_agent_runtime.state import db, store
 
 log = logging.getLogger("papaya_agent_runtime.rounds")
@@ -1155,6 +1163,14 @@ class Rounds:
         parts = await self._pull_requests(now)
         if not self._standalone():
             parts += await self._reclaim(await asyncio.to_thread(ticket_tasks))
+            # Work items no held ticket listens to: the same check a session's heartbeat
+            # runs while no serve does (`workitems.check_untracked`).
+            parts += await asyncio.to_thread(
+                workitems.check_untracked,
+                env=self._papaya_env(),
+                held=self._held_ids(),
+                agent_id=getattr(self._runner, "_own_agent_id", lambda: None)(),
+            )
         held = list(getattr(self._runner, "held", {}).values())
         watched = {t.worker.task_id for t in held if getattr(t, "worker", None) is not None}
         closed = await asyncio.to_thread(close_dead_runners, watched)

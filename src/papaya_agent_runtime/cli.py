@@ -2077,6 +2077,19 @@ def _cmd_checkin(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_heard(args: argparse.Namespace) -> int:
+    """Say a work item change was read and needs nothing from the worker."""
+    from papaya_agent_runtime import workitems
+
+    pending = [c for c in workitems.unheard() if int(c["ticket_task_id"]) == args.task_id]
+    if not pending:
+        print(f"ticket task {args.task_id} has no unheard work item change")
+        return 0
+    workitems.mark_heard(args.task_id, args.note)
+    print(f"ticket task {args.task_id}: work item change heard")
+    return 0
+
+
 def _cmd_assessment(args: argparse.Namespace) -> int:
     from papaya_agent_runtime import assessments
     from papaya_agent_runtime.state import init_db
@@ -3443,6 +3456,14 @@ def build_parser() -> argparse.ArgumentParser:
     followup.add_argument("task_id", type=int)
     followup.add_argument("--send", action="store_true", help="send the steer it names")
     followup.set_defaults(func=_cmd_followup)
+
+    heard = sub.add_parser(
+        "heard",
+        help="a work item change was read and needs nothing from its worker (a steer also counts)",
+    )
+    heard.add_argument("task_id", type=int, help="the ticket task")
+    heard.add_argument("--note", required=True, help="what you read and why nothing is needed")
+    heard.set_defaults(func=_cmd_heard)
 
     checkin = sub.add_parser(
         "checkin",
