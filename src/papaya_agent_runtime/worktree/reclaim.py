@@ -43,10 +43,13 @@ import os
 import shutil
 import sqlite3
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from papaya_agent_runtime.paths import repos_dir, treehouse_home, worktree_pools_dir
+from papaya_agent_runtime.paths import db_path, repos_dir, treehouse_home, worktree_pools_dir
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.worktree.lease import Lease, LeaseError, LeaseManager
 
@@ -77,6 +80,8 @@ class WorktreeEntry:
     #: Whether this instance created the slot — i.e. its checkout belongs to one of
     #: our base clones. False means somebody else's worktree; never reclaimable.
     managed: bool = True
+    #: The open pull request that keeps a delivered task's slot, when one does.
+    open_pr: int | str | None = None
 
     @property
     def slot(self) -> str:
@@ -93,6 +98,195 @@ class WorktreeEntry:
         the checkout, so the two are tracked separately.
         """
         return self.checkout_path or self.path
+
+
+#: The forge read a stale pull request record is refreshed with: `watch._lookup_pr`'s
+#: ``(branch, cwd) -> entry``. A module attribute so a test can answer for the forge.
+lookup_pr: Callable[[str, str | None], dict[str, Any]] | None = None
+
+#: (database, task id) -> (epoch seconds, entry) of the last forge read this process made.
+_asked: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+
+
+@dataclass(frozen=True)
+class HeldByPullRequest:
+    pr: int | str | None
+    reason: str
+
+
+def _stamp_age(stamp: object, now: datetime) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(str(stamp or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (now - parsed).total_seconds()
+
+
+#: One round when nothing says otherwise (`rounds.DEFAULT_ROUNDS_INTERVAL`).
+_ROUND_SECONDS = 300.0
+
+
+def _refresh_after() -> float:
+    """How old a pull request record may be before the forge is asked again: one round.
+
+    Read the way `rounds.interval_from_env` reads it, without importing the rounds
+    (and `serve` with them) into every `ppy worktree list`.
+    """
+    try:
+        raw = os.environ.get("PPY_ROUNDS_INTERVAL", "").strip()
+        if raw:
+            return float(raw) or _ROUND_SECONDS
+        from papaya_agent_runtime.config import load_config
+
+        return float(load_config().health.rounds_interval) or _ROUND_SECONDS
+    except Exception:  # noqa: BLE001 - a bad interval setting is not a reason to prune
+        return _ROUND_SECONDS
+
+
+def open_pull_request(
+    task_id: int, *, now: datetime | None = None, refresh_after: float | None = None
+) -> HeldByPullRequest | None:
+    """Why a delivered task's slot stays because of its pull request, or ``None`` when it does not.
+
+    On PAP-222 (2026-09-17) hygiene removed task 21's slot while PR 710 was open and
+    red, and when the reconcile lane needed the checkout to fix CI there was nothing
+    there. A delivered task whose pull request is open is not over, however clean and
+    pushed its checkout is. The state is the PR watch record (`pr_observed`), read
+    fresh from the forge when it is older than one round. A task with no pull request
+    on record at all is left to the ordinary rules; one whose pull request exists but
+    cannot be read now is kept — unknown is not merged.
+    """
+    import json
+
+    from papaya_agent_runtime import team
+
+    conn = init_db()
+    try:
+        observed = conn.execute(
+            "SELECT payload, created_at FROM events WHERE task_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, team.PR_OBSERVED_EVENT),
+        ).fetchone()
+        delivered = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = 'delivered' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        task = store.get_task(conn, task_id)
+        repo = (
+            conn.execute("SELECT local_path FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+            if task is not None and task["repo_id"]
+            else None
+        )
+    finally:
+        conn.close()
+
+    def load(row: Any) -> dict[str, Any]:
+        try:
+            value = json.loads(row["payload"]) if row is not None else {}
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    if task is None or task["merged_sha"]:
+        return None
+    record = load(observed)
+    delivery = load(delivered)
+    if not record.get("pr") and not (delivery.get("pr_url") or delivery.get("pr_exists")):
+        return None
+    now = now or datetime.now(UTC)
+    limit = _refresh_after() if refresh_after is None else refresh_after
+    age = _stamp_age(observed["created_at"], now) if observed is not None else None
+    fresh_enough = bool(record.get("pr")) and age is not None and age <= limit
+    # The record only changes when the pull request does, so an open one that sits
+    # still keeps an old record; the last forge read in this process counts as fresh.
+    key = (str(db_path()), task_id)
+    asked = _asked.get(key)
+    if not fresh_enough and asked is not None and now.timestamp() - asked[0] <= limit:
+        record, fresh_enough = asked[1], True
+    if not fresh_enough:
+        fresh = _read_forge(task, repo)
+        if fresh is not None:
+            _asked[key] = (now.timestamp(), fresh)
+            record = fresh
+            if fresh.get("pr") is not None:
+                _observe(task_id, fresh)
+        elif not record.get("pr"):
+            where = delivery.get("pr_url") or "its pull request"
+            return HeldByPullRequest(
+                None, f"kept: {where} exists and its state could not be read from the forge"
+            )
+    state = str(record.get("state") or "").upper()
+    if record.get("pr") is None or record.get("merged") or state in ("MERGED", "CLOSED"):
+        return None  # no pull request for the branch after all, or it is over
+    number = record.get("pr")
+    return HeldByPullRequest(number, f"kept: PR #{number} open")
+
+
+def _read_forge(task: Any, repo: Any) -> dict[str, Any] | None:
+    """The forge's entry for the task's branch, or ``None`` when it could not be asked."""
+    if task is None or not task["branch"]:
+        return None
+    cwd = next(
+        (
+            p
+            for p in (task["worktree_path"], repo["local_path"] if repo is not None else None)
+            if p and Path(p).is_dir()
+        ),
+        None,
+    )
+    reader = lookup_pr
+    if reader is None:
+        from papaya_agent_runtime import watch
+
+        reader = watch._lookup_pr
+    try:
+        entry = reader(str(task["branch"]), cwd)
+    except Exception:  # noqa: BLE001 - a forge that cannot be asked is unknown
+        return None
+    return entry if isinstance(entry, dict) and entry.get("known") else None
+
+
+def _observe(task_id: int, entry: dict[str, Any]) -> None:
+    """Write the forge read as the PR watch record, in `rounds.observe_pr`'s shape."""
+    import json
+
+    from papaya_agent_runtime import team
+
+    observed = {
+        "task_id": task_id,
+        "pr": entry.get("pr"),
+        "url": entry.get("url"),
+        "state": entry.get("state"),
+        "merged": bool(entry.get("merged")),
+        "ci": entry.get("ci"),
+        "review": entry.get("review") or None,
+        "head": entry.get("head"),
+    }
+    try:
+        conn = init_db()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM events WHERE task_id = ? AND kind = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id, team.PR_OBSERVED_EVENT),
+            ).fetchone()
+            if row is not None and json.loads(row["payload"]) == observed:
+                return
+            task = store.get_task(conn, task_id)
+            store.append_event(
+                conn,
+                kind=team.PR_OBSERVED_EVENT,
+                payload=observed,
+                run_id=task["run_id"] if task is not None else None,
+                task_id=task_id,
+            )
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - the record is a cache; the answer stands without it
+        pass
 
 
 def _git(args: list[str], cwd: str) -> tuple[int, str]:
@@ -155,6 +349,12 @@ def _inspect(entry: WorktreeEntry) -> WorktreeEntry:
                 "this slot as its worktree and can be resumed into it"
             )
         return entry
+    if entry.task_id is not None and entry.task_status == "delivered":
+        held = open_pull_request(entry.task_id)
+        if held is not None:
+            entry.open_pr = held.pr
+            entry.reason = held.reason
+            return entry
     if entry.dirty:
         entry.reason = "uncommitted changes in the worktree"
         return entry
@@ -310,6 +510,16 @@ def orphan_slots(
     ).fetchall():
         for key in (_resolved(row["worktree_path"]), _resolved(Path(row["worktree_path"]).parent)):
             resumable.setdefault(key, (int(row["id"]), row["status"]))
+    # A delivered task that has not merged may still need its slot for its pull
+    # request; `_inspect` asks whether that pull request is open. Newest task first,
+    # because pool paths are recycled.
+    delivered: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT id, worktree_path FROM tasks WHERE worktree_path IS NOT NULL "
+        "AND status = 'delivered' AND (merged_sha IS NULL OR merged_sha = '') ORDER BY id DESC"
+    ).fetchall():
+        for key in (_resolved(row["worktree_path"]), _resolved(Path(row["worktree_path"]).parent)):
+            delivered.setdefault(key, int(row["id"]))
     repos_by_path = managed_base_clones(conn)
 
     entries: list[WorktreeEntry] = []
@@ -328,6 +538,9 @@ def orphan_slots(
             if repo is not None and owner != repo:
                 continue
             named_by = resumable.get(_resolved(slot)) or resumable.get(_resolved(checkout))
+            if named_by is None:
+                shipped = delivered.get(_resolved(slot)) or delivered.get(_resolved(checkout))
+                named_by = (shipped, "delivered") if shipped is not None else None
             entry = WorktreeEntry(
                 lease_id="",
                 path=str(slot),
@@ -482,6 +695,7 @@ def prune(
             "orphaned": entry.orphaned,
             "managed": entry.managed,
             "repo_path": entry.repo_path,
+            "open_pr": entry.open_pr,
         }
         if not entry.reclaimable:
             record["dirty"] = entry.dirty

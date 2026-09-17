@@ -517,7 +517,12 @@ def test_deliver_targets_main_when_the_layer_below_merged(ppy_home, monkeypatch)
         "_run",
         lambda argv, cwd=None: (
             calls.append(argv)
-            or SimpleNamespace(returncode=0, stdout="https://example/pr/12\n", stderr="")
+            or SimpleNamespace(
+                returncode=0,
+                # `pr list` finds no open pull request yet; everything else prints one.
+                stdout="" if argv[:3] == ["gh", "pr", "list"] else "https://example/pr/12\n",
+                stderr="",
+            )
         ),
     )
     monkeypatch.setattr(delivery, "is_approved_at_head", lambda tid: (True, ""))
@@ -565,7 +570,12 @@ def _deliverable(monkeypatch, calls: list[list[str]]) -> None:
         "_run",
         lambda argv, cwd=None: (
             calls.append(argv)
-            or SimpleNamespace(returncode=0, stdout="https://example/pr/12\n", stderr="")
+            or SimpleNamespace(
+                returncode=0,
+                # `pr list` finds no open pull request yet; everything else prints one.
+                stdout="" if argv[:3] == ["gh", "pr", "list"] else "https://example/pr/12\n",
+                stderr="",
+            )
         ),
     )
     monkeypatch.setattr(delivery, "is_approved_at_head", lambda tid: (True, ""))

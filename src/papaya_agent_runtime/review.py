@@ -25,6 +25,23 @@ class ReviewBundle:
     head_sha: str
     diffstat: str
     files_changed: int
+    #: Where ``base_sha`` came from, in words: what the diff was taken against.
+    base_from: str = ""
+
+
+#: How long the fetch before a review may take; a slow forge falls back, it never hangs.
+FETCH_TIMEOUT_SECONDS = 120
+
+
+@dataclass(frozen=True)
+class ReviewBase:
+    """The commit a review diffs from, and how it was found."""
+
+    sha: str
+    #: The branch it is the merge-base with (``forge/main``), or "" for the dispatch base.
+    ref: str
+    #: One line saying which base was used and why, for `review show` and the review turn.
+    how: str
 
 
 def _git(args: list[str], cwd: str) -> str:
@@ -34,8 +51,68 @@ def _git(args: list[str], cwd: str) -> str:
     return proc.stdout.strip()
 
 
+def _git_quiet(args: list[str], cwd: str, timeout: float = 30) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
 def head_sha(worktree_path: str) -> str:
     return _git(["rev-parse", "HEAD"], cwd=worktree_path)
+
+
+def review_base(conn, task) -> ReviewBase:
+    """The merge-base of the worker's HEAD with the branch its pull request targets.
+
+    The dispatch-time ``base_sha`` stops being the worker's starting point the moment
+    the branch is rebased: on PAP-222 (2026-09-17) `ppy review show 21` diffed from
+    it after a rebase onto a newer main and listed 51 files instead of the worker's
+    3. So the review asks the forge for the target branch (the stacked parent, else
+    the repository's default) and diffs from where HEAD meets it — a rebase moves
+    both ends together and never changes what is reviewed. When the forge cannot be
+    asked, the last fetched copy is used and said; with neither, the dispatch base.
+    """
+    worktree = task["worktree_path"]
+    dispatch = task["base_sha"] or ""
+    fallback = ReviewBase(dispatch, "", f"dispatch-time base {dispatch[:8]}")
+    repo = (
+        conn.execute("SELECT * FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+        if task["repo_id"]
+        else None
+    )
+    stacked = task["stacked_on"] if "stacked_on" in task.keys() else None  # noqa: SIM118 - sqlite3.Row
+    target = stacked or (repo["default_branch"] if repo is not None else None) or "main"
+    remote = "origin"
+    if repo is not None:
+        from papaya_agent_runtime import repos
+
+        try:
+            remote = repos.upstream_remote(repo)
+        except repos.RepoError:
+            remote = "origin"
+    tracking = f"refs/remotes/{remote}/{target}"
+    fetched = (
+        _git_quiet(
+            ["fetch", "--quiet", remote, f"+refs/heads/{target}:{tracking}"],
+            cwd=worktree,
+            timeout=FETCH_TIMEOUT_SECONDS,
+        )
+        is not None
+    )
+    sha = _git_quiet(["merge-base", "HEAD", tracking], cwd=worktree)
+    if not sha:
+        if dispatch:
+            why = "fetched, but HEAD shares no history with it" if fetched else "could not fetch"
+            return ReviewBase(
+                dispatch, "", f"dispatch-time base {dispatch[:8]} ({remote}/{target}: {why})"
+            )
+        return fallback
+    said = "fetched now" if fetched else "could not fetch; the last fetched copy"
+    return ReviewBase(sha, f"{remote}/{target}", f"merge-base with {remote}/{target} ({said})")
 
 
 def build_bundle(task_id: int) -> ReviewBundle:
@@ -44,14 +121,35 @@ def build_bundle(task_id: int) -> ReviewBundle:
     if task is None:
         raise ReviewError(f"task {task_id} not found")
     worktree = task["worktree_path"]
-    base = task["base_sha"]
-    if not worktree or not base:
+    if not worktree or not task["base_sha"]:
         raise ReviewError("task has no worktree/base to review")
     head = head_sha(worktree)
+    found = review_base(conn, task)
+    base = found.sha
     diffstat = _git(["diff", "--stat", f"{base}..{head}"], cwd=worktree)
     names = _git(["diff", "--name-only", f"{base}..{head}"], cwd=worktree)
     files = len([n for n in names.splitlines() if n.strip()])
-    return ReviewBundle(task_id, base, head, diffstat, files)
+    return ReviewBundle(task_id, base, head, diffstat, files, base_from=found.how)
+
+
+def review_base_line(task_id: int) -> str:
+    """`review_base` as the review turn's fact; "" when the task has no worktree. Never raises."""
+    conn = init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        if task is None or not task["worktree_path"]:
+            return ""
+        from pathlib import Path
+
+        if not Path(task["worktree_path"]).is_dir():
+            return ""
+        found = review_base(conn, task)
+        head = head_sha(task["worktree_path"])
+        return f"{found.sha[:8]}..{head[:8]}: {found.how}"
+    except Exception:  # noqa: BLE001 - a fact that cannot be read is left out
+        return ""
+    finally:
+        conn.close()
 
 
 def record_review(

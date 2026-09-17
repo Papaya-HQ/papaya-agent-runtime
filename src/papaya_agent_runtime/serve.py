@@ -138,6 +138,7 @@ from papaya_agent_runtime import (
     papaya_events,
     prompts,
     readiness,
+    review,
     standalone,
     sweep,
     takeover,
@@ -663,6 +664,8 @@ class Ticket:
     #: The full suite recorded at the worker's head (run once, by the supervisor, before
     #: the review turn), as one line; empty when CI owns it or none is recorded.
     full_suite: str = ""
+    #: The commit range the review diffs and how its base was found, read before a review turn.
+    review_base: str = ""
     #: What the manager's rounds noticed and the ticket's loop has not acted on yet.
     nudges: list[Nudge] = field(default_factory=list)
     #: The turn running for this ticket right now, if one is.
@@ -1084,6 +1087,7 @@ class TicketRunner:
         status_comment=None,
         agent_record=None,
         full_suite=None,
+        review_base=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -1120,6 +1124,8 @@ class TicketRunner:
         #: `gate.full_suite_once`'s seam: the full suite at a worker's head, run at most
         #: once per head, or ``None`` when it is not the supervisor's to run.
         self._full_suite = full_suite or full_suite_at_head
+        #: `review.review_base_line`'s seam: which commit the review diffs from, and why.
+        self._review_base = review_base or review.review_base_line
         #: How the living status line is written onto the work item, edited in place:
         #: ``(ticket, line) -> bool``. ``None`` writes nothing, and is the default until
         #: Papaya lets an agent edit its own comment (backend #636); until then the phase
@@ -1894,6 +1900,7 @@ class TicketRunner:
             # the turn writes on the item while it runs, so a new agent comment
             # after it is the turn's report.
             before = await asyncio.to_thread(self._comments, ticket)
+            ticket.review_base = await asyncio.to_thread(self._review_base, worker_id)
             result = await self._turn(ticket, prompts.REVIEW, self._review_facts(ticket, tail))
             if await asyncio.to_thread(delivered_since, worker_id, mark, by_status):
                 ticket.trigger = None
@@ -1957,8 +1964,9 @@ class TicketRunner:
         """The pull request is open: say so, move the item to review, and finish."""
         held = ticket.held
         worker = ticket.worker or await asyncio.to_thread(find_worker, held)
-        pr_url = await asyncio.to_thread(pull_request_url, worker.task_id) if worker else None
-        opened = f"Pull request open: {pr_url}" if pr_url else "Delivered."
+        delivery = await asyncio.to_thread(latest_delivery, worker.task_id) if worker else {}
+        pr_url = delivery.get("pr_url") or None
+        opened = delivery_line(delivery)
         # The ticket's last agent comment should be the turn's own report. Only
         # when the report could not be checked does the runner name the pull
         # request, and only when it is missing does it post the fallback.
@@ -2428,6 +2436,7 @@ class TicketRunner:
             FULL_SUITE_FACT: ticket.full_suite,
             "finding: the gate is red twice the same way": ticket.repeated_red,
             "finding: uncommitted work": ticket.uncommitted,
+            "the worker's commits to review (what `ppy review show` diffs)": ticket.review_base,
             "previous attempt's transcript (tail)": tail,
         }
 
@@ -3446,7 +3455,8 @@ def delivered_since(worker_id: int, mark: int, by_status: bool = True) -> bool:
         conn.close()
 
 
-def pull_request_url(worker_id: int) -> str | None:
+def latest_delivery(worker_id: int) -> dict[str, Any]:
+    """The worker's newest `delivered` payload, or ``{}``."""
     conn = db.init_db()
     try:
         row = conn.execute(
@@ -3454,9 +3464,30 @@ def pull_request_url(worker_id: int) -> str | None:
             "ORDER BY id DESC LIMIT 1",
             (worker_id,),
         ).fetchone()
-        return (_payload(row).get("pr_url") or None) if row is not None else None
+        return _payload(row) if row is not None else {}
     finally:
         conn.close()
+
+
+def pull_request_url(worker_id: int) -> str | None:
+    return latest_delivery(worker_id).get("pr_url") or None
+
+
+def delivery_line(delivery: dict[str, Any]) -> str:
+    """The delivering phase line: the pull request opened or updated, or `gh`'s own error."""
+    from papaya_agent_runtime.delivery import pr_number
+
+    url = delivery.get("pr_url") or None
+    error = delivery.get("pr_error")
+    number = pr_number(url)
+    name = f"PR #{number}" if number else (url or "The pull request")
+    if error and delivery.get("pr_exists"):
+        return f"Pushed; {name} is open but could not be updated: {error}"
+    if error:
+        return f"Pushed, but the pull request could not be opened: {error}"
+    if delivery.get("pr_updated"):
+        return f"{name} updated: {url}" if url and number else f"{name} updated."
+    return f"Pull request open: {url}" if url else "Delivered."
 
 
 def status_line_writable(task_id: int) -> bool:

@@ -423,6 +423,48 @@ def is_reconciliation(conn: sqlite3.Connection, task_id: int) -> bool:
     return row is not None
 
 
+def pull_request_number(conn: sqlite3.Connection, task_id: int) -> int | None:
+    """The delivered task's pull request number: the PR watch record, else the delivery's URL."""
+    from papaya_agent_runtime import team
+
+    row = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, team.PR_OBSERVED_EVENT),
+    ).fetchone()
+    number = _payload(row).get("pr") if row is not None else None
+    if number is None:
+        row = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = 'delivered' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        url = str(_payload(row).get("pr_url") or "") if row is not None else ""
+        tail = url.rstrip("/").rsplit("/", 1)[-1]
+        number = tail if tail.isdigit() else None
+    try:
+        return int(number) if number is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def pr_head_sources(conn: sqlite3.Connection, task: Any) -> list[tuple[str, str]]:
+    """Where a delivered task's pull request head is fetched from, best first.
+
+    ``(refspec, label)`` pairs: the forge's ``refs/pull/<n>/head`` when the pull request
+    is known — that is the head the pull request shows, whoever pushed it — then the
+    task's branch. A worktree rebuilt for the reconcile lane starts from one of these
+    and never from the task's base commit (PAP-222, 2026-09-17: the slot came back at
+    the base, and the gate and the approval ran against it).
+    """
+    sources: list[tuple[str, str]] = []
+    number = pull_request_number(conn, int(task["id"]))
+    if number is not None:
+        sources.append((f"refs/pull/{number}/head", f"PR #{number} head"))
+    if task["branch"]:
+        sources.append((f"refs/heads/{task['branch']}", f"branch {task['branch']}"))
+    return sources
+
+
 def lane_status(conn: sqlite3.Connection | None = None, now: datetime | None = None) -> str:
     """What `ppy status` says about the lane: idle, or which pull request since when."""
     lane = open_lane(conn)
@@ -643,6 +685,8 @@ __all__ = [
     "merge_readiness_order",
     "open_lane",
     "pending_queue",
+    "pr_head_sources",
+    "pull_request_number",
     "reasons_for",
     "reconciler_brief",
 ]

@@ -350,8 +350,8 @@ ppy sweep                               # ask the running serve to look for assi
 ppy supervisor serve                    # per-task runners, durable state
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
-ppy review show <task_id> && ppy review approve <task_id>
-ppy deliver <task_id>                   # refused unless approved at current head
+ppy review show <task_id> && ppy review approve <task_id>   # diffs from HEAD's merge-base with the PR's base
+ppy deliver <task_id>                   # refused unless approved at current head; again updates the open PR
 ppy track <task_id> --record ENG-1183 --provider linear --url ... --title "..."
 ppy answer <task_id> --answer "use /v2/health" --scope run   # recorded + reused
 ppy plan <run_id>                       # cross-repo rollout order
@@ -717,7 +717,10 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
    under `.ppy/repos`. Then it runs `git worktree prune` and `git fetch --prune` on the
    base clones. Each run records a `worktree_hygiene` event with what it removed (in
    bytes) and what it kept (with the reason). A kept slot that is finished, dirty or
-   unpushed, and a day old becomes one "waiting on you" item.
+   unpushed, and a day old becomes one "waiting on you" item. A delivered task whose
+   pull request is still open is not finished: its slot is kept as `kept: PR #N open`
+   until the pull request merges or closes. The state comes from the PR watch record
+   (`pr_observed`), read again from the forge when the record is older than one round.
 
 The round only decides *when* to look and *what facts* a turn gets. It never writes a
 message for a worker: every continue, steer, stop and answer comes from a turn. A round
@@ -856,7 +859,14 @@ age. If the session that delivered the pull request can be resumed and its workt
 still exists, that session is resumed with the steer. Otherwise a fresh **reconciler**
 session starts on the same task and branch from `prompts/reconcile.md`, a brief scoped
 to that one pull request: its link, the base, the log tail, the conflicting files, the
-open threads, the gate policy and the rules. If the lane fails twice at one head (the
+open threads, the gate policy and the rules. A worktree that is gone is rebuilt at the
+pull request's head from the forge (`refs/pull/<n>/head`, then the branch), never at the
+task's base commit; if neither can be fetched, the resume is refused. The review diffs
+from the merge-base of HEAD with the branch the pull request targets, fetched first, so
+a rebase never changes what is reviewed, and `ppy review show` names that base. Delivering
+again updates the open pull request's body and says `PR #N updated`; when `gh` fails,
+its own error is in the delivery note, the ticket's phase line and a `delivery-failed`
+deficiency. If the lane fails twice at one head (the
 attempt ended and the head did not move), the ticket is marked `needs_a_person` with one
 comment and the reasons. It is not retried until its head or its reasons change.
 `ppy status` prints the lane: `idle`, or which pull request it is fixing and for how

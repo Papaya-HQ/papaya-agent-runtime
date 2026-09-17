@@ -2077,8 +2077,8 @@ class Rounds:
                 continue
             if not record.get("dirty") and unpushed == 0:
                 continue
-            if record.get("managed") is False:
-                continue
+            if record.get("managed") is False or record.get("open_pr") is not None:
+                continue  # somebody else's, or waiting on its pull request, not on a person
             updated = await asyncio.to_thread(task_updated_at, record.get("task_id"))
             if updated is None or (now - updated).total_seconds() < KEPT_LOOSE_END_SECONDS:
                 continue
