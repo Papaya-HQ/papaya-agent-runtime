@@ -328,3 +328,18 @@ def test_a_second_tick_inside_the_interval_is_skipped(ppy_home, monkeypatch) -> 
     clock["now"] += 2
     server._tick_health()
     assert server._last_health_tick != first  # ran
+
+
+def test_a_ticket_task_is_never_an_in_flight_worker(tmp_path, monkeypatch) -> None:
+    """Ticket tasks are serve's hold records; the heartbeat listed fifteen as dead workers."""
+    from papaya_agent_runtime import health
+    from papaya_agent_runtime.state import init_db, store
+
+    monkeypatch.setenv("PPY_HOME", str(tmp_path / ".ppy"))
+    conn = init_db()
+    run_id = store.create_run(conn, "r")
+    ticket = store.add_task(conn, run_id=run_id, title="ticket")
+    store.set_task_phase(conn, ticket, "dispatched")
+    worker = store.add_task(conn, run_id=run_id, title="build")
+
+    assert [e["task_id"] for e in health.check(conn)] == [worker]
