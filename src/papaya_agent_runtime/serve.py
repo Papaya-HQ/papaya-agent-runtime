@@ -3522,6 +3522,14 @@ def default_worker_capacity() -> tuple[int, int] | None:
         conn.close()
 
 
+def configured_workers() -> int:
+    """`worker.max_concurrent`, or its default when there is no config to read."""
+    from papaya_agent_runtime.config import WorkerCeiling
+
+    cfg = _load_config()
+    return int(cfg.worker.max_concurrent) if cfg is not None else WorkerCeiling().max_concurrent
+
+
 def _load_config():
     from papaya_agent_runtime.config import ConfigError, load_config
 
@@ -3578,6 +3586,11 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         "home": home,
         "working_directory": options.working_directory,
         "session_id": session_id,
+        # One subject per ticket, and a held ticket's worker takes a slot of
+        # `worker.max_concurrent`, so the loop holds exactly as many tickets as
+        # there are worker slots. Left out, the client's own default applied
+        # whatever the config said, and it declared that to Papaya in `hello`.
+        "max_concurrent": await asyncio.to_thread(configured_workers),
     }
     # `extra` is applied last throughout, so a caller holding a seam (the tests
     # hold `events_factory` and `loop_factory`) can also replace anything above it.
@@ -3649,7 +3662,8 @@ def self_setup(*, stderr) -> None:
         return
     print(
         f"ppy serve: set this runtime up in {ppy_home()} — manager {cfg.manager.provider}, "
-        f"workers {cfg.worker.provider} (up to {cfg.worker.max_concurrent} at once), "
+        f"workers {cfg.worker.provider} (up to {cfg.worker.max_concurrent} at once, "
+        f"plus {cfg.worker.reconcile_slots} for pull-request fixes), "
         "state database and memory created",
         file=stderr,
     )

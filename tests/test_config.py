@@ -29,7 +29,8 @@ def test_round_trip(tmp_path) -> None:
     assert loaded.worker.max_model == "gpt-5-codex"
     assert loaded.worker.default_model == "gpt-5-codex"
     assert loaded.worker.default_reasoning == "medium"
-    assert loaded.worker.max_concurrent == 2
+    assert loaded.worker.max_concurrent == 3
+    assert loaded.worker.reconcile_slots == 1
     assert loaded.authority.merge is False
     assert loaded.cost_posture == "lean"
     assert loaded.assessments.completed_runs == 5
@@ -58,7 +59,55 @@ max_reasoning = "medium"
     assert loaded.assessments.max_days == 14
     assert loaded.worker.default_model == "gpt-5-codex"
     assert loaded.worker.default_reasoning == "medium"
-    assert loaded.worker.max_concurrent == 2
+    assert loaded.worker.max_concurrent == 3
+
+
+def test_three_workers_and_one_reconcile_slot_by_default() -> None:
+    assert (MMConfig().worker.max_concurrent, MMConfig().worker.reconcile_slots) == (3, 1)
+
+
+_VERSION_1_WORKER = """
+cost_posture = "lean"
+[manager]
+provider = "claude"
+model = "opus"
+reasoning = "high"
+[worker]
+provider = "claude"
+max_model = "opus"
+max_reasoning = "medium"
+max_concurrent = {workers}
+"""
+
+
+def test_an_old_release_s_stored_default_of_two_workers_is_dropped_on_migration(tmp_path) -> None:
+    """A version-1 file wrote every default, so its 2 was the release's, not a choice."""
+    path = tmp_path / "config.toml"
+    path.write_text(_VERSION_1_WORKER.format(workers=2))
+
+    assert load_config(path).worker.max_concurrent == 3
+    assert "max_concurrent" not in path.read_text()
+    assert load_config(path).worker.max_concurrent == 3
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_a_version_1_worker_count_that_was_never_a_default_is_kept(tmp_path, workers) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_VERSION_1_WORKER.format(workers=workers))
+
+    assert load_config(path).worker.max_concurrent == workers
+    assert f"max_concurrent = {workers}" in path.read_text()
+
+
+def test_a_person_s_two_workers_in_a_current_file_is_kept(tmp_path) -> None:
+    """Version 2 stores only what differed from its day's default: a 2 there was set by hand."""
+    path = tmp_path / "config.toml"
+    path.write_text("config_version = 2\n" + _VERSION_1_WORKER.format(workers=2))
+
+    assert load_config(path).worker.max_concurrent == 2
+    save_config(load_config(path), path)
+    assert load_config(path).worker.max_concurrent == 2
+    assert "max_concurrent = 2" in path.read_text()
 
 
 def test_a_config_written_before_the_default_changed_keeps_its_split(tmp_path) -> None:

@@ -558,7 +558,10 @@ When the user gives you an objective:
    `ppy repo onboard`, and proceed — a named repo is never a dead end.
 3. Decompose into bounded tasks. Omitted model/reasoning choices resolve to the
    configured worker default; request a cheaper recognized profile explicitly when
-   the task warrants it. Never infer a more expensive profile. A full capacity
+   the task warrants it. Never infer a more expensive profile. By default three
+   workers run at once (`worker.max_concurrent`), plus one reserved for pull-request
+   fixes (`worker.reconcile_slots`), and `ppy serve` holds as many tickets as there are
+   worker slots. A full capacity
    refusal means retry after an active worker exits; worktrees awaiting review do not
    count. One supervisor per `PPY_HOME` is enforced by the owner lock; a duplicate
    resume of a live or pending task is refused at admission with no side effects,

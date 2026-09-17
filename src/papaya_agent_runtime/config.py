@@ -51,7 +51,7 @@ class WorkerCeiling:
     # ceiling fields.
     default_model: str | None = None
     default_reasoning: str | None = None
-    max_concurrent: int = 2
+    max_concurrent: int = 3
     # Capacity admitted only to fix a delivered pull request (red CI, conflicts, a branch
     # behind its base, reviewer comments): never a ticket's first dispatch, and never
     # taken out of `max_concurrent`, so PR fixes and new tickets never wait on each other.
@@ -233,6 +233,17 @@ HISTORICAL_CLAUDE_PROFILES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
 )
+
+#: Values an earlier release's defaults wrote into every version-1 file, by dotted key,
+#: for keys whose default has since changed. A version-1 file cannot say whether a
+#: person chose such a value or a release wrote it, and releases wrote it everywhere, so
+#: migration drops it and today's default applies. A version-2 file stores only what
+#: differed from the default of its day, so its values are always a person's and this
+#: table never touches one. History: never edit an entry, append to it.
+HISTORICAL_DEFAULTS: dict[str, tuple[object, ...]] = {
+    # 2 until 2026-09-17, when a third worker became the default.
+    "worker.max_concurrent": (2,),
+}
 
 #: The config file format. 1 (implicit: no key) wrote every default, including a
 #: verbatim copy of the Claude tool profile; 2 writes only what differs from the code.
@@ -632,11 +643,10 @@ def migrate(data: dict) -> tuple[dict, list[dict]]:
     if isinstance(version, int) and version >= CONFIG_VERSION:
         return data, changes
     try:
-        before = _from_dict(data)
-        before.validate()
+        _from_dict(data).validate()
     except (ConfigError, TypeError):
         return data, changes  # load reports it; an invalid file is never rewritten
-    stored = _stored_dict(before)
+    stored = _stored_dict(_from_dict(_without_historical_defaults(data)))
     removed = sorted(set(_leaves(data)) - set(_leaves(stored)) - {"config_version"})
     changes.append(
         {
@@ -651,6 +661,17 @@ def migrate(data: dict) -> tuple[dict, list[dict]]:
         }
     )
     return stored, changes
+
+
+def _without_historical_defaults(data: dict) -> dict:
+    """`data` less every value an earlier release wrote as its default."""
+    out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in data.items()}
+    for dotted, values in HISTORICAL_DEFAULTS.items():
+        section, key = dotted.split(".", 1)
+        table = out.get(section)
+        if isinstance(table, dict) and key in table and table[key] in values:
+            del table[key]
+    return out
 
 
 def _migrate_allowed_tools(claude: dict) -> dict | None:
