@@ -21,6 +21,7 @@ import test_serve
 from conftest import wait_until
 from papaya_agent_runtime import (
     budgets,
+    delivery,
     papaya_events,
     prompts,
     reconcile,
@@ -503,6 +504,73 @@ def test_a_resumable_session_is_resumed_and_a_dead_one_gets_a_reconciler_on_the_
         (LANE_RECONCILE, False),
         (LANE_RECONCILE, True),
     ]
+
+
+def test_a_merge_on_the_record_closes_the_lane_the_forge_stopped_listing(ppy_home) -> None:
+    """`ppy deliver --merged` ends the attempt: nothing later can, so nothing else will."""
+    _ticket, worker = delivered()
+    world = World()
+    world.forge = [pr(worker, ci="fail", failing=["unit"])]
+    world.round()
+    assert len(reconcile.open_lane()) == 1
+
+    # The merge on the row takes the branch out of `watch.pr_states` for good, so no
+    # round after this one can say where the head landed.
+    delivery.record_merged(worker, "c" * 40)
+    world.forge = []
+
+    assert reconcile.open_lane() == []
+    (finished,) = events_of(worker, reconcile.FINISHED)
+    assert finished["outcome"] == reconcile.OUTCOME_MERGED
+    assert reconcile.lane_status() == "idle"
+
+    # Run it again on the same merge: idempotent, and it says the lane was already free.
+    assert "closed" not in delivery.record_merged(worker, "c" * 40).note
+    assert len(events_of(worker, reconcile.FINISHED)) == 1
+
+
+def test_deliver_merged_again_clears_a_lane_an_earlier_merge_left_open(ppy_home) -> None:
+    """The merge recorded first, the attempt left open: re-running --merged frees it."""
+    _ticket, worker = delivered()
+    world = World()
+    world.forge = [pr(worker, ci="fail", failing=["unit"])]
+    world.round()
+    (attempt,) = reconcile.open_lane()
+
+    delivery.record_merged(worker, "c" * 40)
+    # An open attempt that predates the merge: what task 30 left behind, for 8h.
+    reconcile.record(
+        worker,
+        reconcile.STARTED,
+        fingerprint=attempt.payload.get("fingerprint"),
+        head=attempt.payload.get("head"),
+        pr=worker,
+        at="2026-09-17T12:21:26+00:00",
+    )
+    assert len(reconcile.open_lane()) == 1
+
+    note = delivery.record_merged(worker, "c" * 40).note
+
+    assert "closed 1 open reconcile attempt(s)" in note
+    assert reconcile.open_lane() == []
+    assert reconcile.lane_status() == "idle"
+
+
+def test_an_attempt_the_forge_stops_listing_does_not_hold_the_lane(ppy_home) -> None:
+    """A pull request gone from the forge closes its attempt, rather than a slot forever."""
+    ticket, worker = delivered()
+    world = World()
+    world.forge = [pr(worker, ci="fail", failing=["unit"])]
+    world.round()
+    assert len(reconcile.open_lane()) == 1
+
+    the_worker_fixed_it(ticket, worker)
+    world.forge = []  # closed, merged elsewhere, or no longer watched
+    world.round()
+
+    (finished,) = events_of(worker, reconcile.FINISHED)
+    assert finished["outcome"] == reconcile.OUTCOME_ENDED
+    assert reconcile.lane_status() == "idle"
 
 
 def test_two_failed_attempts_at_one_head_mark_needs_a_person_once_and_stop(ppy_home) -> None:

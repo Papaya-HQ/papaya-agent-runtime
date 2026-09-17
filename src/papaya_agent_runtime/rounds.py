@@ -1945,7 +1945,12 @@ class Rounds:
                 and (entry.get("merged") is True or entry.get("state") == "MERGED")
             ):
                 outcome = reconcile.OUTCOME_MERGED
-            elif entry is None or not entry.get("head"):
+            elif entry is None:
+                # The forge was read this round and does not list this pull request at
+                # all — merged, closed, or dropped from the watch. It never will again,
+                # so the attempt is closed on what is known rather than holding a slot.
+                outcome = reconcile.OUTCOME_ENDED
+            elif not entry.get("head"):
                 continue  # the forge cannot say where the branch is; judge next round
             elif entry.get("head") != attempt.payload.get("head"):
                 outcome = reconcile.OUTCOME_FIXED
