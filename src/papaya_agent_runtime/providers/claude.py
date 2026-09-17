@@ -145,6 +145,36 @@ class ClaudeAdapter(ProviderAdapter):
                 denials.extend(d for d in found if isinstance(d, dict))
         return denials
 
+    def live_denial(self, event: ProviderEvent, events: list[ProviderEvent]) -> dict | None:
+        """A ``system``/``permission_denied`` line, with the command its ``tool_use`` ran."""
+        raw = event.raw
+        if raw.get("type") != "system" or raw.get("subtype") != "permission_denied":
+            return None
+        tool_use_id = raw.get("tool_use_id")
+        tool_input: dict = {}
+        for earlier in reversed(events):
+            content = (earlier.raw.get("message") or {}).get("content")
+            if earlier.raw.get("type") != "assistant" or not isinstance(content, list):
+                continue
+            use = next(
+                (
+                    block
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id
+                ),
+                None,
+            )
+            if use is not None:
+                tool_input = use.get("input") if isinstance(use.get("input"), dict) else {}
+                break
+        return {
+            "tool_name": raw.get("tool_name"),
+            "tool_use_id": tool_use_id,
+            "tool_input": tool_input,
+        }
+
     def parse_usage(self, events: list[ProviderEvent]) -> UsageInfo | None:
         for ev in reversed(events):
             usage = _find_dict(ev.raw, "usage")

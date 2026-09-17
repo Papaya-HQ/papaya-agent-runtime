@@ -20,7 +20,21 @@ from papaya_agent_runtime import prompts
 
 HEADING = "Command rules for this environment"
 
-_CLAUDE_RULES = """\
+#: What a worker does with a refused command. The rules end with it, and a steer about a
+#: refusal (`tool_learning`) quotes it rather than saying it a second way.
+FLAGGED_RULE = """\
+If a command is denied, do not retry it in a different shape and do not silently
+skip the work it was for. Record it verbatim in your final report under a
+heading:
+
+## Flagged, not done
+
+- `<the exact command that was denied>` — what it was for, and what it means for
+  the task.
+"""
+
+_CLAUDE_RULES = (
+    """\
 ## Command rules for this environment
 
 Your shell runs under an allowlist that matches **one plain command per call**.
@@ -46,15 +60,9 @@ These are not style preferences — anything else is denied before it runs.
 - **Do not try to open a pull request.** You have no `gh` and no forge
   credentials. Push your branch and stop; the manager opens the PR from it.
 
-If a command is denied, do not retry it in a different shape and do not silently
-skip the work it was for. Record it verbatim in your final report under a
-heading:
-
-## Flagged, not done
-
-- `<the exact command that was denied>` — what it was for, and what it means for
-  the task.
 """
+    + FLAGGED_RULE
+)
 
 
 def command_rules(provider: str, branch: str | None = None, environment: str | None = None) -> str:

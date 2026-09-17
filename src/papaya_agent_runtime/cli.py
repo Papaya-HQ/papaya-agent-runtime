@@ -761,7 +761,7 @@ def _cmd_deficiency(args: argparse.Namespace) -> int:
     """The runtime's own deficiencies, and the issues `ppy serve` opened about them."""
     from dataclasses import asdict
 
-    from papaya_agent_runtime import deficiencies
+    from papaya_agent_runtime import deficiencies, tool_learning
 
     rows = deficiencies.ledger(include_all=bool(args.all))
     if args.json:
@@ -772,13 +772,22 @@ def _cmd_deficiency(args: argparse.Namespace) -> int:
             "no deficiencies recorded"
             + ("" if args.all else " at or past their threshold (`--all` shows every one)")
         )
-        return 0
     for row in rows:
-        where = row.issue_url or (
-            "waiting to open" if row.status == deficiencies.PENDING else "below threshold"
-        )
+        where = row.issue_url or {
+            deficiencies.PENDING: "waiting to open",
+            deficiencies.RECLASSIFIED: "re-classified; not a profile gap",
+        }.get(row.status, "below threshold")
         print(f"{row.status:<9} {row.count:>3}x  {row.last_seen}  {row.title}")
         print(f"{'':<16}{row.kind} {row.fingerprint} — {where}")
+    # Denials that are never issues are still counted, so a person can see them.
+    for repo, kinds in sorted(tool_learning.counts().items()):
+        quiet = [
+            f"{kinds[k]} {k}"
+            for k in (tool_learning.COMMAND_SHAPE, tool_learning.POLICY_REFUSAL)
+            if kinds.get(k)
+        ]
+        if quiet:
+            print(f"worker denials in {repo}, never reported: {', '.join(quiet)}")
     return 0
 
 

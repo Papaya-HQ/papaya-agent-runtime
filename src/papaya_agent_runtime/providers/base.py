@@ -123,6 +123,15 @@ class ProviderAdapter(abc.ABC):
         """
         return []
 
+    def live_denial(self, event: ProviderEvent, events: list[ProviderEvent]) -> dict | None:
+        """The denial ``event`` reports as it happens, shaped like one of
+        :meth:`permission_denials`, or None. ``events`` are the turn's events so far.
+
+        The turn's list only arrives when the session ends; a steer about a denial is
+        worth something while the worker is still running.
+        """
+        return None
+
     @abc.abstractmethod
     def parse_usage(self, events: list[ProviderEvent]) -> UsageInfo | None:
         """Extract usage accounting from a sequence of parsed events."""
