@@ -111,6 +111,55 @@ def _cmd_tools(args: argparse.Namespace) -> int:
 _LOCKABLE_CLAUDE_KEYS = ("extra_tools", "dropped_tools", "allowed_tools")
 
 
+def _config_capabilities(args: argparse.Namespace) -> int:
+    """`ppy config capabilities`: this machine's grant policy for workers' requests."""
+    from papaya_agent_runtime import capability_requests, config_changes
+    from papaya_agent_runtime.config import ConfigError, load_config, save_config
+
+    cfg = load_config()
+    before = {
+        "auto_grant": list(cfg.capabilities.auto_grant),
+        "never": list(cfg.capabilities.never),
+    }
+    try:
+        for raw in args.auto_grant:
+            program = capability_requests.program_of(raw)
+            if program in capability_requests.floor():
+                print(f"`{program}` is never granted to a worker", file=sys.stderr)
+                return 1
+            cfg.capabilities.never = [p for p in cfg.capabilities.never if p != program]
+            if program not in cfg.capabilities.auto_grant:
+                cfg.capabilities.auto_grant.append(program)
+        for raw in args.never:
+            program = capability_requests.program_of(raw)
+            cfg.capabilities.auto_grant = [p for p in cfg.capabilities.auto_grant if p != program]
+            if program not in cfg.capabilities.never:
+                cfg.capabilities.never.append(program)
+        for raw in args.remove:
+            program = capability_requests.program_of(raw)
+            cfg.capabilities.auto_grant = [p for p in cfg.capabilities.auto_grant if p != program]
+            cfg.capabilities.never = [p for p in cfg.capabilities.never if p != program]
+    except capability_requests.CapabilityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    after = {"auto_grant": list(cfg.capabilities.auto_grant), "never": list(cfg.capabilities.never)}
+    if after != before:
+        try:
+            save_config(cfg)
+        except ConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        config_changes.record(
+            key="capabilities", before=before, after=after, why="changed by a person"
+        )
+    print(
+        "granted without asking: the safe family" + "".join(f", {p}" for p in after["auto_grant"])
+    )
+    print("never granted: " + ", ".join(sorted(capability_requests.floor() | set(after["never"]))))
+    print("anything else waits on a person: `ppy capability list`")
+    return 0
+
+
 def _config_claude(args: argparse.Namespace) -> int:
     """`ppy config claude`: edit the deltas against the code's profile, or show them."""
     from papaya_agent_runtime import config_changes
@@ -215,6 +264,8 @@ def _cmd_config(args: argparse.Namespace) -> int:
             return 0
         if args.config_cmd == "claude":
             return _config_claude(args)
+        if args.config_cmd == "capabilities":
+            return _config_capabilities(args)
         if args.config_cmd == "history":
             from papaya_agent_runtime import config_changes
 
@@ -1890,6 +1941,69 @@ def _cmd_reflect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_need(args: argparse.Namespace) -> int:
+    """A worker declares a capability it needs; policy decides or a person is asked."""
+    from papaya_agent_runtime import capability_requests
+
+    try:
+        found = capability_requests.request(args.task_id, args.capability, why=args.why or "")
+    except capability_requests.CapabilityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(found.public(), indent=2))
+        return 0
+    print(found.line())
+    print(capability_requests.worker_message(found))
+    return 0
+
+
+def _cmd_capability(args: argparse.Namespace) -> int:
+    """List workers' capability requests, or answer a pending one."""
+    from papaya_agent_runtime import capability_requests
+    from papaya_agent_runtime.state import init_db
+
+    if args.capability_cmd == "list":
+        conn = init_db()
+        try:
+            found = (
+                capability_requests.all_requests(conn, task_id=args.task)
+                if args.all or args.task is not None
+                else capability_requests.pending(conn)
+            )
+        finally:
+            conn.close()
+        if args.json:
+            print(json.dumps([r.public() for r in found], indent=2))
+            return 0
+        if not found:
+            print("no capability requests" + ("" if args.all else " waiting on a person"))
+        for item in found:
+            print(item.line())
+        return 0
+    try:
+        decided = capability_requests.decide_request(
+            args.request_id,
+            approve=args.capability_cmd == "approve",
+            always=bool(getattr(args, "always", False)),
+            reason=getattr(args, "reason", "") or "",
+        )
+    except capability_requests.CapabilityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(decided.line())
+    where = (
+        "every worker on this machine"
+        if decided.scope == "install"
+        else f"task {decided.task_id}'s next launch"
+    )
+    if decided.state == capability_requests.GRANTED:
+        print(f"`{decided.pattern}` is in {where}; the worker was told and is resumed with it")
+    else:
+        print("the worker was told the reason")
+    return 0
+
+
 def _cmd_assessment(args: argparse.Namespace) -> int:
     from papaya_agent_runtime import assessments
     from papaya_agent_runtime.state import init_db
@@ -2327,6 +2441,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop the runtime changing a key by itself (extra_tools, dropped_tools)",
     )
     claude_cfg.add_argument("--unlock", action="append", metavar="KEY")
+    caps_cfg = csub.add_parser(
+        "capabilities",
+        help="what this machine grants a worker that asks, without a person or never",
+    )
+    caps_cfg.add_argument("--auto-grant", action="append", metavar="PROGRAM", default=[])
+    caps_cfg.add_argument("--never", action="append", metavar="PROGRAM", default=[])
+    caps_cfg.add_argument(
+        "--remove", action="append", metavar="PROGRAM", default=[], help="drop from both lists"
+    )
     history_cfg = csub.add_parser(
         "history", help="every change made to the configuration, by the runtime or a person"
     )
@@ -3220,6 +3343,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refl.add_argument("--json", action="store_true")
     refl.set_defaults(func=_cmd_reflect)
+
+    need = sub.add_parser(
+        "need",
+        help="a worker declares a program it needs that its tools may not allow; the runtime "
+        "grants it by policy or asks a person",
+    )
+    need.add_argument("task_id", type=int)
+    need.add_argument(
+        "--capability",
+        required=True,
+        metavar="PROGRAM",
+        help="one program, e.g. xcodegen (or Bash(xcodegen:*))",
+    )
+    need.add_argument("--why", default="", help="what the task needs it for, in one line")
+    need.add_argument("--json", action="store_true")
+    need.set_defaults(func=_cmd_need)
+
+    capability = sub.add_parser(
+        "capability", help="workers' capability requests: list them, approve or deny one"
+    )
+    capsub = capability.add_subparsers(dest="capability_cmd", required=True)
+    cap_list = capsub.add_parser("list", help="requests waiting on a person (--all for every one)")
+    cap_list.add_argument("--all", action="store_true")
+    cap_list.add_argument("--task", type=int, default=None)
+    cap_list.add_argument("--json", action="store_true")
+    cap_approve = capsub.add_parser("approve", help="grant a pending request")
+    cap_approve.add_argument("request_id", type=int)
+    cap_approve.add_argument(
+        "--always",
+        action="store_true",
+        help="grant it to every worker on this machine, not only this task",
+    )
+    cap_deny = capsub.add_parser("deny", help="refuse a pending request, with the reason")
+    cap_deny.add_argument("request_id", type=int)
+    cap_deny.add_argument("--reason", required=True)
+    capability.set_defaults(func=_cmd_capability)
 
     handoff = sub.add_parser(
         "handoff",

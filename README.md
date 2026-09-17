@@ -962,9 +962,14 @@ All working state is under `.ppy/` (gitignored):
   is restored, and a worker's denied command in the safe family
   (`tool_learning.SAFE_FAMILY`: read-only text tools, the language toolchains, file
   verbs inside the worktree, `ppy` by any path) is added to `extra_tools` for the next
-  dispatch. A plain command outside the family changes nothing and becomes one
-  readiness warning naming the pattern to `--allow`; a command refused for its shape
-  or by policy never does, because no pattern would help. Every change is a `config_change` event:
+  dispatch. A plain command outside the family is a **capability request**, the same as
+  one a worker declares in its plan with `ppy need <task> --capability <program> --why
+  "..."`: this machine's policy (`ppy config capabilities --auto-grant/--never`) grants
+  or refuses it, and anything else waits on a person as a blocker with its commands,
+  `ppy capability approve <id> [--always]` (this task, or every worker here) or
+  `ppy capability deny <id> --reason "..."`. The worker is told the outcome and a
+  grant reaches it on its next launch. A command refused for its shape or by policy
+  never becomes a request, because no pattern would help. Every change is a `config_change` event:
   `ppy config history` lists them, and `ppy serve` start and `ppy doctor` print one
   line each. `ppy config claude --lock extra_tools` (or `dropped_tools`) stops the
   runtime changing a key; a change a lock refuses is a readiness warning naming it.

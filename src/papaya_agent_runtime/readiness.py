@@ -617,24 +617,19 @@ def _gate_isolation_problems(problems: list[Problem]) -> None:
 
 
 def _learned_tool_problems(problems: list[Problem]) -> None:
-    """Denied tools: a learned one a lock refused, and ones outside the safe family."""
-    from papaya_agent_runtime import config_changes, tool_learning
-    from papaya_agent_runtime.config import effective_claude_tools, load_config
+    """Denied tools: a learned one a lock refused, and a worker's request awaiting a person."""
+    from papaya_agent_runtime import capability_requests, config_changes
+    from papaya_agent_runtime.config import load_config
     from papaya_agent_runtime.paths import config_path
 
+    # A plain command refused outside the safe family is a capability request now, and a
+    # pending one is a person's decision with its own commands.
+    problems.extend(capability_requests.problems())
     if not config_path().exists():
         return
     try:
         cfg = load_config()
-        effective = set(effective_claude_tools(cfg))
         locked = [(r, lock) for r, lock in config_changes.blocked(cfg) if r.evidence.get("command")]
-        refused = [
-            d
-            for d in tool_learning.refused()
-            if d.get("pattern")
-            and d["pattern"] not in effective
-            and d["pattern"] not in cfg.claude.dropped_tools
-        ]
     except Exception:  # noqa: BLE001 - a bad config or state db is reported by the other checks
         return
     if locked:
@@ -650,22 +645,6 @@ def _learned_tool_problems(problems: list[Problem]) -> None:
                     )
                 ),
                 fix="; ".join(sorted({_lock_fix(lock) for _, lock in locked})),
-                owner=USER,
-                blocking=False,
-            )
-        )
-    if refused:
-        problems.append(
-            Problem(
-                code="claude_tool_denied",
-                summary=(
-                    "workers were denied commands outside the safe family, so nothing was "
-                    "learned: "
-                    + "; ".join(
-                        f"`{d.get('command') or d['pattern']}` ({d['reason']})" for d in refused
-                    )
-                ),
-                fix="; ".join(f"`ppy config claude --allow '{d['pattern']}'`" for d in refused),
                 owner=USER,
                 blocking=False,
             )

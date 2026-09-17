@@ -61,6 +61,12 @@ These are not style preferences — anything else is denied before it runs.
 - Push with exactly `git push origin HEAD:{branch}`.
 - **Do not try to open a pull request.** You have no `gh` and no forge
   credentials. Push your branch and stop; the manager opens the PR from it.
+- **Ask for a program before you need it.** In your plan phase, for every program
+  the work needs beyond reading, editing and your repository's own gate (a code
+  generator, a database client, a browser driver), run `ppy need <task id>
+  --capability <program> --why "<what for>"`. It is granted by this machine's policy
+  or put to a person, and the output says which; a grant reaches you when the runtime
+  resumes you. A refused command is turned into the same request for you.
 
 """
     + FLAGGED_RULE

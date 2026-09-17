@@ -16,7 +16,7 @@ from papaya_agent_runtime.setup.discovery import discover, usable_harnesses
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
 #: Readiness findings about the worker tool profile, printed under the readiness line.
-_TOOL_PROBLEMS = ("claude_tools_lack_gate", "claude_tool_denied", "config_locked")
+_TOOL_PROBLEMS = ("claude_tools_lack_gate", "capability_request_pending", "config_locked")
 
 
 def _installed_version(version_str: str | None) -> str | None:
