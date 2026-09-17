@@ -250,6 +250,7 @@ def check_untracked(
             except papaya_events.PapayaEventError:
                 continue
             item = hydrated.payload.get("work_item") if hydrated.payload else None
+            lines += record_obligations(entry, item, comments, agent_id)
             changes = detect(entry.ticket_task_id, item, comments, agent_id)
             if not changes:
                 continue
@@ -272,6 +273,111 @@ def check_untracked(
     except Exception as exc:  # noqa: BLE001 - a round or a heartbeat never ends on this
         lines.append(f"could not read work item changes: {exc}")
     return lines
+
+
+OBLIGATIONS_EVENT = "work_item_obligations"
+
+
+def obligations_missing(
+    entry: Tracked,
+    item: dict[str, Any] | None,
+    comments: list[dict[str, Any]] | None,
+    agent_id: str | None,
+) -> list[str]:
+    """What a ticket's turns owed its work item and it does not show. ``[]`` when unreadable.
+
+    The same two obligations serve's runner checks after its own turns
+    (`TicketRunner._check_acceptance_criteria`, `_check_reported`): a brief with Goals
+    left acceptance criteria on the item, and a delivered pull request has the agent's
+    report on the item after it was delivered.
+    """
+    from papaya_agent_runtime import serve
+    from papaya_agent_runtime.state import init_db, store
+
+    if not isinstance(item, dict) or comments is None:
+        return []
+    missing: list[str] = []
+    conn = init_db()
+    try:
+        for worker_id in entry.workers:
+            task = store.get_task(conn, worker_id)
+            if task is None:
+                continue
+            repo = conn.execute(
+                "SELECT name FROM repos WHERE id = ?", (task["repo_id"],)
+            ).fetchone()
+            worker = serve.Worker(
+                worker_id, str(task["status"]), str(repo["name"]) if repo else None, task["branch"]
+            )
+            if (
+                serve.brief_has_goals(worker)
+                and not str(item.get("acceptance_criteria") or "").strip()
+            ):
+                missing.append("acceptance criteria")
+            delivered = conn.execute(
+                "SELECT created_at FROM events WHERE task_id = ? AND kind = 'delivered' "
+                "ORDER BY id DESC LIMIT 1",
+                (worker_id,),
+            ).fetchone()
+            if task["status"] == "delivered" and delivered is not None:
+                since = serve._parse_time(delivered["created_at"])
+                reported = any(
+                    serve.is_own_comment(c, agent_id)
+                    and serve._is_agent_comment(c)
+                    and (
+                        since is None or (serve._parse_time(c.get("created_at")) or since) >= since
+                    )
+                    for c in comments
+                )
+                if not reported:
+                    missing.append(f"the delivery report for worker task {worker_id}")
+    finally:
+        conn.close()
+    return sorted(set(missing))
+
+
+def record_obligations(
+    entry: Tracked,
+    item: dict[str, Any] | None,
+    comments: list[dict[str, Any]] | None,
+    agent_id: str | None,
+) -> list[str]:
+    """Record a ticket's missing obligations when they change; lines for what is new."""
+    if not isinstance(item, dict) or comments is None:
+        return []
+    missing = obligations_missing(entry, item, comments, agent_id)
+    before = (_last(entry.ticket_task_id, OBLIGATIONS_EVENT) or {}).get("missing")
+    if before == missing or (before is None and not missing):
+        return []
+    _record(
+        entry.ticket_task_id,
+        OBLIGATIONS_EVENT,
+        {"missing": missing, "work_item_id": entry.work_item_id},
+    )
+    if not missing:
+        return []
+    return [f"work item {entry.work_item_id} is missing: {', '.join(missing)}"]
+
+
+def obligations_owed() -> list[dict[str, Any]]:
+    """Tickets whose newest obligations record still names something missing."""
+    from papaya_agent_runtime.state import init_db
+
+    conn = init_db()
+    try:
+        rows = conn.execute(
+            "SELECT task_id, payload FROM events WHERE kind = ? ORDER BY id", (OBLIGATIONS_EVENT,)
+        ).fetchall()
+    finally:
+        conn.close()
+    newest: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        newest[int(row["task_id"])] = json.loads(row["payload"])
+    return [
+        {"ticket_task_id": task_id, **payload}
+        for task_id, payload in newest.items()
+        if payload.get("missing")
+    ]
 
 
 def unheard() -> list[dict[str, Any]]:

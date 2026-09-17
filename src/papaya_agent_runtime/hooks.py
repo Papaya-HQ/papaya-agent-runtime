@@ -224,6 +224,10 @@ def start_remedies_context() -> str | None:
     said = io.StringIO()
     supervision.start_remedies(stderr=said)
     lines = [line.removeprefix("ppy serve: ") for line in said.getvalue().splitlines() if line]
+    # The sweep serve runs on start: assigned work nothing is working, to take up here.
+    for item in supervision.assigned_unpicked():
+        key = item.get("display_id") or item.get("key") or item.get("id")
+        lines.append(f"assigned and waiting, take it up: {key} {item.get('title') or ''}".rstrip())
     if not lines:
         return None
     return "PUT RIGHT AT SESSION START (no ppy serve is running):\n" + "\n".join(

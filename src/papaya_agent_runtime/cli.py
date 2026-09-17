@@ -845,15 +845,28 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.paths import ppy_home
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
 
-    not_serving = f"nothing is serving in {ppy_home()}; start `ppy serve` and it sweeps on start"
+    def unpicked() -> int:
+        # No serve to offer work to: say what is assigned and waiting, with the same
+        # filters the sweep applies, so a session takes it up itself.
+        from papaya_agent_runtime import supervision
+
+        items = supervision.assigned_unpicked()
+        if getattr(args, "json", False):
+            print(json.dumps(items, indent=2, sort_keys=True, default=str))
+            return 0
+        if not items:
+            print(f"nothing is serving in {ppy_home()}, and no assigned work is waiting")
+        for item in items:
+            key = item.get("display_id") or item.get("key") or item.get("id")
+            print(f"assigned and waiting: {key} {item.get('title') or ''}".rstrip())
+        return 0
+
     try:
         resp = SupervisorClient().sweep(include_declined=bool(args.include_declined))
     except SupervisorUnavailable:
-        print(not_serving, file=sys.stderr)
-        return 1
+        return unpicked()
     if not resp.get("serving", True):
-        print(not_serving, file=sys.stderr)
-        return 1
+        return unpicked()
     if not resp.get("ok"):
         print(f"sweep failed: {resp.get('error')}", file=sys.stderr)
         return 1
@@ -1551,6 +1564,13 @@ def _cmd_review(args: argparse.Namespace) -> int:
             print(bundle.diffstat or "(no changes)")
             return 0
         if args.review_cmd == "approve":
+            from papaya_agent_runtime import supervision
+
+            # The rule serve's review keeps too: the supervisor's full suite ran at this head.
+            missing = supervision.full_suite_missing(args.task_id)
+            if missing:
+                print(f"not approved: {missing}", file=sys.stderr)
+                return 1
             res = record_review(args.task_id, "approved", args.findings or "", note=args.note or "")
             print(f"approved task {args.task_id} at {res['head_sha'][:8]}")
             if res["note"]:

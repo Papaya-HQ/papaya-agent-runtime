@@ -482,3 +482,93 @@ def test_the_heartbeat_upkeep_runs_hygiene_hourly_and_blockers_every_quarter_hou
     assert calls == ["b", "h", "b", "b", "h"]
     monkeypatch.setattr(supervision, "serve_running", lambda: True)
     assert upkeep(NOW + timedelta(hours=3)) == []
+
+
+# ── full suite before review, assigned work, turn obligations ───────────────
+
+
+def test_an_approval_waits_for_the_supervisors_full_suite_at_head(ppy_home, monkeypatch) -> None:
+    from papaya_agent_runtime import environment
+
+    monkeypatch.setattr(
+        environment,
+        "for_repo",
+        lambda row: environment.RepoEnvironment(
+            repo="app", full_suite_command="make verify", full_suite_owner="supervisor"
+        ),
+    )
+    conn = init_db()
+    repo_id = store.add_repo(
+        conn, name="app", origin="o", local_path="/x", default_branch="main", base_sha="a" * 40
+    )
+    task_id = store.add_task(conn, run_id=store.create_run(conn, "r"), title="b", repo_id=repo_id)
+    monkeypatch.setattr(gate, "verdict", lambda tid, full=None: gate.Verdict(gate.NONE, "abc"))
+
+    missing = supervision.full_suite_missing(task_id)
+    assert missing and f"ppy gate run --task {task_id} --full" in missing
+    assert main(["review", "approve", str(task_id)]) == 1
+
+    monkeypatch.setattr(
+        gate, "verdict", lambda tid, full=None: gate.Verdict(gate.RED, "abc", _result(green=False))
+    )
+    assert supervision.full_suite_missing(task_id) is None  # red is the reviewer's to judge
+
+
+def test_the_sweeps_first_filter_is_shared() -> None:
+    from papaya_agent_runtime import sweep
+
+    fresh = {"id": "a", "status": "in_progress", "updated_at": NOW.isoformat()}
+    todo = {"id": "b", "status": "todo", "updated_at": NOW.isoformat()}
+    common = {"now": NOW, "declined": {}, "stale_after": 3600.0}
+
+    assert sweep.skip_reason(todo, live={"b"}, **common) == "live here"
+    assert sweep.skip_reason(fresh, live=set(), **common) == "in progress elsewhere"
+    assert sweep.skip_reason(todo, live=set(), **common) is None
+    declined = {"b": {"updated_at": NOW.isoformat(), "reason": "no repo"}}
+    assert (
+        sweep.skip_reason(todo, live=set(), now=NOW, declined=declined, stale_after=3600.0)
+        == "declined earlier, unchanged"
+    )
+
+
+def test_a_session_is_shown_assigned_work_nothing_is_working(ppy_home, monkeypatch) -> None:
+    from papaya_agent_client import api_client
+
+    async def assigned(api):
+        return {
+            "items": [
+                {"id": "w1", "display_id": "PAP-231", "title": "Route it", "status": "todo"},
+                {"id": "w2", "display_id": "PAP-9", "title": "Done", "status": "done"},
+            ]
+        }
+
+    monkeypatch.setattr(api_client, "list_assigned_work_items", assigned)
+
+    waiting = supervision.assigned_unpicked(now=NOW, api=object())
+
+    assert [i["display_id"] for i in waiting] == ["PAP-231"]
+
+
+def test_a_delivered_tickets_missing_report_is_owed_until_posted(ppy_home) -> None:
+    from papaya_agent_runtime import workitems
+
+    conn = init_db()
+    worker = _delivered(conn, ticket_phase="released")
+    [entry] = workitems.tracked()
+    item = {"title": "T", "acceptance_criteria": "it works"}
+
+    assert workitems.record_obligations(entry, item, [], "agent-1") == [
+        f"work item w is missing: the delivery report for worker task {worker}"
+    ]
+    assert [o["missing"] for o in workitems.obligations_owed()] == [
+        [f"the delivery report for worker task {worker}"]
+    ]
+    report = {
+        "id": "c9",
+        "author_type": "agent",
+        "author_id": "agent-1",
+        "body": "PR is up",
+        "created_at": "2999-01-01T00:00:00+00:00",
+    }
+    workitems.record_obligations(entry, item, [report], "agent-1")
+    assert workitems.obligations_owed() == []

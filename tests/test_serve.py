@@ -3108,21 +3108,28 @@ def test_work_papaya_keeps_elsewhere_is_left_alone_until_ppy_sweep_include_kept(
     assert sorted(_reserved(harness)) == ["work_item:item-1"] * 2 + ["work_item:item-2"] * 2
 
 
-def test_ppy_sweep_with_nothing_serving_says_so(ppy_home, capsys) -> None:
-    from papaya_agent_runtime import cli
+def test_ppy_sweep_with_nothing_serving_lists_the_waiting_work_itself(
+    ppy_home, capsys, monkeypatch
+) -> None:
+    """With no serve to offer work to, a session is told what is assigned and waiting."""
+    from papaya_agent_runtime import cli, supervision
     from papaya_agent_runtime.supervisor.server import SupervisorServer
 
-    assert cli.main(["sweep"]) == 1
-    assert "nothing is serving" in capsys.readouterr().err
+    waiting = [{"id": "w1", "display_id": "PAP-231", "title": "Route it"}]
+    monkeypatch.setattr(supervision, "assigned_unpicked", lambda **k: list(waiting))
 
-    # A bare supervisor is running, but no listener: still nothing to sweep for.
+    assert cli.main(["sweep"]) == 0
+    assert "assigned and waiting: PAP-231 Route it" in capsys.readouterr().out
+
+    # A bare supervisor is running, but no listener: the same answer.
     server = SupervisorServer()
     server.start_background()
     try:
-        assert cli.main(["sweep"]) == 1
+        waiting.clear()
+        assert cli.main(["sweep"]) == 0
     finally:
         server.stop()
-    assert "nothing is serving" in capsys.readouterr().err
+    assert "no assigned work is waiting" in capsys.readouterr().out
 
 
 def test_a_ticket_handed_back_by_its_turns_is_not_swept_into_them_again(
