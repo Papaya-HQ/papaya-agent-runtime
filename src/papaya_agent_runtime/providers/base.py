@@ -39,6 +39,11 @@ class TaskSpec:
     # Tool patterns granted to this task alone by a person (`capability_requests`),
     # added to the allowlist at every launch of this task and no other.
     granted_tools: list[str] = field(default_factory=list)
+    # Base clones of other registered repositories this task may READ: a brief that
+    # names another repo as a reference is unreadable without them, because a worker
+    # sees only its own worktree. Granted at dispatch (`--reference-repo`) or after
+    # it (`ppy reference grant`); writing in them is refused, they are not its work.
+    read_only_dirs: list[str] = field(default_factory=list)
 
 
 @dataclass

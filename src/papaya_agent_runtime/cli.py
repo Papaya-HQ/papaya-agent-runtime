@@ -1049,6 +1049,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             base=args.base,
             stack_on=args.stack_on,
             ends_at=args.ends_at,
+            reference_repos=args.reference_repos or None,
         )
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)
@@ -2013,10 +2014,21 @@ def _cmd_reflect(args: argparse.Namespace) -> int:
     return 0
 
 
+REFERENCE_REQUEST = "reference_repo_requested"
+
+
 def _cmd_need(args: argparse.Namespace) -> int:
     """A worker declares a capability it needs; policy decides or a person is asked."""
     from papaya_agent_runtime import capability_requests
 
+    if args.reference_repo:
+        return _need_reference_repo(args)
+    if not args.capability:
+        print(
+            "need: name what is missing — --capability <program> or --reference-repo <name>",
+            file=sys.stderr,
+        )
+        return 1
     try:
         found = capability_requests.request(args.task_id, args.capability, why=args.why or "")
     except capability_requests.CapabilityError as exc:
@@ -2027,6 +2039,133 @@ def _cmd_need(args: argparse.Namespace) -> int:
         return 0
     print(found.line())
     print(capability_requests.worker_message(found))
+    return 0
+
+
+def _need_reference_repo(args: argparse.Namespace) -> int:
+    """A worker asks to read another registered repository. The manager decides.
+
+    Recorded rather than granted here: which repositories a task may read is a
+    scope decision, and the worker asking is not the one who makes it.
+    """
+    from papaya_agent_runtime.state import init_db, store
+    from papaya_agent_runtime.supervisor.core import reference_repo_names
+
+    name = str(args.reference_repo)
+    conn = init_db()
+    try:
+        if store.get_task(conn, args.task_id) is None:
+            print(f"task {args.task_id} does not exist", file=sys.stderr)
+            return 1
+        granted = reference_repo_names(conn, args.task_id)
+        known = store.get_repo(conn, name) is not None
+        if name in granted:
+            message = (
+                f"you can already read {name}; if the path is refused, the grant reaches "
+                "you at your next launch, so say so and stop rather than working around it"
+            )
+        elif not known:
+            message = (
+                f"{name} is not a repository this runtime manages, so nobody can grant it. "
+                "Say what you needed from it in your progress note and carry on without it"
+            )
+        else:
+            message = (
+                f"recorded: this task wants to read {name}. The manager grants it with "
+                "`ppy reference grant`, which relaunches you with the directory readable. "
+                "Until then, do not work around it — say what it blocks in a progress note"
+            )
+        store.append_event(
+            conn,
+            kind=REFERENCE_REQUEST,
+            payload={
+                "task_id": args.task_id,
+                "repo": name,
+                "why": str(args.why or "").strip(),
+                "known": known,
+                "already_granted": name in granted,
+                "summary": f"task {args.task_id} asks to read {name}",
+            },
+            task_id=args.task_id,
+        )
+    finally:
+        conn.close()
+    if args.json:
+        print(json.dumps({"task_id": args.task_id, "repo": name, "message": message}, indent=2))
+        return 0
+    print(message)
+    return 0
+
+
+def _cmd_reference(args: argparse.Namespace) -> int:
+    """List or grant the repositories a task may read."""
+    from papaya_agent_runtime.state import init_db, store
+    from papaya_agent_runtime.supervisor.core import (
+        SupervisorError,
+        grant_reference_repos,
+        reference_repo_names,
+    )
+
+    conn = init_db()
+    try:
+        task = store.get_task(conn, args.task_id)
+        if task is None:
+            print(f"task {args.task_id} does not exist", file=sys.stderr)
+            return 1
+        task_provider = task["provider"]
+        if args.reference_cmd == "list":
+            granted = reference_repo_names(conn, args.task_id)
+            asked = [
+                json.loads(row["payload"]).get("repo")
+                for row in conn.execute(
+                    "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id",
+                    (args.task_id, REFERENCE_REQUEST),
+                ).fetchall()
+            ]
+            wanted = [r for r in dict.fromkeys(filter(None, asked)) if r not in granted]
+            if args.json:
+                print(json.dumps({"granted": granted, "asked_for": wanted}, indent=2))
+                return 0
+            print(
+                f"task {args.task_id} can read: " + (", ".join(granted) or "only its own worktree")
+            )
+            if wanted:
+                print("asked for, not granted: " + ", ".join(wanted))
+            return 0
+        try:
+            granted = grant_reference_repos(conn, args.task_id, list(args.repo))
+        except SupervisorError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    finally:
+        conn.close()
+    print(f"task {args.task_id} can read: " + ", ".join(granted))
+    if str(task_provider or "") == "codex":
+        # Said plainly rather than granted silently: only the Claude adapter turns
+        # a reference into a readable directory today.
+        print(
+            "note: this task runs on codex, which this runtime does not yet hand a "
+            "read-only directory — the grant is recorded but the worker will not see it"
+        )
+    if not args.resume:
+        print("not resumed: the directory reaches the worker at its next launch")
+        return 0
+    from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
+
+    added = ", ".join(args.repo)
+    try:
+        resp = SupervisorClient().resume_task(
+            args.task_id,
+            f"You can now read {added} as a reference: the repository's own clone, "
+            "read-only. Write nothing there; it is a reference, not your work.",
+        )
+    except SupervisorUnavailable as exc:
+        print(f"granted, but not resumed: {exc}", file=sys.stderr)
+        return 0
+    if not resp.get("ok"):
+        print(f"granted, but not resumed: {resp.get('error')}", file=sys.stderr)
+        return 0
+    print("the worker was resumed with it")
     return 0
 
 
@@ -3144,6 +3283,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     dispatch.add_argument(
+        "--reference-repo",
+        dest="reference_repos",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "let the worker READ another registered repository's base clone, for a brief "
+            "that names it as a reference (a contract, a schema, the other half of a "
+            "change). Repeatable. Writing there is refused — it is a reference, not the "
+            "work. A worker that finds it needs one asks with `ppy need --reference-repo`"
+        ),
+    )
+    dispatch.add_argument(
         "--base",
         default=None,
         help=(
@@ -3561,13 +3713,53 @@ def build_parser() -> argparse.ArgumentParser:
     need.add_argument("task_id", type=int)
     need.add_argument(
         "--capability",
-        required=True,
+        default=None,
         metavar="PROGRAM",
         help="one program, e.g. xcodegen (or Bash(xcodegen:*))",
+    )
+    need.add_argument(
+        "--reference-repo",
+        dest="reference_repo",
+        default=None,
+        metavar="NAME",
+        help=(
+            "a registered repository the brief points at that this worktree cannot "
+            "read; the manager grants it with `ppy reference grant`"
+        ),
     )
     need.add_argument("--why", default="", help="what the task needs it for, in one line")
     need.add_argument("--json", action="store_true")
     need.set_defaults(func=_cmd_need)
+
+    reference = sub.add_parser(
+        "reference",
+        help=(
+            "repositories a task may read but never write: what a brief means when it "
+            "names another repo as a reference"
+        ),
+    )
+    refsub = reference.add_subparsers(dest="reference_cmd", required=True)
+    ref_list = refsub.add_parser(
+        "list", help="what a task can read today, and what it has asked for"
+    )
+    ref_list.add_argument("task_id", type=int)
+    ref_list.add_argument("--json", action="store_true")
+    ref_grant = refsub.add_parser(
+        "grant",
+        help=(
+            "let this task read a registered repository's base clone; the worker is "
+            "resumed, because a directory only reaches it through a relaunch"
+        ),
+    )
+    ref_grant.add_argument("task_id", type=int)
+    ref_grant.add_argument("--repo", required=True, action="append", metavar="NAME")
+    ref_grant.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="record the grant without resuming the worker (it takes effect next launch)",
+    )
+    reference.set_defaults(func=_cmd_reference)
 
     capability = sub.add_parser(
         "capability", help="workers' capability requests: list them, approve or deny one"
