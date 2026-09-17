@@ -16,6 +16,7 @@ writes it.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import json
 import os
@@ -2338,6 +2339,60 @@ def test_a_worker_whose_head_has_a_red_gate_is_steered_with_the_summary(
     assert "3 failed, 897 passed in 700.10s" in message
     assert "`ppy gate run --task" in message
     assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+
+
+def test_a_gate_red_twice_the_same_way_is_a_persons_not_a_third_run(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """PAP-219 (2026-09-17): one red gate at one head was run four times."""
+    steers: list[tuple[int, str]] = []
+    red = _recorded(2, "1 failed, 12379 passed in 869.31s").result
+    runs = [
+        dataclasses.replace(red, failing_tests=["tests/test_a.py::test_b"], summary=summary)
+        for summary in ("1 failed, 12379 passed in 869.31s", "1 failed, 12379 passed in 902.10s")
+    ]
+    repeated = gate.repeated_red(runs)
+    assert len(repeated) == 2
+    verdict = gate.Verdict(gate.RED, red.head_sha, runs[0], repeated)
+
+    def steer(task_id: int, message: str) -> None:
+        steers.append((task_id, message))
+
+    papaya = FakePapaya()
+    turns = FakeTurns(
+        lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else _deliver(turn)
+    )
+    harness = Harness(FakeEvents([EVENT]))
+    runner = _runner(turns, papaya, steer=steer, gate_verdict=lambda _id: verdict)
+
+    async def scenario() -> int:
+        task = _serve_ticket(harness, client_home, runner)
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        worker_event(worker, "worker_done", status="worker_done", summary="gate red again")
+        await _until(lambda: harness.results, what="the review to decide")
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    assert steers == [], "the worker was sent back to run the same red gate a third time"
+    assert serve.PHASE_NEEDS_A_PERSON in history()
+    conn = init_db()
+    try:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = ?",
+            (ticket_task()["id"], serve.GATE_NEEDS_A_PERSON),
+        ).fetchall()
+    finally:
+        conn.close()
+    (record,) = [json.loads(row["payload"]) for row in rows]
+    assert record["head_sha"] == red.head_sha and len(record["results"]) == 2
+    said = [c["body"] for thread in papaya.stored.values() for c in thread]
+    gate_comments = [body for body in said if "failed twice the same way" in body]
+    assert len(gate_comments) == 1
+    assert "tests/test_a.py::test_b" in gate_comments[0] and red.head_sha[:8] in gate_comments[0]
+    review = turns.calls[1].prompt
+    assert "red 2 times" in review and "--baseline" in review
 
 
 def test_a_stopped_worker_with_no_recorded_gate_is_steered_to_run_ppy_gate_run(

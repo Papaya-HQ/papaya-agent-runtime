@@ -160,8 +160,13 @@ class SupervisorClient:
     def sweep(self, include_declined: bool = False, timeout: float = 130.0) -> dict:
         return self._call({"cmd": "sweep", "include_declined": include_declined}, timeout=timeout)
 
-    def gate_start(self, *, task_id: int | None, repo: str | None, full: bool) -> dict:
-        return self._call({"cmd": "gate_start", "task_id": task_id, "repo": repo, "full": full})
+    def gate_start(
+        self, *, task_id: int | None, repo: str | None, full: bool, baseline: str | None = None
+    ) -> dict:
+        request = {"cmd": "gate_start", "task_id": task_id, "repo": repo, "full": full}
+        if baseline:
+            request["baseline"] = baseline
+        return self._call(request)
 
     def gate_wait(self, key: str, timeout: float = 60.0) -> dict:
         return self._call(

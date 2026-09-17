@@ -385,6 +385,7 @@ class SupervisorServer:
                         task_id=int(raw_task) if raw_task is not None else None,
                         repo=request.get("repo") or None,
                         full=bool(request.get("full")),
+                        baseline=request.get("baseline") or None,
                     )
                 except gate.GateError as exc:
                     return {"ok": False, "error": str(exc)}

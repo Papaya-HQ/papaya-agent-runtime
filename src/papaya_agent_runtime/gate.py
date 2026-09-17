@@ -39,6 +39,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -49,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from papaya_agent_runtime import environment
+from papaya_agent_runtime.paths import ppy_home
 from papaya_agent_runtime.state import init_db, store
 
 #: The ledger event a finished gate leaves on its task.
@@ -111,16 +113,32 @@ class GateSpec:
     task_id: int | None = None
     run_id: int | None = None
     env: dict[str, str] = field(default_factory=dict, repr=False)
+    #: The compose project and database the gate's environment points at, when it has one.
+    compose_project: str | None = None
+    database: str | None = None
+    #: A baseline gate runs in a scratch worktree of ``head_sha`` checked out from this
+    #: base clone when it starts, and removed (with its stack) when it ends.
+    base_clone: str | None = None
+
+    @property
+    def baseline(self) -> bool:
+        return self.base_clone is not None
 
     @property
     def key(self) -> str:
         """Two requests for the same gate at the same head share one run."""
         scope = f"task:{self.task_id}" if self.task_id is not None else f"repo:{self.repo}"
+        if self.baseline:
+            scope += ":baseline"
         return f"{scope}:{'full' if self.full else 'local'}:{self.head_sha}"
 
     @property
     def label(self) -> str:
-        return "full suite" if self.full else "local gate"
+        return _label(self.full, self.baseline)
+
+
+def _label(full: bool, baseline: bool) -> str:
+    return ("baseline " if baseline else "") + ("full suite" if full else "local gate")
 
 
 @dataclass(frozen=True)
@@ -140,6 +158,14 @@ class GateResult:
     task_id: int | None = None
     #: The largest resident memory sampled across the gate's process group, in MB.
     peak_memory_mb: float | None = None
+    #: The compose project and database it ran against; ``None`` when nothing private
+    #: was set, which means the repository's defaults.
+    compose_project: str | None = None
+    database: str | None = None
+    #: A baseline gate ran at a base commit in a scratch worktree, not at a task's head.
+    baseline: bool = False
+    #: The tests its output names as failed or errored (pytest's ``FAILED``/``ERROR``).
+    failing_tests: list[str] = field(default_factory=list)
 
     @property
     def green(self) -> bool:
@@ -159,7 +185,7 @@ class GateResult:
 
     @property
     def label(self) -> str:
-        return "full suite" if self.full else "local gate"
+        return _label(self.full, self.baseline)
 
 
 def _duration(seconds: float) -> str:
@@ -192,6 +218,21 @@ def summary_line(text: str) -> str:
     if chosen is None:
         chosen = lines[-1] if lines else ""
     return chosen.strip("=- ").strip()[:MAX_SUMMARY]
+
+
+_FAILING_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+)")
+#: The most failing tests kept on one result.
+MAX_FAILING_TESTS = 50
+
+
+def failing_tests(text: str) -> list[str]:
+    """The tests a gate's output names as failed or errored, sorted, without the reason."""
+    found = {
+        match.group(1)
+        for line in text.splitlines()
+        if (match := _FAILING_TEST.match(line.strip())) is not None
+    }
+    return sorted(found)[:MAX_FAILING_TESTS]
 
 
 def _last_line(path: Path) -> str:
@@ -366,19 +407,62 @@ def longer_than_usual_line(label: str, elapsed: float, budget_seconds: float) ->
 # ── Resolving what to run ───────────────────────────────────────────────────
 
 
-def resolve(*, task_id: int | None = None, repo: str | None = None, full: bool = False) -> GateSpec:
-    """The gate a task (in its worktree) or a repository (in its base clone) runs.
+def gate_env(
+    base: dict[str, str], values: dict[str, str], settings: environment.RepoEnvironment
+) -> dict[str, str]:
+    """The environment a gate process gets: the worker's, never the supervisor's stack.
 
-    A task wins: its worktree is where the work is, and its process environment is the
-    one the worker's own shell has. A repository named alongside a task has to be that
-    task's, so a turn cannot run one repository's gate against another's worktree.
+    What :func:`~papaya_agent_runtime.supervisor.runner.worker_env` builds (the
+    manager's ``VIRTUAL_ENV`` and database URLs dropped, then ``values``), with the
+    supervisor's own compose project and database port dropped first as well, so a
+    repository with no private stack declared falls back to its own defaults rather
+    than to whatever stack the supervisor's shell happened to name.
     """
     from papaya_agent_runtime.supervisor.runner import worker_env
 
+    inherited = dict(base)
+    for key in ("COMPOSE_PROJECT_NAME", settings.db_port_variable):
+        inherited.pop(key, None)
+    return worker_env(inherited, task_values=values)
+
+
+def commit_in(path: str, ref: str) -> str:
+    """The full commit ``ref`` names in the clone at ``path``, or ``""``."""
+    proc = subprocess.run(
+        ["git", "-C", path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def resolve(
+    *,
+    task_id: int | None = None,
+    repo: str | None = None,
+    full: bool = False,
+    baseline: str | None = None,
+) -> GateSpec:
+    """The gate a task (in its worktree) or a repository (in its base clone) runs.
+
+    A task wins: its worktree is where the work is, and its process environment is the
+    one the worker's own shell has, rendered here for its task id. A repository named
+    alongside a task has to be that task's, so a turn cannot run one repository's gate
+    against another's worktree.
+
+    ``baseline`` is a commit: the gate runs in a scratch worktree of it (the task only
+    names the repository), in an environment private to that commit and gate, so a
+    review's "was this already red on the base?" never touches a task's database or
+    the repository's default one. A gate with no task, in the base clone, gets a
+    private environment the same way.
+    """
     if task_id is None and not repo:
         raise GateError("name the task (`--task <id>`) or the repository to run a gate for")
     conn = init_db()
     try:
+        run_id = None
+        base_clone = None
         if task_id is not None:
             task = store.get_task(conn, task_id)
             if task is None:
@@ -388,23 +472,54 @@ def resolve(*, task_id: int | None = None, repo: str | None = None, full: bool =
                 raise GateError(f"task {task_id} has no registered repository")
             if repo and repo != row["name"]:
                 raise GateError(f"task {task_id} is in {row['name']}, not {repo}")
-            cwd = str(task["worktree_path"] or "")
-            if not cwd or not Path(cwd).is_dir():
-                raise GateError(f"task {task_id} has no accessible worktree")
-            env = worker_env(
-                dict(os.environ), task_values=environment.task_process_env(conn, row, task_id)
-            )
-            run_id = int(task["run_id"]) if task["run_id"] is not None else None
         else:
             row = store.get_repo(conn, str(repo))
             if row is None:
                 raise GateError(f"repo {repo!r} is not registered")
+        settings = environment.for_repo(row)
+        name = settings.repo
+        mode = "full" if full else "local"
+        if baseline:
+            base_clone = str(row["local_path"] or "")
+            if not base_clone or not Path(base_clone).is_dir():
+                raise GateError(f"the base clone of {name} is missing; `ppy repo sync {name}`")
+            head = commit_in(base_clone, baseline)
+            if not head:
+                raise GateError(
+                    f"{baseline} is not a commit in the base clone of {name}; "
+                    f"`ppy repo sync {name}`"
+                )
+            scope = f"gate_base_{mode}_{head[:12]}"
+            cwd = str(ppy_home() / "gates" / "scratch" / f"{name}-{scope}")
+            evidence_dir = str(ppy_home() / "gates" / name)
+            values = environment.scope_process_env(row, scope)
+            task_id = None
+        elif task_id is not None:
+            cwd = str(task["worktree_path"] or "")
+            if not cwd or not Path(cwd).is_dir():
+                raise GateError(f"task {task_id} has no accessible worktree")
+            values = environment.render_task_env(conn, row, task_id)
+            run_id = int(task["run_id"]) if task["run_id"] is not None else None
+            head = head_of(cwd)
+            evidence_dir = str(Path(cwd) / settings.evidence_dir)
+            repeated = repeated_red(_results_at(conn, task_id, head))
+            if repeated and (repeated[0].compose_project, repeated[0].database) == (
+                values.get("COMPOSE_PROJECT_NAME"),
+                environment.database_name(values),
+            ):
+                raise GateError(
+                    f"{repeated_line(repeated)}. A third run in the same environment cannot "
+                    "say anything new: this is a decision now. "
+                    f"`ppy gate run --task {task_id} --baseline <base sha>` settles whether "
+                    "those failures were already on the base."
+                )
+        else:
             cwd = str(row["local_path"] or "")
             if not cwd or not Path(cwd).is_dir():
-                raise GateError(f"the base clone of {repo} is missing; `ppy repo sync {repo}`")
-            env = dict(os.environ)
-            run_id = None
-        settings = environment.for_repo(row)
+                raise GateError(f"the base clone of {name} is missing; `ppy repo sync {name}`")
+            head = head_of(cwd)
+            values = environment.scope_process_env(row, f"gate_repo_{mode}_{head[:12]}")
+            evidence_dir = str(Path(cwd) / settings.evidence_dir)
     finally:
         conn.close()
     command = settings.full_suite_command if full else settings.local_gate
@@ -412,20 +527,24 @@ def resolve(*, task_id: int | None = None, repo: str | None = None, full: bool =
         what = "full suite" if full else "local gate"
         flag = "--full-suite-command" if full else "--local-gate"
         raise GateError(
-            f"{settings.repo} has no {what} recorded; `ppy repo onboard {settings.repo}` "
-            f'derives one, or `ppy repo set {settings.repo} {flag} "<command>"`'
+            f"{name} has no {what} recorded; `ppy repo onboard {name}` "
+            f'derives one, or `ppy repo set {name} {flag} "<command>"`'
         )
-    environment.ensure_excluded(cwd, settings.evidence_dir)
+    if base_clone is None:
+        environment.ensure_excluded(cwd, settings.evidence_dir)
     return GateSpec(
-        repo=settings.repo,
+        repo=name,
         command=command,
         cwd=cwd,
-        evidence_dir=str(Path(cwd) / settings.evidence_dir),
-        head_sha=head_of(cwd),
+        evidence_dir=evidence_dir,
+        head_sha=head,
         full=full,
         task_id=task_id,
         run_id=run_id,
-        env=env,
+        env=gate_env(dict(os.environ), values, settings),
+        compose_project=values.get("COMPOSE_PROJECT_NAME"),
+        database=environment.database_name(values),
+        base_clone=base_clone,
     )
 
 
@@ -452,6 +571,39 @@ def _record(spec: GateSpec, kind: str, payload: dict[str, Any]) -> None:
         )
     finally:
         conn.close()
+
+
+def _git_quiet(*argv: str) -> bool:
+    proc = subprocess.run(["git", *argv], capture_output=True, text=True, check=False)
+    return proc.returncode == 0
+
+
+def _remove_scratch(spec: GateSpec) -> None:
+    """Take a baseline's scratch worktree away, whatever state it is in. Never raises."""
+    if spec.base_clone is None:
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        _git_quiet("-C", spec.base_clone, "worktree", "remove", "--force", spec.cwd)
+    shutil.rmtree(spec.cwd, ignore_errors=True)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        _git_quiet("-C", spec.base_clone, "worktree", "prune")
+
+
+def _add_scratch(spec: GateSpec) -> str | None:
+    """Check a baseline's commit out in its scratch worktree; say why not when it fails."""
+    if spec.base_clone is None:
+        return None
+    _remove_scratch(spec)  # one a stopped supervisor left behind
+    Path(spec.cwd).parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        ["git", "-C", spec.base_clone, "worktree", "add", "--detach", spec.cwd, spec.head_sha],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout or "git worktree add failed").strip()
+    return None
 
 
 def _lifeline(action: str, proc: Any) -> None:
@@ -489,6 +641,10 @@ def run(
     ``memory`` reads the resident memory of the gate's process group; it is sampled
     when the gate starts and every ``memory_every`` seconds, and the peak is kept with
     the result and as a ``gate_memory`` observation.
+
+    A baseline gate's scratch worktree is checked out here and removed at the end, and a
+    gate that belongs to no task takes its private compose stack down with it: nobody
+    else will.
     """
     if expected is _FROM_HISTORY:
         expected = expected_seconds(spec.repo, spec.full)
@@ -504,8 +660,51 @@ def run(
             "full": spec.full,
             "head_sha": spec.head_sha,
             "output_path": str(output_path),
+            "compose_project": spec.compose_project,
+            "database": spec.database,
+            "baseline": spec.baseline,
         },
     )
+    try:
+        return _run_started(
+            spec,
+            output_path=output_path,
+            started_at=started_at,
+            on_progress=on_progress,
+            on_process=on_process,
+            clock=clock,
+            sleep=sleep,
+            popen=popen,
+            progress_every=progress_every,
+            poll=poll,
+            expected=expected,
+            memory=memory,
+            memory_every=memory_every,
+        )
+    finally:
+        _remove_scratch(spec)
+        if spec.task_id is None and spec.compose_project:
+            from papaya_agent_runtime import compose
+
+            compose.down(spec.compose_project)
+
+
+def _run_started(
+    spec: GateSpec,
+    *,
+    output_path: Path,
+    started_at: str,
+    on_progress: Callable[[str], None],
+    on_process: Callable[[Any], None],
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    popen: Callable[..., Any],
+    progress_every: float,
+    poll: float,
+    expected: float | None,
+    memory: Callable[[int], float | None],
+    memory_every: float,
+) -> GateResult:
     started = clock()
     peak: float | None = None
 
@@ -521,19 +720,24 @@ def run(
             peak = float(value)
 
     with output_path.open("w", encoding="utf-8") as output:
-        try:
-            proc = popen(
-                ["/bin/sh", "-c", spec.command],
-                cwd=spec.cwd,
-                env=spec.env or None,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            output.write(f"could not start `{spec.command}`: {exc}\n")
+        scratch_error = _add_scratch(spec)
+        if scratch_error:
+            output.write(f"could not check out {spec.head_sha} to gate it: {scratch_error}\n")
             proc = None
+        else:
+            try:
+                proc = popen(
+                    ["/bin/sh", "-c", spec.command],
+                    cwd=spec.cwd,
+                    env=spec.env or None,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                output.write(f"could not start `{spec.command}`: {exc}\n")
+                proc = None
         if proc is not None:
             on_process(proc)
             _lifeline("watch_group", proc)
@@ -573,6 +777,10 @@ def run(
         finished_at=_now(),
         task_id=spec.task_id,
         peak_memory_mb=peak,
+        compose_project=spec.compose_project,
+        database=spec.database,
+        baseline=spec.baseline,
+        failing_tests=failing_tests(text) if exit_code != 0 else [],
     )
     # A gate killed by a signal (its supervisor stopping) did not fail: it never
     # finished, so it leaves no verdict to be steered on — only a note that it died.
@@ -900,6 +1108,21 @@ class Gates:
 # ── The caller's side ───────────────────────────────────────────────────────
 
 
+def environment_line(spec: GateSpec) -> str:
+    """Where the gate's database is, said before it runs so a collision is visible."""
+    if spec.compose_project is None and spec.database is None:
+        return (
+            f"environment: no private database stack is declared for {spec.repo}, so the "
+            "gate uses the repository's defaults"
+        )
+    parts = []
+    if spec.compose_project:
+        parts.append(f"compose project {spec.compose_project}")
+    if spec.database:
+        parts.append(f"database {spec.database}")
+    return "environment: " + ", ".join(parts)
+
+
 def _result_from(payload: dict[str, Any]) -> GateResult:
     known = GateResult.__dataclass_fields__
     return GateResult(**{key: value for key, value in payload.items() if key in known})
@@ -910,6 +1133,7 @@ def run_from_cli(
     task_id: int | None,
     repo: str | None,
     full: bool,
+    baseline: str | None = None,
     wait_seconds: float = WAIT_SECONDS,
     out: Callable[[str], None] = print,
     client: Any = None,
@@ -918,7 +1142,7 @@ def run_from_cli(
     """`ppy gate run`: 0 green, 1 red, :data:`STILL_RUNNING` when it outlasted this call."""
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
 
-    spec = resolve(task_id=task_id, repo=repo, full=full)
+    spec = resolve(task_id=task_id, repo=repo, full=full, baseline=baseline)
     expectation = expectation_line(spec.label, spec.repo, spec.full)
     if expectation:
         out(expectation)
@@ -931,11 +1155,14 @@ def run_from_cli(
             f"no supervisor is running, so the {spec.label} runs in this process: "
             f"`{spec.command}` in {spec.cwd}"
         )
+        out(environment_line(spec))
         result = run(spec, on_progress=out, expected=expected)
         out(result.line())
         return 0 if result.green else 1
 
-    answer = client.gate_start(task_id=task_id, repo=repo, full=full)
+    answer = client.gate_start(
+        task_id=task_id, repo=repo, full=full, **({"baseline": baseline} if baseline else {})
+    )
     if not answer.get("ok"):
         raise GateError(str(answer.get("error") or "the supervisor refused the gate"))
     if answer.get("queued"):
@@ -948,6 +1175,7 @@ def run_from_cli(
     )
     if answer.get("queued"):
         out(str(answer.get("queued_reason") or "queued"))
+    out(environment_line(spec))
     deadline = clock() + max(0.0, wait_seconds)
     key = str(answer["key"])
     overdue = False
@@ -1053,6 +1281,56 @@ class Verdict:
     state: str
     head_sha: str = ""
     result: GateResult | None = None
+    #: The two newest results at this head when both are red the same way
+    #: (:func:`repeated_red`): a third run cannot say anything new.
+    repeated: tuple[GateResult, ...] = ()
+
+
+#: How many red results at one head, failing the same way, stop the re-gating.
+REPEATED_RED = 2
+
+_TIMING = re.compile(r"\s+in [\d.]+s\b.*$")
+
+
+def _fails_the_same_way(first: GateResult, second: GateResult) -> bool:
+    """Red twice for the same reason, in the same environment.
+
+    The same failing tests when the output names them, else the same summary with its
+    timing dropped. A run in a different environment (a private database where the
+    last had none) is a different question, so it does not count.
+    """
+    if first.green or second.green:
+        return False
+    if (first.compose_project, first.database) != (second.compose_project, second.database):
+        return False
+    if first.failing_tests or second.failing_tests:
+        return first.failing_tests == second.failing_tests
+    summary = [_TIMING.sub("", r.summary) for r in (first, second)]
+    return bool(summary[0]) and summary[0] == summary[1]
+
+
+def repeated_red(results: list[GateResult]) -> tuple[GateResult, ...]:
+    """The newest :data:`REPEATED_RED` results (newest first) if they fail the same way."""
+    finished = [r for r in results if not r.baseline][:REPEATED_RED]
+    if len(finished) < REPEATED_RED:
+        return ()
+    return tuple(finished) if _fails_the_same_way(finished[0], finished[1]) else ()
+
+
+def _results_at(conn: Any, task_id: int, head: str) -> list[GateResult]:
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC",
+        (task_id, GATE_RESULT),
+    ).fetchall()
+    found = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except ValueError:
+            continue
+        if payload.get("head_sha") == head:
+            found.append(_result_from(payload))
+    return found
 
 
 def verdict(task_id: int) -> Verdict:
@@ -1064,21 +1342,23 @@ def verdict(task_id: int) -> Verdict:
         head = head_of(worktree) if worktree and Path(worktree).is_dir() else ""
         if not head:
             return Verdict(NONE)
-        rows = conn.execute(
-            "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC",
-            (task_id, GATE_RESULT),
-        ).fetchall()
+        results = _results_at(conn, task_id, head)
     finally:
         conn.close()
-    for row in rows:
-        try:
-            payload = json.loads(row["payload"] or "{}")
-        except ValueError:
-            continue
-        if payload.get("head_sha") == head:
-            result = _result_from(payload)
-            return Verdict(GREEN if result.green else RED, head, result)
-    return Verdict(NONE, head)
+    if not results:
+        return Verdict(NONE, head)
+    result = results[0]
+    return Verdict(GREEN if result.green else RED, head, result, repeated_red(results))
+
+
+def repeated_line(repeated: tuple[GateResult, ...]) -> str:
+    """One line naming what failed twice, where, and that it is not being run again."""
+    newest = repeated[0]
+    what = ", ".join(newest.failing_tests) or newest.summary or newest.command
+    return (
+        f"the {newest.label} is red {len(repeated)} times at {newest.head_sha[:8]} with the "
+        f"same failures ({what}); the runtime is not running it again"
+    )
 
 
 __all__ = [

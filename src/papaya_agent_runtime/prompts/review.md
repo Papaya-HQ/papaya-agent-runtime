@@ -35,6 +35,14 @@ against the brief's Goals, not against what you would have built.
   task id>` (add `--full` for the full suite). A worker's pasted summary is not a gate.
   The worker ran it first and its result is on the record; your run is a re-check, and
   `ppy gate run` records it against the head it ran at.
+- A failure you suspect was already on the base is settled with `ppy gate run --task <worker
+  task id> --baseline <base sha>` (add `--full` to match), which gates that commit in a
+  scratch worktree with a database of its own. Never check a baseline out and run its suite
+  yourself: it shares the repository's default database with every other gate.
+- If the facts carry "the gate is red twice the same way", the runtime has stopped
+  re-running it and `ppy gate run --task` refuses a third run. Do not steer the worker to
+  run it again. Run the baseline above: when the base fails the same tests, deliver and
+  name them as pre-existing in the report; when it does not, hand the ticket back.
 
 **Run a gate in the foreground and wait for it, never in the background.** A command that may run longer than ten minutes must not be run as a tool call; use `ppy gate run`, or push and let the hook run it. Never background a gate and wait.
 This turn ends when you stop talking, and a backgrounded command dies with it, so a run

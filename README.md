@@ -116,6 +116,31 @@ machine's free memory is below that repository's p90 ("queued for memory: 812M f
 liveness line show a queued gate as queued, the rounds do not treat it as silence, and
 neither a gate's duration nor a worker's silence observation counts the time queued.
 
+A gate runs in its own database, never the supervisor's or another gate's. A task's gate
+gets exactly the environment its worker gets, rendered for that task id: the compose
+project `task_<id>`, its database port, the database URLs from the repository's
+templates, and private tool caches, with the supervisor's own `VIRTUAL_ENV`,
+`DATABASE_URL`, `TEST_DATABASE_URL`, `COMPOSE_PROJECT_NAME` and port variable dropped
+first (a stack declared after the task was dispatched is settled and recorded then). The
+result records the compose project and database it ran against, and the call says them
+before it starts. `ppy gate run --task <id> --baseline <sha>` (or `<repo> --baseline
+<sha>`) gates a base commit instead: in a scratch worktree of that commit, with a
+compose project and database of its own (`gate_base_<local|full>_<sha>`), both removed
+when it ends, and recorded with `baseline: true` on no task, so it is never a task's
+verdict. A gate with no task, in the base clone, is private the same way. Readiness
+warns `gate_env_not_isolated` for a repository whose gates could still share a
+database: one that ships a compose file but declares no stack, or a compose stack with
+no port base or with database URL templates that lack `{task_id}`.
+
+A gate is not re-run forever. Each result keeps the tests its output names as failed
+(pytest's `FAILED`/`ERROR` lines). When the two newest results at one head are red with
+the same failing tests in the same environment, `ppy serve` stops sending the worker back:
+the ticket task records `needs_a_person` (a `gate_needs_a_person` event with both
+results), the work item gets one comment naming the failing tests and the head, and the
+review turn decides with that fact, delivering with the failures named as pre-existing
+when a `--baseline` run shows them on the base, or handing the ticket back. `ppy gate run
+--task <id>` refuses a third run at that head; a baseline is still allowed.
+
 ## Waits come from each repository's history
 
 One timeout fits no repository. A backend suite outlasts the tool cap, a frontend
