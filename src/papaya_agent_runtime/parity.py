@@ -233,6 +233,20 @@ CAPABILITIES: tuple[Capability, ...] = (
         interactive=("papaya_agent_runtime.watch",),
     ),
     Capability(
+        "person_outreach",
+        SHARED,
+        "a decision, capability request or pull request waiting on a person is said to "
+        "them where they are (their DM with this agent, the work item, the desktop) and "
+        "said again on a clock until it is answered",
+        serve=("Rounds._outreach_lane",),
+        shared="papaya_agent_runtime.outreach",
+        interactive=(
+            "papaya_agent_runtime.watch",
+            "papaya_agent_runtime.hooks",
+            "papaya_agent_runtime.cli",
+        ),
+    ),
+    Capability(
         "ticket_hold_protocol",
         HOST,
         "holding a Papaya ticket: taking, reserving, keeping it alive, status lines, handing back",

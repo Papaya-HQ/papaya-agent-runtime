@@ -274,6 +274,8 @@ def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | 
         parts.append(handoff.render_session_context(handoff.collect(conn)))
     with contextlib.suppress(Exception):
         parts.append(owed_context(conn))
+    with contextlib.suppress(Exception):
+        parts.append(outreach_context(conn))
     assessment = assessments.hook_context(conn)
     if assessment:
         parts.append(assessment)
@@ -322,6 +324,59 @@ def owed_context(conn) -> str | None:
             "until someone asks."
         )
     return "\n".join(lines) or None
+
+
+def outreach_context(conn) -> str | None:
+    """Everything waiting on a person, and whether they have been told.
+
+    The list a manager starts with so a decision never waits on someone re-asking. Said
+    to the person by the same procedure in both modes (`outreach`); here it is named so
+    the session can repeat it in its first reply and act on any answer that arrived.
+    """
+    from papaya_agent_runtime import outreach
+
+    if _headless_turn():
+        return None
+    found = outreach.lines(conn)
+    if not found:
+        return None
+    lines = [
+        f"WAITING ON A PERSON ({len(found)}) — each is chased through Papaya (their DM "
+        "with this agent, the work item) and the desktop until answered; if an answer "
+        "arrived, act on it and close the ask (`ppy todo done <id>`, `ppy capability "
+        "approve|deny <id>`):"
+    ]
+    lines.extend(f"- {line}" for line in found)
+    return "\n".join(lines)
+
+
+def outreach_stop_step(conn) -> str | None:
+    """At Stop: say what waits on a person now; hold the turn once for what nothing reached.
+
+    A session is the only mode with a reply the person may be reading, so an ask no
+    remote channel could carry (this machine not connected) is put in that reply: the
+    turn is bounced once with the words, recorded as said in the session, and lets go.
+    While `ppy serve` runs it says these itself.
+    """
+    from papaya_agent_runtime import outreach, supervision
+
+    if _headless_turn() or supervision.serve_running():
+        return None
+    lines = outreach.step(conn, session=True)
+    unreached = [
+        line[len("said to a person (session): ") :]
+        for line in lines
+        if line.startswith("said to a person (session): ")
+    ]
+    if not unreached:
+        return None
+    listed = "\n".join(f"- {text}" for text in unreached)
+    return (
+        f"{len(unreached)} thing(s) are waiting on a person and nothing outside this "
+        "session could reach them (this machine is not connected to a Papaya agent). Put "
+        "each in your reply, as a question with what unblocks it, then end the turn:\n"
+        f"{listed}"
+    )
 
 
 def owed_stop_reasons(conn) -> list[str]:
@@ -379,6 +434,10 @@ def stop_block_reason(conn, payload: dict[str, Any] | None = None) -> str | None
     reasons: list[str] = []
     with contextlib.suppress(Exception):  # a hook must never break the harness
         reasons.extend(owed_stop_reasons(conn))
+    with contextlib.suppress(Exception):  # a hook must never break the harness
+        unreached = outreach_stop_step(conn)
+        if unreached:
+            reasons.append(unreached)
     open_tasks = conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE status IN "
         "('requested','in_progress','worker_done','worker_stopped','blocked',"

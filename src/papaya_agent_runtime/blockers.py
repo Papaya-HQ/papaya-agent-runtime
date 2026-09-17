@@ -83,6 +83,11 @@ IDLE_WORK_KEPT = "papaya_keeps_idle_work"
 #: Blocker codes a readiness verdict never carries, so observing one never clears them.
 OBSERVED_ELSEWHERE = frozenset({IDLE_WORK_KEPT})
 
+#: Blocker codes the outreach procedure says to the owner itself (`outreach.py`): they
+#: stay in the ledger for the desktop app's card, and out of this module's DM, so a
+#: capability request is asked for once per round, not twice.
+SAID_BY_OUTREACH = frozenset({"capability_request_pending"})
+
 
 # ── redaction ────────────────────────────────────────────────────────────────
 
@@ -314,6 +319,8 @@ class Ledger:
         """The open blockers to report now, and the cleared ones to report once."""
         opened = []
         for blocker in self.open.values():
+            if blocker.code in SAID_BY_OUTREACH:
+                continue
             reported = _parse(blocker.reported_at)
             if (
                 reported is None
@@ -849,6 +856,7 @@ __all__ = [
     "IDLE_WORK_KEPT",
     "OBSERVED_ELSEWHERE",
     "REPEAT_AFTER",
+    "SAID_BY_OUTREACH",
     "TICKET_COMMENT",
     "Blocker",
     "Changes",

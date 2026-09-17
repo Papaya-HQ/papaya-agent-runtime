@@ -41,7 +41,16 @@ import time
 from datetime import UTC, datetime
 from typing import Any, TextIO
 
-from papaya_agent_runtime import board, companions, digest, health, lanes, owed, supervision
+from papaya_agent_runtime import (
+    board,
+    companions,
+    digest,
+    health,
+    lanes,
+    outreach,
+    owed,
+    supervision,
+)
 from papaya_agent_runtime.state import init_db, store
 
 DEFAULT_INTERVAL_SECONDS = 300.0
@@ -615,6 +624,8 @@ def tick(
             {"todo_id": i.todo_id, "text": i.text, "seconds": i.seconds}
             for i in lanes.ledger_due(conn, now=now)
         ],
+        # Everything waiting on a person, with whether and where it has been said.
+        "waiting_on_a_person": outreach.summary(conn, now=now),
         "new_events": new_events,
         "last_event_id": last_id,
         "open_todos": len(board.open_todos(conn)),
@@ -672,6 +683,20 @@ def listen_step(now: datetime) -> list[str]:
         return workitems.check_untracked(env=env, agent_id=who.agent_id if who else None)
     except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
         return [f"could not read work item changes: {exc}"]
+
+
+def outreach_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
+    """Say what waits on a person, where they are, when no `ppy serve` does it.
+
+    The same `outreach.step` serve's rounds run: the work item, the agent's DM with the
+    person, the desktop; said again on a clock until answered. Never raises.
+    """
+    try:
+        if supervision.serve_running():
+            return []
+        return outreach.step(conn, now=now)
+    except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
+        return [f"could not reach the person things wait on: {exc}"]
 
 
 def merge_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
@@ -816,6 +841,12 @@ def render(snapshot: dict[str, Any]) -> str:
         line += " | ledger due: " + "; ".join(
             f"#{i['todo_id']} {_clip(i['text'], 60)}" for i in snapshot["ledger_due"]
         )
+    if snapshot.get("waiting_on_a_person"):
+        line += " | waiting on a person: " + "; ".join(
+            _clip(a["text"], 70)
+            + (f" (said {a['said_count']}x)" if a.get("said_count") else " (not said yet)")
+            for a in snapshot["waiting_on_a_person"]
+        )
     segments = [s for s in (describe_pr(e) for e in snapshot.get("prs", [])) if s]
     if segments:
         line += " | prs: " + "; ".join(segments)
@@ -879,6 +910,7 @@ def _loop(
     # A test that replaces the repair step replaces every step that reaches out.
     listen = listen_step if repair is None else (lambda now: [])
     merges = merge_step if repair is None else (lambda conn, now: [])
+    reach = outreach_step if repair is None else (lambda conn, now: [])
     upkeep = UpkeepStep() if repair is None else (lambda now: [])
     owed_lane = owed_step if repair is None else (lambda conn, now: ([], []))
     repair = repair or repair_step
@@ -907,6 +939,7 @@ def _loop(
                 *repair(conn, moment),
                 *listen(moment),
                 *merges(conn, moment),
+                *reach(conn, moment),
                 *upkeep(moment),
                 *acted,
             ],

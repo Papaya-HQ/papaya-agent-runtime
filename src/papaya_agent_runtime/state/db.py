@@ -244,6 +244,26 @@ CREATE TABLE IF NOT EXISTS todos (
 );
 CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, position, id);
 
+-- What is waiting on a person and where it has been said (`outreach.py`): a
+-- decision recorded against a task, a capability request policy left to a person,
+-- a pull request the reconcile lane gave up on. One row per open ask; `said_at`
+-- and `said_count` are what stop it being said twice in a round and what make
+-- every repeat say which reminder it is. Resolved rows stay as the record.
+CREATE TABLE IF NOT EXISTS outreach (
+    key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    task_id INTEGER,
+    work_item_id TEXT,
+    text TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    said_at TEXT,
+    said_count INTEGER NOT NULL DEFAULT 0,
+    said_via TEXT,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outreach_open ON outreach(resolved_at, first_seen_at);
+
 -- The newest comment (or event) timestamp the manager has processed on an
 -- external record — a ticket URL or id — so a sweep asks only for what is newer
 -- and an empty sweep costs one list call, not a re-read. Same shape `ppy watch`

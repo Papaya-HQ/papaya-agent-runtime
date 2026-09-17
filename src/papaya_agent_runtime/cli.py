@@ -2224,6 +2224,30 @@ def _cmd_capability(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_outreach(args: argparse.Namespace) -> int:
+    """What waits on a person and where it was said; `run` says what is due now."""
+    from papaya_agent_runtime import outreach
+    from papaya_agent_runtime.state import init_db
+
+    conn = init_db()
+    try:
+        if getattr(args, "outreach_cmd", None) == "run":
+            for line in outreach.step(conn, session=False):
+                print(line)
+        found = outreach.summary(conn)
+        if args.json:
+            print(json.dumps(found, indent=2))
+            return 0
+        if not found:
+            print("nothing is waiting on a person")
+            return 0
+        for line in outreach.lines(conn):
+            print(line)
+        return 0
+    finally:
+        conn.close()
+
+
 def _cmd_followup(args: argparse.Namespace) -> int:
     """What a stopped or done worker needs by its record, and optionally send the steer."""
     from papaya_agent_runtime import supervision
@@ -2616,6 +2640,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"todos:   {len(nxt)} next, {len(blocked)} waiting")
         for t in nxt[:3]:
             print(f"  next:  #{t['id']} {t['text']}")
+        from papaya_agent_runtime import outreach
+
+        asks = outreach.summary(conn)
+        if asks:
+            unsaid = sum(1 for a in asks if not a["said_count"])
+            said = "" if not unsaid else f", {unsaid} not said yet"
+            print(f"asks:    {len(asks)} waiting on a person{said} (`ppy outreach`)")
         from papaya_agent_runtime import reconcile
 
         print(f"lane:    {reconcile.lane_status(conn)}")
@@ -3789,6 +3820,20 @@ def build_parser() -> argparse.ArgumentParser:
     cap_deny.add_argument("request_id", type=int)
     cap_deny.add_argument("--reason", required=True)
     capability.set_defaults(func=_cmd_capability)
+
+    outreach_cmd = sub.add_parser(
+        "outreach",
+        help="what is waiting on a person (a recorded decision, a capability request, a pull "
+        "request the lane gave up on) and where it was said; `run` says what is due now, the "
+        "same procedure `ppy serve` and the heartbeat run",
+    )
+    outreach_cmd.add_argument("--json", action="store_true")
+    outsub = outreach_cmd.add_subparsers(dest="outreach_cmd")
+    out_run = outsub.add_parser(
+        "run", help="say what is due now: the work item, the DM, the desktop"
+    )
+    out_run.add_argument("--json", action="store_true")
+    outreach_cmd.set_defaults(func=_cmd_outreach)
 
     handoff = sub.add_parser(
         "handoff",
