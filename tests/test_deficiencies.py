@@ -76,6 +76,11 @@ class FakeGh:
             issue["state"] = "OPEN"
             issue["comments"].append(args[args.index("--comment") + 1])
             return 0, "", ""
+        if args[:2] == ["issue", "close"]:
+            issue = self.issues[args[2]]
+            issue["state"] = "CLOSED"
+            issue["comments"].append(args[args.index("--comment") + 1])
+            return 0, "", ""
         return 1, "", f"unexpected gh call {args}"
 
     def created(self) -> list[dict[str, Any]]:
@@ -363,7 +368,7 @@ def _denials(command: str) -> list[dict[str, Any]]:
     return [{"tool_name": "Bash", "tool_input": {"command": command}}]
 
 
-def test_a_denial_outside_the_safe_family_is_due_an_issue_once_twice_on_one_repo(
+def test_a_plain_denial_outside_the_safe_family_is_due_an_issue_once_twice_on_one_repo(
     ppy_home,
 ) -> None:
     conn = init_db()
@@ -391,13 +396,13 @@ def test_a_denial_outside_the_safe_family_is_due_an_issue_once_twice_on_one_repo
     assert deficiencies.ledger(include_all=True) == []
 
     deficiencies.record_denials(
-        _denials("curl https://example.com"),
+        _denials("terraform plan"),
         task_id=tasks["api"][0],
         run_id=run_id,
         worktree=None,
     )
     deficiencies.record_denials(
-        _denials("curl https://example.org"),
+        _denials("terraform validate"),
         task_id=tasks["web"][0],
         run_id=run_id,
         worktree=None,
@@ -406,7 +411,7 @@ def test_a_denial_outside_the_safe_family_is_due_an_issue_once_twice_on_one_repo
     assert (row.count, row.status) == (2, deficiencies.WATCHING)
 
     deficiencies.record_denials(
-        _denials("curl -s https://example.net"),
+        _denials("terraform plan -out x"),
         task_id=tasks["api"][1],
         run_id=run_id,
         worktree=None,
@@ -417,7 +422,8 @@ def test_a_denial_outside_the_safe_family_is_due_an_issue_once_twice_on_one_repo
         3,
         deficiencies.PENDING,
     )
-    assert row.evidence[-1]["pattern"] == "Bash(curl:*)"
+    assert row.evidence[-1]["pattern"] == "Bash(terraform:*)"
+    assert row.evidence[-1]["command"] == "terraform plan -out x"
 
 
 def test_a_check_in_steering_twice_for_one_reason_on_one_ticket_reaches_its_threshold(
@@ -488,13 +494,13 @@ def test_a_readiness_finding_the_runtime_owns_and_cannot_close_is_recorded() -> 
 
 def test_ppy_deficiency_list_and_doctor_show_the_ledger(ppy_home, capsys, monkeypatch) -> None:
     deficiencies.record(deficiencies.TURN_REPORT, LINE)
-    deficiencies.record(deficiencies.WORKER_DENIAL, "`Bash(curl:*)`", scope="repo:api")
+    deficiencies.record(deficiencies.WORKER_DENIAL, "`Bash(terraform:*)`", scope="repo:api")
     _reporter(FakeGh()).flush()
 
     assert cli.main(["deficiency", "list"]) == 0
     out = capsys.readouterr().out
     assert LINE in out and f"https://github.com/{RUNTIME_REPO}/issues/1" in out
-    assert "curl" not in out
+    assert "terraform" not in out
 
     assert cli.main(["deficiency", "list", "--all"]) == 0
     assert "below threshold" in capsys.readouterr().out

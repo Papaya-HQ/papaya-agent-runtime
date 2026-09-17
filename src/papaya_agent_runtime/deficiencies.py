@@ -65,8 +65,10 @@ STALL_WHILE_LIVE = "stall-while-live"
 MISSED_TURN = "missed-turn"
 #: A worker's gate was backgrounded past the tool cap with no `ppy gate run` on record.
 GATE_PAST_TOOL_CAP = "gate-past-tool-cap"
-#: A worker was denied a tool outside the safe family.
+#: A worker was denied a plain command its profile could not be taught to allow.
 WORKER_DENIAL = "worker-denial"
+#: Workers in one repository kept breaking the command rules: the rules text is unclear.
+PROMPT_CLARITY = "prompt-clarity"
 #: An exception escaped `serve`, a turn, a round, the sweep or the supervisor.
 UNHANDLED_EXCEPTION = "unhandled-exception"
 #: A check-in steered a worker for the same reason again.
@@ -80,6 +82,8 @@ IDLE_WORK_REFUSED = "idle-work-refused"
 WATCHING = "watching"
 PENDING = "pending"
 REPORTED = "reported"
+#: A `worker-denial` row whose denials a later classifier says were never profile gaps.
+RECLASSIFIED = "reclassified"
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,8 @@ class Kind:
     remedy: str = ""
     #: Occurrences within one scope (a repository, a ticket) before an issue opens.
     threshold: int = 1
+    #: When set, the threshold counts distinct values of this evidence field instead.
+    distinct: str = ""
 
 
 KINDS: dict[str, Kind] = {
@@ -177,11 +183,12 @@ KINDS: dict[str, Kind] = {
         ),
     ),
     WORKER_DENIAL: Kind(
-        title="Workers were denied a tool outside the safe family",
+        title="Workers were denied a plain command the runtime cannot learn",
         happened=(
-            "Workers in one repository were refused {detail} more than once. It is outside "
-            "the safe family, so the runtime does not learn it, and every dispatch there "
-            "meets the same refusal."
+            "Workers in one repository were refused {detail} more than once, for a plain "
+            "command (one program, no operators). Either it is outside the safe family, so "
+            "the runtime does not learn it, or the profile already allows it and the harness "
+            "refused it anyway; every dispatch there meets the same refusal."
         ),
         instead="Learned nothing; the workers carried on without the tool.",
         remedy=(
@@ -189,6 +196,24 @@ KINDS: dict[str, Kind] = {
             "for that repository should route around it."
         ),
         threshold=2,
+    ),
+    PROMPT_CLARITY: Kind(
+        title="Workers keep breaking the command rules",
+        happened=(
+            "Workers in one repository ran commands the command rules refuse for their shape "
+            "(operators, pipes, redirection, inline environment) on the same day: {detail}. "
+            "Each worker read the rules at dispatch, so the rules text is not landing."
+        ),
+        instead=(
+            "Recorded the denials, and steered each worker that was refused twice with the "
+            "command rules once; no tool was added."
+        ),
+        remedy=(
+            "Reword the command rules (`providers/command_rules.py`) where the commands in "
+            "the evidence show they were misread."
+        ),
+        threshold=3,
+        distinct="task_id",
     ),
     UNHANDLED_EXCEPTION: Kind(
         title="An unhandled exception",
@@ -514,7 +539,8 @@ def _record(
             status = current.status
         if status == WATCHING:
             within = [e for e in entries if e.get("scope") == entry.get("scope")]
-            if len(within) >= spec.threshold:
+            seen = len({e.get(spec.distinct) for e in within}) if spec.distinct else len(within)
+            if seen >= spec.threshold:
                 status = PENDING
         conn.execute(
             "UPDATE deficiencies SET last_seen = ?, count = ?, evidence = ?, status = ? "
@@ -538,7 +564,7 @@ def ledger(*, include_all: bool = False) -> list[Deficiency]:
     finally:
         conn.close()
     found = [Deficiency.from_row(row) for row in rows]
-    return found if include_all else [d for d in found if d.status != WATCHING]
+    return found if include_all else [d for d in found if d.status not in (WATCHING, RECLASSIFIED)]
 
 
 def summary() -> dict[str, int]:
@@ -693,6 +719,12 @@ class GhForge:
         code, _out, err = self._gh(["issue", "reopen", url, "--comment", body])
         if code != 0:
             log.warning("[deficiencies] gh could not reopen %s: %s", url, err.strip())
+        return code == 0
+
+    def close(self, url: str, body: str) -> bool:
+        code, _out, err = self._gh(["issue", "close", url, "--comment", body])
+        if code != 0:
+            log.warning("[deficiencies] gh could not close %s: %s", url, err.strip())
         return code == 0
 
 
@@ -897,6 +929,65 @@ class Reporter:
             log.info("[deficiencies] %s", line)
         return done
 
+    def reclassify(self) -> list[str]:
+        """Close what the denial kinds say was never a profile gap. Never raises.
+
+        `serve` runs this at start. Each `worker-denial` row whose denials all classify
+        as `command_shape` or `policy_refusal` today leaves the ledger; if it has an
+        open issue, the issue gets one comment saying so and is closed. A row whose
+        issue cannot be closed now (no `gh`, self-reporting off) stays as it is and is
+        tried again at the next start.
+        """
+        with self._lock:
+            try:
+                return self._reclassify()
+            except Exception as exc:  # noqa: BLE001 - reporting must never break serve
+                log.warning("[deficiencies] Could not re-classify worker denials: %s", exc)
+                return []
+
+    def _reclassify(self) -> list[str]:
+        from papaya_agent_runtime.paths import db_path
+        from papaya_agent_runtime.state import init_db
+
+        if not db_path().exists():
+            return []
+        done: list[str] = []
+        repo: str | None = None
+        conn = init_db()
+        try:
+            rows = [
+                Deficiency.from_row(r)
+                for r in conn.execute(
+                    "SELECT * FROM deficiencies WHERE kind = ? AND status != ?",
+                    (WORKER_DENIAL, RECLASSIFIED),
+                )
+            ]
+            for deficiency in rows:
+                kinds = denial_kinds(conn, deficiency)
+                if not kinds or tool_learning.PROFILE_GAP in kinds:
+                    continue
+                if deficiency.status == REPORTED and deficiency.issue_url:
+                    if repo is None:
+                        config = self._settings()
+                        repo = runtime_repo(config, self._origin) if config.enabled else None
+                    if repo is None:
+                        continue
+                    url = deficiency.issue_url
+                    if (self._forge.state(url) or "") != "CLOSED":
+                        if not self._forge.close(url, reclassified_body(kinds)):
+                            continue
+                        done.append(f"closed {url}")
+                conn.execute(
+                    "UPDATE deficiencies SET status = ? WHERE fingerprint = ?",
+                    (RECLASSIFIED, deficiency.fingerprint),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        for line in done:
+            log.info("[deficiencies] %s (re-classified)", line)
+        return done
+
     def flush_soon(self) -> None:
         """Flush on a thread of its own, now, coalescing records that arrive meanwhile."""
         with self._state:
@@ -959,15 +1050,31 @@ def _task_repo(conn: Any, task_id: int) -> str | None:
     return str(row["name"]) if row is not None and row["name"] else None
 
 
-def record_denials(
-    denials: Iterable[dict[str, Any]], *, task_id: int, run_id: int | None, worktree: str | None
-) -> None:
-    """A worker turn's permission denials outside the safe family. Never raises.
+#: The detail of the one `prompt-clarity` deficiency about the command rules.
+COMMAND_RULES_DETAIL = "the command rules"
 
-    ``denials`` are the adapter's (`ProviderAdapter.permission_denials`): the same
-    ones `tool_learning.learn` learns from. A denial inside the safe family is the
-    runtime's to learn, not to report; one outside it is judged with the same
-    `tool_learning.classify`, so the two can never disagree about which is which.
+
+def record_denials(
+    denials: Iterable[dict[str, Any]],
+    *,
+    task_id: int,
+    run_id: int | None,
+    worktree: str | None,
+    profile: Iterable[str] | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> None:
+    """What a worker's new denials mean for the ledger, by kind. Never raises.
+
+    ``denials`` are the adapter's (`ProviderAdapter.permission_denials`), already
+    deduplicated by `tool_learning.learn`, and judged with the same
+    `tool_learning.classify`, so the two never disagree about which is which:
+
+    - ``profile_gap``: a `worker-denial` when learning cannot close it, that is when
+      the program is outside the safe family, or ``profile`` (the tools the worker
+      was dispatched with, when known) already allowed the pattern.
+    - ``command_shape``: one `prompt-clarity` occurrence per worker, scoped to its
+      repository and the day, with the command as evidence.
+    - ``policy_refusal``: nothing; `tool_learning` counts it and steers the worker.
     """
     try:
         denials = [d for d in denials if isinstance(d, dict)]
@@ -975,27 +1082,105 @@ def record_denials(
             return
         from papaya_agent_runtime.state import init_db
 
+        allowed = set(profile) if profile is not None else None
         conn = init_db()
         try:
             repo = _task_repo(conn, task_id)
         finally:
             conn.close()
+        day = (clock or _now)().astimezone(UTC).date().isoformat()
         for denial in denials:
             tool = str(denial.get("tool_name") or denial.get("tool") or "")
             tool_input = denial.get("tool_input") or {}
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             verdict = tool_learning.classify(tool, command, worktree)
-            pattern = verdict.pattern or tool
-            if verdict.in_family or not pattern:
+            evidence = {"repo": repo, "task_id": task_id, "run_id": run_id, "command": command}
+            if verdict.kind == tool_learning.COMMAND_SHAPE:
+                scope = f"repo:{repo or '?'}:{day}"
+                if not _counted(PROMPT_CLARITY, COMMAND_RULES_DETAIL, scope, task_id):
+                    record(PROMPT_CLARITY, COMMAND_RULES_DETAIL, evidence=evidence, scope=scope)
                 continue
+            if verdict.kind != tool_learning.PROFILE_GAP:
+                continue
+            pattern = verdict.pattern or tool
+            if not pattern:
+                continue
+            if verdict.in_family and (allowed is None or pattern not in allowed):
+                continue  # the runtime learns this one
             record(
                 WORKER_DENIAL,
                 f"`{pattern}`",
-                evidence={"pattern": pattern, "repo": repo, "task_id": task_id, "run_id": run_id},
+                evidence={**evidence, "pattern": pattern},
                 scope=f"repo:{repo or '?'}",
             )
     except Exception as exc:  # noqa: BLE001 - a worker's turn must end whatever this does
         log.warning("[deficiencies] Could not read task %s's denials: %s", task_id, exc)
+
+
+def _counted(kind: str, detail: str, scope: str, task_id: int) -> bool:
+    """Whether this worker is already an occurrence of the deficiency within ``scope``."""
+    from papaya_agent_runtime.state import init_db
+
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT evidence FROM deficiencies WHERE fingerprint = ?", (fingerprint(kind, detail),)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return False
+    try:
+        entries = json.loads(row["evidence"] or "[]")
+    except (TypeError, ValueError):
+        return False
+    return any(e.get("scope") == scope and e.get("task_id") == task_id for e in entries)
+
+
+def denial_kinds(conn: Any, deficiency: Deficiency) -> set[str]:
+    """The kinds today's classifier gives a `worker-denial` row's denials.
+
+    A row written before kinds existed carries only the pattern, so its commands are
+    read back from the `permission_denied` events of the tasks in its evidence. An
+    empty set means nothing could be read, which is never a reason to close an issue.
+    """
+    pattern = next(
+        (str(e["pattern"]) for e in deficiency.evidence if e.get("pattern")),
+        deficiency.detail.strip("`"),
+    )
+    kinds: set[str] = set()
+    task_ids: set[int] = set()
+    for entry in deficiency.evidence:
+        if isinstance(entry.get("task_id"), int):
+            task_ids.add(int(entry["task_id"]))
+        if entry.get("command") and pattern.startswith("Bash("):
+            kinds.add(tool_learning.classify("Bash", str(entry["command"]), None).kind)
+    for task_id in sorted(task_ids):
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE kind = ? AND task_id = ?",
+            (tool_learning.PERMISSION_DENIED, task_id),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if payload.get("pattern") == pattern:
+                kinds.add(tool_learning.kind_of(payload))
+    return kinds
+
+
+def reclassified_body(kinds: Iterable[str]) -> str:
+    """The one comment a re-classified issue gets as it is closed."""
+    names = "/".join(sorted(kinds))
+    return (
+        f"re-classified as {names}; closing.\n\n"
+        "The runtime now tells a denial's kind apart. `command_shape` is a command the "
+        "command rules refuse for its shape (operators, pipes, redirection, inline "
+        "environment), and `policy_refusal` is a program workers are never given. Neither "
+        "is a tool missing from the worker profile: the worker is steered with the rule "
+        "instead, and only `profile_gap` denials open issues."
+    )
 
 
 def record_gate_past_tool_cap(task_id: int, run_id: int | None, command: str | None) -> None:
@@ -1030,7 +1215,9 @@ __all__ = [
     "LABEL",
     "MISSED_TURN",
     "PENDING",
+    "PROMPT_CLARITY",
     "READINESS_UNREMEDIED",
+    "RECLASSIFIED",
     "REPEATED_STEER",
     "REPORTED",
     "RUNTIME_CI_RED",
@@ -1045,6 +1232,7 @@ __all__ = [
     "Settings",
     "add_listener",
     "comment_body",
+    "denial_kinds",
     "fingerprint",
     "github_slug",
     "issue_body",
@@ -1055,6 +1243,7 @@ __all__ = [
     "record_denials",
     "record_exception",
     "record_gate_past_tool_cap",
+    "reclassified_body",
     "redact",
     "remove_listener",
     "runtime_repo",

@@ -3805,6 +3805,8 @@ async def run(
     device flow.
     """
     reporter = self_report or deficiencies.Reporter()
+    # Before anything can open an issue: close the ones an older classifier got wrong.
+    await asyncio.to_thread(reporter.reclassify)
     deficiencies.add_listener(reporter.flush_soon)
     try:
         return await _run(

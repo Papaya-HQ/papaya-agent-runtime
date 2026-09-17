@@ -674,8 +674,20 @@ the signals, recorded where they already happen:
 - **A turn misses its job.** A ticket is handed back because a turn ended twice without
   doing its job, or a worker's gate was backgrounded past the tool cap with no
   `ppy gate run` on record.
-- **A tool is refused.** A worker is denied a tool outside the safe family
-  (`tool_learning`, which learns the ones inside it) twice in one repository.
+- **A tool is refused.** Workers in one repository are denied the same plain command
+  twice, and learning cannot fix it: the program is outside the safe family
+  (`tool_learning` learns the ones inside it), or the profile already allows it and the
+  harness refused it anyway. Only this kind of denial, a `profile_gap`, is a tool
+  issue. A `command_shape` denial (operators, a pipe, redirection, `FOO=1 cmd`,
+  `cd … && …`) is the worker breaking the command rules: after two, that worker is
+  steered once with the rules themselves, and three workers doing it in one repository
+  in a day is one `prompt-clarity` issue about the rules text, with their commands as
+  evidence. A `policy_refusal` (a program workers are never given, such as `sudo`,
+  `curl` or `docker`) is counted per repository and never an issue; the worker is
+  steered once with the rule it broke. A denial is recorded once per tool call, and a
+  retry of the same line within a minute is the same denial. At start, `serve`
+  re-classifies older `worker-denial` rows, and comments on and closes any issue whose
+  denials were never profile gaps.
 - **Something crashes.** An exception escapes `serve`, a ticket's hold, a round, the
   sweep or the supervisor's worker thread. It is recorded with the traceback.
 - **A steer doesn't stick.** A check-in steers one ticket twice for the same reason.
@@ -701,7 +713,8 @@ addresses are removed.
 **Seeing it locally.**
 
 - `ppy deficiency list` shows the ledger with issue links; `--all` adds deficiencies
-  still below their threshold.
+  still below their threshold and re-classified ones. It ends with the worker denials
+  per repository that are never reported (`command_shape`, `policy_refusal`).
 - `ppy doctor` shows how many self-reported issues are open.
 - `serve` prints one line at start when some are waiting to open.
 
@@ -806,8 +819,9 @@ All working state is under `.ppy/` (gitignored):
   is restored, and a worker's denied command in the safe family
   (`tool_learning.SAFE_FAMILY`: read-only text tools, the language toolchains, file
   verbs inside the worktree, `ppy` by any path) is added to `extra_tools` for the next
-  dispatch. A denial outside the family changes nothing and becomes one readiness
-  warning naming the pattern to `--allow`. Every change is a `config_change` event:
+  dispatch. A plain command outside the family changes nothing and becomes one
+  readiness warning naming the pattern to `--allow`; a command refused for its shape
+  or by policy never does, because no pattern would help. Every change is a `config_change` event:
   `ppy config history` lists them, and `ppy serve` start and `ppy doctor` print one
   line each. `ppy config claude --lock extra_tools` (or `dropped_tools`) stops the
   runtime changing a key; a change a lock refuses is a readiness warning naming it.

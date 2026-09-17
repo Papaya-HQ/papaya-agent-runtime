@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from papaya_agent_runtime import budgets
+from papaya_agent_runtime import budgets, tool_learning
 from papaya_agent_runtime.providers.base import ProviderAdapter, TaskSpec, WorkerResult
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor import autocommit, lifeline
@@ -210,6 +210,16 @@ class RunnerGuardian:
                     provider_session_id=ev.session_id,
                 )
                 store.update_runner(conn, runner_id, session_id=ev.session_id)
+            denial = self.adapter.live_denial(ev, events)
+            if denial is not None:
+                # Now, so a steer about it reaches a worker that is still running.
+                tool_learning.learn(
+                    [denial],
+                    task_id=spec.task_id,
+                    run_id=spec.run_id,
+                    worktree=spec.worktree_path,
+                    branch=spec.branch,
+                )
             if on_event:
                 on_event(ev.kind, ev.raw)
 
@@ -224,20 +234,15 @@ class RunnerGuardian:
         result = self.adapter.result(events, exit_code)
         from papaya_agent_runtime import deficiencies
 
-        denials = self.adapter.permission_denials(events)
-        if denials:
-            from papaya_agent_runtime import tool_learning
-
-            tool_learning.learn(
-                denials,
-                task_id=spec.task_id,
-                run_id=spec.run_id,
-                worktree=spec.worktree_path,
-            )
-            # What the runtime would not learn, twice on one repository, is its own gap.
-            deficiencies.record_denials(
-                denials, task_id=spec.task_id, run_id=spec.run_id, worktree=spec.worktree_path
-            )
+        # The turn's own list: a denial already recorded live is not recorded, steered or
+        # reported again (`tool_learning.record` deduplicates).
+        tool_learning.learn(
+            self.adapter.permission_denials(events),
+            task_id=spec.task_id,
+            run_id=spec.run_id,
+            worktree=spec.worktree_path,
+            branch=spec.branch,
+        )
         if result.usage is not None:
             store.record_usage(
                 conn,

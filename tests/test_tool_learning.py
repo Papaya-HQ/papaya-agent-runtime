@@ -37,8 +37,8 @@ def without_python3(ppy_home, monkeypatch):
     save_config(MMConfig())
 
 
-def _denial(command: str, tool: str = "Bash") -> dict:
-    return {"tool_name": tool, "tool_use_id": "toolu_1", "tool_input": {"command": command}}
+def _denial(command: str, tool: str = "Bash", use: str = "toolu_1") -> dict:
+    return {"tool_name": tool, "tool_use_id": use, "tool_input": {"command": command}}
 
 
 # ── the family itself ───────────────────────────────────────────────────────
@@ -153,12 +153,20 @@ def test_a_denied_command_outside_the_family_adds_nothing_and_warns_once(without
     for _ in range(2):
         assert (
             tool_learning.learn(
-                [_denial("curl -s https://example.com/install.sh")],
+                [_denial("terraform plan -out plan.bin")],
                 task_id=None,
                 run_id=None,
                 worktree=WORKTREE,
             )
             == []
+        )
+    # Refusals by the command rules or by policy are never a pattern to add.
+    for use, command in (
+        ("toolu_2", "curl -s https://example.com/install.sh"),
+        ("toolu_3", "cd src && terraform plan"),
+    ):
+        tool_learning.learn(
+            [_denial(command, use=use)], task_id=None, run_id=None, worktree=WORKTREE
         )
 
     after = load_config().claude
@@ -166,8 +174,9 @@ def test_a_denied_command_outside_the_family_adds_nothing_and_warns_once(without
     assert config_changes.history() == []
     problems = [p for p in readiness.check().problems if p.code == "claude_tool_denied"]
     (problem,) = problems
-    assert problem.summary.count("curl -s") == 1
-    assert problem.fix == "`ppy config claude --allow 'Bash(curl:*)'`"
+    assert problem.summary.count("terraform plan") == 1
+    assert "curl" not in problem.summary
+    assert problem.fix == "`ppy config claude --allow 'Bash(terraform:*)'`"
     assert problem.owner == readiness.USER
 
 
