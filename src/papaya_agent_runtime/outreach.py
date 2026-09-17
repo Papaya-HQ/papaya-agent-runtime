@@ -463,35 +463,141 @@ def plan(conn: sqlite3.Connection, *, now: datetime, host: str) -> tuple[Plan, l
 # ── the channels a session has ───────────────────────────────────────────────
 
 
+#: The channel to fall back to when this agent has no DM with its owner, by name.
+CHANNEL_ENV = "PPY_OUTREACH_CHANNEL"
+
+
+def _channel_rows(channels: Any) -> list[dict[str, Any]]:
+    if isinstance(channels, dict):
+        channels = channels.get("channels")
+    return (
+        [c for c in (channels or []) if isinstance(c, dict)] if isinstance(channels, list) else []
+    )
+
+
+def fallback_channel_id(channels: Any, *, wanted: str | None = None) -> str | None:
+    """A channel this agent is a member of to say things in when it has no DM.
+
+    ``wanted`` (:data:`CHANNEL_ENV`) names one; otherwise the member channel with the
+    fewest people, then by name — the closest thing to private among what it can see.
+    """
+    rows = [c for c in _channel_rows(channels) if c.get("is_member")]
+    if wanted:
+        for c in rows:
+            if str(c.get("name") or "").strip().lower() == wanted.strip().lower():
+                return str(c.get("id") or c.get("channel_id") or "") or None
+    rows.sort(key=lambda c: (int(c.get("member_count") or 0), str(c.get("name") or "")))
+    for c in rows:
+        identifier = str(c.get("id") or c.get("channel_id") or "").strip()
+        if identifier:
+            return identifier
+    return None
+
+
+async def _owner_mention(api: Any) -> dict[str, str] | None:
+    """The person who connected this agent, as a mention payload; ``None`` if unknown."""
+    from papaya_agent_client import api_client
+
+    me = await api_client.agent_whoami(api)
+    connection = me.get("connection") if isinstance(me, dict) else None
+    owner_id = str((connection or {}).get("owner_id") or "").strip()
+    if not owner_id:
+        return None
+    workspace_id = api.agent_config["workspace_id"]
+    members = await api.request_json("GET", f"/workspaces/{workspace_id}/members")
+    rows = members.get("result") if isinstance(members, dict) else members
+    for member in rows or []:
+        if isinstance(member, dict) and str(member.get("id") or "") == owner_id:
+            handle = str(member.get("handle") or "").strip()
+            return {
+                "type": "user",
+                "id": owner_id,
+                "handle": handle,
+                "display_name": str(member.get("display_name") or handle or "owner"),
+            }
+    return {"type": "user", "id": owner_id, "handle": "", "display_name": "owner"}
+
+
+async def say_in_workspace(api: Any, text: str) -> bool:
+    """Put ``text`` where its owner reads it: their DM with this agent, or a channel with
+    them mentioned. ``False`` when neither exists or the post did not land. Never raises.
+    """
+    if api is None or not text:
+        return False
+    try:
+        from papaya_agent_client import api_client
+
+        from papaya_agent_runtime.serve import dm_channel_id
+
+        channels = await api_client.list_agent_channels(api)
+        channel = dm_channel_id(channels)
+        if channel is not None:
+            await api_client.post_agent_channel_message(api, channel, text)
+            return True
+        channel = fallback_channel_id(channels, wanted=os.environ.get(CHANNEL_ENV))
+        if channel is None:
+            log.warning("[outreach] This agent is in no DM and no channel; nothing was posted")
+            return False
+        mention = await _owner_mention(api)
+        content = text
+        payload: dict[str, Any] = {"content": content}
+        if mention:
+            if mention["handle"]:
+                content = f"@{mention['handle']} — {text}"
+            payload = {"content": content, "mentions": [mention]}
+        workspace_id = api.agent_config["workspace_id"]
+        await api.request_json(
+            "POST", f"/workspaces/{workspace_id}/channels/{channel}/messages", json=payload
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
+        log.warning("[outreach] Could not post to the workspace: %s", exc)
+        return False
+
+
 def post_dm(text: str) -> bool:
-    """Put ``text`` in this agent's DM with the person who connected it. Never raises."""
+    """The session's form of :func:`say_in_workspace`, on this connection's client."""
     import asyncio
 
     from papaya_agent_runtime import papaya
 
     try:
-        api = papaya.agent_api()
-        if api is None:
-            return False
-        from papaya_agent_client import api_client
-
-        from papaya_agent_runtime.serve import dm_channel_id
-
-        async def send() -> bool:
-            channel = dm_channel_id(await api_client.list_agent_channels(api))
-            if channel is None:
-                return False
-            await api_client.post_agent_channel_message(api, channel, text)
-            return True
-
-        return asyncio.run(send())
+        return asyncio.run(say_in_workspace(papaya.agent_api(), text))
     except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
-        log.warning("[outreach] Could not post to the agent's DM: %s", exc)
+        log.warning("[outreach] Could not post to the workspace: %s", exc)
         return False
 
 
-def post_ticket(work_item_id: str, body: str, *, environ: dict[str, str] | None = None) -> bool:
-    """Comment on a work item as this machine's agent. Never raises."""
+_OWNER_MENTION: dict[str, dict[str, str] | None] = {}
+
+
+def owner_mention() -> dict[str, str] | None:
+    """The connection owner's mention payload, resolved once per process. Never raises."""
+    import asyncio
+
+    from papaya_agent_runtime import papaya
+
+    if "owner" in _OWNER_MENTION:
+        return _OWNER_MENTION["owner"]
+    found: dict[str, str] | None = None
+    try:
+        api = papaya.agent_api()
+        if api is not None:
+            found = asyncio.run(_owner_mention(api))
+    except Exception as exc:  # noqa: BLE001 - a comment without a mention still lands
+        log.warning("[outreach] Could not resolve the connection's owner: %s", exc)
+    _OWNER_MENTION["owner"] = found
+    return found
+
+
+def post_ticket(
+    work_item_id: str,
+    body: str,
+    *,
+    environ: dict[str, str] | None = None,
+    mention: dict[str, str] | None = None,
+) -> bool:
+    """Comment on a work item as this machine's agent, mentioning its owner. Never raises."""
     from papaya_agent_runtime import papaya, papaya_events
 
     try:
@@ -505,15 +611,29 @@ def post_ticket(work_item_id: str, body: str, *, environ: dict[str, str] | None 
             payload={},
             work_item_id=work_item_id,
         )
-        return papaya_events.post_work_item_comment(event, body, environ=env)
+        mention = mention if mention is not None else owner_mention()
+        mentions = [mention] if mention and mention.get("id") else None
+        if mention and mention.get("handle"):
+            body = f"@{mention['handle']} — {body}"
+        return papaya_events.post_work_item_comment(event, body, environ=env, mentions=mentions)
     except Exception as exc:  # noqa: BLE001 - a comment that did not land is said elsewhere
         log.warning("[outreach] Could not comment on %s: %s", work_item_id, exc)
         return False
 
 
+#: Set to ``1`` to also raise a macOS desktop notification for what is due. Off by
+#: default: `osascript`'s notifications are attributed to Script Editor, so clicking one
+#: opens Script Editor rather than the ask (Shane, 2026-09-17) — noise, not a channel.
+DESKTOP_ENV = "PPY_OUTREACH_DESKTOP"
+
+
+def desktop_enabled() -> bool:
+    return os.environ.get(DESKTOP_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def notify_desktop(text: str) -> bool:
-    """A desktop notification on this machine, where one is possible. Never raises."""
-    if sys.platform != "darwin" or not text:
+    """A macOS desktop notification, only when :data:`DESKTOP_ENV` asks for one. Never raises."""
+    if not desktop_enabled() or sys.platform != "darwin" or not text:
         return False
     safe = text.replace("\\", "\\\\").replace('"', '\\"')
     try:
@@ -651,7 +771,9 @@ def lines(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[str]
 
 __all__ = [
     "CAPABILITY",
+    "CHANNEL_ENV",
     "DECISION",
+    "DESKTOP_ENV",
     "PULL_REQUEST",
     "REMOTE",
     "REPEAT_AFTER_SECONDS",
@@ -665,18 +787,22 @@ __all__ = [
     "Plan",
     "collect",
     "deliver",
+    "desktop_enabled",
     "due",
+    "fallback_channel_id",
     "headline",
     "lines",
     "message",
     "notify_desktop",
     "observe",
     "open_rows",
+    "owner_mention",
     "plan",
     "post_dm",
     "post_ticket",
     "record_said",
     "repeat_after_seconds",
+    "say_in_workspace",
     "step",
     "summary",
     "ticket_bodies",
