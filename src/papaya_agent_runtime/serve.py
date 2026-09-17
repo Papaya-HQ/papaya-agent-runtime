@@ -3097,11 +3097,14 @@ def _command_runs(conn, worker_id: int, command: str) -> int:
 
 
 def gate_line(state: Any) -> str:
-    """The liveness line for a gate running under the supervisor."""
+    """The liveness line for a gate running (or queued) under the supervisor."""
     command = str(getattr(state, "command", "") or "")
     if not command:
         return f"Gate {getattr(state, 'line', 'running under the supervisor')}"
     scope = "full suite" if getattr(state, "full", False) else "local gate"
+    if getattr(state, "queued", False):
+        reason = str(getattr(state, "queued_reason", "") or "queued")
+        return f"Gate queued under the supervisor: {scope} `{_clipped(command)}`, {reason}"
     elapsed = _duration(float(getattr(state, "elapsed_seconds", 0.0) or 0.0))
     return f"Gate running under the supervisor: {scope} `{_clipped(command)}`, {elapsed}"
 

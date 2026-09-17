@@ -324,6 +324,20 @@ class SupervisorPolicy:
 
 
 @dataclass
+class GatePolicy:
+    """How many heavy gates the supervisor runs at once, and when it waits for memory."""
+
+    # A gate whose learned duration in its repository is longer than this many seconds
+    # is heavy, like every full suite: it takes one of the repository's gate slots.
+    parallel_ceiling_seconds: int = 300
+    # Heavy gates one repository may run at once; the rest queue in arrival order.
+    full_slots_per_repo: int = 1
+    # Megabytes of free memory a heavy gate waits for before it starts. Zero means the
+    # repository's own p90 of gate peak memory, once it has one.
+    min_free_mb: int = 0
+
+
+@dataclass
 class ForgePolicy:
     """How this runtime reaches the forge on a person's behalf."""
 
@@ -369,6 +383,7 @@ class MMConfig:
     supervisor: SupervisorPolicy = field(default_factory=SupervisorPolicy)
     sweep: SweepPolicy = field(default_factory=SweepPolicy)
     papaya: PapayaPolicy = field(default_factory=PapayaPolicy)
+    gate: GatePolicy = field(default_factory=GatePolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -492,6 +507,18 @@ class MMConfig:
             raise ConfigError("sweep.idle_claim_minutes must be a positive number of minutes")
         if not isinstance(self.papaya.invite, bool):
             raise ConfigError("papaya.invite must be true or false")
+        for name, least in (
+            ("parallel_ceiling_seconds", 0),
+            ("full_slots_per_repo", 1),
+            ("min_free_mb", 0),
+        ):
+            value = getattr(self.gate, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < least:
+                raise ConfigError(
+                    f"gate.{name} must be a whole number of at least {least}"
+                    if least
+                    else f"gate.{name} must be zero or a positive whole number"
+                )
 
     def to_dict(self) -> dict:
         """Every setting, resolved — what the runtime runs with, not what is stored."""
@@ -514,6 +541,7 @@ class MMConfig:
             "supervisor": asdict(self.supervisor),
             "sweep": asdict(self.sweep),
             "papaya": asdict(self.papaya),
+            "gate": asdict(self.gate),
         }
 
 
@@ -549,6 +577,7 @@ def _from_dict(data: dict) -> MMConfig:
         supervisor=SupervisorPolicy(**data.get("supervisor", {})),
         sweep=SweepPolicy(**data.get("sweep", {})),
         papaya=PapayaPolicy(**data.get("papaya", {})),
+        gate=GatePolicy(**data.get("gate", {})),
     )
     return cfg
 

@@ -93,9 +93,11 @@ def _observe_timing(conn: sqlite3.Connection, task: sqlite3.Row, phase: str) -> 
     Silence is measured from the previous note (from dispatch for the first). An
     interval in which the worker went quiet, stopped, or was checked on for silence
     is kept flagged ``stall``: it is what the silence budget exists to catch, not a
-    sample of how long this repository's workers normally go between notes.
+    sample of how long this repository's workers normally go between notes. Time a
+    gate of this worker spent queued behind another is left out: that wait is the
+    machine's, not the worker's silence.
     """
-    from papaya_agent_runtime import budgets
+    from papaya_agent_runtime import budgets, gate
 
     try:
         now = datetime.now(UTC)
@@ -106,10 +108,11 @@ def _observe_timing(conn: sqlite3.Connection, task: sqlite3.Row, phase: str) -> 
         since = _parse_stamp(last["created_at"]) if last is not None else created
         if since is not None:
             stalled = _stalled_since(conn, task_id, int(last["id"]) if last is not None else 0)
+            queued = gate.queued_seconds(conn, task_id, since, now)
             budgets.observe_task(
                 task_id,
                 budgets.SILENCE,
-                (now - since).total_seconds(),
+                max(0.0, (now - since).total_seconds() - queued),
                 outcome=budgets.STALL if stalled else "",
                 at=now,
                 conn=conn,
