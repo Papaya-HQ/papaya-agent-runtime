@@ -141,6 +141,7 @@ from papaya_agent_runtime import (
     readiness,
     review,
     standalone,
+    supervision,
     sweep,
     takeover,
 )
@@ -1723,11 +1724,18 @@ class TicketRunner:
             recorded = gate.Verdict(gate.NONE)
         ticket.recorded_gate = recorded.result.line() if recorded.result is not None else ""
         ticket.repeated_red = ""
-        if recorded.state == gate.RED and recorded.repeated:
+        # The decision is the one a session reads too (`supervision.decide_gate`).
+        decision = supervision.decide_gate(
+            recorded,
+            stopped=trigger.kind == WORKER_STOPPED,
+            detail=trigger.detail,
+            worker_id=worker_id,
+        )
+        if decision.action == supervision.PERSON:
             await self._stop_regating(ticket, worker_id, recorded.repeated)
             return False
-        if recorded.state == gate.GREEN and recorded.result is not None:
-            if trigger.failure:
+        if decision.action == supervision.REVIEW:
+            if recorded.state == gate.GREEN and recorded.result is not None and trigger.failure:
                 line = recorded.result.line()
                 ticket.trigger = Trigger(
                     PHASE_REVIEWING, trigger.event_id, trigger.detail, kind=trigger.kind
@@ -1738,11 +1746,9 @@ class TicketRunner:
                     f"Worker task {worker_id} stopped, but its {line}; reviewing.",
                 )
             return False
-        if recorded.state == gate.NONE and trigger.kind != WORKER_STOPPED:
-            return False
         if ticket.gate_steers >= GATE_STEERS:
             return False
-        message = gate_steer_message(trigger.detail, worker_id, recorded.result)
+        message = decision.message
         try:
             await asyncio.to_thread(self._steer, worker_id, message)
         except Exception as exc:  # noqa: BLE001 - a refused steer is the review turn's to handle
@@ -1813,13 +1819,15 @@ class TicketRunner:
         except Exception as exc:  # noqa: BLE001 - an unreadable worktree is not a finding
             log.warning("[serve] Could not read worker task %d's worktree: %s", worker.task_id, exc)
             files = []
-        ticket.uncommitted = uncommitted_finding(files) if files else ""
-        if not files:
+        # The decision is the one a session reads too (`supervision.decide_commit`).
+        decision = supervision.decide_commit(files, worker.branch)
+        ticket.uncommitted = decision.line if decision is not None else ""
+        if decision is None:
             ticket.dirty_steers = 0
             return False
         if ticket.dirty_steers >= GATE_STEERS:
             return False
-        message = uncommitted_steer_message(files, worker.branch)
+        message = decision.message
         try:
             await asyncio.to_thread(self._steer, worker.task_id, message)
         except Exception as exc:  # noqa: BLE001 - a refused steer is the review turn's to handle

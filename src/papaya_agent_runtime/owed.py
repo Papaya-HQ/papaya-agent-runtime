@@ -209,14 +209,27 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
     owed = []
     for row in rows:
         task_id, status = int(row["id"]), str(row["status"])
+        reason, next_step = _reason(conn, task_id, status), _NEXT[status].format(id=task_id)
+        if status in ("worker_done", "worker_stopped"):
+            # The gate follow-up serve's runner makes on the same worker (`supervision`).
+            from papaya_agent_runtime import supervision
+
+            followup = supervision.gate_followup(
+                task_id, stopped=status == "worker_stopped", detail=reason
+            )
+            reason = f"{reason} [{followup.line}]"
+            if followup.action == supervision.STEER:
+                next_step = f"send it back: `ppy followup {task_id} --send` ({followup.line})"
+            elif followup.action == supervision.PERSON:
+                next_step = f"decide on it: {followup.line} (`ppy task show {task_id}`)"
         owed.append(
             Owed(
                 task_id=task_id,
                 status=status,
                 title=str(row["title"] or ""),
                 repo=row["repo"],
-                reason=_reason(conn, task_id, status),
-                next_step=_NEXT[status].format(id=task_id),
+                reason=reason,
+                next_step=next_step,
                 seconds=_seconds(now, row["updated_at"]),
                 ticket_task_id=tickets.get(int(row["run_id"])),
             )

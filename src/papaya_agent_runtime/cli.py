@@ -2025,6 +2025,58 @@ def _cmd_capability(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_followup(args: argparse.Namespace) -> int:
+    """What a stopped or done worker needs by its record, and optionally send the steer."""
+    from papaya_agent_runtime import supervision
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        task = store.get_task(conn, args.task_id)
+    finally:
+        conn.close()
+    if task is None:
+        print(f"task {args.task_id} does not exist", file=sys.stderr)
+        return 1
+    decision = supervision.gate_followup(
+        args.task_id, stopped=task["status"] == "worker_stopped", detail=""
+    )
+    print(f"task {args.task_id}: {decision.action} — {decision.line}")
+    if decision.action != supervision.STEER:
+        return 0
+    if not args.send:
+        print(decision.message)
+        return 0
+    from papaya_agent_runtime.supervisor.client import SupervisorClient
+
+    SupervisorClient().steer_task(args.task_id, decision.message, by=store.BY_MANAGER)
+    print(f"task {args.task_id}: sent back")
+    return 0
+
+
+def _cmd_checkin(args: argparse.Namespace) -> int:
+    """Check-ins due on live workers, or record that one was done by a person."""
+    from papaya_agent_runtime import supervision
+
+    if args.task_id is None:
+        due = supervision.worker_checkins()
+        if not due:
+            print("no worker is due a check-in")
+        for item in due:
+            print(item.line())
+        return 0
+    if not args.ok:
+        print('say what you saw: --ok "..." (or steer the worker instead)', file=sys.stderr)
+        return 2
+    triggers = supervision.record_checkin(args.task_id, note=args.ok)
+    print(
+        f"task {args.task_id}: check-in recorded ({', '.join(triggers)})"
+        if triggers
+        else f"task {args.task_id} is not due a check-in"
+    )
+    return 0
+
+
 def _cmd_assessment(args: argparse.Namespace) -> int:
     from papaya_agent_runtime import assessments
     from papaya_agent_runtime.state import init_db
@@ -3382,6 +3434,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refl.add_argument("--json", action="store_true")
     refl.set_defaults(func=_cmd_reflect)
+
+    followup = sub.add_parser(
+        "followup",
+        help="what a stopped or done worker needs by its recorded gate and worktree "
+        "(the decision `ppy serve` makes too); --send steers it",
+    )
+    followup.add_argument("task_id", type=int)
+    followup.add_argument("--send", action="store_true", help="send the steer it names")
+    followup.set_defaults(func=_cmd_followup)
+
+    checkin = sub.add_parser(
+        "checkin",
+        help="live workers due a check-in (the decision `ppy serve` makes too), or record one",
+    )
+    checkin.add_argument("task_id", type=int, nargs="?")
+    checkin.add_argument("--ok", default="", help="what you saw, when no steer was needed")
+    checkin.set_defaults(func=_cmd_checkin)
 
     need = sub.add_parser(
         "need",
