@@ -67,6 +67,15 @@ What is off without a connection:
 
 Readiness lists `papaya_not_connected` as `info`: never blocking, not a blocker, and a
 ready runtime stays ready. Connect later and the next `ppy serve` start picks it up.
+
+**A shared agent keeps its memory in the repositories.** Papaya refuses a
+machine-extracted memory on a shared (workspace) agent, because the whole workspace
+would see it. `serve` reads the agent's record from Papaya once per connection and
+remembers it in `.ppy/agent-kinds.json`. Every turn's facts then say `agent: shared` or
+`agent: personal`, and `memory: repo-notes-only` or `memory: papaya`. On a shared agent,
+the brief, answer, review and check-in prompts send durable facts to
+`.ppy/memory/repos/<repo>/notes.md` and never to `propose_memory`. Readiness lists
+`memory_unavailable_shared_agent` as `info`, never as a blocker.
 `PPY_QUIET_INVITE=1`, or `papaya.invite = false` in `config.toml`, turns the line off.
 
 ## Repositories: it comes to you with options
@@ -717,7 +726,18 @@ the signals, recorded where they already happen:
 
 - **A turn reports it.** Any turn (brief, answer, review, check-in) ends with a line
   `RUNTIME: <what got in the way>`. Every turn prompt invites that line when a tool was
-  refused, a fact could not be found, or a contract was wrong.
+  refused, a fact could not be found, or a contract was wrong. Two turns seldom word one
+  problem the same way, so this line is fingerprinted by its cause, not its sentence:
+  the first tool or API it names, then the first exception class in it or else the noun
+  phrase after its first refusal verb, then the repository if it names one. A line that
+  names no tool uses its first eight stemmed content words. "`propose_memory` refused
+  an agent-scoped proposal" and "`propose_memory` rejected an agent-scoped proposal"
+  are one deficiency, one issue, and a comment. At start, `serve` merges older turn
+  reports that now share a fingerprint: the issue opened first is kept, and each later
+  one gets the comment "duplicate of #N" and is closed.
+- **A turn ignores its prompt.** A turn on a shared agent reports `propose_memory` refused
+  after its facts and prompt told it to use repository notes. That is one
+  `prompt-defect`, recorded once, not a turn report.
 - **Readiness can't be fixed.** A blocking readiness finding the runtime owns is still
   there after first-run setup.
 - **A live worker stalls.** The client stalls a held ticket while its worker's session is

@@ -643,6 +643,8 @@ def _learned_tool_problems(problems: list[Problem]) -> None:
 
 
 PAPAYA_NOT_CONNECTED = "papaya_not_connected"
+#: The connected agent is shared, so Papaya memory is not this runtime's to write.
+MEMORY_UNAVAILABLE_SHARED_AGENT = "memory_unavailable_shared_agent"
 
 
 def _papaya_problems(problems: list[Problem]) -> None:
@@ -651,9 +653,30 @@ def _papaya_problems(problems: list[Problem]) -> None:
     Everything local works without Papaya, so a runtime running standalone is as
     ready as a connected one. The entry is informational: it has no steps (it is
     not a blocker), it is not blocking, and it does not make a verdict degraded.
+
+    So is a shared agent's missing Papaya memory: the runtime keeps what it learns in
+    repository notes instead, and nothing about it is a gap anyone should close. What
+    kind of agent this is comes from the last read of Papaya's agent record
+    (`papaya.known_agent_kind`), never from the network here.
     """
     from papaya_agent_runtime import papaya
 
+    who = papaya.identity()
+    kind = papaya.known_agent_kind(who.agent_id) if who is not None else None
+    if kind is not None and kind.memory == papaya.MEMORY_REPO_NOTES_ONLY:
+        problems.append(
+            Problem(
+                code=MEMORY_UNAVAILABLE_SHARED_AGENT,
+                summary=(
+                    "connected as a shared agent: Papaya keeps no memories this runtime "
+                    "proposes, so turns keep durable facts in the repositories' memory notes"
+                ),
+                fix="nothing to fix; connect as a personal agent if Papaya memory is wanted",
+                owner=USER,
+                blocking=False,
+                info=True,
+            )
+        )
     if papaya.status()["state"] != "connected":
         problems.append(
             Problem(

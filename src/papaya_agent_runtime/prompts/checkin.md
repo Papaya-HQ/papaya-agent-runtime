@@ -47,6 +47,10 @@ Judge the direction against both.
 Do not run `ppy steer` or `ppy resume` yourself: the runtime does what your last line
 says, exactly once.
 
+## Where durable facts go
+
+Where a durable fact goes depends on this agent, which the facts at the end of this prompt name as `agent:` and `memory:`. On a shared agent (`memory: repo-notes-only`), durable facts go to the repository's memory notes, `.ppy/memory/repos/<repo>/notes.md` in this runtime directory, never to `propose_memory`: Papaya refuses a machine-extracted memory on a shared agent, because the whole workspace would see it. Only with `memory: papaya` may you also propose a memory under your identity.
+
 ## 3. When the runtime got in the way
 
 If the runtime itself got in the way of this turn (not the repository and not the work, but a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true), say so in one line of its own: `RUNTIME: <what got in the way>`. Name ids, never people, and quote no code or ticket text. Leave it out when nothing did.

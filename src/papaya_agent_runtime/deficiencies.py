@@ -77,6 +77,8 @@ REPEATED_STEER = "repeated-steer"
 RUNTIME_CI_RED = "runtime-ci-red"
 #: Papaya refused this machine the same idle item on three sweeps running.
 IDLE_WORK_REFUSED = "idle-work-refused"
+#: A turn did what its prompt tells it not to do for this agent (`propose_memory` on a shared one).
+PROMPT_DEFECT = "prompt-defect"
 
 #: Ledger statuses: below its threshold; ready for an issue; an issue exists.
 WATCHING = "watching"
@@ -265,6 +267,18 @@ KINDS: dict[str, Kind] = {
             "that no hosted run is using."
         ),
     ),
+    PROMPT_DEFECT: Kind(
+        title="A turn did what its prompt tells it not to",
+        happened=(
+            "A manager turn's facts said what this agent cannot do, its prompt said what to "
+            "do instead, and the turn tried it anyway: {detail}."
+        ),
+        instead="Nothing was lost to it: the refusal came back and the turn carried on.",
+        remedy=(
+            "Reword the prompt's instruction where the turn met it, or move the fact nearer "
+            "the step that needs it."
+        ),
+    ),
 }
 
 #: The evidence fields an issue may carry. Anything else a caller passes is dropped.
@@ -378,9 +392,97 @@ def normalise(detail: str) -> str:
     return text
 
 
+#: A tool or API a turn names: `propose_memory`, `Job.report_progress`, `ppy gate`.
+_TOOL = re.compile(r"\bppy\s+[a-z][a-z-]*|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+_ERROR_CLASS = re.compile(r"\b[A-Z][A-Za-z]*(?:Error|Exception)\b")
+_REPO = re.compile(r"\b(?:repo|repository)\s+`?([A-Za-z0-9][\w.\-/]*[A-Za-z0-9])`?")
+_WORD = re.compile(r"[a-z][a-z0-9_\-]*|[^\sa-z]")
+_REFUSALS = ("refus", "reject", "denie", "deny", "forbid", "forbade", "disallow", "block")
+_DETERMINERS = frozenset(
+    ("a", "an", "the", "its", "their", "this", "that", "these", "those", "any", "every")
+    + ("some", "to", "my", "our")
+)
+_STOPWORDS = _DETERMINERS | frozenset(
+    ("about", "after", "again", "all", "also", "and", "are", "as", "at", "be", "because")
+    + ("been", "before", "being", "but", "by", "can", "cannot", "could", "did", "do", "does")
+    + ("for", "from", "had", "has", "have", "he", "her", "him", "his", "how", "i", "if", "in")
+    + ("into", "is", "it", "me", "no", "nor", "not", "of", "off", "on", "once", "only", "or")
+    + ("other", "out", "over", "own", "same", "she", "should", "so", "still", "such", "than")
+    + ("then", "there", "they", "through", "too", "under", "until", "up", "very", "was", "we")
+    + ("were", "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with")
+    + ("would", "you", "your")
+    # The placeholders `normalise` leaves behind: `<id>`, `<n>`, `<path>`.
+    + ("id", "n", "path")
+)
+#: How many stemmed content words stand for a line that names no tool.
+CONTENT_WORDS = 8
+
+
+def _stem(word: str) -> str:
+    """A crude suffix strip, enough that "refused" and "refuses" read as one word."""
+    for suffix, keep in (("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3 and not word.endswith("ss"):
+            return word[: -len(suffix)] + keep
+    return word
+
+
+def _content_words(tokens: list[str], limit: int = CONTENT_WORDS) -> list[str]:
+    words = [_stem(t) for t in tokens if t[0].isalpha() and t not in _STOPWORDS and len(t) > 1]
+    return words[:limit]
+
+
+def _refusal_noun(tokens: list[str]) -> str:
+    """The noun phrase after the first refusal verb: "refused an agent-scoped proposal"."""
+    for at, token in enumerate(tokens):
+        if not token.startswith(_REFUSALS):
+            continue
+        phrase: list[str] = []
+        for word in tokens[at + 1 :]:
+            if not phrase and word in _DETERMINERS:
+                continue
+            if not word[0].isalpha() or word in _STOPWORDS or len(phrase) == 4:
+                break
+            phrase.append(_stem(word))
+        if phrase:
+            return " ".join(phrase)
+    return ""
+
+
+def reduce_turn_report(detail: str) -> str:
+    """What a `RUNTIME:` line is about, not how the turn happened to word it.
+
+    ``tool | error class or refusal noun phrase | repo``: the first tool or API the
+    line names, the first exception class in it or else the noun phrase after its first
+    refusal verb, and the repository when it names one. Two turns that hit the same
+    refusal and say so in different sentences reduce to the same thing. A line that
+    names no tool is its first eight stemmed content words, which still ignores what
+    varies (ids, numbers, paths) and small rewordings around them.
+    """
+    text = _one_line(detail)
+    error = _ERROR_CLASS.search(text)
+    repo = _REPO.search(text)
+    lowered = normalise(text)
+    tokens = _WORD.findall(lowered)
+    tool = _TOOL.search(lowered.replace("`", " "))
+    if tool is None:
+        return "words|" + " ".join(_content_words(tokens))
+    tokens = _WORD.findall(lowered[tool.end() :].replace("`", " "))
+    cause = error.group(0) if error else _refusal_noun(tokens)
+    if not cause:
+        cause = " ".join(_content_words(tokens, 4))
+    where = repo.group(1).lower() if repo else ""
+    return f"{' '.join(tool.group(0).split())}|{cause}|{where}"
+
+
 def fingerprint(kind: str, detail: str) -> str:
-    """A stable id for one deficiency: its kind and its normalised detail."""
-    return hashlib.sha256(f"{kind}\n{normalise(detail)}".encode()).hexdigest()[:16]
+    """A stable id for one deficiency: its kind and its normalised detail.
+
+    A turn report's detail is a sentence a model wrote, so it is reduced to its
+    cause first (:func:`reduce_turn_report`); every other kind's detail is written
+    by the runtime and only normalised.
+    """
+    reduced = reduce_turn_report(detail) if kind == TURN_REPORT else normalise(detail)
+    return hashlib.sha256(f"{kind}\n{reduced}".encode()).hexdigest()[:16]
 
 
 # ── the ledger ──────────────────────────────────────────────────────────────
@@ -996,6 +1098,75 @@ class Reporter:
             log.info("[deficiencies] %s (re-classified)", line)
         return done
 
+    def merge_duplicates(self) -> list[str]:
+        """Fold turn-report rows that reduce to one cause into one. Never raises.
+
+        `serve` runs this at start. A turn report recorded before fingerprints were
+        reduced (:func:`reduce_turn_report`) sits under the fingerprint of its whole
+        sentence, so two wordings of one cause are two rows and two issues. Each group
+        that now shares a fingerprint keeps the row with the earliest issue; every
+        other open issue in the group gets one comment, "duplicate of #N", and is
+        closed, and its occurrences join the kept row. A duplicate whose issue cannot
+        be closed now stays as it is and is tried again at the next start.
+        """
+        with self._lock:
+            try:
+                return self._merge_duplicates()
+            except Exception as exc:  # noqa: BLE001 - reporting must never break serve
+                log.warning("[deficiencies] Could not merge duplicate turn reports: %s", exc)
+                return []
+
+    def _merge_duplicates(self) -> list[str]:
+        from papaya_agent_runtime.paths import db_path
+        from papaya_agent_runtime.state import init_db
+
+        if not db_path().exists():
+            return []
+        done: list[str] = []
+        repo: str | None = None
+        conn = init_db()
+        try:
+            rows = [
+                Deficiency.from_row(r)
+                for r in conn.execute(
+                    "SELECT * FROM deficiencies WHERE kind = ? AND status != ?",
+                    (TURN_REPORT, RECLASSIFIED),
+                )
+            ]
+            groups: dict[str, list[Deficiency]] = {}
+            for deficiency in rows:
+                groups.setdefault(fingerprint(TURN_REPORT, deficiency.detail), []).append(
+                    deficiency
+                )
+            for key, group in groups.items():
+                if len(group) == 1 and group[0].fingerprint == key:
+                    continue
+                group.sort(key=_merge_order)
+                kept, rest = group[0], group[1:]
+                merged: list[Deficiency] = []
+                for duplicate in rest:
+                    url = duplicate.issue_url
+                    if duplicate.status == REPORTED and url and url != kept.issue_url:
+                        if repo is None:
+                            config = self._settings()
+                            repo = runtime_repo(config, self._origin) if config.enabled else None
+                        if repo is None:
+                            continue
+                        if (self._forge.state(url) or "") != "CLOSED":
+                            if not self._forge.close(url, duplicate_body(kept)):
+                                continue
+                            done.append(f"closed {url} as a duplicate of {kept.issue_url}")
+                    merged.append(duplicate)
+                if any(d.fingerprint == key for d in rest if d not in merged):
+                    continue  # the new key is taken by a duplicate still open; next start
+                _fold(conn, key, kept, merged)
+                conn.commit()
+        finally:
+            conn.close()
+        for line in done:
+            log.info("[deficiencies] %s", line)
+        return done
+
     def flush_soon(self) -> None:
         """Flush on a thread of its own, now, coalescing records that arrive meanwhile."""
         with self._state:
@@ -1020,6 +1191,71 @@ class Reporter:
             thread = self._thread
         if thread is not None:
             thread.join(timeout)
+
+
+_ISSUE_NUMBER = re.compile(r"/issues/(\d+)\b")
+
+
+def issue_number(url: str | None) -> int | None:
+    match = _ISSUE_NUMBER.search(str(url or ""))
+    return int(match.group(1)) if match else None
+
+
+def _merge_order(deficiency: Deficiency) -> tuple[int, int, str]:
+    """The row a group keeps sorts first: an issue before none, the lowest number first."""
+    number = issue_number(deficiency.issue_url)
+    return (0 if number is not None else 1, number or 0, deficiency.first_seen)
+
+
+def duplicate_body(kept: Deficiency) -> str:
+    """The one comment a duplicate issue gets as it is closed."""
+    number = issue_number(kept.issue_url)
+    target = f"#{number}" if number is not None else (kept.issue_url or "the kept report")
+    return (
+        f"duplicate of {target}\n\n"
+        "The runtime now fingerprints a turn's `RUNTIME:` line by its cause (the tool it "
+        "names, the error or refusal, the repository) rather than its wording, and this "
+        "report has the same cause as that one. Its occurrences are counted there."
+    )
+
+
+def _fold(conn: Any, key: str, kept: Deficiency, merged: list[Deficiency]) -> None:
+    """Make ``kept`` the row for ``key``, with ``merged``'s occurrences, and drop the rest."""
+    group = (kept, *merged)
+    count = sum(d.count for d in group)
+    entries = sorted((e for d in group for e in d.evidence), key=lambda e: str(e.get("at") or ""))[
+        -EVIDENCE_KEPT:
+    ]
+    # Occurrence numbers run on across the group, so a recurrence comments only what is new.
+    for n, entry in enumerate(entries, start=count - len(entries) + 1):
+        entry["n"] = n
+    if kept.issue_url:
+        # What the duplicates' issues said is said; only what comes next is news.
+        status, reported = kept.status, count
+    else:
+        status = PENDING if any(d.status == PENDING for d in group) else kept.status
+        reported = 0
+    for gone in {d.fingerprint for d in group}:
+        conn.execute("DELETE FROM deficiencies WHERE fingerprint = ?", (gone,))
+    conn.execute(
+        "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
+        "count, evidence, issue_url, status, opened_at, reported_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            key,
+            kept.kind,
+            kept.title,
+            kept.detail,
+            min(d.first_seen for d in group),
+            max(d.last_seen for d in group),
+            count,
+            json.dumps(entries),
+            kept.issue_url,
+            status,
+            kept.opened_at,
+            reported,
+        ),
+    )
 
 
 # ── signals that need a little reading first ────────────────────────────────
@@ -1294,6 +1530,7 @@ __all__ = [
     "MISSED_TURN",
     "PENDING",
     "PROMPT_CLARITY",
+    "PROMPT_DEFECT",
     "READINESS_UNREMEDIED",
     "RECLASSIFIED",
     "REPEATED_STEER",
@@ -1312,10 +1549,12 @@ __all__ = [
     "add_listener",
     "comment_body",
     "denial_kinds",
+    "duplicate_body",
     "fingerprint",
     "fixed_checkin",
     "github_slug",
     "issue_body",
+    "issue_number",
     "ledger",
     "normalise",
     "notify",
@@ -1325,6 +1564,7 @@ __all__ = [
     "record_gate_past_tool_cap",
     "reclassified_body",
     "redact",
+    "reduce_turn_report",
     "remove_listener",
     "runtime_repo",
     "settings",

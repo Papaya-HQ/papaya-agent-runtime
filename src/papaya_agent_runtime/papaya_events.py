@@ -318,6 +318,36 @@ def list_work_item_comments(
     return [comment for comment in comments if isinstance(comment, dict)]
 
 
+def read_agent_record(
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Papaya's record of the agent a job's token speaks for, or ``None``.
+
+    The agent context read (`GET .../polyweave-agents/me/context`) is the one route an
+    agent token can call that carries the agent's ``ownership_scope``. ``None`` when
+    there is nothing to call with; a refusal or an unreachable Papaya raises
+    :class:`PapayaEventError` like every other read here.
+    """
+    env = os.environ if environ is None else environ
+    api_url = _clean(env.get(_PAPAYA_API_ENV))
+    workspace = _clean(env.get(_PAPAYA_WORKSPACE_ENV))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if not api_url or not workspace or not token:
+        return None
+    base = api_url.rstrip("/")
+    if not base.endswith("/api/v1"):
+        base += "/api/v1"
+    url = (
+        f"{base}/workspaces/{urllib.parse.quote(workspace, safe='')}/polyweave-agents/me/context"
+        "?max_records=1&include_sensitive=false"
+    )
+    payload = _papaya_request(url, token, what="agent read", opener=opener)
+    agent = payload.get("agent")
+    return agent if isinstance(agent, dict) else None
+
+
 def _repository_value(value: object) -> str | None:
     if isinstance(value, Mapping):
         for key in _REPOSITORY_VALUE_KEYS:

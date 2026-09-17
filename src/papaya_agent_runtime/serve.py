@@ -115,9 +115,11 @@ import argparse
 import asyncio
 import contextlib
 import functools
+import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -196,6 +198,11 @@ POLL_SECONDS = 2.0
 #: Papaya's API, not the ledger, so once a minute rather than every poll: it
 #: bounds how late a person's reply on the ticket is heard.
 COMMENT_POLL_SECONDS = 60.0
+#: How long a failed read of the agent's record stands before a turn asks again.
+AGENT_KIND_RETRY_SECONDS = 600.0
+#: The tool a shared agent's turns are told not to call.
+PROPOSE_MEMORY = "propose_memory"
+_REFUSED = re.compile(r"\b(?:refus|reject|denied|not allowed|forbidden)")
 
 #: How often, at most, a held ticket whose worker or gate is active says so as a
 #: progress line (`health.liveness_minutes`). The client's stall clock hears only
@@ -1072,6 +1079,7 @@ class TicketRunner:
         liveness_seconds: float | None = None,
         uncommitted=None,
         status_comment=None,
+        agent_record=None,
     ) -> None:
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
@@ -1110,6 +1118,14 @@ class TicketRunner:
         #: Papaya lets an agent edit its own comment (backend #636); until then the phase
         #: comments stay the ticket's record and nothing new is posted.
         self._status_comment = status_comment
+        #: Papaya's record of the agent a job's token speaks for: ``(env) -> dict | None``.
+        self._agent_record = agent_record or (
+            lambda env: papaya_events.read_agent_record(environ=env)
+        )
+        #: What each connection's agent is, read once: connection -> (kind, when read).
+        self._agent_kinds: dict[str, tuple[papaya.AgentKind | None, float]] = {}
+        #: Agents a turn already called `propose_memory` on while shared: said once.
+        self._memory_defects: set[str] = set()
         #: Every ticket held right now, by its task id: what the rounds walk.
         self.held: dict[int, Ticket] = {}
         #: Work item id -> the task the rounds re-offered it for, so the offer
@@ -2054,6 +2070,32 @@ class TicketRunner:
             self._agent_id = who.agent_id if who is not None else ""
         return self._agent_id or None
 
+    def agent_kind(self, env: dict[str, str]) -> papaya.AgentKind | None:
+        """What the agent behind this job's connection is. Blocking: on a thread.
+
+        Read from Papaya's agent record once per connection and remembered; a read
+        that fails is tried again after `AGENT_KIND_RETRY_SECONDS`, and meanwhile the
+        last kind this runtime learned for the agent (`papaya.known_agent_kind`) stands.
+        """
+        token = str(env.get("PAPAYA_AGENT_TOKEN") or "")
+        connection = hashlib.sha256(
+            "\n".join(
+                (str(env.get("PAPAYA_API_URL") or ""), str(env.get("PAPAYA_WORKSPACE_ID")), token)
+            ).encode()
+        ).hexdigest()
+        now = self._clock()
+        cached = self._agent_kinds.get(connection)
+        if cached is None or (cached[0] is None and now - cached[1] >= AGENT_KIND_RETRY_SECONDS):
+            try:
+                kind = papaya.agent_kind_of(self._agent_record(env))
+            except Exception as exc:  # noqa: BLE001 - a turn goes ahead without the fact
+                log.warning("[serve] Could not read this agent's record from Papaya: %s", exc)
+                kind = None
+            cached = self._agent_kinds[connection] = (kind, now)
+            if kind is not None:
+                papaya.remember_agent_kind(self._own_agent_id() or "", kind)
+        return cached[0] or papaya.known_agent_kind(self._own_agent_id())
+
     # -- waiting, without ever blocking the loop ------------------------------
 
     async def _wait_on_person(self, ticket: Ticket) -> bool:
@@ -2191,6 +2233,9 @@ class TicketRunner:
         )
 
         root = self._root()
+        kind = await asyncio.to_thread(self.agent_kind, ticket.job.env)
+        if kind is not None:
+            facts = {**facts, **kind.facts()}
         prompt = prompts.render(turn, runtime_dir=root, facts=facts)
         env = {
             **os.environ,
@@ -2233,6 +2278,10 @@ class TicketRunner:
             ticket.comments_read_at = None
         await self._observe_turn(ticket, turn, self._clock() - started, result)
         said = runtime_report(result)
+        shared = kind is not None and kind.memory == papaya.MEMORY_REPO_NOTES_ONLY
+        if shared and await self._memory_on_shared_agent(ticket, turn, result):
+            # The line is the refusal the prompt defect already stands for.
+            said = None if said is not None and PROPOSE_MEMORY in said else said
         if said is not None:
             _report_progress(
                 ticket.job, ticket.phase, f"The {turn} turn reported a runtime problem."
@@ -2242,6 +2291,31 @@ class TicketRunner:
             )
         self._check_stop(ticket)
         return result
+
+    async def _memory_on_shared_agent(self, ticket: Ticket, turn: str, result: Any) -> bool:
+        """Whether a turn on a shared agent still reached for `propose_memory`.
+
+        Its facts said `memory: repo-notes-only` and its prompt said where facts go
+        instead, so that is a prompt defect, not the runtime's refusal: recorded once
+        for the agent, however many turns repeat it.
+        """
+        text = result.transcript if hasattr(result, "transcript") else str(result or "")
+        # A turn that did as told may still name the tool; only a refusal means it called it.
+        if not any(
+            PROPOSE_MEMORY in line and _REFUSED.search(line) for line in text.lower().splitlines()
+        ):
+            return False
+        agent = await asyncio.to_thread(self._own_agent_id) or ""
+        if agent not in self._memory_defects:
+            self._memory_defects.add(agent)
+            await asyncio.to_thread(
+                self._deficiency,
+                ticket,
+                deficiencies.PROMPT_DEFECT,
+                f"a turn on a shared agent reached for `{PROPOSE_MEMORY}`",
+                turn=turn,
+            )
+        return True
 
     async def _observe_turn(self, ticket: Ticket, turn: str, seconds: float, result: Any) -> None:
         """Keep how long a brief or review turn took, against its repository."""
@@ -3918,6 +3992,8 @@ async def run(
     reporter = self_report or deficiencies.Reporter()
     # Before anything can open an issue: close the ones an older classifier got wrong.
     await asyncio.to_thread(reporter.reclassify)
+    # And fold turn reports that were one cause worded twice into one issue.
+    await asyncio.to_thread(reporter.merge_duplicates)
     deficiencies.add_listener(reporter.flush_soon)
     try:
         return await _run(
