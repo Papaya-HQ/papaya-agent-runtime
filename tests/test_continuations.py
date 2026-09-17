@@ -275,6 +275,12 @@ def test_a_newly_lowered_ceiling_refuses_the_retry_until_it_is_raised_again(
     _config(2, max_reasoning="medium")  # the task's `high` now exceeds the ceiling
 
     _wait_for(lambda: bool(_events(task_id, "continuation_deferred")))
+    # The worker's thread ends its turn with a retry of its own, after its lease and
+    # assessment bookkeeping. Let it finish first: on a slow box it would otherwise
+    # race the retries below, win admission, and leave this test's retry holding a
+    # "duplicate resume" refusal before `resumed` is written (CI run 35168522984).
+    worker_thread = supervisor._threads[task_id]
+    _wait_for(lambda: not worker_thread.is_alive())
     deferred = _events(task_id, "continuation_deferred")[-1]
     assert "worker ceiling" in deferred["reason"]
     assert _events(task_id, "resumed") == []

@@ -267,6 +267,9 @@ class Nudge:
     event_id: int = 0
     #: Extra facts for the turn, in order.
     facts: tuple[tuple[str, str], ...] = ()
+    #: What the rounds saw that the check-in record keeps beside its decision: for a
+    #: push check-in, `remote_sha`, `head_sha` and `last_push_at`.
+    record: tuple[tuple[str, str | None], ...] = ()
 
 
 # ── arguments ───────────────────────────────────────────────────────────────
@@ -1601,6 +1604,7 @@ class TicketRunner:
             decision=choice,
             message=message,
             error=error,
+            **dict(nudge.record),
         )
         if choice == prompts.CHECKIN_STEER and not error:
             # Once is judgment; the same reason again on one ticket is the check-in
@@ -2829,8 +2833,13 @@ def record_checkin(
     decision: str,
     message: str = "",
     error: str = "",
+    **seen: str | None,
 ) -> None:
-    """Record a check-in on the ticket's own task: why it ran, what the turn decided."""
+    """Record a check-in on the ticket's own task: why it ran, what the turn decided.
+
+    ``seen`` is what the rounds read that made the check run (a push check-in's
+    `remote_sha`, `head_sha` and `last_push_at`), kept so a person can see why.
+    """
     conn = db.init_db()
     try:
         task = store.get_task(conn, task_id)
@@ -2845,6 +2854,7 @@ def record_checkin(
                 "decision": decision,
                 "message": message,
                 "error": error,
+                **seen,
             },
             run_id=int(task["run_id"]) if task is not None else None,
             task_id=task_id,

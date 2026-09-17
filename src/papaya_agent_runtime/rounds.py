@@ -43,9 +43,10 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    path; a live worker silent past its repository's silence budget, still planning
    past its plan budget, first running for half its worker-session budget
    (:mod:`papaya_agent_runtime.budgets`; with no history, `health.quiet_minutes`,
-   `health.plan_minutes` and `health.checkin_after`), or running
-   `health.push_by_minutes` with nothing new on its remote branch (again every as
-   many minutes until something lands) gets the **check-in turn**; a person-wait
+   `health.plan_minutes` and `health.checkin_after`), or with a HEAD the forge does not
+   have and no new tip there for `health.push_by_minutes` (asked with `ls-remote` every
+   round; again every as many minutes until something lands) gets the **check-in
+   turn**; a person-wait
    older than fifteen minutes is said on the ticket once ("waiting on you: …") and
    the ticket is `blocked`.
 4. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
@@ -110,6 +111,10 @@ KEPT_SUMMARY_RUNS = 3
 
 #: The event kind, on a ticket's task, that records what a round did once.
 ROUND_EVENT = "ticket_round"
+
+#: The round action that records a new tip of a worker's branch on the forge, and when
+#: a round first saw it: the runtime's record of a push, which the push check-in reads.
+PUSH_SEEN = "push_seen"
 
 #: The event kind every hygiene run records: what went, what stayed, and why.
 HYGIENE_EVENT = "worktree_hygiene"
@@ -595,13 +600,14 @@ def branch_ahead_of_base(worker_task_id: int) -> bool | None:
 
 @dataclass(frozen=True)
 class PushState:
-    """What of a worker's work is on its remote lease branch."""
+    """What of a worker's work is on the forge's copy of its lease branch."""
 
-    #: The remote branch's tip, or ``None`` when nothing was ever pushed to it.
+    #: The forge's tip of the branch, or ``None`` when nothing was ever pushed to it.
     remote_sha: str | None
-    #: When that tip was committed; the nearest the record has to "last pushed".
-    remote_at: datetime | None
-    #: Commits or files in the worktree that the remote branch does not have.
+    #: The worktree's HEAD when the forge was asked.
+    head_sha: str | None
+    #: HEAD is not on the forge: neither the tip nor a commit behind it. Uncommitted
+    #: files do not count; a worker whose commits are all pushed is not nudged to push.
     unpushed: bool
 
 
@@ -616,16 +622,22 @@ def _git_out(cwd: str, *args: str) -> str | None:
 
 
 def push_state(worker_task_id: int) -> PushState | None:
-    """Read the worker's lease branch against `origin`, or ``None`` if it cannot be read.
+    """Ask the forge for the worker's lease branch now, or ``None`` if it cannot be read.
 
-    The remote side is the worktree's own `refs/remotes/origin/<branch>`, which a
-    `git push origin HEAD:<branch>` updates as it lands, so a round asks no network.
-    Unpushed is a head the remote tip does not match, or any uncommitted file.
+    The remote side is `git ls-remote <forge_url> refs/heads/<branch>`, fresh every
+    call: never a remote-tracking ref, which is only as current as the remote a
+    clone was told about when it last fetched or pushed. A repository with no
+    `forge_url` is asked through the worktree's `origin`. The local side is the
+    worktree's HEAD, which is on the forge when it is the tip or behind it.
     """
+    from papaya_agent_runtime import repos
+
     conn = db.init_db()
     try:
         row = conn.execute(
-            "SELECT branch, worktree_path FROM tasks WHERE id = ?", (worker_task_id,)
+            "SELECT t.branch, t.worktree_path, r.forge_url FROM tasks t "
+            "LEFT JOIN repos r ON r.id = t.repo_id WHERE t.id = ?",
+            (worker_task_id,),
         ).fetchone()
     finally:
         conn.close()
@@ -635,15 +647,83 @@ def push_state(worker_task_id: int) -> PushState | None:
     if not os.path.isdir(cwd):
         return None
     head = _git_out(cwd, "rev-parse", "HEAD")
-    dirty = serve.uncommitted_files(worker_task_id)
-    if head is None or dirty is None:
+    url = row["forge_url"] or repos.remote_url(cwd)
+    if head is None or not url:
         return None
-    ref = f"refs/remotes/origin/{row['branch']}"
-    remote = _git_out(cwd, "rev-parse", "--verify", "--quiet", ref)
-    if not remote:
-        return PushState(None, None, True)
-    stamp = _git_out(cwd, "log", "-1", "--format=%cI", remote)
-    return PushState(remote, _parse(stamp), remote != head or bool(dirty))
+    read, remote = repos.forge_branch_tip(str(url), str(row["branch"]), cwd=cwd)
+    if not read:
+        return None
+    if remote is None:
+        return PushState(None, head, True)
+    return PushState(remote, head, not _on_forge(cwd, head, remote))
+
+
+def _on_forge(cwd: str, head: str, remote: str) -> bool:
+    """HEAD is the forge's tip, or an ancestor of it (the object must be here to tell)."""
+    if head == remote:
+        return True
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "merge-base", "--is-ancestor", head, remote],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def push_record(
+    push: PushState, records: list[tuple[int, dict[str, Any]]], look: WorkerLook
+) -> dict[str, str | None]:
+    """What a push check-in saw: the forge's tip, the worktree's HEAD, the last push.
+
+    The last push is when a round first saw the forge's tip, or ``None`` for a
+    branch the forge has never had.
+    """
+    at = last_push_at(records, look.task_id, push.remote_sha)
+    return {
+        "remote_sha": push.remote_sha,
+        "head_sha": push.head_sha,
+        "last_push_at": at.isoformat() if at is not None else None,
+    }
+
+
+def push_facts(seen: Mapping[str, str | None]) -> tuple[tuple[str, str], ...]:
+    """The push check-in's three values, as facts the check-in turn reads."""
+    return (
+        (
+            "the lease branch's tip on the forge (read now)",
+            seen.get("remote_sha") or "(the forge has no such branch: nothing was ever pushed)",
+        ),
+        ("the worktree's HEAD", seen.get("head_sha") or "(unknown)"),
+        (
+            "the last push the runtime recorded (when a round first saw that tip)",
+            seen.get("last_push_at") or "(none)",
+        ),
+    )
+
+
+def last_push_at(
+    records: list[tuple[int, dict[str, Any]]], worker_task_id: int, remote_sha: str | None
+) -> datetime | None:
+    """When a round first saw the forge's tip at ``remote_sha``, or ``None`` if none did.
+
+    That is the runtime's record of the push: a round asks the forge every round, so
+    it is at most one round late, and never earlier than the push really landed.
+    """
+    if remote_sha is None:
+        return None
+    seen = [
+        _parse(payload.get("at"))
+        for _id, payload in records
+        if payload.get("action") == PUSH_SEEN
+        and payload.get("worker_task_id") == worker_task_id
+        and payload.get("remote_sha") == remote_sha
+    ]
+    stamps = [at for at in seen if at is not None]
+    return min(stamps) if stamps else None
 
 
 # ── the tickets a round can act on without holding them ─────────────────────
@@ -1217,35 +1297,37 @@ class Rounds:
 
         if look.status != "in_progress" or look.verdict is None or "checkin" in queued:
             return parts
+        # The forge is asked every round, so a push is on the record within a round of
+        # landing, whatever else this worker is doing.
+        push = await asyncio.to_thread(self._pushed, worker.task_id)
+        records = await self._saw_push(task_id, worker.task_id, push, now, records)
         steers = await asyncio.to_thread(person_steers, worker.task_id)
         if self._person_has_it(look, steers, records, now, waits):
             # A person at a session just gave this worker direction. A check-in now
             # would second-guess it before the worker has even answered.
             return parts
-        push = None
-        if look.running_seconds(now) >= _push_by_seconds():
-            push = await asyncio.to_thread(self._pushed, worker.task_id)
         due = self._checkins_due(look, now, records, waits, push)
         if not due:
             return parts
         reason = "; ".join(why for _trigger, why in due)
         facts = await asyncio.to_thread(self._checkin_facts, worker, look, gate_now, steers)
+        seen: dict[str, str | None] = {}
+        if push is not None and any(trigger == "push" for trigger, _why in due):
+            seen = push_record(push, records, look)
+            facts = (*facts, *push_facts(seen))
         ticket.nudges.append(
             serve.Nudge(
                 "checkin",
                 reason,
                 trigger=",".join(trigger for trigger, _why in due),
                 facts=facts,
+                record=tuple(seen.items()),
             )
         )
         for trigger, why in due:
-            # A push check-in remembers the remote tip it saw and when, so the next one
-            # waits another `push_by_minutes` unless something lands meanwhile.
-            pushed = (
-                {"at": now.isoformat(), "remote_sha": push.remote_sha}
-                if trigger == "push" and push is not None
-                else {}
-            )
+            # A push check-in remembers what it saw and when, so the next one waits
+            # another `push_by_minutes` unless something lands meanwhile.
+            pushed = {"at": now.isoformat(), **seen} if trigger == "push" else {}
             await asyncio.to_thread(
                 record_round,
                 task_id,
@@ -1338,8 +1420,13 @@ class Rounds:
                 )
             )
         if push is not None and push.unpushed and look.created_at is not None:
-            # Nothing pushed since the session started or the remote tip was committed.
-            pushed_at = max(look.created_at, push.remote_at or look.created_at)
+            # HEAD is not on the forge, and the forge's tip has not moved since the
+            # session started or since a round first saw it there. A tip's commit date
+            # is not when it was pushed: a push can land long after the commit.
+            pushed_at = max(
+                look.created_at,
+                last_push_at(records, look.task_id, push.remote_sha) or look.created_at,
+            )
             since = pushed_at
             for p in mine:
                 at = _parse(p.get("at"))
@@ -1349,6 +1436,28 @@ class Rounds:
                 minutes = int((now - pushed_at).total_seconds() // 60)
                 due.append(("push", f"nothing pushed in {minutes} minutes"))
         return due
+
+    async def _saw_push(
+        self,
+        ticket_task_id: int,
+        worker_task_id: int,
+        push: PushState | None,
+        now: datetime,
+        records: list[tuple[int, dict[str, Any]]],
+    ) -> list[tuple[int, dict[str, Any]]]:
+        """Record a forge tip no round has seen for this worker yet; the records after."""
+        if push is None or push.remote_sha is None:
+            return records
+        if last_push_at(records, worker_task_id, push.remote_sha) is not None:
+            return records
+        details = {
+            "worker_task_id": worker_task_id,
+            "remote_sha": push.remote_sha,
+            "head_sha": push.head_sha,
+            "at": now.isoformat(),
+        }
+        await asyncio.to_thread(record_round, ticket_task_id, PUSH_SEEN, **details)
+        return [*records, (0, {"task_id": ticket_task_id, "action": PUSH_SEEN, **details})]
 
     @staticmethod
     def _person_has_it(
@@ -2015,12 +2124,18 @@ __all__ = [
     "KEPT_LOOSE_END_SECONDS",
     "KEPT_SUMMARY_RUNS",
     "PERSON_WAIT_SECONDS",
+    "PUSH_SEEN",
     "ROUNDS_INTERVAL_ENV",
     "ROUND_EVENT",
+    "PushState",
     "Rounds",
     "WorkerLook",
     "interval_from_env",
+    "last_push_at",
     "look_at_worker",
+    "push_facts",
+    "push_record",
+    "push_state",
     "record_worker_stopped",
     "ticket_tasks",
 ]

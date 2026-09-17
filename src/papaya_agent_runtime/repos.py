@@ -227,6 +227,22 @@ def forge_head(forge_url: str | None) -> str | None:
     return None
 
 
+def forge_branch_tip(url: str, branch: str, cwd: str | None = None) -> tuple[bool, str | None]:
+    """``(read, sha)`` for ``branch`` on the forge, asked now with `git ls-remote`.
+
+    ``(True, None)`` is a branch the forge does not have; ``(False, None)`` is a
+    forge that could not be asked, which is never the same thing.
+    """
+    rc, out, _err = _forge_git(["ls-remote", url, f"refs/heads/{branch}"], cwd=cwd)
+    if rc != 0:
+        return False, None
+    for line in out.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == f"refs/heads/{branch}" and sha.strip():
+            return True, sha.strip()
+    return True, None
+
+
 def default_branch_from_forge(local_path: str, forge_url: str | None) -> str | None:
     """Which branch the forge calls its default, never which one a checkout is on.
 
