@@ -4199,10 +4199,8 @@ async def _run(
 
     # Before anything is said to Papaya: a connection whose runtime has never been
     # configured is the silent failure this whole sequence exists to end.
-    await asyncio.to_thread(self_setup, stderr=stderr)
-    await asyncio.to_thread(keep_config_right, stderr=stderr)
-    await asyncio.to_thread(keep_state_right, stderr=stderr)
-    await asyncio.to_thread(announce_deficiencies, stderr=stderr)
+    # The same remedies a session's start hook runs when no serve does.
+    await asyncio.to_thread(supervision.start_remedies, stderr=stderr)
     deficiencies.notify()
     # Checked after the runtime has applied its own remedies and before the listener
     # is built, so the `hello` a supervised host gets already carries only the

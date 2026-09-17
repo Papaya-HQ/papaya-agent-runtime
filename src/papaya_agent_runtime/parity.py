@@ -163,14 +163,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "hygiene",
-        GAP,
+        SHARED,
         "finished worktrees are pruned and loose ends are surfaced",
         serve=("Rounds._hygiene", "Rounds._loose_ends"),
-        heal="the heartbeat runs the same prune rules at most hourly",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.watch",),
     ),
     Capability(
         "start_remedies",
-        GAP,
+        SHARED,
         "config, state, dead runners and gate policies are put right, deficiencies announced",
         serve=(
             "serve.self_setup",
@@ -178,14 +179,16 @@ CAPABILITIES: tuple[Capability, ...] = (
             "serve.keep_state_right",
             "serve.announce_deficiencies",
         ),
-        heal="the session-start hook runs the same remedies",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.hooks",),
     ),
     Capability(
         "owner_blocker_reports",
-        GAP,
+        SHARED,
         "blockers only a person can close are re-checked on a clock and told to the owner",
         serve=("blockers.Watch",),
-        heal="the heartbeat re-checks readiness and names new blockers",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.watch",),
     ),
     Capability(
         "assigned_work_sweep",
@@ -280,9 +283,6 @@ KNOWN_GAPS = frozenset(
     {
         "turn_obligations",
         "full_suite_before_review",
-        "hygiene",
-        "start_remedies",
-        "owner_blocker_reports",
         "assigned_work_sweep",
     }
 )

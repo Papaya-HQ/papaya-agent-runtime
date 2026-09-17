@@ -205,6 +205,32 @@ def papaya_tools_context() -> str | None:
     )
 
 
+def start_remedies_context() -> str | None:
+    """Run the start remedies `ppy serve` runs at its start, when no serve is running.
+
+    First-run setup, config migration, dead runner rows, base clones and gate policies:
+    a session on a machine nobody is serving gets them put right as it starts, and is
+    told what changed. Headless turns and framework-development sessions are left alone.
+    """
+    import io
+
+    from papaya_agent_runtime import supervision
+    from papaya_agent_runtime.manager.launch import MANAGER_TURN_ENV
+
+    if os.environ.get("PPY_DEV") or os.environ.get(MANAGER_TURN_ENV):
+        return None
+    if supervision.serve_running():
+        return None
+    said = io.StringIO()
+    supervision.start_remedies(stderr=said)
+    lines = [line.removeprefix("ppy serve: ") for line in said.getvalue().splitlines() if line]
+    if not lines:
+        return None
+    return "PUT RIGHT AT SESSION START (no ppy serve is running):\n" + "\n".join(
+        f"- {line}" for line in lines
+    )
+
+
 def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | None:
     """What a (re)starting manager needs to know before its first reply.
 
@@ -223,6 +249,10 @@ def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | 
         ready = readiness_context()
         if ready:
             parts.append(ready)
+    with contextlib.suppress(Exception):
+        remedied = start_remedies_context()
+        if remedied:
+            parts.append(remedied)
     with contextlib.suppress(Exception):
         from papaya_agent_runtime import parity
 

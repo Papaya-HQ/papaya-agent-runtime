@@ -21,6 +21,7 @@ Two decisions live here so far:
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -865,3 +866,176 @@ def post_as_agent(ticket: Any, body: str, status: str | None) -> None:
     if status is not None:
         papaya_events.set_work_item_status(event, status, environ=env)
     papaya_events.post_work_item_comment(event, body, environ=env)
+
+
+# ── hygiene ─────────────────────────────────────────────────────────────────
+
+
+def hygiene_step(
+    task_id: int | None,
+    now: datetime,
+    *,
+    prune,
+    git,
+    post,
+    kept_runs: dict[str, int] | None = None,
+) -> list[str]:
+    """Clean up worktrees under `ppy worktree prune`'s rules; say only what matters.
+
+    ``task_id`` is one task's slot, straight after its work merged; ``None`` is the hourly
+    run over every slot. The base clones touched get `git worktree prune` and
+    `git fetch --prune`; one hygiene event records what went and what stayed; a kept slot
+    only a person can settle becomes a person's todo once (and a comment on its ticket,
+    through ``post(ticket, body, None)``). ``kept_runs`` carries the kept-streak count
+    between hourly runs of one process. Both modes call it: serve's rounds hourly and after
+    a merge, a session's heartbeat hourly while no serve runs. Never raises.
+    """
+    from papaya_agent_runtime import rounds
+    from papaya_agent_runtime.worktree.reclaim import RECLAIMABLE_STATUSES, human_bytes
+
+    try:
+        result = prune(task_id)
+    except Exception:  # noqa: BLE001 - hygiene never ends a round or a tick
+        return []
+    removed = list(result.get("removed") or [])
+    kept = list(result.get("skipped") or [])
+    repos = {str(r["repo"]) for r in removed if r.get("repo")}
+    if task_id is None:
+        repos |= {str(r["repo"]) for r in kept if r.get("repo") and r.get("managed", True)}
+    clones = rounds.managed_clone_paths(repos if task_id is not None else None)
+    for clone in clones:
+        git(["worktree", "prune"], clone)
+        git(["fetch", "--prune", "--quiet"], clone)
+
+    streak: list[str] = []
+    if task_id is None and kept_runs is not None:
+        still = {str(r["path"]) for r in kept}
+        fresh = {path: kept_runs.get(path, 0) + 1 for path in still}
+        kept_runs.clear()
+        kept_runs.update(fresh)
+        streak = [
+            f"kept {r['path']} for the {rounds.KEPT_SUMMARY_RUNS}rd run in a row: {r['reason']}"
+            for r in kept
+            if kept_runs.get(str(r["path"])) == rounds.KEPT_SUMMARY_RUNS
+        ]
+
+    already = rounds.surfaced_loose_ends()
+    surfaced: list[str] = []
+    for record in kept:
+        path = str(record.get("path") or "")
+        unpushed = int(record.get("unpushed_commits") or 0)
+        if not path or path in already or record.get("task_status") not in RECLAIMABLE_STATUSES:
+            continue
+        if not record.get("dirty") and unpushed == 0:
+            continue
+        if record.get("managed") is False or record.get("open_pr") is not None:
+            continue  # somebody else's, or waiting on its pull request, not on a person
+        updated = rounds.task_updated_at(record.get("task_id"))
+        if updated is None or (now - updated).total_seconds() < rounds.KEPT_LOOSE_END_SECONDS:
+            continue
+        ticket = rounds.ticket_for_worker(record.get("task_id"))
+        text = (
+            f"worktree {path} for task {record.get('task_id')} is kept: "
+            f"{record.get('reason')}; commit and push what should stay, or discard it"
+        )
+        rounds.surface_kept_slot(ticket.task_id if ticket else record.get("task_id"), text)
+        if ticket is not None:
+            # The todo is the record; the comment a courtesy.
+            with contextlib.suppress(Exception):
+                post(ticket, f"waiting on you: {text}", None)
+        surfaced.append(path)
+
+    rounds.record_hygiene(
+        {
+            "task_id": task_id,
+            "scope": "task" if task_id is not None else "all",
+            "removed": [
+                {
+                    "task_id": r.get("task_id"),
+                    "path": r.get("path"),
+                    "branch": r.get("branch"),
+                    "size_bytes": int(r.get("size_bytes") or 0),
+                }
+                for r in removed
+            ],
+            "kept": [
+                {
+                    "task_id": r.get("task_id"),
+                    "path": r.get("path"),
+                    "reason": r.get("reason"),
+                    "dirty": r.get("dirty"),
+                    "unpushed_commits": r.get("unpushed_commits"),
+                }
+                for r in kept
+            ],
+            "reclaimed_bytes": int(result.get("reclaimed_bytes") or 0),
+            "base_clones": clones,
+            "surfaced": surfaced,
+        }
+    )
+    parts: list[str] = []
+    if removed:
+        total = int(result.get("reclaimed_bytes") or 0)
+        parts.append(f"removed {len(removed)} worktree(s), {human_bytes(total)} freed")
+    parts += streak
+    parts += [f"worktree {path} needs a person: waiting on you" for path in surfaced]
+    return parts
+
+
+def last_hygiene_at() -> datetime | None:
+    """When any mode last ran the hourly hygiene over every slot."""
+    from papaya_agent_runtime import rounds
+    from papaya_agent_runtime.state import init_db
+
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT created_at FROM events WHERE kind = ? "
+            "AND json_extract(payload, '$.scope') = 'all' ORDER BY id DESC LIMIT 1",
+            (rounds.HYGIENE_EVENT,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _parse(row["created_at"]) if row is not None else None
+
+
+# ── start remedies and blocker reports ──────────────────────────────────────
+
+
+def start_remedies(*, stderr) -> None:
+    """What a start puts right: first-run setup, config, state, then the deficiency count.
+
+    `ppy serve` runs it as it starts; a session's start hook runs it when no serve is
+    running, so a session on a machine nobody served still gets its config migrated, dead
+    runners closed, base clones and gate policies read again. Each remedy says one line
+    per thing it changed on ``stderr``.
+    """
+    from papaya_agent_runtime import serve
+
+    serve.self_setup(stderr=stderr)
+    serve.keep_config_right(stderr=stderr)
+    serve.keep_state_right(stderr=stderr)
+    serve.announce_deficiencies(stderr=stderr)
+
+
+def blocker_lines(changes: Any) -> list[str]:
+    """What a blocker observation changed, in the words a heartbeat line or a DM uses."""
+    lines = [f"new blocker: {b.title}" for b in getattr(changes, "appeared", [])]
+    lines += [f"blocker changed: {b.title}" for b in getattr(changes, "changed", [])]
+    lines += [f"blocker cleared: {b.title}" for b in getattr(changes, "cleared", [])]
+    return lines
+
+
+def blocker_step(*, check=None) -> list[str]:
+    """Re-check readiness, keep the blocker ledger, and return what changed. Never raises.
+
+    Serve's blocker watch does this on its clock and DMs the owner; a session's heartbeat
+    does it while no serve runs and says it on its line, where the person is.
+    """
+    from papaya_agent_runtime import blockers, readiness
+
+    try:
+        verdict = (check or readiness.check)()
+        return blocker_lines(blockers.update(verdict))
+    except Exception as exc:  # noqa: BLE001 - a heartbeat keeps ticking
+        return [f"could not re-check readiness: {exc}"]
