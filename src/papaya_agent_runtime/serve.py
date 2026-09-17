@@ -3853,10 +3853,11 @@ def keep_state_right(*, stderr) -> None:
     closed (the supervisor start already did this when this process owns it; here it
     also covers a start that adopted one), every base clone is put back on its
     forge — ``origin`` the forge, not a local checkout, and the default branch the
-    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`) — and every gate
-    answer the old heuristics guessed is dropped for what the repository itself
-    declares (`solicit.clear_heuristic_gate_policies`). A remedy that
-    cannot finish says why and never stops `serve` from starting.
+    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`) — and every
+    repository's gates are read again from what it says and what its pull-request
+    workflows run, keeping every answer a person set and dropping the old heuristics'
+    guesses (`solicit.keep_gate_policies_right`). A remedy that cannot finish says why
+    and never stops `serve` from starting.
     """
     from papaya_agent_runtime import repos
     from papaya_agent_runtime.rounds import DEAD_GRACE_SECONDS
@@ -3881,11 +3882,11 @@ def keep_state_right(*, stderr) -> None:
         lines = [f"could not check base clones against their forges: {exc}"]
     for line in lines:
         _say(line, stderr=stderr)
-    # The repository owns its gates: an answer the old heuristics guessed is dropped,
-    # and the repository's own instructions are read again (`solicit`).
+    # The repository owns its gates and a person's word outranks it: read them again
+    # at every start (`solicit`), so readiness never asks what the repository answers.
     from papaya_agent_runtime import solicit
 
-    for line in solicit.clear_heuristic_gate_policies():
+    for line in solicit.keep_gate_policies_right():
         _say(line, stderr=stderr)
 
 
