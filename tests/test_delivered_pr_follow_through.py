@@ -274,7 +274,8 @@ def test_a_delivered_task_whose_pr_head_cannot_be_fetched_is_never_rebuilt_at_th
 # The three ledger rows close from the fix
 # --------------------------------------------------------------------------- #
 
-#: The three `RUNTIME:` details as the live ledger recorded them on 2026-09-17.
+#: The three `RUNTIME:` details as the live ledger recorded them on 2026-09-17, keyed by
+#: the fingerprint the ledger holds them under (the normalised detail, before task 285).
 PAP_222_REPORTS = {
     "74fccc066045a150": (
         "`ppy review show 21` compared against an older starting commit (3f3c0181) and listed "
@@ -294,43 +295,67 @@ PAP_222_REPORTS = {
     ),
 }
 
+#: The reduced turn-report fingerprint (task 285) each row is rekeyed to at `serve` start.
+REDUCED = {
+    "74fccc066045a150": "af2aa9532fde4fce",
+    "ecfb07ec73b22d9a": "7ba58c5a7c72a5b0",
+    "73e968fea9ac0d8e": "c4b7a8dab0a58df5",
+}
+
+BEFORE_THE_FIX = lambda: datetime(2026, 9, 17, 1, 49, 12, tzinfo=UTC)  # noqa: E731
+AFTER_THE_FIX = lambda: datetime(2026, 9, 18, 9, 0, tzinfo=UTC)  # noqa: E731
+
 
 def test_the_three_pap_222_reports_are_closed_from_the_fix_and_a_recurrence_is_not(
     ppy_home,
 ) -> None:
     from test_deficiencies import FakeGh, _reporter
 
-    before = lambda: datetime(2026, 9, 17, 1, 49, 12, tzinfo=UTC)  # noqa: E731
-    for fingerprint, detail in PAP_222_REPORTS.items():
-        row = deficiencies.record(deficiencies.TURN_REPORT, detail, clock=before)
-        assert row is not None and row.fingerprint == fingerprint
-    # The same words again after the fix is a recurrence, and stays open.
-    after = lambda: datetime(2026, 9, 18, 9, 0, tzinfo=UTC)  # noqa: E731
+    for legacy, detail in PAP_222_REPORTS.items():
+        row = deficiencies.record(deficiencies.TURN_REPORT, detail, clock=BEFORE_THE_FIX)
+        assert row is not None and row.fingerprint == REDUCED[legacy]
+    # The same cause again after the fix is a recurrence, and keeps its row open.
     later = deficiencies.record(
         deficiencies.TURN_REPORT,
         PAP_222_REPORTS["73e968fea9ac0d8e"].replace("21", "34"),
-        clock=after,
+        clock=AFTER_THE_FIX,
     )
-    assert later is not None and later.fingerprint == "73e968fea9ac0d8e"
+    assert later is not None and later.fingerprint == REDUCED["73e968fea9ac0d8e"]
 
-    gh = FakeGh()
-    reporter = _reporter(gh)
-    reporter.reclassify()
+    _reporter(FakeGh()).reclassify()
 
     status = {d.fingerprint: d.status for d in deficiencies.ledger(include_all=True)}
-    assert status["74fccc066045a150"] == deficiencies.RECLASSIFIED
-    assert status["ecfb07ec73b22d9a"] == deficiencies.RECLASSIFIED
-    assert status["73e968fea9ac0d8e"] != deficiencies.RECLASSIFIED  # it recurred after the fix
+    assert status[REDUCED["74fccc066045a150"]] == deficiencies.RECLASSIFIED
+    assert status[REDUCED["ecfb07ec73b22d9a"]] == deficiencies.RECLASSIFIED
+    assert status[REDUCED["73e968fea9ac0d8e"]] != deficiencies.RECLASSIFIED
+
+
+def test_rows_still_under_their_pre_285_fingerprint_close_too(ppy_home) -> None:
+    """`serve` re-classifies before it rekeys, so the live rows are closed by their old keys."""
+    from test_deficiencies import FakeGh, _reporter
+
+    conn = init_db()
+    for legacy, detail in PAP_222_REPORTS.items():
+        deficiencies.record(deficiencies.TURN_REPORT, detail, clock=BEFORE_THE_FIX)
+        conn.execute(
+            "UPDATE deficiencies SET fingerprint = ? WHERE fingerprint = ?",
+            (legacy, REDUCED[legacy]),
+        )
+        conn.commit()  # before the next record, which needs the write lock
+
+    _reporter(FakeGh()).reclassify()
+
+    status = {d.fingerprint: d.status for d in deficiencies.ledger(include_all=True)}
+    assert {status[legacy] for legacy in PAP_222_REPORTS} == {deficiencies.RECLASSIFIED}
 
 
 def test_a_reported_pap_222_issue_is_closed_with_what_the_fix_changed(ppy_home) -> None:
     from test_deficiencies import FakeGh, _reporter
 
     detail = PAP_222_REPORTS["73e968fea9ac0d8e"]
-    before = lambda: datetime(2026, 9, 17, 1, 49, 12, tzinfo=UTC)  # noqa: E731
-    deficiencies.record(deficiencies.TURN_REPORT, detail, clock=before)
+    deficiencies.record(deficiencies.TURN_REPORT, detail, clock=BEFORE_THE_FIX)
     gh = FakeGh()
-    reporter = _reporter(gh, clock=before)
+    reporter = _reporter(gh, clock=BEFORE_THE_FIX)
     assert reporter.flush()  # opened an issue for it
 
     reporter.reclassify()
@@ -342,8 +367,8 @@ def test_a_reported_pap_222_issue_is_closed_with_what_the_fix_changed(ppy_home) 
 
 def test_every_fixed_report_names_its_reduced_fingerprint_too() -> None:
     """Rows are rekeyed to the reduced turn-report fingerprint (task 285); both close."""
-    for fix in deficiencies.FIXED_TURN_REPORTS:
-        assert len(fix.fingerprints) == 2
-    assert {"af2aa9532fde4fce", "7ba58c5a7c72a5b0", "c4b7a8dab0a58df5"} <= set().union(
-        *(fix.fingerprints for fix in deficiencies.FIXED_TURN_REPORTS)
-    )
+    for legacy, detail in PAP_222_REPORTS.items():
+        reduced = deficiencies.fingerprint(deficiencies.TURN_REPORT, detail)
+        assert reduced == REDUCED[legacy]  # what task 285 computes today, not a copied value
+        [fix] = [f for f in deficiencies.FIXED_TURN_REPORTS if legacy in f.fingerprints]
+        assert fix.fingerprints == {legacy, reduced}
