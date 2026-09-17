@@ -136,6 +136,7 @@ from papaya_agent_runtime import (
     gate,
     papaya,
     papaya_events,
+    progress,
     prompts,
     readiness,
     review,
@@ -973,9 +974,10 @@ def checkin_decision(result: object) -> tuple[str, str] | None:
     """What a check-in turn decided, as ``(decision, message)``, or ``None`` if it did not say.
 
     The contract is `prompts/checkin.md`: the last `CHECK-IN:` line in the
-    transcript's tail, one of `continue`, `steer <message>` or `stop and resume
-    with <message>`. A steer or a stop with no message is no decision: there is
-    nothing to give the worker, and the runner never writes one itself.
+    transcript's tail, one of `continue`, `continue, note <text>`, `steer <message>`
+    or `stop and resume with <message>`. A steer or a stop with no message is no
+    decision: there is nothing to give the worker, and the runner never writes one
+    itself. A `continue` carries its note as the message, empty without one.
     """
     text = result.tail() if hasattr(result, "tail") else str(result or "")
     for line in reversed(text.splitlines()):
@@ -986,13 +988,21 @@ def checkin_decision(result: object) -> tuple[str, str] | None:
         lowered = said.lower()
         # Longest first: "stop and resume with" before anything it could start with.
         for decision in (prompts.CHECKIN_STOP, prompts.CHECKIN_STEER, prompts.CHECKIN_CONTINUE):
+            if decision == prompts.CHECKIN_CONTINUE and lowered.startswith(decision):
+                return decision, _continue_note(said[len(decision) :])
             if lowered == decision or lowered.startswith(decision + " "):
                 message = said[len(decision) :].strip().lstrip(":").strip()
-                if decision == prompts.CHECKIN_CONTINUE:
-                    return decision, ""
                 return (decision, message) if message else None
         return None
     return None
+
+
+def _continue_note(rest: str) -> str:
+    """The note after `continue` (`, note <text>`), or ``""`` when there is none."""
+    text = rest.strip().lstrip(",:;-—").strip()
+    if not text.lower().startswith(prompts.CHECKIN_NOTE):
+        return ""
+    return text[len(prompts.CHECKIN_NOTE) :].strip().lstrip(":").strip()
 
 
 class _Stopped(Exception):
@@ -1627,6 +1637,16 @@ class TicketRunner:
             except Exception as exc:  # noqa: BLE001 - a refused steer is recorded, not fatal
                 log.warning("[serve] Could not deliver the check-in to task %d: %s", worker_id, exc)
                 error = str(exc)
+        elif choice == prompts.CHECKIN_CONTINUE and message:
+            # A reminder, not a steer: nothing interrupts the worker, and its next
+            # `ppy progress` hands the note over.
+            try:
+                await asyncio.to_thread(progress.post_guidance, worker_id, message)
+            except Exception as exc:  # noqa: BLE001 - a lost note is recorded, not fatal
+                log.warning(
+                    "[serve] Could not leave the check-in note for task %d: %s", worker_id, exc
+                )
+                error = str(exc)
         await asyncio.to_thread(
             record_checkin,
             ticket.held.task_id,
@@ -1638,9 +1658,10 @@ class TicketRunner:
             error=error,
             **dict(nudge.record),
         )
-        if choice == prompts.CHECKIN_STEER and not error:
+        if choice in (prompts.CHECKIN_STEER, prompts.CHECKIN_STOP) and not error:
             # Once is judgment; the same reason again on one ticket is the check-in
             # not being able to move the worker, which is the runtime's to look at.
+            # A `continue` with a note is a reminder and never counts (#55).
             await asyncio.to_thread(
                 self._deficiency,
                 ticket,
@@ -1650,6 +1671,13 @@ class TicketRunner:
                 trigger=nudge.trigger or nudge.reason,
             )
         if choice == prompts.CHECKIN_CONTINUE:
+            if message and not error:
+                _report_progress(
+                    ticket.job,
+                    ticket.phase,
+                    f"Checked in on worker task {worker_id} ({nudge.reason}): left it a note: "
+                    f"{message}",
+                )
             return
         if choice == "none":
             said = "the check-in turn ended without a decision"

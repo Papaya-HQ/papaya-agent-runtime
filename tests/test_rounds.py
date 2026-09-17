@@ -27,6 +27,7 @@ import pytest
 import test_serve
 from conftest import make_git_repo, scale
 from papaya_agent_runtime import (
+    budgets,
     gate,
     papaya_events,
     preflight,
@@ -175,8 +176,13 @@ def live_session(task_id: int) -> None:
         conn.close()
 
 
-def working_worker(run_id: int, *, note: str, phase: str = "implement", live: bool = True) -> int:
-    """What a brief turn leaves: a dispatched worker with a brief, a progress note, a session."""
+def working_worker(
+    run_id: int, *, note: str | None, phase: str = "implement", live: bool = True
+) -> int:
+    """What a brief turn leaves: a dispatched worker with a brief, a progress note, a session.
+
+    With ``note=None`` the worker has posted nothing yet.
+    """
     worker = dispatch_worker(run_id)
     preflight.archive_brief(
         "runtime",
@@ -184,7 +190,8 @@ def working_worker(run_id: int, *, note: str, phase: str = "implement", live: bo
         f"# Task\n\n## Goals\n\n{GOALS}\n\n## Intent\n\nA person asked.\n\n"
         "## In scope\n\nThe endpoint.\n\n## Out of scope\n\nFlags.\n",
     )
-    progress.record(worker, phase=phase, note=note)
+    if note is not None:
+        progress.record(worker, phase=phase, note=note)
     if live:
         live_session(worker)
     return worker
@@ -303,6 +310,184 @@ def test_a_continue_line_records_the_check_and_nothing_else(
     (record,) = checkins()
     assert (record["decision"], record["message"], record["error"]) == ("continue", "", "")
     assert not any("Checked in on" in detail for _s, _p, detail in progress_lines)
+
+
+# ── planning: no plan note is not stuck while the worker works (#55) ─────────
+
+
+def repo_budget(kind: str, seconds: float) -> None:
+    """A person's budget for the registered repository, so a test is not tied to defaults."""
+    conn = init_db()
+    try:
+        budgets.set_override(conn, "runtime", kind, seconds)
+    finally:
+        conn.close()
+
+
+def tool_call(task_id: int, at: datetime) -> None:
+    """A tool call heartbeat from the worker's provider stream, stamped ``at``."""
+    conn = init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        event_id = store.append_event(
+            conn,
+            kind="worker_tool_progress",
+            payload={"tool_name": "Bash", "tool_use_id": "toolu_1", "elapsed_time_seconds": 30},
+            run_id=int(task["run_id"]),
+            task_id=task_id,
+        )
+        conn.execute("UPDATE events SET created_at = ? WHERE id = ?", (at.isoformat(), event_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("last_tool_minutes_ago", "checked_in"),
+    [(2, False), (6, True)],
+    ids=["tool-call-2m-ago", "idle-6m"],
+)
+def test_no_plan_note_at_twelve_minutes_gets_a_checkin_only_when_the_worker_is_idle(
+    ppy_home,
+    client_home,
+    ready,
+    registered_repo,
+    assigned,
+    pruned,
+    last_tool_minutes_ago,
+    checked_in,
+) -> None:
+    """#55: two workers twelve minutes into their rebase and setup were steered to plan."""
+    repo_budget("plan", 10 * 60)
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            working_worker(turn.run_id, note=None)
+        elif turn.name == prompts.CHECKIN:
+            return "CHECK-IN: steer Post your plan."
+        return None
+
+    turns, timer, clock = FakeTurns(act), Timer(), WallClock()
+    harness = Harness(FakeEvents([EVENT]))
+    runner = _runner(turns, FakePapaya(), steer=lambda _t, _m: None)
+
+    async def scenario() -> int:
+        task = _serve(harness, client_home, runner, _seams(timer, clock, pruned))
+        worker = await _dispatched(timer)
+        clock.advance(minutes=12)
+        tool_call(worker, clock.now - timedelta(minutes=last_tool_minutes_ago))
+        await timer.round()
+        if checked_in:
+            await _until(lambda: checkins(), what="the plan check-in")
+        await asyncio.sleep(scale(0.2))
+        harness.loop.request_stop()
+        assert await task == 0
+        return worker
+
+    asyncio.run(scenario())
+
+    if not checked_in:
+        assert turns.names() == [prompts.BRIEF]
+        assert checkins() == []
+        return
+    assert turns.names() == [prompts.BRIEF, prompts.CHECKIN]
+    (record,) = checkins()
+    assert record["trigger"] == "plan"
+    assert "no tool call for 6m" in record["reason"]
+
+
+def test_the_plan_checkin_fires_past_three_budgets_whatever_the_worker_is_doing() -> None:
+    start = datetime(2026, 9, 17, 3, 0, tzinfo=UTC)
+    waits = rounds.WorkerBudgets(10**6, 10 * 60, 10**6)
+
+    def look(phase: str | None, tool_at: datetime) -> rounds.WorkerLook:
+        return rounds.WorkerLook(
+            task_id=21,
+            status="in_progress",
+            branch="ppy/task-21",
+            created_at=start,
+            verdict="alive",
+            silent_seconds=0,
+            last_event_id=1,
+            progress=[(1, start.isoformat(), phase, "the approach")] if phase else [],
+            question=None,
+            stopped=None,
+            last_acted_id=0,
+            last_tool_at=tool_at,
+        )
+
+    def triggers(worker: rounds.WorkerLook, now: datetime) -> list[str]:
+        return [trigger for trigger, _why in rounds.Rounds._checkins_due(worker, now, [], waits)]
+
+    at_12 = start + timedelta(minutes=12)
+    busy = look(None, at_12 - timedelta(minutes=2))
+    assert triggers(busy, at_12) == []
+    reminder = rounds.Rounds._plan_reminder(busy, at_12, waits)
+    assert reminder is not None and "no plan note yet" in reminder
+    # A worker that posted its plan gets no reminder, and neither does an idle one: it
+    # gets the check-in itself.
+    assert rounds.Rounds._plan_reminder(look("plan", at_12), at_12, waits) is None
+    assert rounds.Rounds._plan_reminder(look(None, start), at_12, waits) is None
+
+    at_30 = start + timedelta(minutes=30)
+    assert triggers(look(None, at_30 - timedelta(minutes=1)), at_30) == ["plan"]
+    assert triggers(look("plan", at_30 - timedelta(minutes=1)), at_30) == ["plan"]
+    assert triggers(look("plan", at_12 - timedelta(minutes=9)), at_12) == []
+
+
+def test_a_continue_with_a_note_leaves_the_note_and_records_no_steer(
+    ppy_home, client_home, ready, registered_repo, assigned, pruned, progress_lines, capsys
+) -> None:
+    from papaya_agent_runtime import cli, deficiencies
+
+    note = "Post your plan note with `ppy progress` once the rebase is done."
+    repo_budget("plan", 10 * 60)
+    repo_budget("worker_session", 20 * 60)  # the midpoint check-in lands at ten minutes
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            working_worker(turn.run_id, note=None)
+        elif turn.name == prompts.CHECKIN:
+            return f"Rebasing, as the brief asked.\nCHECK-IN: continue, note {note}"
+        return None
+
+    turns, timer, clock = FakeTurns(act), Timer(), WallClock()
+    harness = Harness(FakeEvents([EVENT]))
+    # `_runner`'s default steer raises: a note that became a steer fails the test.
+    runner = _runner(turns, FakePapaya())
+
+    async def scenario() -> int:
+        task = _serve(harness, client_home, runner, _seams(timer, clock, pruned))
+        worker = await _dispatched(timer)
+        clock.advance(minutes=12)
+        tool_call(worker, clock.now - timedelta(minutes=2))
+        await timer.round()
+        await _until(lambda: checkins(), what="the midpoint check-in")
+        await asyncio.sleep(scale(0.2))
+        harness.loop.request_stop()
+        assert await task == 0
+        return worker
+
+    worker = asyncio.run(scenario())
+
+    assert turns.names() == [prompts.BRIEF, prompts.CHECKIN]
+    prompt = turns.calls[1].prompt
+    assert "- plan note: no plan note yet after " in prompt and "last tool call 2m ago" in prompt
+    (record,) = checkins()
+    assert record["trigger"] == "midpoint"
+    assert (record["decision"], record["message"], record["error"]) == ("continue", note, "")
+    assert events_of(worker, "steer") == []
+    assert [e["note"] for e in events_of(worker, progress.GUIDANCE_EVENT)] == [note]
+    assert [
+        d for d in deficiencies.ledger(include_all=True) if d.kind == deficiencies.REPEATED_STEER
+    ] == []
+    assert any("left it a note" in detail for _s, _p, detail in progress_lines)
+
+    capsys.readouterr()
+    assert cli.main(["progress", str(worker), "--phase", "plan", "--note", "the approach"]) == 0
+    assert f"note from your manager: {note}" in capsys.readouterr().out
+    assert cli.main(["progress", str(worker), "--phase", "implement", "--note", "go"]) == 0
+    assert "note from your manager" not in capsys.readouterr().out
 
 
 class FakeRemote:
@@ -1186,6 +1371,8 @@ def test_hygiene_runs_hourly_and_names_a_slot_kept_three_runs_in_a_row(ppy_home)
     ("transcript", "decision"),
     [
         ("All fine.\nCHECK-IN: continue", ("continue", "")),
+        ("CHECK-IN: continue, note Post your plan.", ("continue", "Post your plan.")),
+        ("CHECK-IN: continue note: Post your plan.", ("continue", "Post your plan.")),
         (
             "**CHECK-IN: steer Commit to the plan in your note.**",
             ("steer", "Commit to the plan in your note."),
@@ -1215,7 +1402,12 @@ def test_the_rounds_interval_comes_from_the_flag_then_the_environment(monkeypatc
 
 def test_the_checkin_prompt_names_its_three_endings_and_both_skills() -> None:
     text = prompts.load(prompts.CHECKIN)
-    for ending in ("CHECK-IN: continue", "CHECK-IN: steer <", "CHECK-IN: stop and resume with <"):
+    for ending in (
+        "CHECK-IN: continue",
+        "CHECK-IN: continue, note <",
+        "CHECK-IN: steer <",
+        "CHECK-IN: stop and resume with <",
+    ):
         assert ending in text
     assert prompts.BRIEF_SKILL in text and prompts.REVIEW_SKILL in text
 

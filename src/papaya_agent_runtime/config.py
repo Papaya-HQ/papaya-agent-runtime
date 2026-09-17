@@ -243,6 +243,8 @@ HISTORICAL_CLAUDE_PROFILES: tuple[tuple[str, tuple[str, ...]], ...] = (
 HISTORICAL_DEFAULTS: dict[str, tuple[object, ...]] = {
     # 2 until 2026-09-17, when a third worker became the default.
     "worker.max_concurrent": (2,),
+    # 10 until 2026-09-17, when a repository's setup outlasted it (#55).
+    "health.plan_minutes": (10,),
 }
 
 #: The config file format. 1 (implicit: no key) wrote every default, including a
@@ -288,7 +290,10 @@ class HealthPolicy:
 
     quiet_minutes: int = 15
     # Minutes a worker may run before it is flagged for never having posted a plan.
-    plan_minutes: int = 10
+    plan_minutes: int = 20
+    # Minutes with no tool call before a worker with no plan note past its plan budget
+    # gets the plan check-in; one still working is left to its setup.
+    plan_idle_minutes: int = 5
     # Finished task stacks still consume Docker networks and database ports.
     max_stale_stacks: int = 4
     # Minutes a worker runs before `ppy serve`'s rounds check it is still on course.
@@ -472,6 +477,8 @@ class MMConfig:
             raise ConfigError("health.quiet_minutes must be at least 1")
         if self.health.plan_minutes < 1:
             raise ConfigError("health.plan_minutes must be at least 1")
+        if self.health.plan_idle_minutes < 1:
+            raise ConfigError("health.plan_idle_minutes must be at least 1")
         if self.health.checkin_after < 1:
             raise ConfigError("health.checkin_after must be at least 1")
         if self.health.push_by_minutes < 1:

@@ -131,9 +131,11 @@ PR_FOLLOW_RULE = (
 )
 
 #: How a check-in turn says what it decided: its last line starts with this, then
-#: one of the three decisions below (the steer and stop ones carry the message).
+#: one of the three decisions below (the steer and stop ones carry the message; a
+#: continue may carry a note, `continue, note <text>`, which is never a steer).
 CHECKIN_PREFIX = "CHECK-IN:"
 CHECKIN_CONTINUE = "continue"
+CHECKIN_NOTE = "note"
 CHECKIN_STEER = "steer"
 CHECKIN_STOP = "stop and resume with"
 CHECKIN_DECISIONS = (CHECKIN_CONTINUE, CHECKIN_STEER, CHECKIN_STOP)
@@ -187,6 +189,7 @@ __all__ = [
     "CHECKIN",
     "CHECKIN_CONTINUE",
     "CHECKIN_DECISIONS",
+    "CHECKIN_NOTE",
     "CHECKIN_PREFIX",
     "CHECKIN_STEER",
     "CHECKIN_STOP",

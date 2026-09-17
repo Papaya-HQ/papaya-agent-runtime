@@ -12,7 +12,8 @@ task, outcome), and every wait that used to read a global default reads the budg
 its repository instead:
 
 - **budget** = the 90th percentile (nearest rank) of the window × 1.5, floored at the
-  configured default and capped at :data:`CAPS`;
+  configured default (for ``plan``, the smaller of the default and the window's
+  shortest observation) and capped at :data:`CAPS`;
 - **window** = the newest :data:`WINDOW_COUNT` observations within
   :data:`WINDOW_DAYS` days, whichever is fewer, leaving out anything flagged
   ``stall`` or ``kill`` — a worker that stalled is what the silence budget protects
@@ -295,6 +296,8 @@ class Budget:
     p90: float | None
     default: float
     cap: float
+    #: What the derivation may not go below (:func:`floor_seconds`); the default when unset.
+    floor: float | None = None
 
     @property
     def derived(self) -> bool:
@@ -309,7 +312,8 @@ class Budget:
         """The one line `ppy repo budgets` prints for this kind."""
         p90 = _minutes(self.p90) if self.p90 is not None else "-"
         why = {
-            DERIVED: f"derived: p90 x {FACTOR:g}, floor {_minutes(self.default)}, "
+            DERIVED: f"derived: p90 x {FACTOR:g}, "
+            f"floor {_minutes(self.default if self.floor is None else self.floor)}, "
             f"cap {_minutes(self.cap)}",
             DEFAULT: f"default: fewer than {MIN_OBSERVATIONS} observations"
             if self.observations < MIN_OBSERVATIONS
@@ -381,14 +385,28 @@ def budget(
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
     p90 = percentile(values)
+    floor = floor_seconds(kind, default, values)
     if override is not None:
         return Budget(
-            repo, kind, float(override["seconds"]), OVERRIDE, len(values), p90, default, cap
+            repo, kind, float(override["seconds"]), OVERRIDE, len(values), p90, default, cap, floor
         )
     if p90 is None or len(values) < MIN_OBSERVATIONS:
-        return Budget(repo, kind, default, DEFAULT, len(values), p90, default, cap)
-    seconds = min(cap, max(default, p90 * FACTOR))
-    return Budget(repo, kind, seconds, DERIVED, len(values), p90, default, cap)
+        return Budget(repo, kind, default, DEFAULT, len(values), p90, default, cap, floor)
+    seconds = min(cap, max(floor, p90 * FACTOR))
+    return Budget(repo, kind, seconds, DERIVED, len(values), p90, default, cap, floor)
+
+
+def floor_seconds(kind: str, default: float, values: Iterable[float]) -> float:
+    """What a derivation may not go below: the default, or for `plan` the observed floor.
+
+    A plan phase is mostly the setup a brief asks for, and a repository whose plans
+    take twelve minutes should learn twelve, not be held at a default it never meets
+    (#55). Every other kind keeps the default as its floor.
+    """
+    observed = [float(v) for v in values]
+    if kind == PLAN and observed:
+        return min(default, min(observed))
+    return default
 
 
 def seconds(repo: str | None, kind: str, *, now: datetime | None = None) -> float:
@@ -510,6 +528,7 @@ __all__ = [
     "all_budgets",
     "budget",
     "default_seconds",
+    "floor_seconds",
     "gate_timing_line",
     "longest_gate",
     "megabytes",

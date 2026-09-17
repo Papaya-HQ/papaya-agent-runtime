@@ -686,11 +686,17 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
    - **Stopped short.** A stopped worker whose branch is ahead of base and has no gate
      recorded at its head goes to that same gate steer.
    - **Check-in.** A worker gets the **check-in turn** if it is silent past its
-     repository's silence budget with a live session, still planning past the plan
-     budget, has run for half its worker-session budget, or has run
+     repository's silence budget with a live session, is past the plan budget with no
+     plan note and no tool call for `health.plan_idle_minutes` (5), is still planning
+     past three plan budgets whatever it is doing, has run for half its worker-session
+     budget, or has run
      `health.push_by_minutes` (45) with nothing new on its remote lease branch. Without
-     history the first three are `health.quiet_minutes`, `health.plan_minutes` and
-     `health.checkin_after` (20). For the push one, every round asks the forge for the
+     history the budgets are `health.quiet_minutes`, `health.plan_minutes` (20) and
+     `health.checkin_after` (20); a plan budget learned from history may go below the
+     default, down to the repository's shortest observed plan. A worker past its plan
+     budget with no plan note that is still making tool calls is doing its setup: it gets
+     no check-in of its own, only a reminder line in the facts of one that is due anyway.
+     For the push one, every round asks the forge for the
      lease branch (`git ls-remote` against the repository's `forge_url`, or the
      worktree's `origin` when it has none), never a remote-tracking ref, and records when
      it first sees a new tip (`push_seen`): that is the last push. The push check-in
@@ -703,8 +709,11 @@ sweep's lock, so a round and a sweep never overlap. In order, a round:
      `push_by_minutes` with no push, and the turn steers the worker to commit what is
      green and push before it continues. The turn
      reads the brief's Goals and the whole progress log, then ends with one line:
-     `CHECK-IN: continue`, `CHECK-IN: steer <message>` or
-     `CHECK-IN: stop and resume with <message>`. The decision and why the check ran are
+     `CHECK-IN: continue`, `CHECK-IN: continue, note <text>`, `CHECK-IN: steer <message>`
+     or `CHECK-IN: stop and resume with <message>`. A note does not interrupt the worker
+     and is not a steer: it is recorded on the worker (`progress_guidance`) and printed
+     by the worker's next `ppy progress`. Only a steer or a stop and resume counts toward
+     the `repeated-steer` self-report. The decision and why the check ran are
      recorded on the ticket (`ticket_checkin`). A push check-in's record and its turn's
      facts also carry what the round saw: the forge's tip (`remote_sha`), the worktree's
      HEAD (`head_sha`) and the last recorded push (`last_push_at`).
