@@ -79,6 +79,8 @@ RUNTIME_CI_RED = "runtime-ci-red"
 IDLE_WORK_REFUSED = "idle-work-refused"
 #: A turn did what its prompt tells it not to do for this agent (`propose_memory` on a shared one).
 PROMPT_DEFECT = "prompt-defect"
+#: A supervision capability works only under `ppy serve` (`parity`), so a session misses it.
+SERVE_ONLY_CAPABILITY = "serve-only-capability"
 #: `ppy deliver` pushed, and then `gh` refused to open or update the pull request.
 DELIVERY_FAILED = "delivery-failed"
 
@@ -294,6 +296,21 @@ KINDS: dict[str, Kind] = {
         remedy=(
             "Read `gh`'s error: missing auth or permission is a blocker a person closes; "
             "anything else is a delivery bug."
+        ),
+    ),
+    SERVE_ONLY_CAPABILITY: Kind(
+        title="A supervision capability works only under ppy serve",
+        happened=(
+            "The runtime runs as `ppy serve` and as an interactive session and must supervise "
+            "workers equally in both, but this capability is registered as serve-only in "
+            "`papaya_agent_runtime.parity`: {detail}."
+        ),
+        instead=(
+            "Serve does it; a session covers it by hand, and misses it when nobody remembers."
+        ),
+        remedy=(
+            "Make it one decision both modes call, register it as shared in `parity`, prove it "
+            "in both modes in tests, and remove it from `parity.KNOWN_GAPS`."
         ),
     ),
 }

@@ -20,6 +20,18 @@ from papaya_agent_runtime.providers import capability
 
 
 @pytest.fixture(autouse=True)
+def _parity_gaps_are_recorded_only_where_a_test_asks(request, monkeypatch):
+    """Every serve start and session start records the open parity gaps as a deficiency
+    (`parity.record_gaps`); tests about other deficiencies should not count that entry.
+    `tests/test_mode_parity.py` exercises the real recording."""
+    if request.module.__name__.endswith("test_mode_parity"):
+        return
+    from papaya_agent_runtime import parity
+
+    monkeypatch.setattr(parity, "record_gaps", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _force_git_lease_backend(monkeypatch):
     """Keep the hermetic suite on the git lease backend.
 

@@ -35,6 +35,11 @@ Prefer the reversible repair over stopping to ask.
 - **A command hangs or a path clearly isn't working** → stop it and take the better
   route (the right script or skill) instead of waiting it out. A frozen turn is a
   bug, not patience.
+- **A capability only one mode has** (serve does it, a session does not, or the
+  reverse; a `serve-only-capability` deficiency) → cover it by hand now, record a todo,
+  and heal it as runtime work: one shared decision both modes call, registered in
+  `papaya_agent_runtime.parity`, tested in both modes (the development contract's
+  "Mode parity"). Never add serve-only supervision to get something working.
 - Heal quietly. Mention it only when it changes what the user should think or do
   ("re-probed Codex after a drift — we're good"); otherwise just keep moving.
 
