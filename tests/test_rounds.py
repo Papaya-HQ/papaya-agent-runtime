@@ -1725,3 +1725,54 @@ def test_one_round_over_a_ticket_in_every_phase_completes_on_real_threads(
     assert events_of(red_worker, reconcile.STARTED)
     assert events_of(red_worker, serve.PR_ATTENTION)
     assert serve.PHASE_DISPATCHED in history(19)[len(finished) + 1 :]
+
+
+# ── every delivered pull request is somebody's, and nobody's twice (#72) ───────
+
+
+def test_a_merged_pr_with_no_ticket_is_recorded_and_a_handed_over_tickets_red_one_repaired(
+    ppy_home, registered_repo, pruned
+) -> None:
+    conn = init_db()
+    plain_run = store.create_run(conn, "from a session")
+    conn.close()
+    merged_worker = dispatch_worker(plain_run)
+    worker_event(merged_worker, "delivered", status="delivered", pr_url=PR_URL)
+    ticket, _run_id, red_worker = seed_ticket([serve.PHASE_DISPATCHED, serve.PHASE_HANDED_OVER])
+    worker_event(red_worker, "delivered", status="delivered", pr_url=PR_URL)
+    forge = [
+        _pr(merged_worker, state="MERGED", merged=True, merge_commit="b" * 40),
+        _pr(red_worker, pr=8, ci="fail", failing=["unit tests"]),
+    ]
+    steered: list[tuple[int, str]] = []
+    stderr, clock = io.StringIO(), WallClock()
+    manager_rounds = _bare_rounds(
+        stderr,
+        clock,
+        prune=lambda task_id: pruned.append(task_id) or {"removed": [], "skipped": []},
+        git=lambda *_a, **_k: 0,
+        steer_worker=lambda task_id, message: steered.append((task_id, message)),
+        pr_details=lambda _task_id, _entry: {},
+    )
+    manager_rounds._forge = lambda _conn: [dict(e) for e in forge]
+
+    async def scenario() -> list[str]:
+        first = await manager_rounds.round_once()
+        clock.advance(minutes=5)
+        second = await manager_rounds.round_once()
+        await manager_rounds.close()
+        return first + second
+
+    parts = asyncio.run(scenario())
+
+    conn = init_db()
+    assert store.get_task(conn, merged_worker)["merged_sha"] == "b" * 40
+    assert merged_worker in pruned
+    assert any(f"worker task {merged_worker}'s pull request merged: recorded" in p for p in parts)
+    # The handed-over ticket's pull request went through the repair step, once, and
+    # never through the ticket path (which would have re-offered a ticket nobody holds).
+    assert steered and steered[0][0] == red_worker and "unit tests" in steered[0][1]
+    assert len(steered) == 1
+    assert store.task_phase(conn, ticket) == serve.PHASE_HANDED_OVER
+    assert events_of(red_worker, serve.PR_ATTENTION)
+    assert all(e.get("ticket_task_id") is None for e in events_of(red_worker, reconcile.STARTED))

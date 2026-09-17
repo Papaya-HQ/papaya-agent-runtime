@@ -2137,7 +2137,7 @@ def test_a_review_at_a_head_with_a_dirty_worktree_reports_the_count_and_steers(
     assert "commit" in message and "discard" in message
     # Reviewed only once the worktree was clean, and the finding was not carried into it.
     assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
-    assert "uncommitted work" not in reviews[0].split("## This ticket")[1]
+    assert "uncommitted work" not in reviews[0].split(prompts.FACTS_HEADING)[1]
     phases = history()
     reviewing = phases.index(serve.PHASE_REVIEWING)
     assert phases[reviewing + 1 : reviewing + 3] == [serve.PHASE_DISPATCHED, serve.PHASE_REVIEWING]
@@ -2628,7 +2628,7 @@ def test_a_rendered_prompt_resolves_the_skills_and_appends_only_facts(tmp_path) 
     )
     assert prompts.RUNTIME_DIR not in rendered
     assert f"{tmp_path.resolve()}/.agents/skills/review-a-worker/SKILL.md" in rendered
-    tail = rendered.split("## This ticket", 1)[1]
+    tail = rendered.split(prompts.FACTS_HEADING, 1)[1]
     assert "- work item id: item-9" in tail
     assert "repository" not in tail
     assert "```\nWhich route?\nv1 or v2?\n```" in tail

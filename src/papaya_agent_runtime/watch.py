@@ -21,6 +21,12 @@ not. After two consecutive idle ticks it says so once and then prints nothing
 until the team has news again — because on 2026-09-04 a finished run left the
 watch announcing "no workers in flight" every five minutes for over an hour, and
 every one of those ticks woke the manager to relay nothing.
+
+While no `ppy serve` runs, the heartbeat is also what acts: the same lanes serve's
+rounds run (:mod:`papaya_agent_runtime.lanes`) — a stopped worker sent back to its
+gate, a decision handed to a person, deficiencies opened as issues — and the turns
+only a session can take (a review, an answer) named on the line as ``your turn``. Every
+tick ends in the delta since the last check (:mod:`papaya_agent_runtime.digest`).
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any, TextIO
 
-from papaya_agent_runtime import board, companions, health, owed, supervision
+from papaya_agent_runtime import board, companions, digest, health, lanes, owed, supervision
 from papaya_agent_runtime.state import init_db, store
 
 DEFAULT_INTERVAL_SECONDS = 300.0
@@ -536,11 +542,14 @@ def tick(
     previous_prs: dict[str, dict[str, Any]] | None = None,
     settled_prs: dict[str, dict[str, Any]] | None = None,
     repairs: list[str] | None = None,
+    turns: list[Any] | None = None,
 ) -> dict[str, Any]:
     """One snapshot of team state, plus the events that arrived since ``since_event_id``.
 
     ``repairs`` are the lines of the pull request repair step the running heartbeat took
-    just before this tick (:func:`repair_step`); a snapshot never acts itself.
+    just before this tick (:func:`repair_step`), and ``turns`` the owed-lane decisions
+    only this session can act on (:func:`lanes.interactive_step`); a snapshot never acts
+    itself. It ends with the delta since the last check, remembered as this one.
     """
     conn = conn or init_db()
     now = now or datetime.now(UTC)
@@ -597,6 +606,15 @@ def tick(
         "needs_me": needs_me,
         "checkins": checkins,
         "repairs": list(repairs or []),
+        # The turns only a session can take: the same decisions serve runs turns for.
+        "your_turn": [
+            {"task_id": d.task_id, "turn": d.turn, "reason": d.line} for d in (turns or [])
+        ],
+        # Next steps that sat past the ledger grace: a queue, not a diary.
+        "ledger_due": [
+            {"todo_id": i.todo_id, "text": i.text, "seconds": i.seconds}
+            for i in lanes.ledger_due(conn, now=now)
+        ],
         "new_events": new_events,
         "last_event_id": last_id,
         "open_todos": len(board.open_todos(conn)),
@@ -605,8 +623,21 @@ def tick(
         "usage_advisories": health.usage_advisories(conn),
         "pr_changes": pr_changes(previous_prs, pr_index(prs)),
     }
+    snapshot["delta"] = digest.check(conn, now=now, prs=pr_index(prs))
     snapshot["idle"] = is_idle(snapshot)
     return snapshot
+
+
+def owed_step(conn: sqlite3.Connection, now: datetime) -> tuple[list[str], list[Any]]:
+    """The owed lane from a session, when no `ppy serve` does it (`lanes.interactive_step`).
+
+    Returns the lines of what it did mechanically (a gate send-back, a person-wait) and
+    the decisions the session itself is the turn for. Never raises.
+    """
+    try:
+        return lanes.interactive_step(conn, now)
+    except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
+        return [f"could not run the owed lane: {exc}"], []
 
 
 def repair_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
@@ -679,6 +710,7 @@ class UpkeepStep:
 
     def __init__(self) -> None:
         self._blockers_at: datetime | None = None
+        self._deficiencies_at: datetime | None = None
         self._kept_runs: dict[str, int] = {}
         self._waiting: list[str] = []
 
@@ -700,6 +732,12 @@ class UpkeepStep:
                 if keys and keys != self._waiting:
                     lines.append("assigned and waiting: " + ", ".join(keys))
                 self._waiting = keys
+            if self._deficiencies_at is None or (
+                (now - self._deficiencies_at).total_seconds() >= lanes.DEFICIENCY_EVERY_SECONDS
+            ):
+                # The deficiency lane serve's rounds run: recorded defects open as issues.
+                self._deficiencies_at = now
+                lines += lanes.deficiency_step()
             last = supervision.last_hygiene_at()
             if last is None or (now - last).total_seconds() >= HYGIENE_EVERY_SECONDS:
                 lines += supervision.hygiene_step(
@@ -730,7 +768,7 @@ def is_idle(snapshot: dict[str, Any]) -> bool:
     """
     if snapshot["in_flight"] or snapshot["needs_me"] or snapshot.get("checkins"):
         return False
-    if snapshot.get("repairs"):
+    if snapshot.get("repairs") or snapshot.get("your_turn") or snapshot.get("ledger_due"):
         return False
     if snapshot["new_events"] or snapshot["pr_changes"] or snapshot.get("recorded_merges"):
         return False
@@ -770,6 +808,14 @@ def render(snapshot: dict[str, Any]) -> str:
         line += " | check in: " + "; ".join(
             f"t{c['task_id']} ({_clip(c['reason'], 90)})" for c in snapshot["checkins"]
         )
+    if snapshot.get("your_turn"):
+        line += " | your turn: " + "; ".join(
+            f"t{t['task_id']} {t['turn']} ({_clip(t['reason'], 90)})" for t in snapshot["your_turn"]
+        )
+    if snapshot.get("ledger_due"):
+        line += " | ledger due: " + "; ".join(
+            f"#{i['todo_id']} {_clip(i['text'], 60)}" for i in snapshot["ledger_due"]
+        )
     segments = [s for s in (describe_pr(e) for e in snapshot.get("prs", [])) if s]
     if segments:
         line += " | prs: " + "; ".join(segments)
@@ -786,7 +832,10 @@ def render(snapshot: dict[str, Any]) -> str:
         line += " | " + "; ".join(
             health.describe_usage_advisory(item) for item in snapshot["usage_advisories"]
         )
-    return line + f" | open todos: {snapshot['open_todos']}"
+    line += f" | open todos: {snapshot['open_todos']}"
+    if snapshot.get("delta"):
+        line += " || " + digest.line(snapshot["delta"])
+    return line
 
 
 def run(
@@ -831,6 +880,7 @@ def _loop(
     listen = listen_step if repair is None else (lambda now: [])
     merges = merge_step if repair is None else (lambda conn, now: [])
     upkeep = UpkeepStep() if repair is None else (lambda now: [])
+    owed_lane = owed_step if repair is None else (lambda conn, now: ([], []))
     repair = repair or repair_step
     # The first tick reports the current state, not the whole event history.
     since = max_event_id(conn)
@@ -844,6 +894,7 @@ def _loop(
 
     while True:
         moment = clock() if clock else datetime.now(UTC)
+        acted, turns = ([], []) if once else owed_lane(conn, moment)
         snapshot = tick(
             conn,
             since_event_id=since,
@@ -852,7 +903,14 @@ def _loop(
             now=moment,
             repairs=[]
             if once
-            else [*repair(conn, moment), *listen(moment), *merges(conn, moment), *upkeep(moment)],
+            else [
+                *repair(conn, moment),
+                *listen(moment),
+                *merges(conn, moment),
+                *upkeep(moment),
+                *acted,
+            ],
+            turns=turns,
         )
         since = snapshot["last_event_id"]
         previous = pr_index(snapshot["prs"])

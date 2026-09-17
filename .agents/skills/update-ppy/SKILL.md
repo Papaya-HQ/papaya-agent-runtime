@@ -84,7 +84,7 @@ person's to see.
   Papaya app (or quit and reopen it). That is the one click this needs.
 - **Run from a terminal** (`ppy serve` without `--supervised`, or no Papaya
   connection): start `./bin/ppy serve` again in the background the way it was run.
-- Start the heartbeat again: `./bin/ppy watch` as a background monitor, then
+- Start the heartbeat again: `./bin/ppy watch --follow` as a background monitor, then
   `./bin/ppy papaya tools --check` (new code may have moved the client's interpreter;
   `ppy papaya tools` fixes it, and the session loads it after `/mcp`).
 

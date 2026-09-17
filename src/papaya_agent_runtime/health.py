@@ -298,10 +298,10 @@ def check(
     now = now or datetime.now(UTC)
     repos = {r["id"]: r["name"] for r in store.list_repos(conn)}
     marks = ",".join("?" for _ in IN_FLIGHT)
-    # Worker tasks only: a ticket task (`phase` set) is `ppy serve`'s record of a hold,
-    # never a process, and read as a worker it was a dead one forever.
+    # Worker tasks only (`store.WORKER_TASK`): a ticket task is `ppy serve`'s record of a
+    # hold, never a process, and read as a worker it was a dead one forever.
     rows = conn.execute(
-        f"SELECT * FROM tasks WHERE status IN ({marks}) AND phase IS NULL ORDER BY id",
+        f"SELECT * FROM tasks WHERE status IN ({marks}) AND {store.WORKER_TASK} ORDER BY id",
         IN_FLIGHT,
     ).fetchall()
 

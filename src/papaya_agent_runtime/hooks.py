@@ -297,6 +297,8 @@ def owed_context(conn) -> str | None:
 
     if _headless_turn():
         return None
+    from papaya_agent_runtime import lanes
+
     items = owed.collect(conn)
     running = owed.running_count(conn)
     lines: list[str] = []
@@ -304,33 +306,40 @@ def owed_context(conn) -> str | None:
     if mine:
         lines.append(f"WORKERS WAITING ON YOU ({len(mine)}) — take each up before new work:")
         lines.extend(f"- {item.line()}" for item in mine)
+    # The ledger lane: a recorded next step is a queue item, not a diary entry.
+    due = lanes.ledger_due(conn)
+    if due:
+        lines.append(
+            f"NEXT STEPS THAT SAT ({len(due)}) — do each, defer it with a reason "
+            "(`ppy todo block <id> --on user:<why>|task:<id>|review`), or drop it:"
+        )
+        lines.extend(f"- {item.said()}" for item in due)
     if (mine or running) and not owed.watch_running():
         lines.append(
-            "NO HEARTBEAT IS RUNNING. Start `./bin/ppy watch` now as a background monitor "
-            "(Claude Code: the Monitor tool; Codex: a background terminal) and relay its "
-            "lines. Without it a worker that finishes, stops or crashes waits unheard "
+            "NO HEARTBEAT IS RUNNING. Start `./bin/ppy watch --follow` now as a background "
+            "monitor (Claude Code: the Monitor tool; Codex: a background terminal) and relay "
+            "its lines. Without it a worker that finishes, stops or crashes waits unheard "
             "until someone asks."
         )
     return "\n".join(lines) or None
 
 
 def owed_stop_reasons(conn) -> list[str]:
-    """Why an interactive turn may not end yet: owed work with no next step, no heartbeat."""
-    from papaya_agent_runtime import owed
+    """Why an interactive turn may not end yet: a turn only this session can take, a next
+    step that sat, a check-in due, no heartbeat.
+
+    The owed and ledger lanes are the same decisions `ppy serve` runs turns for
+    (`lanes.stop_reasons`); while a serve runs on this machine it takes them up, so a
+    session is not held for them.
+    """
+    from papaya_agent_runtime import lanes, owed, supervision
 
     if _headless_turn():
         return []
     items = owed.collect(conn)
     reasons: list[str] = []
-    untracked = owed.untracked(conn, items)
-    if untracked:
-        listed = "\n".join(f"- {item.line()}" for item in untracked)
-        reasons.append(
-            f"{len(untracked)} worker task(s) are waiting on you with no next step recorded "
-            "against them. Take each up now, or record the next step against the task so it "
-            'survives compaction: `ppy todo add --task <id> "..."`.\n' + listed
-        )
-    from papaya_agent_runtime import supervision
+    if not supervision.serve_running():
+        reasons.extend(lanes.stop_reasons(conn))
 
     # Serve's rounds check in on its held tickets' workers; a session checks the rest.
     due = [c for c in supervision.worker_checkins() if c.ticket_task_id is None]
@@ -341,8 +350,8 @@ def owed_stop_reasons(conn) -> list[str]:
     if in_flight and not owed.watch_running():
         reasons.append(
             f"{in_flight} worker task(s) are running or waiting on you and no heartbeat is "
-            "running to hear what happens next. Start `./bin/ppy watch` as a background "
-            "monitor (Claude Code: the Monitor tool) before ending the turn."
+            "running to hear what happens next. Start `./bin/ppy watch --follow` as a "
+            "background monitor (Claude Code: the Monitor tool) before ending the turn."
         )
     return reasons
 

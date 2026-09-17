@@ -183,9 +183,10 @@ def todo_line(t: dict[str, Any]) -> str:
 def _live_tasks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     repos = {r["id"]: r["name"] for r in store.list_repos(conn)}
     marks = ",".join("?" for _ in (*IN_FLIGHT, *NEEDS_ME))
+    # Worker tasks only (`store.WORKER_TASK`): a ticket placeholder is not in flight.
     rows = conn.execute(
         f"SELECT t.*, r.objective FROM tasks t JOIN runs r ON r.id = t.run_id "
-        f"WHERE t.status IN ({marks}) ORDER BY t.run_id, t.id",
+        f"WHERE t.status IN ({marks}) AND t.{store.WORKER_TASK} ORDER BY t.run_id, t.id",
         (*IN_FLIGHT, *NEEDS_ME),
     ).fetchall()
     out = []

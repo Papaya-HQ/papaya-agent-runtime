@@ -51,17 +51,38 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    (asked with `ls-remote` every round; again every as many minutes until something
    lands) gets the **check-in turn**; a person-wait older than fifteen minutes is said
    on the ticket once ("waiting on you: …") and the ticket is `blocked`.
-4. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
+4. **The owed lane** (:mod:`papaya_agent_runtime.lanes`): every worker waiting on the
+   manager that no live ticket covers — dispatched from a session, or its ticket was
+   released, handed over or ended — is taken up the way a held ticket's would be: a
+   stopped or done worker whose record calls for it is sent back to its gate, a
+   question gets the answer turn and finished work the review turn, keyed on the task
+   and run without a hold (:class:`~papaya_agent_runtime.lanes.TurnRunner`), and a
+   decision only a person can make is recorded against the task as a person-wait.
+5. **The ledger lane**: open, unblocked next steps that sat past
+   `lanes.LEDGER_GRACE_SECONDS` get the ledger turn, which does each, defers it with a
+   reason, or drops it.
+6. **The deficiency lane**, every `lanes.DEFICIENCY_EVERY_SECONDS`: what the runtime
+   recorded about itself is opened as issues, on the clock rather than only when the
+   next record lands.
+7. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
    (only terminal tasks, clean, every commit on a remote, base clone under
    `.ppy/repos`), then `git worktree prune` and `git fetch --prune` on the base
    clones. A kept slot that is a loose end — terminal, dirty or unpushed, a day old
    — becomes one "waiting on you" item.
 
+Step 1 covers every delivered pull request, live ticket or not: one a live ticket owns
+goes through that ticket's review turn; every other one (no ticket, or a ticket that
+ended) goes through the same repair step a session's heartbeat runs
+(`supervision.repair_untracked`), and a merged one is recorded merged and cleaned up
+whether or not a ticket ever existed for it.
+
 The rule the whole module keeps: **the round is the clock and the facts; judgment
 stays in turns.** A round never writes a message for a worker. It queues a
 :class:`~papaya_agent_runtime.serve.Nudge` on the held ticket, and the ticket's own
 loop runs the turn, so a round's turn never overlaps the ticket's others and every
-"continue", "steer", "stop" and "answer" comes from a turn reading the record.
+"continue", "steer", "stop" and "answer" comes from a turn reading the record. A
+worker with no ticket has no loop of its own, so its turns run beside the rounds under
+the turn runner, at most `lanes.TURNS_AT_ONCE` at a time and never two on one task.
 
 A round holds the lock the sweep holds, so the two never overlap. It says one
 progress line per ticket whose state it changed and one stderr summary; a round
@@ -84,6 +105,7 @@ from typing import Any
 from papaya_agent_runtime import (
     deficiencies,
     health,
+    lanes,
     papaya_events,
     serve,
     supervision,
@@ -1072,6 +1094,8 @@ class Rounds:
         pr_details: Callable[[int, dict[str, Any]], dict[str, Any]] | None = None,
         steer_worker: Callable[[int, str], Any] | None = None,
         merge: Callable[[int, dict[str, Any], str], Any] | None = None,
+        turns: lanes.TurnRunner | None = None,
+        reporter: Any = None,
     ) -> None:
         self._built = built
         self._runner = runner
@@ -1094,6 +1118,21 @@ class Rounds:
         #: How a repair with no ticket reaches its worker: a steer, admitted in the lane.
         self._steer_worker = steer_worker or supervision.steer_worker
         self._merge = merge or _default_merge
+        #: How a turn keyed on a task runs (the owed and ledger lanes): the runner's own
+        #: harness, tools and config seams, this connection's credentials, no hold.
+        self._turns = turns or lanes.TurnRunner(
+            run_turn=getattr(runner, "_run_turn", None),
+            turn_tools=getattr(runner, "_turn_tools", None),
+            config=getattr(runner, "_config", None),
+            runtime_dir=getattr(runner, "_runtime_dir", None),
+            papaya_env=self._papaya_env,
+            steer=self._steer_worker,
+            agent_kind=getattr(runner, "agent_kind", None),
+            clock=self._clock,
+        )
+        #: What opens the runtime's recorded deficiencies as issues (`serve` hands in its own).
+        self._reporter = reporter
+        self._last_deficiencies: datetime | None = None
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
         self._watched: Any = None
@@ -1179,12 +1218,63 @@ class Rounds:
         parts += [entry.line() for entry in closed]
         for ticket in held:
             parts += await self._look_at(ticket, now)
+        parts += await self._owed_lane(now, watched)
+        parts += await self._ledger_lane(now)
+        parts += await self._deficiency_lane(now)
         if self._last_hygiene is None or (
             (now - self._last_hygiene).total_seconds() >= HYGIENE_EVERY_SECONDS
         ):
             self._last_hygiene = now
             parts += await self._hygiene(None, now)
         return parts
+
+    async def close(self) -> None:
+        """End the turns the lanes have running: serve is stopping."""
+        await self._turns.close()
+
+    # -- the lanes: what no held ticket covers ---------------------------------------
+
+    async def _owed_lane(self, now: datetime, covered: set[int]) -> list[str]:
+        """Every worker waiting on the manager with no live ticket (`lanes.owed_decisions`).
+
+        ``covered`` are the held tickets' workers; connected, the workers of every ticket
+        this process can offer back to the loop are the ticket path's too (a stalled or
+        released hold resumes from its worker's state, and its review turn is that
+        ticket's), so the lane never runs a second turn beside a reclaim.
+        """
+        if not self._standalone():
+            covered = covered | await store.run_in_thread(self._ticket_workers)
+        decisions = await store.run_in_thread(lanes.owed_decisions, now=now, covered=covered)
+        if not decisions:
+            return []
+        return await self._turns.take_up(decisions)
+
+    def _ticket_workers(self, conn: Any) -> set[int]:
+        """The workers of every ticket held, being offered, or that a reclaim would resume."""
+        tickets = ticket_tasks()
+        running, held = self._running(), self._held_ids()
+        theirs = [t for t in tickets if t.subject in running or t.task_id in held]
+        theirs += reclaimable([t for t in tickets if t not in theirs])
+        found: set[int] = set()
+        for ticket in theirs:
+            found |= workers_of(conn, ticket)
+        return found
+
+    async def _ledger_lane(self, now: datetime) -> list[str]:
+        """Next steps that sat in the ledger get the ledger turn (`lanes.ledger_due`)."""
+        due = await store.run_in_thread(lanes.ledger_due, now=now)
+        if not due:
+            return []
+        return await self._turns.take_up_ledger(due)
+
+    async def _deficiency_lane(self, now: datetime) -> list[str]:
+        """Open recorded deficiencies as issues on the clock (`lanes.deficiency_step`)."""
+        if self._last_deficiencies is not None and (
+            (now - self._last_deficiencies).total_seconds() < lanes.DEFICIENCY_EVERY_SECONDS
+        ):
+            return []
+        self._last_deficiencies = now
+        return await asyncio.to_thread(lanes.deficiency_step, self._reporter)
 
     # -- reclaim -----------------------------------------------------------------
 
@@ -1566,6 +1656,8 @@ class Rounds:
         await self._finish_attempts(by_worker, now)
         #: Worker -> the fingerprint its pull request has this round, for the lane.
         current: dict[int, str] = {}
+        #: Workers the ticket path took up this round: not the repair step's too.
+        covered: set[int] = set()
         for entry in entries:
             if not entry.get("known") or entry.get("pr") is None:
                 continue
@@ -1578,16 +1670,27 @@ class Rounds:
                     observe_ci, worker_id, float(entry["ci_seconds"]), str(entry.get("ci") or "")
                 )
             ticket = await asyncio.to_thread(self._ticket_of, worker_id, tickets)
-            if ticket is None or ticket.task_id in held:
+            if ticket is not None and ticket.task_id in held:
                 continue
             if entry.get("merged") is True or entry.get("state") == "MERGED":
-                # Handed over or not: the same follow-up a session's heartbeat makes.
+                # Ticket or not, handed over or not: the same follow-up a session's
+                # heartbeat makes, and the merge on the record so nothing asks again.
                 lines = await self._merged(ticket, worker_id, entry, now)
                 if lines:
                     said[worker_id] = "; ".join(lines)
                 continue
+            # A pull request whose ticket this process can offer back to the loop goes
+            # through that ticket's review turn (attention sets it `dispatched`, and the
+            # reclaim above takes it up). Every other one — no ticket, a ticket done or
+            # handed over, or anything standalone with no loop to offer to — is the
+            # repair step's below, the same one a session's heartbeat runs
+            # (`supervision.repair_untracked`), so every delivered pull request is
+            # somebody's and none is two people's (#72).
+            if ticket is None or self._standalone():
+                continue
             if ticket.phase in (serve.PHASE_DONE, serve.PHASE_HANDED_OVER):
                 continue
+            covered.add(worker_id)
             if entry.get("state") != "OPEN":
                 continue
             line = await self._follow(ticket, worker_id, entry, now, current)
@@ -1597,14 +1700,13 @@ class Rounds:
             await self._start_attempts(tickets, by_worker, current, now)
         ).items():
             said[worker_id] = line
-        # Pull requests no held ticket covers (dispatched from a session, or a ticket
-        # that ended): the same repair step a session's heartbeat runs without serve.
         lines = await asyncio.to_thread(
             supervision.repair_untracked,
             entries,
             now,
             steer=self._steer_worker,
             pr_details=self._pr_details,
+            covered=covered,
         )
         return [line for line in said.values() if line] + lines
 
@@ -1888,15 +1990,24 @@ class Rounds:
         return tickets.get(int(task["run_id"]))
 
     async def _merged(
-        self, ticket: Ticket, worker_id: int, entry: dict[str, Any], now: datetime
+        self, ticket: Ticket | None, worker_id: int, entry: dict[str, Any], now: datetime
     ) -> list[str]:
-        """Follow up a merged pull request once (`supervision.merged_step`), then clean up."""
+        """Follow up a merged pull request once (`supervision.merged_step`), then clean up.
+
+        The merge is recorded on the worker first (`delivery.record_merged`, what a
+        session's heartbeat does on observing one), so the task reads delivered at its
+        merge commit and the forge is never asked about it again. With no ticket there is
+        nothing to say and nowhere to say it: the record and the clean-up are the follow-up.
+        """
         loop = asyncio.get_running_loop()
 
         def post(target: Ticket, body: str, status: str | None) -> None:
             asyncio.run_coroutine_threadsafe(self._post(target, body, status=status), loop).result()
 
+        recorded = await asyncio.to_thread(supervision.record_merge, worker_id, entry)
         parts = await asyncio.to_thread(supervision.merged_step, [entry], post=post)
+        if ticket is None and recorded:
+            parts.append(f"worker task {worker_id}'s pull request merged: recorded, no ticket")
         if not parts:
             return []
         return parts + await self._hygiene(worker_id, now)
@@ -1955,10 +2066,14 @@ class Rounds:
         agent_config = getattr(self._built, "agent_config", None) or {}
         api = getattr(self._built, "api", None)
         server = str((getattr(api, "config", None) or {}).get("server_url") or "")
+        from papaya_agent_runtime.manager.launch import AGENT_REF_ENV
+
         return {
             "PAPAYA_API_URL": os.environ.get("PAPAYA_API_URL") or server,
             "PAPAYA_WORKSPACE_ID": str(agent_config.get("workspace_id") or ""),
             "PAPAYA_AGENT_TOKEN": str(agent_config.get("client_token") or ""),
+            # A turn keyed on a task asks the client for its tools by this ref.
+            AGENT_REF_ENV: str(getattr(self._built, "agent_ref", "") or ""),
         }
 
     # -- hygiene -------------------------------------------------------------------

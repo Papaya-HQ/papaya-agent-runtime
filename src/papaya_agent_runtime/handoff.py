@@ -125,7 +125,8 @@ def collect(conn: sqlite3.Connection | None = None, *, recent_runs: int = 10) ->
 
     open_runs: list[dict[str, Any]] = []
     for run in rows:
-        tasks = store.list_tasks(conn, run["id"])
+        # Worker tasks only (`store.WORKER_TASK`): a ticket placeholder is not in flight.
+        tasks = [t for t in store.list_tasks(conn, run["id"]) if store.is_worker_task(t)]
         questions = _open_questions(conn, run["id"])
         entries = [_task_entry(conn, t, repos, questions) for t in tasks]
         in_flight = [e for e in entries if e["status"] in IN_FLIGHT]

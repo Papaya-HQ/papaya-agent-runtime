@@ -73,8 +73,17 @@ def test_stop_blocks_once_when_work_is_open_and_no_next_step(ppy_home, monkeypat
     board.add("deliver task 1", conn=conn)
     assert hooks.handle_hook_stdin("Stop", "{}")["decision"] == "block"
 
-    # Once a next step is recorded against the task, stopping is fine.
+    # An open next step against the task does not discharge it either: the worker is
+    # still waiting on a turn only this session can take (#72). A deferral with a
+    # reason does, and a person's decision is what `ppy status --team` then lists.
     board.add("deliver it", task_id=task_id, conn=conn)
+    assert hooks.handle_hook_stdin("Stop", "{}")["decision"] == "block"
+    board.add(
+        "wait for the requester's word on the API shape",
+        task_id=task_id,
+        blocked_on="user",
+        conn=conn,
+    )
     assert "decision" not in hooks.handle_hook_stdin("Stop", "{}")
 
 

@@ -159,8 +159,10 @@ def test_status_team_renders_every_section_from_a_state_with_one_of_each(
     assert "forge_unauthenticated: gh is signed out" in under("blockers")
     assert any(line.startswith("last round (") and ROUND_LINE in line for line in lines)
     assert QUESTION in under("waiting on a person")
-    # One line per item, one heading per section, and nothing else.
-    assert len(lines) == 1 + 2 * 5 + 2
+    # One line per item, one heading per section, the delta since the last check (#72),
+    # and nothing else.
+    assert lines[-1].startswith("delta: ")
+    assert len(lines) == 1 + 2 * 5 + 2 + 1
 
 
 def test_status_team_json_carries_the_same_facts_machine_readably(world, capsys) -> None:
