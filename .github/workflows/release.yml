@@ -1,0 +1,99 @@
+# Every merge to `main` is a release.
+#
+# The `main` ruleset requires a pull request and a green `ci-ok`, with no bypass
+# actors, so no workflow can commit a version bump to it. A tag, however, a
+# workflow may push — so the tag *is* the version, and this is what creates it:
+# the newest `v<major>.<minor>.<patch>` with its patch bumped by one, or `v0.1.0`
+# if the repository has never been released.
+#
+# The computation is not in this file. `src/papaya_agent_runtime/version.py` owns
+# it, and this workflow calls it, because `git tag` sorts lexically — it puts
+# `v0.1.10` before `v0.1.9` — and because the same code has to read the tag back
+# out again at runtime. One sort, one place, unit-tested.
+#
+# There is nothing to gate on: the ruleset already guarantees every commit on
+# `main` passed `ci-ok`, so this deliberately does not depend on `ci.yml`.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  # So a release can be cut by hand if a run was missed or had to be re-run.
+  workflow_dispatch:
+
+# Pushing a tag and publishing a release is the only write this repository's CI
+# does. Nothing else in the job needs more.
+permissions:
+  contents: write
+
+# Serialised, because two runs racing would both compute the same next tag and
+# the second `git push` would fail on a tag that already exists. The cost is that
+# three merges inside one run's lifetime leave the middle commit untagged (GitHub
+# keeps only the newest pending run in a group) — a quiet gap rather than a red
+# release job, and the next merge releases normally.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: tag and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history and every tag: the next version is computed from the tags,
+      # and a shallow clone would have none of them and re-release v0.1.0.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # No uv, no install, no dependencies: `version.py` is standard library only
+      # precisely so it can be read by a bare interpreter, here and in `bin/ppy`.
+      #
+      # Prints the tag to create, or an empty line when HEAD already carries a
+      # release tag — which is what makes this idempotent. A re-run of a push
+      # that already tagged, or a `main` commit somebody tagged by hand to cut a
+      # minor, tags nothing and exits green. Exit 2 (a git it could not read at
+      # all) fails the job rather than releasing on a guess.
+      - name: Work out the next tag
+        id: next
+        env:
+          PYTHONPATH: src
+        run: echo "tag=$(python3 -m papaya_agent_runtime.version --next)" >> "$GITHUB_OUTPUT"
+
+      - name: Tag this commit
+        if: steps.next.outputs.tag != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.next.outputs.tag }}" -m "papaya-agent-runtime ${{ steps.next.outputs.tag }}"
+          git push origin "${{ steps.next.outputs.tag }}"
+
+      # The one thing worth proving on a real release: what the runtime reports
+      # is what was just tagged. `ppy capabilities --json` feeds the desktop's
+      # machine card verbatim, so a derivation that drifted from the tag would be
+      # visible to every user before it was visible here.
+      - name: The runtime reports the tag it was just given
+        if: steps.next.outputs.tag != ''
+        env:
+          PYTHONPATH: src
+        run: |
+          expected="${{ steps.next.outputs.tag }}"
+          reported="$(python3 -m papaya_agent_runtime.version)"
+          echo "tag=$expected reported=$reported"
+          test "$reported" = "${expected#v}"
+
+      # If this fails the job goes red and the tag stays pushed. That is on
+      # purpose: re-running must not create a second tag for one build, so the
+      # re-run sees the tag on HEAD and does nothing. Publish the missing release
+      # by hand instead — `gh release create <tag> --generate-notes` — which is
+      # also all this step does.
+      - name: Publish the release
+        if: steps.next.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release create "${{ steps.next.outputs.tag }}"
+          --title "${{ steps.next.outputs.tag }}"
+          --generate-notes

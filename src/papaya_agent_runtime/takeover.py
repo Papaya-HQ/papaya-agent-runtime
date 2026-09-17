@@ -134,10 +134,17 @@ def checkout_build(root: str) -> dict[str, str]:
         from papaya_agent_runtime import __version__ as version
     except ImportError:  # pragma: no cover - the package is what is running this
         version = "unknown"
+    # The build id drops the version's local segment. Since the version became
+    # git-derived, that segment carries `.dirty`, and a build id that moved
+    # whenever the working tree did would read as "another build" to `decide()` —
+    # so editing one file under a running supervisor would retire it, workers and
+    # all. The commit is already named here; the release is all the version needs
+    # to contribute, and it does not flicker.
+    public = str(version).split("+", 1)[0]
     return {
         "git_head": head,
         "version": str(version),
-        "build_id": f"{version}+{head[:12] or 'unknown'}",
+        "build_id": f"{public}+{head[:12] or 'unknown'}",
     }
 
 

@@ -1,6 +1,19 @@
 [project]
 name = "papaya-agent-runtime"
-version = "0.0.0"
+# The version is a git tag, not a line in this file. Every merge to `main` is
+# tagged `v<major>.<minor>.<patch>` by `.github/workflows/release.yml`, and
+# `src/papaya_agent_runtime/version.py` reads that tag back out of the checkout —
+# which is the only honest source, since this runtime is always run from a
+# checkout and never built into a wheel. A literal here would have to be bumped
+# by hand and would name the same build on every machine when nobody did; it said
+# `0.0.0` for the whole of the project's life, and the desktop machine card
+# printed that.
+#
+# `dynamic` is accepted without a build backend because `[tool.uv] package =
+# false` below makes this a virtual project: uv never builds it, records no
+# version for the root in `uv.lock`, and `uv sync --frozen` — what CI runs —
+# resolves it exactly as before.
+dynamic = ["version"]
 description = "A lightweight, local framework for directing autonomous software work across one or more Git repositories."
 readme = "README.md"
 requires-python = ">=3.13"
