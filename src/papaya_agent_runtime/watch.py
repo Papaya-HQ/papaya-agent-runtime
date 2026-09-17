@@ -47,7 +47,7 @@ NEEDS_ME = owed.OWED_STATUSES
 PR_TRACKED = ("worker_done", "delivered")
 
 # Event kinds that are provider chatter, not news the manager relays.
-NOISE_PREFIXES = ("worker_item.", "worker_thread.", "worker_turn.", "hook_")
+NOISE_PREFIXES = ("worker_item.", "worker_thread.", "worker_turn.", "hook_", "worktree_hygiene")
 
 # A heartbeat must not hang on a slow forge; an unanswered query is "unknown".
 GH_TIMEOUT_SECONDS = 30.0
@@ -665,6 +665,49 @@ def merge_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
         return [f"could not follow up merged pull requests: {exc}"]
 
 
+#: How often the heartbeat re-checks readiness for blockers, and runs hygiene.
+BLOCKER_EVERY_SECONDS = 15 * 60.0
+HYGIENE_EVERY_SECONDS = 60 * 60.0
+
+
+class UpkeepStep:
+    """Hourly hygiene and a blocker re-check every fifteen minutes, when no serve does them.
+
+    The same `supervision.hygiene_step` and `supervision.blocker_step` serve's rounds and
+    blocker watch run. Never raises.
+    """
+
+    def __init__(self) -> None:
+        self._blockers_at: datetime | None = None
+        self._kept_runs: dict[str, int] = {}
+
+    def __call__(self, now: datetime) -> list[str]:
+        try:
+            if supervision.serve_running():
+                return []
+            from papaya_agent_runtime import rounds
+
+            lines: list[str] = []
+            if self._blockers_at is None or (
+                (now - self._blockers_at).total_seconds() >= BLOCKER_EVERY_SECONDS
+            ):
+                self._blockers_at = now
+                lines += supervision.blocker_step()
+            last = supervision.last_hygiene_at()
+            if last is None or (now - last).total_seconds() >= HYGIENE_EVERY_SECONDS:
+                lines += supervision.hygiene_step(
+                    None,
+                    now,
+                    prune=rounds.default_prune,
+                    git=rounds.default_git,
+                    post=supervision.post_as_agent,
+                    kept_runs=self._kept_runs,
+                )
+            return lines
+        except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
+            return [f"could not run upkeep: {exc}"]
+
+
 def is_idle(snapshot: dict[str, Any]) -> bool:
     """Is there nothing for the manager to watch right now?
 
@@ -780,6 +823,7 @@ def _loop(
     # A test that replaces the repair step replaces every step that reaches out.
     listen = listen_step if repair is None else (lambda now: [])
     merges = merge_step if repair is None else (lambda conn, now: [])
+    upkeep = UpkeepStep() if repair is None else (lambda now: [])
     repair = repair or repair_step
     # The first tick reports the current state, not the whole event history.
     since = max_event_id(conn)
@@ -799,7 +843,9 @@ def _loop(
             previous_prs=previous,
             settled_prs=settled,
             now=moment,
-            repairs=[] if once else [*repair(conn, moment), *listen(moment), *merges(conn, moment)],
+            repairs=[]
+            if once
+            else [*repair(conn, moment), *listen(moment), *merges(conn, moment), *upkeep(moment)],
         )
         since = snapshot["last_event_id"]
         previous = pr_index(snapshot["prs"])

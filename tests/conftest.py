@@ -20,6 +20,30 @@ from papaya_agent_runtime.providers import capability
 
 
 @pytest.fixture(autouse=True)
+def _heartbeat_upkeep_only_where_a_test_asks(request, monkeypatch):
+    """The heartbeat's upkeep re-checks readiness, which names this machine's real
+    blockers (CI has no signed-in harness); heartbeat tests about other lines should not
+    depend on the machine. `tests/test_supervision.py` exercises the real step."""
+    if request.module.__name__.endswith("test_supervision"):
+        return
+    from papaya_agent_runtime import watch
+
+    monkeypatch.setattr(watch.UpkeepStep, "__call__", lambda self, now: [])
+
+
+@pytest.fixture(autouse=True)
+def _session_start_remedies_only_where_a_test_asks(request, monkeypatch):
+    """The session-start hook runs serve's start remedies when no serve is running
+    (`hooks.start_remedies_context`); hook tests about other context should not see
+    first-run setup. `tests/test_supervision.py` exercises the real step."""
+    if request.module.__name__.endswith("test_supervision"):
+        return
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.setattr(hooks, "start_remedies_context", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _parity_gaps_are_recorded_only_where_a_test_asks(request, monkeypatch):
     """Every serve start and session start records the open parity gaps as a deficiency
     (`parity.record_gaps`); tests about other deficiencies should not count that entry.

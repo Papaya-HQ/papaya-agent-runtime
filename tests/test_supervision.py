@@ -396,3 +396,89 @@ def test_the_heartbeat_follows_up_merges_only_without_serve(ppy_home, monkeypatc
     assert watch.merge_step(conn, NOW) == [] and calls == []
     monkeypatch.setattr(supervision, "serve_running", lambda: False)
     assert watch.merge_step(conn, NOW) == ["m"] and calls == ["m", "g"]
+
+
+# ── hygiene, start remedies, blockers ───────────────────────────────────────
+
+
+def test_hygiene_removes_what_prune_allows_and_records_the_run(ppy_home) -> None:
+    from papaya_agent_runtime import rounds
+
+    prune = lambda task_id: {  # noqa: E731
+        "removed": [{"task_id": 3, "path": "/wt/3", "repo": "app", "size_bytes": 2048}],
+        "skipped": [],
+        "reclaimed_bytes": 2048,
+    }
+    git_calls: list = []
+
+    lines = supervision.hygiene_step(
+        None,
+        NOW,
+        prune=prune,
+        git=lambda args, cwd: git_calls.append(args),
+        post=None,
+        kept_runs={},
+    )
+
+    assert lines[0].startswith("removed 1 worktree(s)")
+    assert rounds.hygiene_records()[-1]["scope"] == "all"
+    assert supervision.last_hygiene_at() is not None
+
+
+def test_a_blocker_that_appears_or_clears_is_said(ppy_home) -> None:
+    from papaya_agent_runtime import readiness
+
+    problem = readiness.Problem(
+        code="gh_missing",
+        summary="gh is missing",
+        fix="install gh",
+        owner=readiness.USER,
+        blocking=False,
+        title="Install gh",
+        steps=("brew install gh",),
+    )
+    appeared = supervision.blocker_step(check=lambda: readiness.Readiness("degraded", [problem]))
+    cleared = supervision.blocker_step(check=lambda: readiness.Readiness("ready", []))
+
+    assert appeared == ["new blocker: Install gh"]
+    assert cleared == ["blocker cleared: Install gh"]
+
+
+def test_a_session_starts_with_the_start_remedies_only_when_no_serve_runs(
+    ppy_home, monkeypatch
+) -> None:
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.delenv(MANAGER_TURN_ENV, raising=False)
+    monkeypatch.setattr(
+        supervision,
+        "start_remedies",
+        lambda *, stderr: stderr.write("ppy serve: closed 1 runner\n"),
+    )
+
+    monkeypatch.setattr(supervision, "serve_running", lambda: True)
+    assert hooks.start_remedies_context() is None
+    monkeypatch.setattr(supervision, "serve_running", lambda: False)
+    said = hooks.start_remedies_context()
+    assert said is not None and "- closed 1 runner" in said
+
+
+def test_the_heartbeat_upkeep_runs_hygiene_hourly_and_blockers_every_quarter_hour(
+    ppy_home, monkeypatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(supervision, "serve_running", lambda: False)
+    monkeypatch.setattr(supervision, "blocker_step", lambda: calls.append("b") or [])
+    monkeypatch.setattr(supervision, "hygiene_step", lambda *a, **k: calls.append("h") or [])
+    last: list = [None]
+    monkeypatch.setattr(supervision, "last_hygiene_at", lambda: last[0])
+    upkeep = watch.UpkeepStep()
+
+    upkeep(NOW)
+    last[0] = NOW
+    upkeep(NOW + timedelta(minutes=5))
+    upkeep(NOW + timedelta(minutes=16))
+    upkeep(NOW + timedelta(minutes=61))
+
+    assert calls == ["b", "h", "b", "b", "h"]
+    monkeypatch.setattr(supervision, "serve_running", lambda: True)
+    assert upkeep(NOW + timedelta(hours=3)) == []

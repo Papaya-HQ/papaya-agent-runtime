@@ -1964,110 +1964,25 @@ class Rounds:
     # -- hygiene -------------------------------------------------------------------
 
     async def _hygiene(self, task_id: int | None, now: datetime) -> list[str]:
-        """Clean up worktrees under `ppy worktree prune`'s rules, and say so only when it matters.
+        """Worktree hygiene (`supervision.hygiene_step`); a session's heartbeat runs it too."""
+        loop = asyncio.get_running_loop()
 
-        ``task_id`` is one task's slot, straight after its ticket is done; ``None``
-        is the hourly run over every slot. Either way the base clones touched get
-        `git worktree prune` and `git fetch --prune`, and one hygiene event records
-        what went (with bytes) and what stayed (with why).
-        """
-        try:
-            result = await asyncio.to_thread(self._prune, task_id)
-        except Exception as exc:  # noqa: BLE001 - hygiene must never end a round
-            log.warning("[rounds] Worktree hygiene failed: %s", exc)
-            return []
-        removed = list(result.get("removed") or [])
-        kept = list(result.get("skipped") or [])
-        repos = {str(r["repo"]) for r in removed if r.get("repo")}
-        if task_id is None:
-            repos |= {str(r["repo"]) for r in kept if r.get("repo") and r.get("managed", True)}
-        clones = await asyncio.to_thread(
-            managed_clone_paths, repos if task_id is not None else None
+        def post(target: Ticket, body: str, status: str | None) -> None:
+            asyncio.run_coroutine_threadsafe(self._post(target, body, status=status), loop).result()
+
+        return await asyncio.to_thread(
+            supervision.hygiene_step,
+            task_id,
+            now,
+            prune=self._prune,
+            git=self._git,
+            post=post,
+            kept_runs=self._kept_runs,
         )
-        for clone in clones:
-            await asyncio.to_thread(self._git, ["worktree", "prune"], clone)
-            await asyncio.to_thread(self._git, ["fetch", "--prune", "--quiet"], clone)
-
-        parts: list[str] = []
-        streak_parts: list[str] = []
-        if task_id is None:
-            still = {str(r["path"]) for r in kept}
-            self._kept_runs = {path: self._kept_runs.get(path, 0) + 1 for path in still}
-            streak_parts = [
-                f"kept {r['path']} for the {KEPT_SUMMARY_RUNS}rd run in a row: {r['reason']}"
-                for r in kept
-                if self._kept_runs.get(str(r["path"])) == KEPT_SUMMARY_RUNS
-            ]
-        surfaced = await self._loose_ends(kept, now)
-        await asyncio.to_thread(
-            record_hygiene,
-            {
-                "task_id": task_id,
-                "scope": "task" if task_id is not None else "all",
-                "removed": [
-                    {
-                        "task_id": r.get("task_id"),
-                        "path": r.get("path"),
-                        "branch": r.get("branch"),
-                        "size_bytes": int(r.get("size_bytes") or 0),
-                    }
-                    for r in removed
-                ],
-                "kept": [
-                    {
-                        "task_id": r.get("task_id"),
-                        "path": r.get("path"),
-                        "reason": r.get("reason"),
-                        "dirty": r.get("dirty"),
-                        "unpushed_commits": r.get("unpushed_commits"),
-                    }
-                    for r in kept
-                ],
-                "reclaimed_bytes": int(result.get("reclaimed_bytes") or 0),
-                "base_clones": clones,
-                "surfaced": surfaced,
-            },
-        )
-        if removed:
-            from papaya_agent_runtime.worktree.reclaim import human_bytes
-
-            total = int(result.get("reclaimed_bytes") or 0)
-            parts.append(f"removed {len(removed)} worktree(s), {human_bytes(total)} freed")
-        parts += streak_parts
-        parts += [f"worktree {path} needs a person: waiting on you" for path in surfaced]
-        return parts
 
     async def _loose_ends(self, kept: list[dict[str, Any]], now: datetime) -> list[str]:
-        """Kept slots that only a person can settle, surfaced once each."""
-        from papaya_agent_runtime.worktree.reclaim import RECLAIMABLE_STATUSES
-
-        already = await asyncio.to_thread(surfaced_loose_ends)
-        surfaced: list[str] = []
-        for record in kept:
-            path = str(record.get("path") or "")
-            status = record.get("task_status")
-            unpushed = int(record.get("unpushed_commits") or 0)
-            if not path or path in already or status not in RECLAIMABLE_STATUSES:
-                continue
-            if not record.get("dirty") and unpushed == 0:
-                continue
-            if record.get("managed") is False or record.get("open_pr") is not None:
-                continue  # somebody else's, or waiting on its pull request, not on a person
-            updated = await asyncio.to_thread(task_updated_at, record.get("task_id"))
-            if updated is None or (now - updated).total_seconds() < KEPT_LOOSE_END_SECONDS:
-                continue
-            ticket = await asyncio.to_thread(ticket_for_worker, record.get("task_id"))
-            text = (
-                f"worktree {path} for task {record.get('task_id')} is kept: "
-                f"{record.get('reason')}; commit and push what should stay, or discard it"
-            )
-            await asyncio.to_thread(
-                surface_kept_slot, ticket.task_id if ticket else record.get("task_id"), text
-            )
-            if ticket is not None:
-                await self._post(ticket, f"waiting on you: {text}")
-            surfaced.append(path)
-        return surfaced
+        """Kept slots a person must settle: part of `supervision.hygiene_step` now."""
+        return []
 
 
 def _default_gate_verdict(task_id: int) -> Any:
