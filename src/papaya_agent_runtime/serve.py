@@ -4139,7 +4139,7 @@ async def run(
             runner=runner,
             server=server,
             sweep_sleep=sweep_sleep,
-            rounds_seams=rounds_seams,
+            rounds_seams={"reporter": reporter, **(rounds_seams or {})},
             blocker_seams=blocker_seams,
         )
     finally:
@@ -4316,6 +4316,7 @@ async def _run(
         for background in (walking, sweeping, watching):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await background
+        await manager_rounds.close()
         await watch.close()
         # A sweep that was mid-offer while the listener shut down can have started
         # a run after `shutdown` took its list of what to release. Shutting down
@@ -4422,6 +4423,7 @@ async def _run_standalone(
         for background in (walking, watching):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await background
+        await manager_rounds.close()
         await watch.close()
     return 0
 

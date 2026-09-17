@@ -1203,6 +1203,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     usage = snap.get("usage") or {}
     if usage:
         print(f"usage: in={usage.get('input_tokens', 0)} out={usage.get('output_tokens', 0)}")
+    # A batch of events received from the team ends in the delta, like every check.
+    _say_delta()
     return 0
 
 
@@ -1768,13 +1770,20 @@ def _cmd_health(args: argparse.Namespace) -> int:
 
 
 def _cmd_watch(args: argparse.Namespace) -> int:
-    """The team heartbeat: one relayable line of state per tick, on a cadence."""
+    """The team heartbeat: one relayable line of state per tick, on a cadence.
+
+    Piped (stdout not a terminal) it prints one tick and exits unless ``--follow`` says
+    otherwise: an agent calling it as a tool call otherwise hung on the five-minute
+    cadence until its tool timeout (#72). A background monitor passes ``--follow``.
+    """
     from papaya_agent_runtime import watch
 
+    follow = args.follow or args.exit_when_idle or sys.stdout.isatty()
+    once = args.once or not follow
     try:
         return watch.run(
             interval=args.interval,
-            once=args.once,
+            once=once,
             as_json=args.json,
             exit_when_idle=args.exit_when_idle,
         )
@@ -2383,8 +2392,26 @@ def _cmd_status_team(args: argparse.Namespace) -> int:
     else:
         for line in team.render(snap):
             print(line)
+        _say_delta(prs={p["url"] or f"task {p['task_id']}": p for p in snap["pull_requests"]})
     standalone.say_invitation(sys.stdout)
     return 0
+
+
+def _say_delta(prs: dict | None = None) -> None:
+    """Every check ends in the delta since the last one (`digest.check`). Never raises."""
+    from papaya_agent_runtime import digest
+    from papaya_agent_runtime.paths import db_path
+    from papaya_agent_runtime.state import init_db
+
+    if not db_path().exists():
+        return
+    try:
+        lines = digest.check(init_db(), prs=prs)
+    except Exception:  # noqa: BLE001 - a digest never fails the command it ends
+        return
+    print("delta: " + lines[0])
+    for line in lines[1:]:
+        print("       " + line)
 
 
 def _cmd_tail(args: argparse.Namespace) -> int:
@@ -2425,9 +2452,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
         conn = init_db()
         marks = ",".join("?" for _ in (*board.IN_FLIGHT, *board.NEEDS_ME))
+        # Worker tasks only (`store.WORKER_TASK`): a ticket placeholder is not in flight.
         counts = dict(
             conn.execute(
-                f"SELECT status, COUNT(*) FROM tasks WHERE status IN ({marks}) GROUP BY status",
+                f"SELECT status, COUNT(*) FROM tasks WHERE status IN ({marks}) "
+                f"AND {store.WORKER_TASK} GROUP BY status",
                 (*board.IN_FLIGHT, *board.NEEDS_ME),
             ).fetchall()
         )
@@ -2444,7 +2473,6 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"lane:    {reconcile.lane_status(conn)}")
         for advisory in health.usage_advisories(conn):
             print(health.describe_usage_advisory(advisory))
-        _ = store
     except Exception:  # noqa: BLE001 - status must never crash
         pass
     try:
@@ -2456,6 +2484,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"review:  assessment {row['id']} {row['status']}")
     except Exception:  # noqa: BLE001 - status must never crash
         pass
+    _say_delta()
     from papaya_agent_runtime import standalone
 
     standalone.say_invitation(sys.stdout)
@@ -3572,7 +3601,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "team heartbeat: print one line of state (in-flight workers, tasks waiting "
             "on you, the pull requests delivered work sits in with their CI verdict, "
-            "new events) now and every --interval seconds; relay each tick"
+            "new events, the delta since the last check) now and every --interval "
+            "seconds on a terminal or with --follow; one tick when piped"
         ),
     )
     watch_cmd.add_argument(
@@ -3581,7 +3611,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=300.0,
         help="seconds between ticks (default 300 — the 5-minute check-in)",
     )
-    watch_cmd.add_argument("--once", action="store_true", help="print one tick and exit")
+    watch_cmd.add_argument(
+        "--once",
+        action="store_true",
+        help="print one tick and exit (the default when stdout is not a terminal)",
+    )
+    watch_cmd.add_argument(
+        "--follow",
+        action="store_true",
+        help="keep ticking even when stdout is not a terminal: for a background monitor",
+    )
     watch_cmd.add_argument("--json", action="store_true", help="machine-readable ticks")
     watch_cmd.add_argument(
         "--exit-when-idle",

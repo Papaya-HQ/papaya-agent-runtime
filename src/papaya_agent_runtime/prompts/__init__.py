@@ -1,10 +1,13 @@
 """The prompts `ppy serve` gives its manager turns, as reviewed text.
 
-Four turns, four files beside this one: ``brief.md`` (choose the repository, define
+Five turns, five files beside this one: ``brief.md`` (choose the repository, define
 done on the record, brief and dispatch), ``answer.md`` (unblock a worker's question
-or take it to a person), ``review.md`` (review at head, deliver, report back) and
+or take it to a person), ``review.md`` (review at head, deliver, report back),
 ``checkin.md`` (the rounds' look at a running worker: continue, steer, or stop and
-resume, said on one last line the runner acts on).
+resume, said on one last line the runner acts on) and ``ledger.md`` (the next steps
+that sat in the ledger: do each, defer it with a reason, or drop it). The answer and
+review turns run with a held Papaya work item or without one (a worker dispatched from
+a session, or whose ticket ended: `lanes`); the facts say which.
 
 They instruct; they do not template. Task 222 was closed for generating briefs in
 code, and the rule that came out of it is kept here structurally: the only thing
@@ -24,7 +27,8 @@ BRIEF = "brief"
 ANSWER = "answer"
 REVIEW = "review"
 CHECKIN = "checkin"
-TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN)
+LEDGER = "ledger"
+TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER)
 #: Not a manager turn: the scoped brief a reconciler worker starts from when the
 #: session that delivered a pull request cannot be resumed to fix it.
 RECONCILE = "reconcile"
@@ -35,6 +39,10 @@ REVIEW_SKILL = ".agents/skills/review-a-worker/SKILL.md"
 
 #: The one placeholder a prompt file may contain.
 RUNTIME_DIR = "{runtime_dir}"
+
+#: The heading the facts are appended under. Not "this ticket": a turn keyed on a task
+#: (`lanes`) holds no ticket, and its facts say so.
+FACTS_HEADING = "## The facts"
 
 #: What a rerun is told when the runner found a turn's obligation unmet on the
 #: record. One line each, appended as a fact; the prompts themselves are unchanged.
@@ -164,7 +172,7 @@ def render(turn: str, *, runtime_dir: str | Path, facts: Mapping[str, object]) -
     (a worker's question, a failure summary) are kept verbatim in a fenced block.
     """
     body = load(turn).replace(RUNTIME_DIR, str(Path(runtime_dir).resolve()))
-    lines = ["", "## This ticket", ""]
+    lines = ["", FACTS_HEADING, ""]
     blocks: list[str] = []
     for key, value in facts.items():
         if value is None:
@@ -193,7 +201,9 @@ __all__ = [
     "CHECKIN_PREFIX",
     "CHECKIN_STEER",
     "CHECKIN_STOP",
+    "FACTS_HEADING",
     "GATE_TIERS_RULE",
+    "LEDGER",
     "MEMORY_RULE",
     "REVIEW",
     "PR_FOLLOW_RULE",

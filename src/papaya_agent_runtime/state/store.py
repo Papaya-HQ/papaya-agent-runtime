@@ -783,6 +783,17 @@ def delete_watermark(conn: sqlite3.Connection, key: str) -> bool:
 #: wrote its note (CI, 2026-09-16).
 PROGRESS_NOTE = "kind = 'worker_progress' AND COALESCE(json_extract(payload, '$.phase'), '') != ''"
 
+#: The SQL that keeps a query to worker tasks. A ticket task (`phase` set) is `ppy serve`'s
+#: record of a hold, never a process: counted as a worker it read as one dead forever
+#: (`health`, PR #71), and as "in flight" on the board, in the handoff and in `ppy status`
+#: with one worker actually running (#72). Every in-flight count reads through this.
+WORKER_TASK = "phase IS NULL"
+
+
+def is_worker_task(row: sqlite3.Row | dict) -> bool:
+    """The row is a worker task, not a ticket task: :data:`WORKER_TASK` in Python."""
+    return row["phase"] is None
+
 
 def progress_events(
     conn: sqlite3.Connection, *, task_id: int | None = None, repo_id: int | None = None

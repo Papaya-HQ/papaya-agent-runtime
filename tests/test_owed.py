@@ -153,7 +153,13 @@ def test_stop_needs_a_next_step_against_each_owed_task(home, monkeypatch) -> Non
     assert first["decision"] == "block"
     assert f"worker task {task_id} failed" in first["reason"]
 
+    # An open next step against the task is not enough: the worker still waits on a
+    # turn only this session can take (#72). Deferring it with a reason is.
     board.add("resume it with the fix", task_id=task_id, conn=conn)
+    assert hooks.handle_hook_stdin("Stop", "{}")["decision"] == "block"
+    board.add(
+        "decide whether the fix is worth a redo", task_id=task_id, blocked_on="user", conn=conn
+    )
     assert "decision" not in hooks.handle_hook_stdin("Stop", "{}")
 
 

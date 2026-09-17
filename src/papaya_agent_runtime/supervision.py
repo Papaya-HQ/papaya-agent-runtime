@@ -22,11 +22,14 @@ Two decisions live here so far:
 from __future__ import annotations
 
 import contextlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from papaya_agent_runtime import health
+
+log = logging.getLogger("papaya_agent_runtime.supervision")
 
 #: Gate follow-up actions.
 REVIEW = "review"
@@ -587,17 +590,20 @@ def repair_untracked(
     steer,
     pr_details=None,
     room: int | None = None,
+    covered: set[int] | None = None,
 ) -> list[str]:
     """Repair every open delivered pull request no live ticket covers. Returns lines.
 
     The ticket path in `ppy serve` goes through a review turn; this is everything else:
     work dispatched from a session, and tickets that ended (handed over, done, stalled).
     Both modes call it: serve's rounds each round, and the heartbeat when no serve is
-    running. Never raises.
+    running. ``covered`` are the workers serve's ticket path took up this round, so no
+    pull request is repaired twice. Never raises.
     """
     from papaya_agent_runtime import reconcile
 
     lines: list[str] = []
+    skip = set(covered or ())
     try:
         mine: dict[int, dict[str, Any]] = {}
         for entry in entries:
@@ -606,7 +612,7 @@ def repair_untracked(
             if entry.get("status") != "delivered" or entry.get("state") != "OPEN":
                 continue
             worker_id = int(entry["task_id"])
-            if not _no_live_ticket(worker_id):
+            if worker_id in skip or not _no_live_ticket(worker_id):
                 continue
             mine[worker_id] = entry
             attention = pr_attention(worker_id, entry, now)
@@ -700,6 +706,35 @@ def merged_message(where: str, rule: str) -> tuple[str, str | None]:
 
 def _merged(entry: dict[str, Any]) -> bool:
     return entry.get("merged") is True or entry.get("state") == "MERGED"
+
+
+def record_merge(worker_task_id: int, entry: dict[str, Any]) -> bool:
+    """Record a pull request the forge reports merged on its worker, once. Never raises.
+
+    The same bookkeeping a session's heartbeat does on observing a merge
+    (`delivery.record_merged`): the task reads delivered at the merge commit, its compose
+    stack comes down, and the forge is not asked about the branch again. Returns whether
+    this call recorded it (a merge already on the record is not news).
+    """
+    import re
+
+    from papaya_agent_runtime.delivery import DeliveryError, record_merged
+
+    if not _merged(entry):
+        return False
+    sha = entry.get("merge_commit")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        return False
+    try:
+        result = record_merged(
+            worker_task_id, sha, note=f"a round observed pull request #{entry.get('pr')} merged"
+        )
+    except DeliveryError:
+        return False
+    except Exception as exc:  # noqa: BLE001 - the follow-up still runs
+        log.warning("[supervision] Could not record task %d merged: %s", worker_task_id, exc)
+        return False
+    return "already recorded" not in str(result.note or "")
 
 
 def merged_step(entries: list[dict[str, Any]], *, post, held: set[int] | None = None) -> list[str]:

@@ -118,3 +118,22 @@ def test_cli_todo_board_and_status(ppy_home, capsys) -> None:
     out = capsys.readouterr().out
     assert "tasks:   1 in flight, 0 waiting on me" in out
     assert "todos:   0 next, 1 waiting" in out
+
+
+def test_a_ticket_placeholder_is_not_in_flight_on_any_surface(ppy_home, capsys) -> None:
+    """One shared worker-task filter (`store.WORKER_TASK`): the board, the handoff and
+    `ppy status` read a ticket task (phase set, status `requested`) as a hold, never a
+    worker. On 2026-09-17 the board said "20 in flight" with one worker running (#72)."""
+    from papaya_agent_runtime import handoff, health
+
+    conn = init_db()
+    run_id, worker = _run_with_task(conn)
+    ticket = store.add_task(conn, run_id=run_id, title="the ticket")
+    store.set_task_phase(conn, ticket, "dispatched")
+
+    text = board.render_board(conn)
+    assert f"- task {worker}" in text and f"- task {ticket}" not in text
+    assert [e["id"] for r in handoff.collect(conn)["open_runs"] for e in r["in_flight"]] == [worker]
+    assert [e["task_id"] for e in health.check(conn)] == [worker]
+    assert main(["status"]) == 0
+    assert "tasks:   1 in flight, 0 waiting on me" in capsys.readouterr().out

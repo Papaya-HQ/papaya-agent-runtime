@@ -71,6 +71,10 @@ class Owed:
     seconds: float | None
     #: The ticket task `ppy serve` is working it under, when that ticket is still live.
     ticket_task_id: int | None = None
+    #: For a done or stopped worker: the gate follow-up its record calls for
+    #: (`supervision.GateFollowup`), so the lanes act on the decision this list was read
+    #: with rather than reading the record twice.
+    followup: Any = None
 
     @property
     def serve_owns(self) -> bool:
@@ -213,6 +217,7 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
     for row in rows:
         task_id, status = int(row["id"]), str(row["status"])
         reason, next_step = _reason(conn, task_id, status), _NEXT[status].format(id=task_id)
+        followup = None
         if status in ("worker_done", "worker_stopped"):
             # The gate follow-up serve's runner makes on the same worker (`supervision`).
             from papaya_agent_runtime import supervision
@@ -235,6 +240,7 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
                 next_step=next_step,
                 seconds=_seconds(now, row["updated_at"]),
                 ticket_task_id=tickets.get(int(row["run_id"])),
+                followup=followup,
             )
         )
     from papaya_agent_runtime import supervision, workitems

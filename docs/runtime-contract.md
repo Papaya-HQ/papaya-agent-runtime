@@ -48,6 +48,22 @@ and posted, a recorded next step still gets executed or explicitly deferred with
 reason. `ppy status`, `ppy board` and the Stop hook read the same ledger you do — if
 one of them says something is waiting on you, it is.
 
+The runtime keeps this rule in code, the same way in both modes (`lanes.py`). Every
+worker waiting on the manager with no live ticket, every next step that has sat in
+the ledger past thirty minutes, and every deficiency the runtime recorded about itself
+is one decision over the ledger. `ppy serve` acts on it on its rounds: a stopped or
+done worker whose record says so is sent back to its gate, a question gets the answer
+turn and finished work the review turn — keyed on the task, run without a hold — a
+recorded next step gets the ledger turn (do it, defer it with a reason, or drop it),
+and a decision only a person can make is recorded against the task, where
+`ppy status --team` lists it. In a session **you are the turn**: the session-start
+hook and every heartbeat tick name the turns only you can take (`your turn:`) and the
+next steps that sat (`ledger due:`), the heartbeat does the mechanical parts itself
+while no `ppy serve` runs, and the Stop hook refuses to end a turn while one of them
+is yours to take. An open next step recorded against a task does not discharge it;
+only a deferral with a reason does (`ppy todo add --task <id> --blocked-on
+user|review|task:<id> "..."`, `ppy todo block <id> --on ...`).
+
 This applies with equal force to a status question. "What is the team working on"
 is not a read-only turn: run the preflight, do the work the board shows is due, then
 report. Ask the user only about decisions that are genuinely theirs — a capability
@@ -61,6 +77,11 @@ each end with a **very concise** summary: what moved, what is newly blocked, wha
 needs the user. A few lines. When nothing changed, say that in one line rather than
 going quiet — silence and a full board dump are both failures of the same rule. Keep
 the complete listing for when the user asks for it.
+
+The runtime writes that delta for you: every heartbeat tick ends in it (after `||`),
+and `ppy status`, `ppy status --team` and `ppy run` end in a `delta:` line, each
+compared with whichever check came last on this machine. Relay it; do not rebuild it
+from the board.
 
 ## When a gate fails twice, it is a decision — not a third round
 
@@ -424,12 +445,15 @@ quietly; do not narrate the steps or report diagnostics.
    every worker waiting on you (finished, stopped, failed, asking, lost its process —
    the same list `ppy watch`, `ppy status --team` and readiness read, from
    `owed.py`), and the Stop hook refuses to end a turn while a worker runs or waits
-   with no heartbeat alive, or while a waiting worker has no next step recorded
-   against it (`ppy todo add --task <id> "..."`). A worker nobody takes up within
+   with no heartbeat alive, or while a waiting worker is still yours to review or
+   answer and not deferred with a reason (`ppy todo add --task <id> --blocked-on
+   user|review|task:<id> "..."`). A worker nobody takes up within
    fifteen minutes and no live ticket covers becomes a person's blocker, which
    `ppy serve` reports to them, so a machine with no session open still tells
-   somebody. Start `./bin/ppy watch` as a background monitor in your
-   harness (it prints one line of team state now and every five minutes: who is
+   somebody. Start `./bin/ppy watch --follow` as a background monitor in your
+   harness (`--follow` because a monitor's output is a pipe, and piped the command
+   prints one tick and exits, so a tool call never hangs on it; it prints one line
+   of team state now and every five minutes: who is
    in flight and alive, which tasks are waiting on you, the *open* pull requests
    your delivered work is sitting in with their CI verdict and mergeability, what
    arrived since the last tick, how big the ledger is). It also names what
@@ -938,7 +962,7 @@ readable at a glance by someone who just wants to know if it's done.
 | Delegate | `ppy dispatch --repo ... --title ... --provider ... [--model] [--reasoning] [--stack-on <task_id>] [--ends-at review\|done]` — before creating a task it refuses when Treehouse has no reusable slot and no room to grow below its configured `max_trees` (remedy: `ppy worktree prune`); an unreadable ceiling leaves capacity unknown and the gate open. It also refuses when a compose-enabled repo has more stale task stacks than `health.max_stale_stacks` (default 4; remedies: `ppy task close` / `ppy worktree prune`). Terminal phase defaults to `done` and is stored on the task. A review-ending worker commits, files `--phase review`, does not call done or push, and hands control to the manager for review and delivery. `--stack-on` builds on that task: its lease branch becomes the starting point and the stack parent is recorded, so `ppy stack` and `ppy deliver` follow the chain. A `claude` dispatch automatically prepends command rules and the repo environment block; Codex gets the environment block alone. Don't restate either in the brief. |
 | Gates past the tool cap | `ppy gate run [<repo>] [--task <id>] [--full] [--wait <seconds>]` — a command that may run longer than ten minutes must not be run as a tool call; use `ppy gate run`, or push and let the hook run it. Never background a gate and wait. The supervisor runs the repo's recorded local gate (or `--full-suite-command` with `--full`) in the task's worktree (or the base clone, given only a repo) as its own subprocess with no timeout; the call prints a progress line every minute and returns within `--wait` (default 540s): exit 0 green, 1 red, 75 still running — the same command again attaches instead of starting another. The result is a `gate_result` event on the task (command, duration, summary line, exit code, head SHA, output path) plus a `receipts.txt` line. `ppy serve` decides on it: green at the worker's head is reviewable, red is steered with the summary, a stopped worker with none is steered to run it. `ppy repo onboard [--local-gate <cmd>]`, `ppy repo ensure` and every `ppy serve` start read the gate policy (hook flag, local gate, full suite and its owner) from what the repository says and what its pull-request workflows run, never replacing a value a person set (`ppy repo show <repo>` prints each with its source: `person`, `repo:<file>:<line>`, `observed:<where>`); when the instructions name no full suite it is discovered from pull-request CI's check steps, then the build files, so readiness raises `repo_without_gate_policy` only for an onboarded repo whose instructions, CI, build files and hooks give nothing |
 | Command receipts | `ppy receipt <task_id> -- <command ...>` runs the command in the task worktree under the same resolved child environment, tees combined output to `<evidence-dir>/<slug>.txt`, appends `<utc> \| <command> \| exit=<n> \| <elapsed>s \| head=<sha>` to `<evidence-dir>/receipts.txt`, and returns the command's nonzero exit unchanged. |
-| Heartbeat | `ppy watch` (background monitor; one line every `--interval` seconds, default 300) — in-flight workers, tasks waiting on you, and for every finished or delivered task whose branch has an open pull request: number, base, CI verdict (naming the failing checks), and mergeability, plus what flipped since the last tick. When the forge reports a PR merged, that tick records the forge's merge commit (including squash merges), tears down the task's compose stack, says so, and retires the PR; a closed-unmerged PR is never recorded. `ppy deliver <task> --merged <sha>` remains the idempotent manual form. `--once` for one line, `--json` for machine output. Without `gh` it says `ci: unknown` rather than failing. It goes quiet on its own after two idle ticks (nothing in flight, nothing owed to you, no pending or failing checks, nothing new) and speaks again the moment that stops being true — leave it running rather than restarting it; `--exit-when-idle` makes it exit instead, for scripts |
+| Heartbeat | `ppy watch --follow` (background monitor; one line every `--interval` seconds, default 300; without `--follow`, when stdout is not a terminal, it prints one tick and exits, so a tool call never hangs on it) — in-flight workers, tasks waiting on you, the turns only a session can take (`your turn:`), next steps that sat in the ledger (`ledger due:`), and for every finished or delivered task whose branch has an open pull request: number, base, CI verdict (naming the failing checks), and mergeability, plus what flipped since the last tick, ending in the delta since the last check (after `||`). While no `ppy serve` runs it also acts: the same lanes serve's rounds run — a stopped worker sent back to its gate, a decision handed to a person, delivered pull requests repaired, deficiencies opened as issues. When the forge reports a PR merged, that tick records the forge's merge commit (including squash merges), tears down the task's compose stack, says so, and retires the PR; a closed-unmerged PR is never recorded. `ppy deliver <task> --merged <sha>` remains the idempotent manual form. `--once` for one line, `--json` for machine output. Without `gh` it says `ci: unknown` rather than failing. It goes quiet on its own after two idle ticks (nothing in flight, nothing owed to you, no pending or failing checks, nothing new) and speaks again the moment that stops being true — leave it running rather than restarting it; `--exit-when-idle` makes it exit instead, for scripts |
 | External sweeps | `ppy watermark get <key>` (the newest comment timestamp already processed on a ticket URL or id; exit 1 and a plain message when unset, so the first sweep reads everything), `ppy watermark set <key> <iso-timestamp> [--note ...]` after the sweep has handled what was newer (stored as UTC; moving it back is allowed and named, for a re-read), `ppy watermark list [--json]`, `ppy watermark clear <key>`. A sweep asks the source only for comments newer than the watermark and runs on the cheapest model |
 | Status (non-blocking) | `ppy run <run_id>`, `ppy task <task_id>` (long form `ppy task show <task_id>`), `ppy status` — snapshot; returns immediately. A task whose turn ended mid-gate shows as `worker_stopped` with the reason named (no done note, unpushed commits, or a backgrounded command killed with the session) — that is work to resume, not work to review. Unpushed commits under a done note are the exception: the harness pushes the lease branch itself and the task lands `worker_done`, unless the remote refuses, and then the reason quotes the refusal |
 | Team picture | `ppy status --team [--json]` — held tickets (phase, age), workers (status, session, last tool and elapsed, last progress note, a person's last steer), delivered pull requests (state, CI, review, reconcile lane), the lane, blockers, the last round's summary, what waits on a person; one line per item, nothing the record does not say. `--json` is the same facts for a hosted tool or a script |
