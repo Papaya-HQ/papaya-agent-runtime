@@ -109,10 +109,16 @@ the brief, answer, review and check-in prompts send durable facts to
   `repo:<file>:<line>` (`repo:AGENTS.md:57`). The full suite's owner is `ci` when a
   workflow that runs on pull requests (or a reusable workflow one calls) runs it,
   literally or through the test program its target or script runs, else `supervisor`,
-  with source `observed:<workflow>:<line>`. A Makefile target named `verify` is never a
-  gate by its name alone. Whatever the repository does not say is **unknown**, and
-  readiness raises a blocker to the owner with the exact question ("which command is the
-  quick gate, which is the full suite?").
+  with source `observed:<workflow>:<line>`. When the instructions name no full suite,
+  the runtime finds it: the lint, type-check and test steps pull-request CI runs
+  (source `observed:<workflow>:<line>`), else the build files' `verify`, `check`, `ci`
+  or `test` target or `test` script; the quick gate is then read beside it and is never
+  the same suite. A command with a leading environment assignment (`CI=1 pnpm exec
+  vitest run`) is a command, an e2e suite is never the whole of a full suite another
+  line names, and a committed Claude Code `PreToolUse` hook that runs the suite before
+  `git push` is a push hook. Only a repository that says nothing in any of those places
+  is **unknown**, and readiness then asks the owner the exact question ("which command
+  is the quick gate, which is the full suite?"), saying where it looked.
   `ppy repo set <name> --local-gate "..." --full-suite-command "..."` records a
   person's answer (source `person`), which **nothing ever replaces**: not onboarding,
   not the start remedy. `ppy repo show <name>` prints each gate with its source. At

@@ -358,10 +358,16 @@ def _repo_problems(problems: list[Problem]) -> None:
         # owner rather than guessing (a guessed `make verify` became every worker's
         # local gate on 2026-09-17).
         question = gate_question(name, missing)
+        searched = (
+            "nothing in its instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING, testing docs), "
+            "its pull-request CI, its Makefile or package scripts, or its push hooks says it"
+        )
         problems.append(
             Problem(
                 code="repo_without_gate_policy",
-                summary=f"{name} does not say its {' or its '.join(missing)}: {question}",
+                summary=(
+                    f"{name} does not say its {' or its '.join(missing)} ({searched}): {question}"
+                ),
                 fix=(
                     f"say it in {name}'s AGENTS.md (then `ppy repo onboard {name}`), or "
                     f'`ppy repo set {name} --local-gate "<quick gate>" '

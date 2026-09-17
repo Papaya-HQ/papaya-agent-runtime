@@ -72,10 +72,12 @@ at by a worker at full model price.
 
 For each one:
 
-- **No test command found.** Read the repository yourself — a `justfile`, a
-  `docker-compose` test service, a README section. If it genuinely is not written down,
-  ask the user for the one command that proves a change is good. One question, not a
-  questionnaire.
+- **No test command found.** Onboarding already read the instructions, pull-request
+  CI, the Makefile and package scripts, and the push hooks. Read what it cannot — a
+  `justfile`, a `docker-compose` test service, a README section, the CI job a workflow
+  calls — and record what you find with `ppy repo set`. The user is never the first
+  place to look: ask for the one command that proves a change is good only when the
+  repository genuinely does not show it anywhere. One question, not a questionnaire.
 - **No CI workflow commands found.** Say plainly that a green local run is not proof of
   a gate, and find out what the gate is before briefing work that has to pass one.
 - **No stated conventions.** Read the recent commit history for branch naming, commit
