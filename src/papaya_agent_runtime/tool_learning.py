@@ -63,7 +63,10 @@ COMMAND_SHAPE = "command_shape"
 POLICY_REFUSAL = "policy_refusal"
 #: A plain command the profile did not allow.
 PROFILE_GAP = "profile_gap"
-KINDS = (COMMAND_SHAPE, POLICY_REFUSAL, PROFILE_GAP)
+#: A command the worker is allowed to run, refused for WHERE it pointed: outside the
+#: session's own worktree. Nothing about the profile would change that.
+OUTSIDE_WORKTREE = "outside_worktree"
+KINDS = (COMMAND_SHAPE, POLICY_REFUSAL, PROFILE_GAP, OUTSIDE_WORKTREE)
 
 #: Command-shape denials on one worker before it is steered with the rules.
 SHAPE_STEER_AFTER = 2
@@ -161,7 +164,7 @@ class Verdict:
     pattern: str
     in_family: bool
     reason: str
-    #: :data:`COMMAND_SHAPE`, :data:`POLICY_REFUSAL` or :data:`PROFILE_GAP`.
+    #: One of :data:`KINDS`.
     kind: str = PROFILE_GAP
     #: The program the command runs, when it could be read.
     program: str = ""
@@ -198,6 +201,17 @@ def _inside(arg: str, worktree: str, *, strict: bool = False) -> bool:
     if path == root:
         return not strict
     return path.startswith(root + os.sep)
+
+
+def _reaches_out(paths: list[str], worktree: str) -> bool:
+    """Every path this read names sits outside the worktree.
+
+    All of them, not any: a command reading one file in the worktree and one
+    outside it was still refused for the shape of the profile, and a mixed case is
+    not clear enough evidence to stop learning from.
+    """
+    real = [p for p in paths if not p.startswith("-")]
+    return bool(real) and not any(_inside(p, worktree) for p in real)
 
 
 def _suggest(program: str) -> str:
@@ -258,6 +272,20 @@ def classify(tool: str, command: str | None, worktree: str | None) -> Verdict:
         return Verdict(suggestion, False, f"{program} is not in the safe family", program=program)
     args = words[1:]
     paths = [a for a in args if not a.startswith("-")]
+    if family == "read" and worktree and paths and _reaches_out(paths, worktree):
+        # `ls ../other-repo` is not a missing `ls`: the harness confines a session to
+        # its working directory, and adding the program to the profile would change
+        # nothing. Learning it as a gap taught the wrong lesson twice (2026-09-17,
+        # task 30). The manager grants the directory instead, with
+        # `ppy reference grant` for a registered repository.
+        return Verdict(
+            "",
+            False,
+            f"{program} pointed outside the worktree, which no tool pattern allows; a "
+            "registered repository is granted with `ppy reference grant`",
+            OUTSIDE_WORKTREE,
+            program,
+        )
     refusal = ""
     if family == "write":
         if not worktree:
@@ -678,6 +706,7 @@ __all__ = [
     "NEVER",
     "PERMISSION_DENIED",
     "POLICY",
+    "OUTSIDE_WORKTREE",
     "POLICY_REFUSAL",
     "PROFILE_GAP",
     "SAFE_FAMILY",

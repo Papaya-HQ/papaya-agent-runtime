@@ -104,6 +104,62 @@ def _granted_tools(task_id: int) -> list[str]:
         return []
 
 
+#: `task_env` key holding the registered repositories this task may read.
+REFERENCE_REPOS_KEY = "reference_repos"
+
+
+def reference_repo_names(conn, task_id: int) -> list[str]:
+    """Registered repositories this task was granted read access to, in order."""
+    import json as _json
+
+    raw = store.get_task_env(conn, task_id, REFERENCE_REPOS_KEY)
+    if not raw:
+        return []
+    try:
+        names = _json.loads(raw)
+    except ValueError:
+        return []
+    return [str(n) for n in names if str(n).strip()]
+
+
+def grant_reference_repos(conn, task_id: int, names: list[str]) -> list[str]:
+    """Add these repositories to what the task may read; returns the full list.
+
+    Raises :class:`SupervisorError` for a name that is not registered: a reference
+    is a repository this runtime already manages, never a path someone typed.
+    """
+    import json as _json
+
+    have = reference_repo_names(conn, task_id)
+    for name in names:
+        if store.get_repo(conn, name) is None:
+            raise SupervisorError(f"repo {name!r} is not registered (ppy repo add)")
+        if name not in have:
+            have.append(name)
+    store.set_task_env(conn, task_id, REFERENCE_REPOS_KEY, _json.dumps(have), source="manager")
+    return have
+
+
+def _reference_dirs(task_id: int) -> list[str]:
+    """The base clones of this task's reference repositories, as paths.
+
+    Never raises: a launch is not held up by a reference it cannot resolve.
+    """
+    try:
+        conn = init_db()
+        try:
+            out = []
+            for name in reference_repo_names(conn, task_id):
+                row = store.get_repo(conn, name)
+                if row is not None and row["local_path"]:
+                    out.append(str(row["local_path"]))
+            return out
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _adapter_for(provider: str):
     if provider == "fake":
         return FakeProvider()
@@ -295,6 +351,7 @@ class Supervisor:
         base: str | None = None,
         stack_on: int | None = None,
         ends_at: str = "done",
+        reference_repos: list[str] | None = None,
         papaya_event_key: str | None = None,
         papaya_event_metadata: str | None = None,
     ) -> dict:
@@ -310,6 +367,7 @@ class Supervisor:
                 base=base,
                 stack_on=stack_on,
                 ends_at=ends_at,
+                reference_repos=reference_repos,
             )
 
         from papaya_agent_runtime import papaya_events
@@ -344,6 +402,7 @@ class Supervisor:
                 base=base,
                 stack_on=stack_on,
                 ends_at=ends_at,
+                reference_repos=reference_repos,
                 papaya_event_key=papaya_event_key,
                 papaya_event_metadata=papaya_event_metadata,
             )
@@ -364,6 +423,7 @@ class Supervisor:
         base: str | None = None,
         stack_on: int | None = None,
         ends_at: str = "done",
+        reference_repos: list[str] | None = None,
         papaya_event_key: str | None = None,
         papaya_event_metadata: str | None = None,
     ) -> dict:
@@ -403,6 +463,16 @@ class Supervisor:
                     f"--base says {base!r}; pass one or the other"
                 )
             base = parent["branch"]
+
+        # A reference repository is checked before any state exists: a brief that
+        # points a worker at a repository this runtime does not manage is a brief
+        # nobody can satisfy, and refusing now costs nothing.
+        for name in reference_repos or []:
+            if store.get_repo(conn, name) is None:
+                raise SupervisorError(
+                    f"--reference-repo {name!r} is not registered (ppy repo add); a reference "
+                    "is a repository this runtime manages, never a path"
+                )
 
         # Whether another task in this repository is already adding a database
         # migration. Read before this task's row exists, so nothing has to filter
@@ -483,6 +553,7 @@ class Supervisor:
                 migration_advisory=migration_advisory,
                 overlap_advisory=overlap_advisory,
                 ends_at=ends_at,
+                reference_repos=reference_repos,
                 papaya_event_key=papaya_event_key,
                 papaya_event_metadata=papaya_event_metadata,
             )
@@ -511,7 +582,8 @@ class Supervisor:
         migration_advisory: str | None,
         overlap_advisory: str | None,
         ends_at: str,
-        papaya_event_key: str | None,
+        reference_repos: list[str] | None = None,
+        papaya_event_key: str | None = None,
         papaya_event_metadata: str | None,
     ) -> dict:
         if run_id is None:
@@ -528,6 +600,8 @@ class Supervisor:
             reasoning=reasoning,
             ends_at=ends_at,
         )
+        if reference_repos:
+            grant_reference_repos(conn, task_id, list(reference_repos))
         if papaya_event_key:
             from papaya_agent_runtime.papaya_events import (
                 PAPAYA_EVENT_KEY,
@@ -706,6 +780,7 @@ class Supervisor:
             process_env=prepared.process_env or {},
             denied_tools=environment.denied_tools(repo_row),
             granted_tools=_granted_tools(task_id),
+            read_only_dirs=_reference_dirs(task_id),
         )
         adapter = _adapter_for(provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
@@ -1045,6 +1120,7 @@ class Supervisor:
                 process_env=(prepared.process_env if prepared is not None else None) or process_env,
                 denied_tools=environment.denied_tools(repo_row),
                 granted_tools=_granted_tools(task_id),
+                read_only_dirs=_reference_dirs(task_id),
             )
             session_id = None
         else:
@@ -1064,6 +1140,7 @@ class Supervisor:
                 process_env=process_env,
                 denied_tools=environment.denied_tools(repo_row),
                 granted_tools=_granted_tools(task_id),
+                read_only_dirs=_reference_dirs(task_id),
             )
         adapter = _adapter_for(spec.provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
@@ -1391,6 +1468,14 @@ class Supervisor:
                     continue
                 if _pid_alive(row["pid"]):
                     pending = True
+            # The process being gone is not the same as the runner being released:
+            # its thread still has to record the exit, and until it does, admission
+            # counts the row live and refuses this resume outright ("task already
+            # has a live execution"), leaving the steer queued on a task nobody is
+            # running. On a busy machine that gap is wide enough to lose the race
+            # (2026-09-17, PR #58 CI). Wait for the row too, inside the same budget.
+            if not pending and any(row["task_id"] == task_id for row in store.live_runners(conn)):
+                pending = True
             if not pending:
                 break
             time.sleep(0.1)

@@ -104,7 +104,15 @@ def _lookup_pr_url(tool: str, branch: str, forge_slug: str | None, cwd: str) -> 
     proc = _run(argv, cwd=cwd)
     if proc.returncode != 0:
         return None
-    return extract_pr_url(proc.stdout)
+    url = extract_pr_url(proc.stdout)
+    if url or not forge_slug:
+        return url
+    # `gh-axi pr list` prints a row per pull request — `724,"title",open,…` — with
+    # its number but no URL, so searching the text for one finds nothing and the
+    # caller goes on to create a second pull request, which the forge then refuses
+    # (2026-09-17, task 37). The number plus the forge is the URL.
+    match = re.search(r"^\s*(\d+),", proc.stdout, re.MULTILINE)
+    return f"https://github.com/{forge_slug}/pull/{match.group(1)}" if match else None
 
 
 def _run(argv: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -363,6 +371,11 @@ def deliver(
                 # `gh` refuses a second PR for the same head and names the one that
                 # exists. That is the retry path: the PR is real, so record it.
                 pr_url = extract_pr_url(proc.stderr) or extract_pr_url(proc.stdout)
+                if pr_url is None and "already exists" in (proc.stderr + proc.stdout):
+                    # A wrapper that swallows the URL out of the refusal still leaves
+                    # the pull request findable by branch; ask again rather than
+                    # reporting a delivery failure for work that is on the forge.
+                    pr_url = _lookup_pr_url(tool, branch, forge_slug, worktree)
                 if pr_url and "already exists" in (proc.stderr + proc.stdout):
                     pr_exists = True
                     note = "pushed; a PR for this branch was already open"

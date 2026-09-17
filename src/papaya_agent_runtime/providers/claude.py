@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from pathlib import Path
 
 from papaya_agent_runtime.config import (
     ConfigError,
@@ -30,6 +32,78 @@ from papaya_agent_runtime.providers.capability import (
 from papaya_agent_runtime.providers.command_rules import command_rules
 
 ALLOWED_TOOLS_ENV = "PPY_CLAUDE_ALLOWED_TOOLS"
+
+
+def _transcript_path(worktree: str, session_id: str) -> Path:
+    """Where Claude Code keeps a session's transcript for a working directory.
+
+    The directory name is the absolute cwd with every character that is not a
+    letter or a digit replaced by a dash, which is how the harness itself writes
+    it (`~/.claude/projects/-Users-me-workspace-repo/<session>.jsonl`).
+    """
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path(worktree).resolve()))
+    return Path.home() / ".claude" / "projects" / slug / f"{session_id}.jsonl"
+
+
+def _ends_on_an_assistant_turn(spec: TaskSpec) -> bool:
+    """Does this session's transcript end mid-answer, with nothing to reply to?
+
+    False whenever the transcript cannot be read: an unreadable file is not
+    evidence of anything, and resuming is still the right default.
+    """
+    path = _transcript_path(spec.worktree_path, str(spec.resume_session_id))
+    try:
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        kind = entry.get("type")
+        if kind in ("assistant", "user"):
+            return kind == "assistant"
+    return False
+
+
+def _fresh_session_prompt(worker_prompt: str, spec: TaskSpec, steer: str) -> str:
+    """The brief again, plus what the worker already said and what to do now.
+
+    Everything the retired session held that is worth keeping is already in the
+    progress log it filed, so a fresh session reads it rather than starting blind.
+    """
+    from papaya_agent_runtime.state import init_db
+
+    reported: list[str] = []
+    try:
+        conn = init_db()
+        try:
+            rows = conn.execute(
+                "SELECT payload FROM events WHERE task_id = ? AND kind = 'worker_progress' "
+                "ORDER BY id",
+                (spec.task_id,),
+            ).fetchall()
+            for row in rows:
+                payload = json.loads(row["payload"] or "{}")
+                phase = str(payload.get("phase") or "").strip()
+                note = str(payload.get("note") or "").strip()
+                if note:
+                    reported.append(f"- **{phase or 'note'}**: {note}")
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - the prompt is worth having without the log
+        reported = []
+    log = "\n".join(reported) or "- (you filed no progress notes)"
+    return (
+        f"{worker_prompt}\n\n---\n\n"
+        "## You are continuing an interrupted session\n\n"
+        "Your previous session could not be resumed, so this is a new one on the same "
+        "task, in the same worktree, on the same branch. Your work on disk is intact — "
+        "read it before assuming anything is missing. What you reported so far:\n\n"
+        f"{log}\n\n"
+        f"What you were asked to do next:\n\n{steer}\n"
+    )
 
 
 def effective_allowed_tools() -> tuple[list[str], str]:
@@ -83,8 +157,20 @@ class ClaudeAdapter(ProviderAdapter):
         allowed = [*allowed, *(t for t in spec.granted_tools if t not in allowed)]
         if allowed:
             argv += ["--allowedTools", ",".join(allowed)]
-        if spec.denied_tools:
-            argv += ["--disallowedTools", ",".join(spec.denied_tools)]
+        denied = list(spec.denied_tools)
+        for directory in spec.read_only_dirs:
+            # Claude Code confines a session to its working directory, so a brief
+            # naming another registered repository as a reference is unreadable
+            # without this (2026-09-17, task 30). Read-only is the whole point: the
+            # edit tools are refused there, so the reference stays a reference.
+            argv += ["--add-dir", directory]
+            denied += [
+                f"Edit({directory}/**)",
+                f"Write({directory}/**)",
+                f"NotebookEdit({directory}/**)",
+            ]
+        if denied:
+            argv += ["--disallowedTools", ",".join(denied)]
         return argv
 
     def start(self, spec: TaskSpec) -> list[str]:
@@ -100,6 +186,22 @@ class ClaudeAdapter(ProviderAdapter):
 
     def resume(self, spec: TaskSpec) -> list[str]:
         prompt = spec.steer_message or spec.instructions or "Continue the task."
+        if spec.resume_session_id and _ends_on_an_assistant_turn(spec):
+            # A transcript whose last entry is the assistant's cannot be resumed:
+            # `--resume` replays it as a prefilled assistant message and the API
+            # answers `400 This model does not support assistant message prefill`,
+            # which fails the task instead of continuing it (2026-09-17, task 30,
+            # after a steer resume). A fresh session carrying the brief, what the
+            # worker already reported, and the steer continues the work instead.
+            argv = [
+                "claude",
+                "-p",
+                _fresh_session_prompt(self.worker_prompt(spec), spec, prompt),
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ]
+            return self._common(argv, spec)
         argv = [
             "claude",
             "-p",
