@@ -568,8 +568,36 @@ def post_dm(text: str) -> bool:
         return False
 
 
-def post_ticket(work_item_id: str, body: str, *, environ: dict[str, str] | None = None) -> bool:
-    """Comment on a work item as this machine's agent. Never raises."""
+_OWNER_MENTION: dict[str, dict[str, str] | None] = {}
+
+
+def owner_mention() -> dict[str, str] | None:
+    """The connection owner's mention payload, resolved once per process. Never raises."""
+    import asyncio
+
+    from papaya_agent_runtime import papaya
+
+    if "owner" in _OWNER_MENTION:
+        return _OWNER_MENTION["owner"]
+    found: dict[str, str] | None = None
+    try:
+        api = papaya.agent_api()
+        if api is not None:
+            found = asyncio.run(_owner_mention(api))
+    except Exception as exc:  # noqa: BLE001 - a comment without a mention still lands
+        log.warning("[outreach] Could not resolve the connection's owner: %s", exc)
+    _OWNER_MENTION["owner"] = found
+    return found
+
+
+def post_ticket(
+    work_item_id: str,
+    body: str,
+    *,
+    environ: dict[str, str] | None = None,
+    mention: dict[str, str] | None = None,
+) -> bool:
+    """Comment on a work item as this machine's agent, mentioning its owner. Never raises."""
     from papaya_agent_runtime import papaya, papaya_events
 
     try:
@@ -583,7 +611,11 @@ def post_ticket(work_item_id: str, body: str, *, environ: dict[str, str] | None 
             payload={},
             work_item_id=work_item_id,
         )
-        return papaya_events.post_work_item_comment(event, body, environ=env)
+        mention = mention if mention is not None else owner_mention()
+        mentions = [mention] if mention and mention.get("id") else None
+        if mention and mention.get("handle"):
+            body = f"@{mention['handle']} — {body}"
+        return papaya_events.post_work_item_comment(event, body, environ=env, mentions=mentions)
     except Exception as exc:  # noqa: BLE001 - a comment that did not land is said elsewhere
         log.warning("[outreach] Could not comment on %s: %s", work_item_id, exc)
         return False
@@ -764,6 +796,7 @@ __all__ = [
     "notify_desktop",
     "observe",
     "open_rows",
+    "owner_mention",
     "plan",
     "post_dm",
     "post_ticket",

@@ -269,8 +269,13 @@ def post_work_item_comment(
     *,
     environ: Mapping[str, str] | None = None,
     opener=urllib.request.urlopen,
+    mentions: list[Mapping[str, Any]] | None = None,
 ) -> bool:
     """Post one comment on this event's work item. Returns whether a call was made.
+
+    ``mentions`` are real mention payloads (``type``, ``id``, ``handle``,
+    ``display_name``), carried in the comment's ``metadata`` the way the app's own
+    comments carry them, so the person is notified rather than merely named.
 
     For the runner's single mechanical sentence only — the hand-back line. What a
     manager has to *say* about a ticket is said by a manager turn through MCP.
@@ -288,7 +293,9 @@ def post_work_item_comment(
         f"{url}/comments",
         token,
         method="POST",
-        body={"body": text},
+        body={"body": text, "metadata": {"mentions": list(mentions)}}
+        if mentions
+        else {"body": text},
         what="comment",
         opener=opener,
     )

@@ -542,6 +542,61 @@ def test_nothing_to_post_into_is_not_said(monkeypatch) -> None:
     assert asyncio.run(outreach.say_in_workspace(None, "x")) is False
 
 
+def test_a_ticket_comment_carries_a_real_mention_of_the_owner(monkeypatch) -> None:
+    from papaya_agent_runtime import papaya_events
+
+    sent: list[tuple[str, dict]] = []
+
+    def post(event, body, *, environ=None, mentions=None, **_kw):
+        sent.append((body, {"mentions": mentions}))
+        return True
+
+    monkeypatch.setattr(papaya_events, "post_work_item_comment", post)
+    mention = {"type": "user", "id": "u-shane", "handle": "shanewolf", "display_name": "Shane"}
+    assert outreach.post_ticket(
+        "PAP-1", "Waiting on a person", environ={"PAPAYA_AGENT_TOKEN": "t"}, mention=mention
+    )
+    body, extra = sent[0]
+    assert body.startswith("@shanewolf — Waiting on a person")
+    assert extra["mentions"] == [mention]
+    # No owner known: the comment still lands, unmentioned.
+    outreach._OWNER_MENTION["owner"] = None
+    assert outreach.post_ticket("PAP-1", "x", environ={"PAPAYA_AGENT_TOKEN": "t"})
+    assert sent[1] == ("x", {"mentions": None})
+    outreach._OWNER_MENTION.clear()
+
+
+def test_the_comment_request_carries_mentions_in_metadata() -> None:
+    from papaya_agent_runtime import papaya_events
+
+    seen: list[dict] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def opener(request, timeout=None):
+        seen.append(json.loads(request.data))
+        return Response()
+
+    event = papaya_events.PapayaEvent(
+        id=None, kind="", subject="work_item:PAP-1", payload={}, work_item_id="PAP-1"
+    )
+    env = {"PAPAYA_API_URL": "https://x", "PAPAYA_WORKSPACE_ID": "ws", "PAPAYA_AGENT_TOKEN": "t"}
+    papaya_events.post_work_item_comment(
+        event, "hi", environ=env, opener=opener, mentions=[{"id": "u"}]
+    )
+    assert seen[0] == {"body": "hi", "metadata": {"mentions": [{"id": "u"}]}}
+
+
 def test_the_desktop_notification_is_off_unless_asked_for(monkeypatch) -> None:
     calls: list[list[str]] = []
 
