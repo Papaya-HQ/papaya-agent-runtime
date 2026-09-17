@@ -413,7 +413,13 @@ def _repo_budgets(name: str | None) -> int:
             "left out; an override wins"
         )
         for repo in names:
-            print(budgets.render(repo, budgets.all_budgets(repo, conn=conn)))
+            print(
+                budgets.render(
+                    repo,
+                    budgets.all_budgets(repo, conn=conn),
+                    budgets.memory(repo, conn=conn),
+                )
+            )
     finally:
         conn.close()
     return 0

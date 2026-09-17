@@ -433,24 +433,29 @@ class GateState:
     command: str = ""
     elapsed_seconds: float = 0.0
     full: bool = False
+    #: Waiting under the supervisor for a repository gate slot or for memory. A queued
+    #: gate is ``running`` too: the worker waiting on it is not silent.
+    queued: bool = False
+    queued_reason: str = ""
 
 
 def gate_state(worker_task_id: int) -> GateState:
     """Read the worker's gate: the newest `gate_result` and the supervisor's `gate_wait`.
 
-    A `gate_started` with no result after it names the gate's key; the supervisor
-    is then asked (without waiting) whether that gate is still running. A start
-    with no running gate behind it — the supervisor restarted, the gate was
+    A `gate_started` (or `gate_queued`) with no result after it names the gate's key;
+    the supervisor is then asked (without waiting) whether that gate is still running
+    or queued. A start with no gate behind it — the supervisor restarted, the gate was
     killed — is not running.
     """
     from papaya_agent_runtime import gate
 
+    open_kinds = (gate.GATE_STARTED, gate.GATE_QUEUED, gate.GATE_UNQUEUED)
     conn = db.init_db()
     try:
         rows = conn.execute(
-            "SELECT kind, payload FROM events WHERE task_id = ? AND kind IN (?, ?, ?) "
+            "SELECT kind, payload FROM events WHERE task_id = ? AND kind IN (?, ?, ?, ?, ?) "
             "ORDER BY id DESC",
-            (worker_task_id, gate.GATE_STARTED, gate.GATE_RESULT, gate.GATE_KILLED),
+            (worker_task_id, *open_kinds, gate.GATE_RESULT, gate.GATE_KILLED),
         ).fetchall()
     finally:
         conn.close()
@@ -460,11 +465,13 @@ def gate_state(worker_task_id: int) -> GateState:
         if last_result is not None
         else "no gate result recorded for this worker"
     )
-    if not rows or rows[0]["kind"] != gate.GATE_STARTED:
+    if not rows or rows[0]["kind"] not in open_kinds:
         return GateState(False, line)
     started = _payload(rows[0])
     scope = "full" if started.get("full") else "local"
-    key = f"task:{worker_task_id}:{scope}:{started.get('head_sha') or ''}"
+    key = str(
+        started.get("key") or f"task:{worker_task_id}:{scope}:{started.get('head_sha') or ''}"
+    )
     try:
         from papaya_agent_runtime.supervisor.client import SupervisorClient
 
@@ -475,12 +482,23 @@ def gate_state(worker_task_id: int) -> GateState:
         return GateState(False, line)
     seconds = float(answer.get("elapsed") or 0)
     command = str(answer.get("command") or started.get("command") or "the gate")
+    full = bool(answer.get("full", started.get("full")))
+    if answer.get("queued"):
+        reason = str(answer.get("queued_reason") or "queued")
+        return GateState(
+            True,
+            f"queued under the supervisor: `{command}`, {reason}; {line}",
+            command=command,
+            full=full,
+            queued=True,
+            queued_reason=reason,
+        )
     return GateState(
         True,
         f"running under the supervisor for {health.humanize(int(seconds))}: `{command}`; {line}",
         command=command,
         elapsed_seconds=seconds,
-        full=bool(started.get("full")),
+        full=full,
     )
 
 
@@ -1135,8 +1153,9 @@ class Rounds:
         queued = {nudge.kind for nudge in ticket.nudges}
         gate_now = await asyncio.to_thread(self._gate, worker.task_id)
         if gate_now.running:
-            # A gate in progress under the supervisor is not silence, and a worker
-            # waiting on it is not to be nudged: its result lands on the record.
+            # A gate in progress (or queued behind another) under the supervisor is not
+            # silence, and a worker waiting on it is not to be nudged: its result lands
+            # on the record.
             return parts
 
         if look.verdict == "dead" and look.latest_phase != "done":

@@ -102,6 +102,20 @@ and exit code, and `ppy serve` decides on that record: a worker with a green gat
 its head is reviewed, a red one is steered with the summary, and one that stopped with
 none is steered to run `ppy gate run`.
 
+Heavy gates run one at a time per repository. A full suite (`--full`), or any gate whose
+learned duration in its repository (p90, or a budget override) is past
+`gate.parallel_ceiling_seconds` (300), takes one of the repository's
+`gate.full_slots_per_repo` slots (1) before it starts. A second one queues behind it in
+arrival order: its call exits 75 while queued and says so ("queued behind task 12's full
+gate, started 4 min ago"), and running it again attaches as usual. Scoped gates never
+queue, and full gates in different repositories run side by side. The supervisor samples
+each gate's process group for peak resident memory, keeps it with the result and as a
+`gate_memory` observation, and the head of a repository's queue also waits while the
+machine's free memory is below that repository's p90 ("queued for memory: 812M free,
+..."); `gate.min_free_mb` sets that floor instead. `ppy status --team` and the
+liveness line show a queued gate as queued, the rounds do not treat it as silence, and
+neither a gate's duration nor a worker's silence observation counts the time queued.
+
 ## Waits come from each repository's history
 
 One timeout fits no repository. A backend suite outlasts the tool cap, a frontend
@@ -124,7 +138,8 @@ environment block says how long the gate has taken there, and readiness warns wh
 repository's gate budget is longer than the ten-minute tool cap.
 
 `ppy repo budgets [<repo>]` prints each kind's observation count, p90 and budget, and
-whether it is `derived`, `default` or `override`. `ppy repo set <repo> --budget
+whether it is `derived`, `default` or `override`, and the p90 of the repository's gate
+peak memory (`gate_memory`), which is a measure a heavy gate waits for, not a time budget. `ppy repo set <repo> --budget
 <kind>=<seconds>` sets an override, which wins over the history; `0` clears it.
 
 ## Work reaches the remote as it goes

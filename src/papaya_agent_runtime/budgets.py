@@ -54,6 +54,13 @@ CI = "ci"
 
 KINDS = (GATE, FULL_SUITE, WORKER_SESSION, PLAN, SILENCE, BRIEF_TURN, REVIEW_TURN, CI)
 
+#: A gate's peak resident memory, in megabytes, summed over its process group.
+#: Kept in the same table (the ``seconds`` column holds the megabytes) but never a time
+#: budget: it has no default, no override and no factor, only a p90 a heavy gate waits
+#: for as free memory before it starts.
+GATE_MEMORY = "gate_memory"
+MEASURES = (GATE_MEMORY,)
+
 #: An observation of something that stalled: kept, never derived from.
 STALL = "stall"
 #: An observation of something killed before it could finish: kept, never derived from.
@@ -154,8 +161,8 @@ def observe(
     at: datetime | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Keep one duration. Returns whether it was kept; never raises."""
-    if not repo or kind not in KINDS:
+    """Keep one duration (or measure). Returns whether it was kept; never raises."""
+    if not repo or (kind not in KINDS and kind not in MEASURES):
         return False
     try:
         value = float(seconds)
@@ -395,10 +402,63 @@ def all_budgets(
     return [budget(repo, kind, now=now, conn=conn) for kind in KINDS]
 
 
-def render(repo: str, budgets: list[Budget]) -> str:
+@dataclass(frozen=True)
+class Memory:
+    """One repository's gate peak memory: how much a heavy gate there waits for."""
+
+    repo: str
+    observations: int
+    #: The window's 90th percentile in megabytes, or ``None`` with no observations.
+    p90_mb: float | None
+
+    @property
+    def known(self) -> bool:
+        return self.observations >= MIN_OBSERVATIONS and self.p90_mb is not None
+
+    def line(self) -> str:
+        p90 = megabytes(self.p90_mb) if self.p90_mb is not None else "-"
+        why = (
+            "peak resident memory of the gate's processes; a heavy gate waits for this much free"
+            if self.known
+            else f"fewer than {MIN_OBSERVATIONS} observations: a heavy gate does not wait on memory"
+        )
+        return f"{GATE_MEMORY:<15} {self.observations:>3} obs  p90 {p90:>7}  {why}"
+
+
+def megabytes(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value / 1024:.1f}G" if value >= 1024 else f"{int(round(value))}M"
+
+
+def memory(
+    repo: str | None, *, now: datetime | None = None, conn: sqlite3.Connection | None = None
+) -> Memory:
+    """The p90 of this repository's gate peak memory; unknown when the state cannot say."""
+    if not repo:
+        return Memory("", 0, None)
+    own = conn is None
+    try:
+        if own:
+            from papaya_agent_runtime.state import init_db
+
+            conn = init_db()
+        values = window(conn, repo, GATE_MEMORY, now=now)
+    except (sqlite3.Error, OSError):
+        return Memory(str(repo), 0, None)
+    finally:
+        if own and conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+    return Memory(str(repo), len(values), percentile(values))
+
+
+def render(repo: str, budgets: list[Budget], memory: Memory | None = None) -> str:
     """What `ppy repo budgets` prints for one repository."""
     lines = [f"{repo}:"]
     lines.extend(f"  {b.line()}" for b in budgets)
+    if memory is not None:
+        lines.append(f"  {memory.line()}")
     return "\n".join(lines)
 
 
@@ -433,8 +493,10 @@ __all__ = [
     "DERIVED",
     "FULL_SUITE",
     "GATE",
+    "GATE_MEMORY",
     "KILL",
     "KINDS",
+    "MEASURES",
     "OVERRIDE",
     "PLAN",
     "REVIEW_TURN",
@@ -444,11 +506,14 @@ __all__ = [
     "WORKER_SESSION",
     "Budget",
     "BudgetError",
+    "Memory",
     "all_budgets",
     "budget",
     "default_seconds",
     "gate_timing_line",
     "longest_gate",
+    "megabytes",
+    "memory",
     "observe",
     "observe_task",
     "parse_override",

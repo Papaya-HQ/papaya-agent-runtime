@@ -215,6 +215,36 @@ def _activity(conn: sqlite3.Connection, worker_task_id: int) -> dict[str, Any]:
     }
 
 
+def _gate(conn: sqlite3.Connection, worker_task_id: int, now: datetime) -> dict[str, Any] | None:
+    """The worker's gate as the ledger has it: queued (and why) or running, else ``None``."""
+    from papaya_agent_runtime import gate
+
+    row = conn.execute(
+        "SELECT kind, payload, created_at FROM events WHERE task_id = ? "
+        "AND kind IN (?, ?, ?, ?, ?) ORDER BY id DESC LIMIT 1",
+        (
+            worker_task_id,
+            gate.GATE_QUEUED,
+            gate.GATE_UNQUEUED,
+            gate.GATE_STARTED,
+            gate.GATE_RESULT,
+            gate.GATE_KILLED,
+        ),
+    ).fetchone()
+    if row is None or row["kind"] in (gate.GATE_RESULT, gate.GATE_KILLED):
+        return None
+    payload = _payload(row)
+    if row["kind"] == gate.GATE_UNQUEUED and not payload.get("started"):
+        return None
+    queued = row["kind"] == gate.GATE_QUEUED
+    return {
+        "state": "queued" if queued else "running",
+        "full": bool(payload.get("full", "full" in str(payload.get("key") or "").split(":"))),
+        "reason": _clip(payload.get("reason"), 120) if queued else None,
+        "seconds": _ago(now, row["created_at"]),
+    }
+
+
 def _workers(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
     marks = ",".join("?" for _ in WORKER_STATUSES)
     rows = conn.execute(
@@ -242,6 +272,7 @@ def _workers(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
                 "session": entry["verdict"] if entry else None,
                 "silent_seconds": entry["silent_seconds"] if entry else None,
                 **_activity(conn, task_id),
+                "gate": _gate(conn, task_id, now),
                 "note_phase": note_payload.get("phase"),
                 "note": _clip(note_payload.get("note"), 140) if note is not None else None,
                 "note_seconds": _ago(now, note["created_at"]) if note is not None else None,
@@ -387,6 +418,15 @@ def _doing(w: dict[str, Any]) -> str | None:
     return None
 
 
+def _gate_words(g: dict[str, Any] | None) -> str | None:
+    if not g:
+        return None
+    scope = "full suite" if g["full"] else "local gate"
+    if g["state"] == "queued":
+        return f"{scope} queued {_age(g['seconds'])}: {g['reason'] or 'waiting for a slot'}"
+    return f"{scope} running under the supervisor ({_age(g['seconds'])} in)"
+
+
 def _worker_line(w: dict[str, Any]) -> str:
     parts = [f"worker task {w['task_id']}"]
     if w["repo"]:
@@ -398,6 +438,9 @@ def _worker_line(w: dict[str, Any]) -> str:
     doing = _doing(w)
     if doing:
         parts.append(doing)
+    gate_said = _gate_words(w.get("gate"))
+    if gate_said:
+        parts.append(gate_said)
     if w["note"] is not None:
         parts.append(f"note [{w['note_phase']}] {w['note']} ({_age(w['note_seconds'])} ago)")
     if w["last_person_steer"]:
@@ -489,6 +532,9 @@ def status_line(snap: dict[str, Any], ticket_task_id: int) -> str | None:
         said = f"worker {state}"
         if doing and worker["status"] == "in_progress":
             said += f", {doing}"
+        gate_said = _gate_words(worker.get("gate"))
+        if gate_said:
+            said += f"; {gate_said}"
         if worker["note"] is not None:
             said += f"; last note: {_clip(worker['note'], 80)}"
         parts.append(said)
