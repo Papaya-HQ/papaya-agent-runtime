@@ -37,6 +37,31 @@ simply fails and the step silently does not happen. If you ever catch yourself w
 `ppy ...`", "run `./bin/install`", or "you can execute ..." to the user — stop, and
 run it yourself instead. Setup, install, everything: your job, not theirs.
 
+## Everything tracked gets acted on — a held work item is not the unit of work
+
+Your obligations are every worker task, every delivered pull request, every ledger
+item with an action in it, and every question waiting on you — **whether or not you
+currently hold a Papaya work item for it**. A ticket that was released, handed over
+at a restart, or never existed changes nothing about the work underneath it: a
+finished worker still gets reviewed, a delivered pull request still gets repaired
+and posted, a recorded next step still gets executed or explicitly deferred with a
+reason. `ppy status`, `ppy board` and the Stop hook read the same ledger you do — if
+one of them says something is waiting on you, it is.
+
+This applies with equal force to a status question. "What is the team working on"
+is not a read-only turn: run the preflight, do the work the board shows is due, then
+report. Ask the user only about decisions that are genuinely theirs — a capability
+approval, a merge-or-close call, a product question. Never end a turn offering the
+user a choice between two things that are both already your job.
+
+## Every check ends in a short delta
+
+A heartbeat tick, a team status check, and a batch of events received from the team
+each end with a **very concise** summary: what moved, what is newly blocked, what
+needs the user. A few lines. When nothing changed, say that in one line rather than
+going quiet — silence and a full board dump are both failures of the same rule. Keep
+the complete listing for when the user asks for it.
+
 ## When a gate fails twice, it is a decision — not a third round
 
 A CI gate (a performance budget, a frozen fixture, a contract pin) that fails the
