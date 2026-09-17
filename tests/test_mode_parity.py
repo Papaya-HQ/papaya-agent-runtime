@@ -126,14 +126,19 @@ def test_every_gap_says_what_healing_it_means() -> None:
         assert capability.heal, f"{capability.name} has no heal line"
 
 
-def test_open_gaps_are_one_runtime_deficiency_recorded_in_both_modes(ppy_home) -> None:
+def test_open_gaps_are_one_runtime_deficiency_recorded_in_both_modes(ppy_home, monkeypatch) -> None:
     from papaya_agent_runtime import deficiencies
 
+    # Every capability is shared today: nothing is recorded.
+    assert parity.gaps() == [] and parity.record_gaps() is False
+    assert deficiencies.ledger() == []
+
+    gap = parity.Capability("example", parity.GAP, "an example", serve=(), heal="make it shared")
+    monkeypatch.setattr(parity, "CAPABILITIES", (*parity.CAPABILITIES, gap))
     assert parity.record_gaps() is True
     parity.record_gaps()  # every start adds evidence to the one entry
     [row] = [d for d in deficiencies.ledger() if d.kind == deficiencies.SERVE_ONLY_CAPABILITY]
-    assert row.count == 2
-    assert row.evidence[-1]["where"] == ", ".join(c.name for c in parity.gaps())
+    assert row.count == 2 and row.evidence[-1]["where"] == "example"
     # Both starts call it: serve's start announcement and the session-start hook.
     for filename in ("serve.py", "hooks.py"):
         assert "parity.record_gaps()" in (SRC / filename).read_text(encoding="utf-8")

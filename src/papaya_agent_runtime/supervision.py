@@ -1039,3 +1039,90 @@ def blocker_step(*, check=None) -> list[str]:
         return blocker_lines(blockers.update(verdict))
     except Exception as exc:  # noqa: BLE001 - a heartbeat keeps ticking
         return [f"could not re-check readiness: {exc}"]
+
+
+# ── the full suite before review ────────────────────────────────────────────
+
+
+def full_suite_missing(worker_task_id: int) -> str | None:
+    """Why an approval must wait for the full suite at this head, or ``None``.
+
+    When the repository's full suite is the supervisor's to run (not CI's), it runs once
+    at the head that will be delivered before review. Serve runs it before its review
+    turn (`TicketRunner._full_suite_before_review`); `ppy review approve` refuses a head
+    with no full-suite result, so a review from a session keeps the same rule. A red
+    result is the reviewer's to judge, not a refusal.
+    """
+    from papaya_agent_runtime import environment, gate
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        task = store.get_task(conn, worker_task_id)
+        row = (
+            conn.execute("SELECT * FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+            if task is not None and task["repo_id"] is not None
+            else None
+        )
+    finally:
+        conn.close()
+    if row is None or not environment.for_repo(row).supervisor_runs_full_suite:
+        return None
+    recorded = gate.verdict(worker_task_id, full=True)
+    if not recorded.head_sha or recorded.state != gate.NONE:
+        return None
+    return (
+        f"the full suite is the supervisor's to run and has no result at this head: run "
+        f"`ppy gate run --task {worker_task_id} --full` (run it again while it says it is "
+        "still running), then approve"
+    )
+
+
+# ── assigned work nobody picked up ──────────────────────────────────────────
+
+
+def assigned_unpicked(*, now: datetime | None = None, api=None) -> list[dict[str, Any]]:
+    """Work items assigned to this agent that nothing here or elsewhere is working.
+
+    The same filters serve's sweep applies before it offers an item (`sweep.skip_reason`):
+    open, no live task here, not in progress elsewhere, not declined earlier with nothing
+    changed since. A session is shown them (session start, `ppy sweep`, the heartbeat)
+    and takes one up by briefing and dispatching it. Never raises; ``[]`` when not
+    connected.
+    """
+    import asyncio
+
+    from papaya_agent_runtime import sweep
+
+    now = now or datetime.now(UTC)
+    try:
+        if api is None:
+            from papaya_agent_client.api_client import AgentTokenApi
+
+            from papaya_agent_runtime import papaya
+
+            found = papaya._best()
+            if found is None:
+                return []
+            who, home = found
+            config = papaya._read_config(home)
+            agent = (config.get("agents") or {}).get(who.agent_id)
+            if not agent:
+                return []
+            api = AgentTokenApi(config, agent)
+        from papaya_agent_client import api_client
+
+        answer = asyncio.run(api_client.list_assigned_work_items(api))
+        items = sweep.sweep_order([i for i in sweep._items(answer) if sweep.is_open(i)])
+        live = sweep.live_work_item_ids()
+        declined = sweep.declined_items()
+        return [
+            item
+            for item in items
+            if sweep.skip_reason(
+                item, now=now, live=live, declined=declined, stale_after=sweep.DEFAULT_STALE_AFTER
+            )
+            is None
+        ]
+    except Exception:  # noqa: BLE001 - a session is never stopped by an unreachable Papaya
+        return []

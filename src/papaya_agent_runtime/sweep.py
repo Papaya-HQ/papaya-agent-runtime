@@ -754,6 +754,33 @@ def live_work_item_ids() -> set[str]:
     return {str(row[0]) for row in rows if row[0] is not None}
 
 
+def skip_reason(
+    item: dict[str, Any],
+    *,
+    now: datetime,
+    live: set[str],
+    declined: dict[str, dict[str, Any]],
+    stale_after: float,
+    running: set[str] | frozenset[str] = frozenset(),
+    kept: dict[str, dict[str, Any]] | None = None,
+) -> str | None:
+    """Why an assigned item is not offered, or ``None``: the sweep's shared first filter.
+
+    `Sweeper._sweep` applies it before offering; a session's `ppy sweep` applies it to say
+    what is waiting. Work kept elsewhere is judged on evidence afterwards, by the sweep.
+    """
+    item_id = str(item["id"])
+    if f"work_item:{item_id}" in running or item_id in live:
+        return "live here"
+    if (kept or {}).get(item_id) is None and in_progress_elsewhere(
+        item, now=now, stale_after=stale_after
+    ):
+        return "in progress elsewhere"
+    if declined_earlier(item, declined.get(item_id)):
+        return "declined earlier, unchanged"
+    return None
+
+
 def envelope_for(item: dict[str, Any], *, agent_id: str = "", workspace_id: str = "") -> dict:
     """The assignment an offer stands in for, shaped like the event would have been.
 
@@ -1130,32 +1157,24 @@ class Sweeper:
                 offered += 1
                 taken.append(item_id)
                 continue
-            if item_id not in asked and (subject in built.loop.running_subjects or item_id in live):
-                log.debug("[sweep] %s already has a live task here; not offering it", subject)
-                skipped += 1
-                continue
             remembered = kept.get(item_id)
-            # Work Papaya has refused here before is judged on evidence, not on how
+            # The shared first filter (`skip_reason`), which a session's `ppy sweep` applies
+            # too. Work Papaya has refused here before is judged on evidence, not on how
             # recently somebody touched it.
-            if remembered is None and in_progress_elsewhere(
-                item, now=now, stale_after=self._stale_after
-            ):
-                log.debug(
-                    "[sweep] %s is in progress and was touched within %ss; not offering it",
-                    subject,
-                    int(self._stale_after),
-                )
+            reason = skip_reason(
+                item,
+                now=now,
+                live=set() if item_id in asked else live,
+                declined=declined,
+                stale_after=self._stale_after,
+                running=frozenset() if item_id in asked else built.loop.running_subjects,
+                kept=kept,
+            )
+            if reason is not None:
+                log.debug("[sweep] %s not offered: %s", subject, reason)
                 skipped += 1
-                elsewhere += 1
-                continue
-            if declined_earlier(item, declined.get(item_id)):
-                log.debug(
-                    "[sweep] %s was declined earlier (%s) and has not changed since",
-                    subject,
-                    declined[item_id].get("reason") or "no reason recorded",
-                )
-                skipped += 1
-                earlier += 1
+                elsewhere += reason == "in progress elsewhere"
+                earlier += reason == "declined earlier, unchanged"
                 continue
             evidence: Evidence | None = None
             if item_id not in asked and kept_elsewhere(item, remembered, now=clock_now):

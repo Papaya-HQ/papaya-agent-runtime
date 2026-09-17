@@ -680,6 +680,7 @@ class UpkeepStep:
     def __init__(self) -> None:
         self._blockers_at: datetime | None = None
         self._kept_runs: dict[str, int] = {}
+        self._waiting: list[str] = []
 
     def __call__(self, now: datetime) -> list[str]:
         try:
@@ -693,6 +694,12 @@ class UpkeepStep:
             ):
                 self._blockers_at = now
                 lines += supervision.blocker_step()
+                # The sweep serve runs on its clock: assigned work nothing is working.
+                waiting = supervision.assigned_unpicked(now=now)
+                keys = sorted(str(i.get("display_id") or i.get("id")) for i in waiting)
+                if keys and keys != self._waiting:
+                    lines.append("assigned and waiting: " + ", ".join(keys))
+                self._waiting = keys
             last = supervision.last_hygiene_at()
             if last is None or (now - last).total_seconds() >= HYGIENE_EVERY_SECONDS:
                 lines += supervision.hygiene_step(

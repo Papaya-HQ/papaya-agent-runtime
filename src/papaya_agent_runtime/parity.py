@@ -145,21 +145,26 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "turn_obligations",
-        GAP,
+        SHARED,
         "a brief left acceptance criteria on the item; a delivery left its report",
         serve=(
             "TicketRunner._check_acceptance_criteria",
             "TicketRunner._acceptance_criteria",
             "TicketRunner._check_reported",
         ),
-        heal="the same record checks after `ppy dispatch` and `ppy deliver` in a session",
+        shared="papaya_agent_runtime.workitems",
+        interactive=(
+            "papaya_agent_runtime.owed",
+            "papaya_agent_runtime.watch",
+        ),
     ),
     Capability(
         "full_suite_before_review",
-        GAP,
+        SHARED,
         "the supervisor-owned full suite runs once at the worker's head before review",
         serve=("TicketRunner._full_suite_before_review",),
-        heal="`ppy review approve` requires the record, whoever reviews",
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.cli",),
     ),
     Capability(
         "hygiene",
@@ -192,10 +197,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "assigned_work_sweep",
-        GAP,
+        SHARED,
         "work assigned to this agent that nothing picked up is found",
         serve=("sweep.Sweeper",),
-        heal="`ppy sweep` answers without a running serve, and the session-start hook runs it",
+        shared="papaya_agent_runtime.supervision",
+        interactive=(
+            "papaya_agent_runtime.hooks",
+            "papaya_agent_runtime.watch",
+            "papaya_agent_runtime.cli",
+        ),
     ),
     Capability(
         "ticket_hold_protocol",
@@ -276,16 +286,10 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
 )
 
-#: The serve-only capabilities that existed when this registry was written (2026-09-17).
-#: This set only shrinks: a capability leaves it when it becomes shared, and nothing new
-#: may join it — a new supervision capability is built shared from the start.
-KNOWN_GAPS = frozenset(
-    {
-        "turn_obligations",
-        "full_suite_before_review",
-        "assigned_work_sweep",
-    }
-)
+#: The serve-only capabilities still open. The registry started with eleven (2026-09-17);
+#: every one was made shared the same day. This set only shrinks and stays empty: a new
+#: supervision capability is built shared from the start, never added here.
+KNOWN_GAPS: frozenset[str] = frozenset()
 
 
 def by_serve_name() -> dict[str, Capability]:

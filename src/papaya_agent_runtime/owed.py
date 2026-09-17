@@ -105,6 +105,7 @@ _WORDS = {
     "failed": "failed",
     "pr_needs_a_person": "has a pull request that needs a person",
     "work_item_changed": "is a ticket whose work item changed",
+    "work_item_obligation": "is a ticket whose work item is missing what its turns owed",
 }
 
 _NEXT = {
@@ -253,6 +254,20 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
                     f"steer worker task(s) {workers} if it changes their work, or "
                     f'`ppy heard {change["ticket_task_id"]} --note "..."`'
                 ),
+                seconds=None,
+                ticket_task_id=None,
+            )
+        )
+    for owed_item in workitems.obligations_owed():
+        owed.append(
+            Owed(
+                task_id=int(owed_item["ticket_task_id"]),
+                status="work_item_obligation",
+                title="",
+                repo=None,
+                reason=f"work item {owed_item.get('work_item_id')} is missing "
+                + ", ".join(owed_item.get("missing") or []),
+                next_step="post it on the work item as this agent (the heartbeat clears it)",
                 seconds=None,
                 ticket_task_id=None,
             )
