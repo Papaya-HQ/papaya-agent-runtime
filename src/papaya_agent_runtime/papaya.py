@@ -332,14 +332,36 @@ def status() -> dict:
     }
 
 
-def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str],
+    *,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - fixed argv, no shell
         argv,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        env=env,
+        cwd=cwd,
     )
+
+
+def client_env() -> dict[str, str]:
+    """This process's environment, pointed at the home the connection lives in.
+
+    A shell the person opened did not inherit the desktop app's `PAPAYA_AGENT_HOME`,
+    so a client started from it looks in the wrong home and says "not connected"
+    while `status()` says connected. Every call into the client goes through this.
+    """
+    env = dict(os.environ)
+    found = _best()
+    if found is not None:
+        env[CLIENT_HOME_ENV] = str(found[1])
+    return env
 
 
 def connect_argv(*, harness: str = "claude") -> list[str]:
@@ -394,14 +416,18 @@ def context(*, refresh: bool = False) -> dict | None:
     say who it is before the first hook fires. Returns None when not connected or
     when the client cannot answer.
     """
-    path = installed()
-    if path is None:
+    from papaya_agent_runtime.manager.launch import papaya_agent_command
+
+    if installed() is None and _best() is None:
         return None
-    argv = [path, "context", "--json"]
+    env = client_env()
+    # The client `ppy serve` embeds, not whichever `papaya-agent` is first on PATH: an
+    # older one cannot read the desktop app's connection and says "connect first".
+    argv = [*papaya_agent_command(env), "context", "--json"]
     if refresh:
         argv.append("--refresh")
     try:
-        proc = _run(argv, timeout=PROBE_TIMEOUT)
+        proc = _run(argv, timeout=PROBE_TIMEOUT, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
@@ -411,6 +437,149 @@ def context(*, refresh: bool = False) -> dict | None:
     except ValueError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+# ── Papaya tools in an interactive session ──────────────────────────────────
+
+#: The MCP server name, the same one `ppy serve`'s turns load.
+SESSION_SERVER = "papaya"
+#: Where Claude Code keeps a project's local-scope MCP servers.
+CLAUDE_USER_CONFIG_ENV = "PPY_CLAUDE_USER_CONFIG"
+
+
+def _claude_user_config() -> Path:
+    override = os.environ.get(CLAUDE_USER_CONFIG_ENV)
+    return Path(override) if override else Path.home() / ".claude.json"
+
+
+def session_server(root: str | Path) -> dict | None:
+    """The Papaya MCP server a Claude Code session in ``root`` loads, if any."""
+    try:
+        data = json.loads(_claude_user_config().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    projects = data.get("projects") or {}
+    for key in _project_keys(root):
+        server = ((projects.get(key) or {}).get("mcpServers") or {}).get(SESSION_SERVER)
+        if isinstance(server, dict):
+            return server
+    return None
+
+
+def _project_keys(root: str | Path) -> list[str]:
+    """The keys Claude Code may file ``root``'s local settings under.
+
+    The directory itself, and the main checkout of the repository it belongs to: a
+    git worktree's local-scope servers are kept under its main checkout.
+    """
+    resolved = Path(root).resolve()
+    keys = [str(resolved)]
+    try:
+        proc = _run(
+            ["git", "-C", str(resolved), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return keys
+    common = proc.stdout.strip() if proc.returncode == 0 else ""
+    if common:
+        main = str(Path(common).parent.resolve())
+        if main not in keys:
+            keys.append(main)
+    return keys
+
+
+def session_tools_ready(root: str | Path) -> bool:
+    """Would a Claude Code session opened in ``root`` have this agent's Papaya tools?
+
+    Configured, and still runnable: the client's interpreter path moves when the
+    runtime's environment is rebuilt, and a server whose command is gone fails
+    silently at session start.
+    """
+    server = session_server(root)
+    if server is None:
+        return False
+    command = str(server.get("command") or "")
+    return not command.startswith("/") or Path(command).exists()
+
+
+def install_session_tools(root: str | Path, *, run=None) -> dict:
+    """Give Claude Code sessions in ``root`` the Papaya tools this machine is connected as.
+
+    `ppy serve`'s headless turns get them by passing the client's `runner-config`
+    server with `--mcp-config`. A session a person opens in the runtime directory
+    loads only its own Claude Code configuration, so on 2026-09-17 a manager session
+    connected as the engineering agent could not read or comment on a work item.
+    This writes the same server into Claude Code's local scope for this directory
+    (never a committed file), replacing any stale copy. A session already running
+    loads it after `/mcp` reconnects or the session restarts. Never raises.
+    """
+    from papaya_agent_runtime.manager.launch import papaya_agent_command
+
+    runner = run or _run
+    root = str(Path(root).resolve())
+    if status()["state"] != "connected":
+        return {
+            "ok": False,
+            "reason": "not_connected",
+            "detail": "this machine is not connected to a Papaya agent: `ppy papaya connect`",
+        }
+    claude = shutil.which("claude")
+    if claude is None:
+        return {"ok": False, "reason": "no_claude", "detail": "the `claude` CLI is not on PATH"}
+    env = client_env()
+    command = [
+        *papaya_agent_command(env),
+        "mcp",
+        "runner-config",
+        "--harness",
+        "claude-code",
+        "--working-directory",
+        root,
+    ]
+    try:
+        proc = runner(command, timeout=PROBE_TIMEOUT * 4, env=env, cwd=root)
+        server = (
+            json.loads(proc.stdout)["mcpServers"][SESSION_SERVER] if proc.returncode == 0 else None
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
+        return {"ok": False, "reason": "client_failed", "detail": f"runner-config: {exc}"}
+    if server is None:
+        said = (proc.stderr or proc.stdout or "").strip().splitlines()
+        last = said[-1] if said else "no output"
+        return {
+            "ok": False,
+            "reason": "client_failed",
+            "detail": f"runner-config exited {proc.returncode}: {last}",
+        }
+    try:
+        runner(
+            [claude, "mcp", "remove", SESSION_SERVER, "--scope", "local"],
+            timeout=PROBE_TIMEOUT,
+            cwd=root,
+        )
+        added = runner(
+            [claude, "mcp", "add-json", SESSION_SERVER, json.dumps(server), "--scope", "local"],
+            timeout=PROBE_TIMEOUT,
+            cwd=root,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "reason": "claude_failed", "detail": str(exc)}
+    if added.returncode != 0:
+        said = (added.stderr or added.stdout or "").strip().splitlines()
+        return {
+            "ok": False,
+            "reason": "claude_failed",
+            "detail": said[-1] if said else f"claude mcp add-json exited {added.returncode}",
+        }
+    return {
+        "ok": True,
+        "addressed": status()["addressed"],
+        "detail": (
+            "Papaya tools are configured for Claude Code sessions in this directory; a "
+            "session already open loads them after `/mcp` or a restart"
+        ),
+    }
 
 
 __all__ = [

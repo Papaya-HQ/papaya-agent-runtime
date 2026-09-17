@@ -705,6 +705,27 @@ def _cmd_papaya(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if args.papaya_cmd == "tools":
+        from papaya_agent_runtime.manager.launch import repo_root
+
+        root = repo_root()
+        if args.check:
+            ready = papaya.session_tools_ready(root)
+            print(
+                "Papaya tools are configured for sessions here"
+                if ready
+                else "sessions here have no Papaya tools: `ppy papaya tools` adds them"
+            )
+            return 0 if ready else 1
+        result = papaya.install_session_tools(root)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        elif result["ok"]:
+            print(f"{result['addressed']}: {result['detail']}")
+        else:
+            print(f"not configured ({result['reason']}): {result['detail']}", file=sys.stderr)
+        return 0 if result["ok"] else 1
+
     if args.papaya_cmd == "context":
         payload = papaya.context(refresh=args.refresh)
         if payload is None:
@@ -2213,6 +2234,17 @@ def _cmd_start(args: argparse.Namespace) -> int:
 
     # Once, at the start of the session this launches; the session itself never repeats it.
     standalone.say_invitation(sys.stderr)
+    if not args.dry_run and launch.provider == "claude":
+        from papaya_agent_runtime import papaya
+        from papaya_agent_runtime.manager.launch import repo_root
+
+        # The session this launches acts as the connected agent, so it gets its tools.
+        if papaya.status()["state"] == "connected" and not papaya.session_tools_ready(repo_root()):
+            result = papaya.install_session_tools(repo_root())
+            if not result["ok"]:
+                print(
+                    f"ppy start: Papaya tools not configured: {result['detail']}", file=sys.stderr
+                )
     if args.dry_run:
         print(f"provider: {launch.provider}")
         print(f"model:    {launch.model or '(harness default)'}")
@@ -2816,6 +2848,13 @@ def build_parser() -> argparse.ArgumentParser:
     pcontext.add_argument(
         "--refresh", action="store_true", help="re-fetch instead of reading the cache"
     )
+    ptools = psub.add_parser(
+        "tools",
+        help="give Claude Code sessions in the runtime directory this agent's Papaya tools "
+        "(the MCP server `ppy serve` turns use)",
+    )
+    ptools.add_argument("--check", action="store_true", help="only say whether they are set up")
+    ptools.add_argument("--json", action="store_true", help="machine-readable output")
     papaya_cmd.set_defaults(func=_cmd_papaya)
 
     track = sub.add_parser(

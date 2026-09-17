@@ -171,6 +171,40 @@ def invitation_context(payload: dict[str, Any] | None = None) -> str | None:
     )
 
 
+def papaya_tools_context() -> str | None:
+    """Make sure a connected interactive session can act as its agent in Papaya.
+
+    `ppy serve` turns load the Papaya MCP server themselves; a session a person opened
+    here only loads its own Claude Code configuration. When this machine is connected
+    and sessions here have no Papaya server (or a stale one), it is configured now, and
+    the session is told how to load it without restarting. Headless turns and
+    framework-development sessions are left alone.
+    """
+    from papaya_agent_runtime import papaya
+    from papaya_agent_runtime.manager.launch import MANAGER_TURN_ENV, repo_root
+
+    if os.environ.get("PPY_DEV") or os.environ.get(MANAGER_TURN_ENV):
+        return None
+    root = repo_root()
+    if papaya.session_tools_ready(root):
+        return None
+    if papaya.status()["state"] != "connected":
+        return None
+    result = papaya.install_session_tools(root)
+    if result["ok"]:
+        return (
+            f"PAPAYA TOOLS: this session acts as {result['addressed']} but started without its "
+            "Papaya tools. They are configured now; ask the person to run `/mcp` (or restart "
+            "the session) to load them before reading or commenting on work items. "
+            "`ppy papaya tools` repeats this whenever they go missing."
+        )
+    return (
+        "PAPAYA TOOLS: this machine is connected but this session has no Papaya tools and "
+        f"configuring them failed ({result['detail']}). Run `ppy papaya tools` and say what it "
+        "reports."
+    )
+
+
 def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | None:
     """What a (re)starting manager needs to know before its first reply.
 
@@ -189,6 +223,10 @@ def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | 
         ready = readiness_context()
         if ready:
             parts.append(ready)
+    with contextlib.suppress(Exception):
+        tools = papaya_tools_context()
+        if tools:
+            parts.append(tools)
     with contextlib.suppress(Exception):
         invite = invitation_context(payload)
         if invite:
