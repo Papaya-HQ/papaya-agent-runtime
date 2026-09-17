@@ -104,6 +104,7 @@ _WORDS = {
     "needs_recovery": "lost its process",
     "failed": "failed",
     "pr_needs_a_person": "has a pull request that needs a person",
+    "work_item_changed": "is a ticket whose work item changed",
 }
 
 _NEXT = {
@@ -235,8 +236,27 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
                 ticket_task_id=tickets.get(int(row["run_id"])),
             )
         )
-    from papaya_agent_runtime import supervision
+    from papaya_agent_runtime import supervision, workitems
 
+    for change in workitems.unheard():
+        said = "; ".join(f"{c.get('author')}: {c.get('text')}" for c in change.get("changes") or [])
+        workers = ", ".join(str(w) for w in change.get("workers") or [])
+        owed.append(
+            Owed(
+                task_id=int(change["ticket_task_id"]),
+                status="work_item_changed",
+                title="",
+                repo=None,
+                reason=f"work item {change.get('work_item_id')} changed while worker task(s) "
+                f"{workers} work on it: {_clip(said)}",
+                next_step=(
+                    f"steer worker task(s) {workers} if it changes their work, or "
+                    f'`ppy heard {change["ticket_task_id"]} --note "..."`'
+                ),
+                seconds=None,
+                ticket_task_id=None,
+            )
+        )
     for task_id, reasons in supervision.prs_needing_a_person():
         owed.append(
             Owed(
