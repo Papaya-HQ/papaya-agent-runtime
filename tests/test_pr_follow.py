@@ -28,6 +28,7 @@ from papaya_agent_runtime import (
     rounds,
     serve,
 )
+from papaya_agent_runtime.config import WorkerCeiling
 from papaya_agent_runtime.providers.command_rules import command_rules
 from papaya_agent_runtime.state import store
 from papaya_agent_runtime.state.db import init_db
@@ -394,19 +395,21 @@ def delivered_worker(sup: Supervisor, repo: str) -> dict[str, Any]:
     return resp
 
 
-def test_pr_attention_runs_in_the_lane_with_both_ticket_slots_busy_and_queues_by_readiness(
+def test_pr_attention_runs_in_the_lane_with_every_ticket_slot_busy_and_queues_by_readiness(
     supervisor, source_repo
 ) -> None:
     added = repos.add_repo(source_repo)
     sup = supervisor()
     first = delivered_worker(sup, added.name)
     second = delivered_worker(sup, added.name)
-    for title in ("ticket one", "ticket two"):
-        sup.dispatch_task(repo=added.name, title=title, instructions="HOLD:30", provider="fake")
+    for n in range(WorkerCeiling().max_concurrent):
+        sup.dispatch_task(
+            repo=added.name, title=f"ticket {n}", instructions="HOLD:30", provider="fake"
+        )
     with pytest.raises(SupervisorError, match="worker capacity is full"):
-        sup.dispatch_task(repo=added.name, title="ticket three", provider="fake")
+        sup.dispatch_task(repo=added.name, title="one ticket too many", provider="fake")
 
-    # Both ticket slots busy: the pull request fix is admitted at once, in the lane.
+    # Every ticket slot busy: the pull request fix is admitted at once, in the lane.
     fixing: list[Any] = []
     specs = recorded_specs(sup, running=fixing)
     resumed = sup.steer_task(first["task_id"], "Rebase onto main.")
@@ -417,7 +420,7 @@ def test_pr_attention_runs_in_the_lane_with_both_ticket_slots_busy_and_queues_by
     with pytest.raises(SupervisorError, match="reconcile lane is full"):
         sup.steer_task(second["task_id"], "Update the branch.")
     with pytest.raises(SupervisorError, match="worker capacity is full"):
-        sup.dispatch_task(repo=added.name, title="ticket three", provider="fake")
+        sup.dispatch_task(repo=added.name, title="one ticket too many", provider="fake")
     for execution in fixing:
         sup._release(execution)
     sup.steer_task(second["task_id"], "Update the branch.")
