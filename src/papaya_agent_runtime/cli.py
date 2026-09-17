@@ -1833,6 +1833,7 @@ def _cmd_gate(args: argparse.Namespace) -> int:
             task_id=args.task_id,
             repo=args.repo,
             full=args.full,
+            baseline=args.baseline,
             wait_seconds=gate.WAIT_SECONDS if args.wait_seconds is None else args.wait_seconds,
             out=out,
         )
@@ -3164,6 +3165,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate_run.add_argument(
         "--full", action="store_true", help="run the repository's full suite, not its local gate"
+    )
+    gate_run.add_argument(
+        "--baseline",
+        default=None,
+        metavar="SHA",
+        help=(
+            "gate this base commit instead, in a scratch worktree and a database of its own "
+            "(the repository comes from --task or the positional name)"
+        ),
     )
     gate_run.add_argument(
         "--wait",

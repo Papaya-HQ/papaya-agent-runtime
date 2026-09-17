@@ -32,11 +32,13 @@ So the facts live on the repository (``ppy repo set <name> --compose-stack ...
 from __future__ import annotations
 
 import shlex
+import socket
 import sqlite3
 import string
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from papaya_agent_runtime import compose, prompts
 from papaya_agent_runtime.paths import cache_dir, uv_cache_dir
@@ -357,15 +359,15 @@ class PreparedEnvironment:
     process_env: dict[str, str] | None = None
 
 
-def task_cache_dir(task_id: int) -> Path:
-    """Writable cache root private to one task's lint/type-checker processes."""
+def task_cache_dir(task_id: int | str) -> Path:
+    """Writable cache root private to one task's (or one gate scope's) processes."""
     return cache_dir() / "tasks" / str(task_id)
 
 
 def _resolved_variables(
     env: RepoEnvironment,
     *,
-    task_id: int,
+    task_id: int | str,
     compose_project: str | None,
     db_port: int | None,
 ) -> dict[str, str]:
@@ -400,6 +402,80 @@ def task_process_env(conn: sqlite3.Connection, repo_row, task_id: int) -> dict[s
         compose_project=project if env.compose_stack else None,
         db_port=int(raw_port) if env.compose_stack and raw_port else None,
     )
+
+
+def render_task_env(conn: sqlite3.Connection, repo_row, task_id: int) -> dict[str, str]:
+    """A task's resolved process values for a process that has no runner: a gate.
+
+    What :func:`task_process_env` reads, except that a compose repository's project and
+    port are settled here when dispatch did not record them (the stack was declared
+    after the task was dispatched), exactly as dispatch would have, and recorded, so
+    teardown finds the stack a gate brought up. Without this a gate for such a task
+    ran against the repository's default database (issue #47).
+    """
+    env = for_repo(repo_row)
+    project = port = None
+    if env.compose_stack:
+        project = store.get_task_env(conn, task_id, compose.COMPOSE_PROJECT_KEY)
+        if not project:
+            project = compose.record_project(
+                task_id, compose_project_for(task_id), source="gate", conn=conn
+            )
+        raw_port = store.get_task_env(conn, task_id, DB_PORT_KEY)
+        port = int(raw_port) if raw_port else derive_port(env.db_port_base, task_id)
+        if port is not None and not raw_port:
+            store.set_task_env(conn, task_id, DB_PORT_KEY, str(port), source="gate")
+    return _resolved_variables(env, task_id=task_id, compose_project=project, db_port=port)
+
+
+def free_port() -> int:
+    """A host port nothing is listening on right now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def scope_process_env(repo_row, scope: str) -> dict[str, str]:
+    """Process values private to a gate that belongs to no task (a baseline, a base clone).
+
+    ``scope`` stands in for the task: it is the compose project and the ``{task_id}`` in
+    the database URL templates. The port is one nothing holds now, since no task id
+    derives it.
+    """
+    env = for_repo(repo_row)
+    project = scope if env.compose_stack else None
+    port = free_port() if project and env.db_port_base else None
+    return _resolved_variables(env, task_id=scope, compose_project=project, db_port=port)
+
+
+def database_name(values: dict[str, str]) -> str | None:
+    """The database a process with these values runs its tests against, when a URL says."""
+    for key in ("TEST_DATABASE_URL", "DATABASE_URL"):
+        name = urlsplit(values.get(key) or "").path.lstrip("/")
+        if name:
+            return name
+    return None
+
+
+def isolation_gaps(env: RepoEnvironment, *, has_compose_file: bool) -> list[str]:
+    """Why two gates on this repository could share a database; empty when they cannot.
+
+    A repository with a compose file but no declared stack gives every gate the
+    repository's default stack; a declared one needs a port base, so each task's stack
+    listens on its own port, and URL templates carrying ``{task_id}``, so each task's
+    database has its own name.
+    """
+    if not env.compose_stack:
+        return ["ships a compose file but declares no compose stack"] if has_compose_file else []
+    gaps = []
+    if not env.db_port_base:
+        gaps.append("no database port base")
+    templates = [t for t in (env.db_url_template, env.test_db_url_template) if t]
+    if not templates:
+        gaps.append("no database URL template")
+    elif any("{task_id}" not in template for template in templates):
+        gaps.append("a database URL template without {task_id}")
+    return gaps
 
 
 def finish_instruction(task_id: int | str, ends_at: str) -> str:

@@ -646,6 +646,9 @@ class Ticket:
     #: The gate recorded at the worker's head when it last stopped or said done, as one
     #: line for the review turn; empty when none was.
     recorded_gate: str = ""
+    #: Set when the gate at the worker's head is red twice the same way: the runner
+    #: stopped re-gating, and the review turn decides on this line.
+    repeated_red: str = ""
     #: How many times in a row the runner has sent a worker back for uncommitted work.
     dirty_steers: int = 0
     #: The uncommitted-work finding at the last review, for the review turn; empty when clean.
@@ -1646,6 +1649,11 @@ class TicketRunner:
           `worker_done` goes to review as before, where the re-check happens.
 
         After `GATE_STEERS` in a row, or a refused steer, the review turn gets it.
+
+        A head whose gate is red twice the same way (`gate.repeated_red`) is never sent
+        back again: re-running cannot change it (PAP-219's worker ran one red gate four
+        times). The ticket task records `needs_a_person` with both results, the item gets
+        one comment naming the failing tests and the head, and the review turn decides.
         """
         trigger, worker = ticket.trigger, ticket.worker
         if trigger is None or worker is None:
@@ -1657,6 +1665,10 @@ class TicketRunner:
             log.warning("[serve] Could not read worker task %d's gate: %s", worker_id, exc)
             recorded = gate.Verdict(gate.NONE)
         ticket.recorded_gate = recorded.result.line() if recorded.result is not None else ""
+        ticket.repeated_red = ""
+        if recorded.state == gate.RED and recorded.repeated:
+            await self._stop_regating(ticket, worker_id, recorded.repeated)
+            return False
         if recorded.state == gate.GREEN and recorded.result is not None:
             if trigger.failure:
                 line = recorded.result.line()
@@ -1701,6 +1713,31 @@ class TicketRunner:
             )
         await self._enter(ticket, PHASE_DISPATCHED, sent)
         return True
+
+    async def _stop_regating(
+        self, ticket: Ticket, worker_id: int, repeated: tuple[gate.GateResult, ...]
+    ) -> None:
+        """Record and say, once per head, that the gate is a person's decision now."""
+        line = gate.repeated_line(repeated)
+        head = repeated[0].head_sha
+        ticket.repeated_red = (
+            f"{line}. Decide on it: if `ppy gate run --task {worker_id} --baseline <base sha>` "
+            "shows the same failures on the base, deliver and name them as pre-existing; "
+            "otherwise hand the ticket back."
+        )
+        first = await asyncio.to_thread(
+            record_gate_needs_a_person, ticket.held.task_id, worker_id, repeated
+        )
+        if not first:
+            return
+        _report_progress(ticket.job, ticket.phase, f"Worker task {worker_id}: {line}.")
+        await self._say(
+            ticket,
+            f"{PHASE_NEEDS_A_PERSON}:gate:{head}",
+            f"The gate at {head[:8]} failed twice the same way: "
+            f"{', '.join(repeated[0].failing_tests) or repeated[0].summary}. It is not being "
+            "run again; the review decides whether these failures were already there.",
+        )
 
     async def _back_to_commit(self, ticket: Ticket) -> bool:
         """Send a worker back when its worktree holds what its branch does not.
@@ -2280,6 +2317,7 @@ class TicketRunner:
             **_worker_facts(ticket.worker),
             "what stopped the worker": trigger.detail if trigger and trigger.failure else "",
             "the worker's recorded gate at its head": ticket.recorded_gate,
+            "finding: the gate is red twice the same way": ticket.repeated_red,
             "finding: uncommitted work": ticket.uncommitted,
             "previous attempt's transcript (tail)": tail,
         }
@@ -2687,6 +2725,52 @@ def record_phase(conn, task_id: int, phase: str, detail: str = "") -> None:
         run_id=int(task["run_id"]) if task is not None else None,
         task_id=task_id,
     )
+
+
+#: The event a ticket task gets when its worker's gate is red twice the same way at a head.
+GATE_NEEDS_A_PERSON = "gate_needs_a_person"
+
+
+def record_gate_needs_a_person(
+    ticket_task_id: int, worker_task_id: int, repeated: tuple[gate.GateResult, ...]
+) -> bool:
+    """Record ``needs_a_person`` on the ticket task with both results; False if already done.
+
+    Once per head: a resumed hold, or the next stop at the same head, reads the record
+    rather than saying it again.
+    """
+    head = repeated[0].head_sha
+    conn = db.init_db()
+    try:
+        for row in conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = ?",
+            (ticket_task_id, GATE_NEEDS_A_PERSON),
+        ).fetchall():
+            payload = _payload(row)
+            if payload.get("head_sha") == head and payload.get("worker_task_id") == worker_task_id:
+                return False
+        task = store.get_task(conn, ticket_task_id)
+        store.append_event(
+            conn,
+            kind=GATE_NEEDS_A_PERSON,
+            payload={
+                "worker_task_id": worker_task_id,
+                "head_sha": head,
+                "failing_tests": list(repeated[0].failing_tests),
+                "results": [result.as_dict() for result in repeated],
+            },
+            run_id=int(task["run_id"]) if task is not None else None,
+            task_id=ticket_task_id,
+        )
+        record_phase(
+            conn,
+            ticket_task_id,
+            PHASE_NEEDS_A_PERSON,
+            f"worker task {worker_task_id}: {gate.repeated_line(repeated)}",
+        )
+        return True
+    finally:
+        conn.close()
 
 
 def phase_history(conn, task_id: int) -> list[str]:

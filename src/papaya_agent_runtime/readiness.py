@@ -537,6 +537,55 @@ def _gate_budget_problems(problems: list[Problem]) -> None:
     )
 
 
+GATE_ENV_NOT_ISOLATED = "gate_env_not_isolated"
+
+
+def _gate_isolation_problems(problems: list[Problem]) -> None:
+    """Could two gates on a registered repository run against one database?
+
+    Issue #47 (2026-09-17): every backend gate and a review's baseline check ran
+    against the repository's default test database at once, because the repository
+    ships a compose file but had no private stack declared, so each task's gate
+    environment had nothing private in it. A compose repository is isolated per task
+    only with a port base and database URL templates that carry ``{task_id}``.
+    """
+    from papaya_agent_runtime import environment, repos
+
+    try:
+        registered = repos.list_repos()
+    except Exception:  # noqa: BLE001 - an unreadable state db is reported elsewhere
+        return
+    gaps: list[str] = []
+    for row in registered:
+        path = str(row.get("local_path") or "")
+        has_compose_file = bool(path) and any(
+            machine.is_file(f"{path}/{name}") for name in _COMPOSE_FILES
+        )
+        found = environment.isolation_gaps(
+            environment.for_repo(row), has_compose_file=has_compose_file
+        )
+        if found:
+            gaps.append(f"{row['name']} ({'; '.join(found)})")
+    if not gaps:
+        return
+    problems.append(
+        Problem(
+            code=GATE_ENV_NOT_ISOLATED,
+            summary=(
+                "gates on these repositories can share one database, so one gate's run "
+                "can fail another's: " + ", ".join(gaps)
+            ),
+            fix=(
+                "`ppy repo set <name> --compose-stack yes --db-port-base <port> "
+                "--db-port-variable <the Makefile's port variable> "
+                '--test-db-url-template "postgresql://...:{port}/<db>_{task_id}"`'
+            ),
+            owner=USER,
+            blocking=False,
+        )
+    )
+
+
 def _learned_tool_problems(problems: list[Problem]) -> None:
     """Denied tools: a learned one a lock refused, and ones outside the safe family."""
     from papaya_agent_runtime import config_changes, tool_learning
@@ -1111,6 +1160,7 @@ def check() -> Readiness:
     _gate_tool_problems(problems)
     _learned_tool_problems(problems)
     _gate_budget_problems(problems)
+    _gate_isolation_problems(problems)
     _papaya_problems(problems)
     _client_problems(problems)
     _machine_problems(problems)
