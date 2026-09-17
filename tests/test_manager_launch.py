@@ -94,7 +94,19 @@ def test_a_turn_is_the_same_manager_built_headless() -> None:
 
     codex = build_launch(config=_cfg(provider="codex", model="gpt-5-codex"), turn="# Turn: brief")
     assert codex.argv[:2] == ["codex", "exec"]
-    assert codex.argv[-1] == "# Turn: brief"
+    # Codex has no system-prompt flag, so the role rides ahead of the turn in the one
+    # prompt it gets (#74): the same contract pointer a Claude turn has in its system
+    # prompt, and the turn's heading still the first line after it.
+    assert codex.argv[-1] == codex.seed_prompt
+    assert codex.seed_prompt.endswith("\n\n---\n\n# Turn: brief")
+    assert codex.seed_prompt.count("# Turn: brief") == 1
+    for launch in (claude, codex):
+        carried = " ".join(launch.argv)
+        assert "docs/runtime-contract.md" in carried, launch.provider
+        assert "overrides any repository-development instructions" in carried, launch.provider
+        assert "never ask the user to run a command" in carried, launch.provider
+    # An interactive Codex session still gets the seed prompt alone, as before.
+    assert build_launch(config=_cfg(provider="codex")).seed_prompt.startswith("Starting a")
 
 
 def test_a_codex_turn_gets_the_clients_mcp_overrides_the_way_its_runner_does(tmp_path) -> None:
@@ -135,7 +147,8 @@ def test_a_codex_turn_gets_the_clients_mcp_overrides_the_way_its_runner_does(tmp
         "-c",
         'mcp_servers.papaya-job.url="https://x"',
     ]
-    assert codex.argv[-3:] == ["--cd", str(tmp_path), "# Turn: brief"]
+    assert codex.argv[-3:-1] == ["--cd", str(tmp_path)]
+    assert codex.argv[-1].endswith("# Turn: brief")
 
     def refused(command, **_kwargs):
         return subprocess.CompletedProcess(command, 75, stdout="", stderr="identity mismatch\n")
