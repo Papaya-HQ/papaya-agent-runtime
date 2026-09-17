@@ -322,6 +322,13 @@ def _cmd_repo(args: argparse.Namespace) -> int:
             )
             print(settings.describe())
             return _repo_set_budgets(args.name, budget_changes) if budget_changes else 0
+        if args.repo_cmd == "show":
+            settings = get_settings(args.name)
+            print(args.name)
+            if settings.environment is not None:
+                print("\n".join(f"  {line}" for line in settings.environment.gate_lines()))
+            print(settings.describe())
+            return 0
         if args.repo_cmd == "budgets":
             return _repo_budgets(args.name)
         if args.repo_cmd == "provision":
@@ -2388,6 +2395,12 @@ def build_parser() -> argparse.ArgumentParser:
         "worktree, e.g. backend/.venv; empty string clears it",
     )
     prov.add_argument("--clear", action="store_true", help="turn provisioning off for this repo")
+    rshow = rsub.add_parser(
+        "show",
+        help="a repo's gates, each with where it came from (person, repo:<file>:<line>, "
+        "observed), and its other settings",
+    )
+    rshow.add_argument("name", help="registered repository name")
     rset = rsub.add_parser(
         "set",
         help="per-repo settings (no flags: show what is configured)",

@@ -233,6 +233,10 @@ class Onboarding:
 SCOPED = "scoped"
 #: A declaration's role: the complete run, once, before a pull request.
 FULL = "full"
+#: Source prefixes, as `environment.SOURCE_REPO` and `environment.SOURCE_OBSERVED`
+#: spell them (this module imports nothing from the state layer at import time).
+_REPO = "repo:"
+_OBSERVED = "observed:"
 
 
 @dataclass(frozen=True)
@@ -245,6 +249,12 @@ class Declaration:
     source: str
     #: The line it was read from, as written, so a brief can quote it.
     quote: str
+    #: What the command checks (:func:`command_kind`): ``lint``, ``typecheck``,
+    #: ``test``, ``e2e``, ``verify``, ``format`` or ``other``.
+    kind: str = ""
+    #: Commands the instructions give together (one sentence, or one introduced
+    #: list) share a group, and a gate is the whole group.
+    group: str = ""
 
 
 @dataclass
@@ -252,11 +262,11 @@ class GatePolicy:
     """Who runs which gate for a repository: what the environment block tells a worker.
 
     Only what the repository declares (a command quoted from its own instructions,
-    with the file and line) and what the runtime observes (a CI workflow that runs the
-    full suite, a pre-push hook that does). Until 2026-09-17 the runtime guessed from
-    target names instead, and a backend's guessed local gate was its sixteen-minute
-    full suite. A repository that declares nothing has an unknown policy, and readiness
-    asks its owner.
+    with the file and line, source ``repo:<file>:<line>``) and what the runtime observes
+    (a pull-request workflow that runs the full suite, a pre-push hook that does; source
+    ``observed:<where>``). Until 2026-09-17 the runtime guessed from target names
+    instead, and a backend's guessed local gate was its sixteen-minute full suite. A
+    repository that declares nothing has an unknown policy, and readiness asks its owner.
     """
 
     local_gate: str | None = None
@@ -580,7 +590,7 @@ def _ci(root: Path) -> tuple[list[str], list[str]]:
 # ── Gate policy ─────────────────────────────────────────────────────────────
 
 #: The runtime's gate guesses before 2026-09-17, kept only so the start remedy can
-#: recognise a stored value that came from them (`clear_heuristic_gate_policies`).
+#: recognise a stored value that came from them (`settle_gate_policy`).
 _LEGACY_FAST_MAKE_TARGETS = (
     "test-fast",
     "fast-test",
@@ -651,17 +661,25 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 _FULL_CUE = re.compile(
     r"before\s+(?:opening\s+|you\s+open\s+|raising\s+|sending\s+)?(?:a|an|the|any|your)?\s*"
     r"(?:pr\b|pull\s+request|merg|push|ship|release|review)"
-    r"|full\s+(?:test\s+)?(?:suite|gate|verification|check)|whole\s+suite|entire\s+suite"
-    r"|complete\s+suite|pre-?pr\b|final\s+check|everything\s+ci",
+    r"|full\s+(?:local\s+)?(?:test\s+)?(?:suite|gate|verification|check)"
+    r"|whole\s+suite|entire\s+suite|complete\s+suite|pre-?pr\b|final\s+check|everything\s+ci"
+    r"|required\s+(?:full|complete)|\be2e\b|end-to-end",
     re.IGNORECASE,
 )
 _SCOPED_CUE = re.compile(
     r"while\s+(?:you(?:'re|\s+are)?\s+)?(?:work|develop|iterat|cod|chang)"
     r"|as\s+you\s+(?:go|work)|during\s+development|inner\s+loop|iterat"
     r"|\bquick|\bfast\b|\bscoped\b|\btargeted\b|local\s+gate"
-    r"|before\s+(?:each\s+|every\s+)?commit|after\s+(?:each|every)\s+change",
+    r"|before\s+(?:each\s+|every\s+)?commit|after\s+(?:each|every)\s+change"
+    r"|before\s+(?:you\s+)?(?:mark(?:ing)?\s+(?:the\s+|your\s+)?(?:work|task|it)\s+(?:as\s+)?"
+    r"(?:complete|done|finished)|hand(?:ing)?\s+(?:it\s+|work\s+|the\s+work\s+)?(?:back|off)"
+    r"|finish(?:ing)?\b)",
     re.IGNORECASE,
 )
+#: A command that runs beside the one before it, so it has that one's role.
+_ALONGSIDE = re.compile(r"\balongside\b|\btogether\s+with\b|\bas\s+well\b", re.IGNORECASE)
+#: What may sit between two commands of one list: "`a`, `b`, and `c`".
+_LIST_SEPARATOR = re.compile(r"[\s,;/]*(?:(?:and|or|then|&&|plus)[\s,]*)?", re.IGNORECASE)
 
 
 def _role(text: str) -> str | None:
@@ -701,14 +719,104 @@ def _clause(text: str, *, after: bool) -> str:
     return parts[0] if after else parts[-1]
 
 
+_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s")
+
+
+@dataclass
+class _Logical:
+    """One sentence-bearing unit of Markdown: a paragraph or list item, rewrapped."""
+
+    number: int
+    text: str
+    kind: str  # "prose", "listed", "table", "heading" or "fenced"
+    #: ``(offset in text, file line)``, so a command can be sourced to its own line.
+    starts: list[tuple[int, int]] = field(default_factory=list)
+
+    def line_at(self, offset: int) -> int:
+        return max((line for at, line in self.starts if at <= offset), default=self.number)
+
+
+def _logical_lines(lines: list[str]) -> list[_Logical]:
+    """Markdown lines joined the way a reader reads them.
+
+    Instructions wrap: "`make verify` - required full local gate; it does NOT run
+    Vitest, so run" continues "`make frontend-unit` alongside it." on the next line, and
+    a role read line by line never reaches the command it belongs to.
+    """
+    out: list[_Logical] = []
+    current: _Logical | None = None
+    fenced = False
+    for number, raw in enumerate(lines, start=1):
+        line = raw.strip()
+        if line.startswith(("```", "~~~")):
+            fenced, current = not fenced, None
+            continue
+        if fenced:
+            out.append(_Logical(number, line, "fenced", [(0, number)]))
+            continue
+        if not line:
+            current = None
+            continue
+        if line.startswith("#") or line.startswith("|"):
+            kind = "heading" if line.startswith("#") else "table"
+            out.append(_Logical(number, line, kind, [(0, number)]))
+            current = None
+            continue
+        if _LIST_ITEM.match(line):
+            current = _Logical(number, line, "listed", [(0, number)])
+            out.append(current)
+            continue
+        if current is not None:
+            current.starts.append((len(current.text) + 1, number))
+            current.text = f"{current.text} {line}"
+            continue
+        current = _Logical(number, line, "prose", [(0, number)])
+        out.append(current)
+    return out
+
+
+def _line_roles(text: str, commands: list[tuple[int, int, str]]) -> list[str | None]:
+    """The role each command on one logical line is given, by the words around it.
+
+    First the clause after it ("`make lint-check` while working"), then the clause
+    before it ("before a PR, run `make verify`"). Commands listed together share the
+    list's words ("run `make lint`, `make fmt`, and `make test` before marking work
+    complete"), and one that runs "alongside" the command before it has that one's role.
+    """
+    count = len(commands)
+    after: list[str | None] = [None] * count
+    for index in reversed(range(count)):
+        following = commands[index + 1][0] if index + 1 < count else len(text)
+        between = text[commands[index][1] : following]
+        if index + 1 < count and _LIST_SEPARATOR.fullmatch(between):
+            after[index] = after[index + 1]
+        else:
+            after[index] = _role(_clause(between, after=True))
+    roles: list[str | None] = []
+    for index, (start, end, _command) in enumerate(commands):
+        preceding = commands[index - 1][1] if index else 0
+        between = text[preceding:start]
+        if index and _LIST_SEPARATOR.fullmatch(between):
+            before = roles[index - 1]
+        else:
+            before = _role(_clause(between, after=False))
+        role = after[index] or before
+        following = commands[index + 1][0] if index + 1 < count else len(text)
+        beside = _clause(text[end:following], after=True) + " " + _clause(between, after=False)
+        if role is None and index and _ALONGSIDE.search(beside):
+            role = roles[index - 1]
+        roles.append(role)
+    return roles
+
+
 def declarations(root: Path) -> list[Declaration]:
     """Every gate command a repository's instructions name, with its role and source.
 
-    Read by line, in the order of :data:`INSTRUCTION_FILES`. A command's role comes from
-    the words beside it: first the clause after it ("`make lint-check` while working"),
-    then the clause before it ("before a PR, run `make verify`"), then a lead-in line
-    ending in a colon, then the heading it sits under. A command no words give a role
-    is not a declaration: the runtime does not guess one.
+    Read in the order of :data:`INSTRUCTION_FILES`, a wrapped paragraph or list item as
+    one line. A command's role comes from the words beside it (:func:`_line_roles`), then
+    from a lead-in line ending in a colon, then from the heading it sits under. In a
+    table, the commands in a row's first cell take the role the rest of the row gives.
+    A command no words give a role is not a declaration: the runtime does not guess one.
     """
     found: list[Declaration] = []
     for name in INSTRUCTION_FILES:
@@ -717,41 +825,105 @@ def declarations(root: Path) -> list[Declaration]:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        heading = ""
-        lead_in = ""
-        fenced = False
-        for number, raw in enumerate(lines, start=1):
-            line = raw.strip()
-            if line.startswith(("```", "~~~")):
-                fenced = not fenced
-                continue
-            source = f"{name}:{number}"
-            if fenced:
-                command, _, comment = line.lstrip("$ ").partition(" #")
-                if _is_command(command):
-                    role = _role(comment) or _role(lead_in) or _role(heading)
+        heading, heading_at = "", 0
+        lead_in, lead_in_at = "", 0
+        # (role, command, line, quote, group) for this file, in reading order.
+        named: list[tuple[str, str, int, str, int]] = []
+        for unit in _logical_lines(lines):
+            text = unit.text
+            if unit.kind == "fenced":
+                command, _, comment = text.lstrip("$ ").partition(" #")
+                if not _is_command(command):
+                    continue
+                for role, group in (
+                    (_role(comment), unit.number),
+                    (_role(lead_in), lead_in_at),
+                    (_role(heading), heading_at),
+                ):
                     if role:
-                        found.append(Declaration(role, command.strip(), source, raw.strip()))
+                        named.append((role, command.strip(), unit.number, text, group))
+                        break
                 continue
-            if line.startswith("#"):
-                heading, lead_in = line.lstrip("#").strip(), ""
+            if unit.kind == "heading":
+                heading, heading_at = text.lstrip("#").strip(), unit.number
+                lead_in, lead_in_at = "", 0
                 continue
-            listed = bool(re.match(r"^(?:[-*+]|\d+[.)])\s", line))
-            commands = _commands_in(line)
-            for index, (start, end, command) in enumerate(commands):
-                following = commands[index + 1][0] if index + 1 < len(commands) else len(line)
-                preceding = commands[index - 1][1] if index else 0
-                role = _role(_clause(line[end:following], after=True)) or _role(
-                    _clause(line[preceding:start], after=False)
-                )
-                if role is None and listed:
+            if unit.kind == "table":
+                cells = text.strip().strip("|").split("|")
+                rest = "|".join(cells[1:])
+                others = _commands_in(rest)
+                role = _role(_clause(rest[: others[0][0]] if others else rest, after=True))
+                for _start, _end, command in _commands_in(cells[0]) if role else []:
+                    named.append((role, command, unit.number, text, unit.number))
+                continue
+            commands = _commands_in(text)
+            for (start, _end, command), role in zip(
+                commands, _line_roles(text, commands), strict=True
+            ):
+                group = unit.number
+                if role is None and unit.kind == "listed":
                     # A bare list item takes the role of the line that introduces it.
-                    role = _role(lead_in) or _role(heading)
+                    if role := _role(lead_in):
+                        group = lead_in_at
+                    elif role := _role(heading):
+                        group = heading_at
                 if role:
-                    found.append(Declaration(role, command, source, line))
-            if line and not listed:
-                lead_in = line if line.endswith(":") else ""
+                    named.append((role, command, unit.line_at(start), text, group))
+            if unit.kind == "prose":
+                lead_in, lead_in_at = (text, unit.number) if text.endswith(":") else ("", 0)
+        found.extend(
+            Declaration(
+                role,
+                command,
+                f"{name}:{number}",
+                quote,
+                kind=command_kind(command),
+                group=f"{name}:{group}",
+            )
+            for role, command, number, quote, group in named
+        )
     return found
+
+
+#: What a command checks, judged from the target, script or program it runs.
+_KIND_WORDS = (
+    ("format", re.compile(r"^(?:fmt|format)(?:$|[:_-])|[:_-](?:fmt|format)$|^(?:black|prettier)$")),
+    ("e2e", re.compile(r"e2e|end-to-end|playwright|cypress")),
+    ("lint", re.compile(r"lint|^ruff$|^eslint$|^biome$|^flake8$|^clippy$")),
+    ("typecheck", re.compile(r"type-?check|^types$|^tsc$|^mypy$|^pyright$")),
+    ("verify", re.compile(r"^(?:verify|check|ci|validate)(?:$|[:_-])")),
+    ("test", re.compile(r"test|unit|spec|^pytest$|^vitest$|^jest$")),
+)
+
+
+def command_kind(command: str) -> str:
+    """``lint``, ``typecheck``, ``test``, ``e2e``, ``verify``, ``format`` or ``other``."""
+    words = [w for w in command.split() if not re.match(r"^[A-Z_][A-Z0-9_]*=", w)]
+    if not words:
+        return "other"
+    program, rest = words[0], words[1:]
+    if program in ("uv", "poetry", "hatch", "pnpm", "npm", "yarn", "bun") and rest:
+        if rest[0] in ("run", "exec") and len(rest) > 1:
+            rest = rest[1:]
+        program, rest = rest[0], rest[1:]
+    elif program in ("uvx", "npx") and rest:
+        program, rest = rest[0], rest[1:]
+    if program in ("ruff", "go", "cargo") and rest:
+        if rest[0] in ("format", "fmt"):
+            return "format"
+        if rest[0] == "test":
+            return "test"
+        if rest[0] in ("check", "vet", "clippy"):
+            return "lint"
+    if program in ("make", "just") and rest:
+        program = rest[0]
+    if program in ("python", "python3") and rest[:1] == ["-m"] and len(rest) > 1:
+        program = rest[1]
+    name = program.lower()
+    for kind, pattern in _KIND_WORDS:
+        if pattern.search(name):
+            return kind
+    return "other"
 
 
 def _workflow_lines(root: Path) -> list[tuple[str, int, str]]:
@@ -770,19 +942,159 @@ def _workflow_lines(root: Path) -> list[tuple[str, int, str]]:
     return out
 
 
-def ci_runs(root: Path, command: str) -> str | None:
-    """``<workflow>:<line>`` of the first workflow line that runs ``command``, if any."""
+def ci_runs(root: Path, command: str, *, only: set[str] | None = None) -> str | None:
+    """``<workflow>:<line>`` of the first workflow line that runs ``command``, if any.
+
+    ``only`` limits the search to those workflow files (paths relative to ``root``).
+    """
     wanted = " ".join(command.split())
     if not wanted:
         return None
     pattern = re.compile(rf"(?:^|[\s:|&;]){re.escape(wanted)}(?:$|[\s;&|])")
     for relative, number, line in _workflow_lines(root):
+        if only is not None and relative not in only:
+            continue
         text = " ".join(line.split())
         if text.startswith("#"):
             continue
         if pattern.search(text):
             return f"{relative}:{number}"
     return None
+
+
+_PR_TRIGGER = re.compile(r"\b(?:pull_request(?:_target)?|merge_group)\b")
+_CALLED_WORKFLOW = re.compile(r"uses:\s*['\"]?\./(\.github/workflows/[\w.-]+\.ya?ml)")
+
+
+def pull_request_workflows(root: Path) -> set[str]:
+    """The workflows that run on a pull request, and the reusable ones they call."""
+    texts: dict[str, str] = {}
+    for relative, _number, line in _workflow_lines(root):
+        texts[relative] = f"{texts.get(relative, '')}{line}\n"
+    found: set[str] = set()
+    for relative, text in texts.items():
+        trigger = re.search(r"^(['\"]?on['\"]?)\s*:(.*)$", text, re.MULTILINE)
+        if trigger and _PR_TRIGGER.search(
+            f"{trigger.group(2)}\n{_section(text, trigger.group(1))}"
+        ):
+            found.add(relative)
+    pending = list(found)
+    while pending:
+        for called in _CALLED_WORKFLOW.findall(texts.get(pending.pop(), "")):
+            if called in texts and called not in found:
+                found.add(called)
+                pending.append(called)
+    return found
+
+
+#: A program that runs a test suite, however a workflow spells the command around it.
+_SUITE_RUNNER = re.compile(
+    r"\b(pytest|vitest|jest|playwright|cypress|mocha|rspec|phpunit|tox|nox|go\s+test|cargo\s+test)\b"
+)
+
+
+def _make_rules(root: Path) -> dict[str, tuple[int, list[str], list[str]]]:
+    """Each Makefile target: ``(line, prerequisites, recipe lines)``."""
+    try:
+        lines = (root / "Makefile").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    rules: dict[str, tuple[int, list[str], list[str]]] = {}
+    current: list[str] | None = None
+    for number, line in enumerate(lines, start=1):
+        if line.startswith("\t"):
+            if current is not None:
+                current.append(line.strip())
+            continue
+        match = _MAKE_TARGET.match(line)
+        if match is None:
+            if line.strip() and not line.startswith("#"):
+                current = None
+            continue
+        prerequisites = line[match.end() :].split("#", 1)[0].split(";", 1)[0].split()
+        current = []
+        for target in line[: match.end() - 1].split():
+            if target not in rules and not target.startswith("."):
+                rules[target] = (number, prerequisites, current)
+    return rules
+
+
+def _make_closure(rules, target: str) -> set[str]:
+    """``target`` and every target it depends on."""
+    seen: set[str] = set()
+    pending = [target]
+    while pending:
+        name = pending.pop()
+        if name in seen or name not in rules:
+            continue
+        seen.add(name)
+        pending.extend(rules[name][1])
+    return seen
+
+
+def _package_scripts(root: Path) -> dict[str, tuple[int, str]]:
+    """Each root ``package.json`` script: ``(line, body)``."""
+    try:
+        text = (root / "package.json").read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, ValueError):
+        return {}
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    if not isinstance(scripts, dict):
+        return {}
+    lines = text.splitlines()
+    found: dict[str, tuple[int, str]] = {}
+    for key, body in scripts.items():
+        needle = re.compile(rf"^\s*{re.escape(json.dumps(str(key)))}\s*:")
+        number = next((n for n, line in enumerate(lines, start=1) if needle.match(line)), 1)
+        found[str(key)] = (number, str(body))
+    return found
+
+
+def _suite_runners(root: Path, command: str) -> set[str]:
+    """The test programs ``command`` ends up running: its own, its target's, its script's."""
+    runners = {" ".join(m.split()) for m in _SUITE_RUNNER.findall(command)}
+    words = command.split()
+    if len(words) > 1 and words[0] == "make":
+        rules = _make_rules(root)
+        for target in _make_closure(rules, words[1]):
+            runners.update(
+                " ".join(m.split()) for m in _SUITE_RUNNER.findall("\n".join(rules[target][2]))
+            )
+    elif len(words) > 1 and words[0] in ("pnpm", "npm", "yarn", "bun"):
+        script = words[2] if words[1] == "run" and len(words) > 2 else words[1]
+        body = _package_scripts(root).get(script, (0, ""))[1]
+        runners.update(" ".join(m.split()) for m in _SUITE_RUNNER.findall(body))
+    return runners
+
+
+def observe_full_suite_owner(root: Path, command: str | None) -> tuple[str | None, str | None]:
+    """Who runs ``command``, the full suite, and what the runtime saw that says so.
+
+    ``ci`` when a pull-request workflow (:func:`pull_request_workflows`) runs every part
+    of it, either literally or through the test program the part runs (`make verify`
+    whose `test` prerequisite runs pytest, and a workflow that runs `uv run pytest`);
+    otherwise ``supervisor``, which runs it once at the delivered head. Read at every
+    start, so a workflow added since onboarding is seen.
+    """
+    if not command:
+        return None, None
+    workflows = pull_request_workflows(root)
+    first: str | None = None
+    for part in (p.strip() for p in command.split("&&")):
+        if not part:
+            continue
+        seen = ci_runs(root, part, only=workflows)
+        for runner in sorted(_suite_runners(root, part)) if seen is None else []:
+            seen = ci_runs(root, runner, only=workflows)
+            if seen:
+                break
+        if seen is None:
+            return "supervisor", f"{_OBSERVED}no pull-request workflow runs `{part}`"
+        first = first or seen
+    if first is None:
+        return None, None
+    return "ci", f"{_OBSERVED}{first}"
 
 
 #: A command that runs a test suite, as a hook or a workflow spells it.
@@ -881,19 +1193,26 @@ def _pre_push_hooks(root: Path) -> list[tuple[str, str]]:
 def derive_gate_policy(root: Path, report: Onboarding | None = None) -> GatePolicy:
     """Read a repository's gate policy from what it declares, and nothing else.
 
-    - **Scoped gate / full suite:** the first command the repository's own instructions
-      (:data:`INSTRUCTION_FILES`) give each role, quoted with its file and line
-      (:func:`declarations`). A Makefile target or package script is not a declaration
-      by its name alone; it is only a command a declaration may name.
-    - **Owner:** ``ci`` when a CI workflow runs the declared full suite (with the
-      workflow line), else ``supervisor``: the runtime runs it once at the delivered head.
+    - **Scoped gate:** the first group of commands the repository's own instructions
+      (:data:`INSTRUCTION_FILES`) give the scoped role, quoted with file and line
+      (:func:`declarations`), joined with ``&&``, formatters left out ("run `make lint`,
+      `make fmt`, and `make test` before marking work complete" is `make lint && make
+      test`). When the instructions name a full suite but no quick gate, the quick gate
+      is the repository's own package scripts ``lint``, ``typecheck`` and ``test:unit``
+      (else ``test``), or failing those its Makefile targets of those names, where a
+      test target is not part of the full suite's own target.
+    - **Full suite:** the first group given the full role ("full local gate", "required
+      full", "before a PR", e2e), joined the same way. A declared quick gate whose only
+      test command is the repository's only test command is the full suite too.
+    - **Owner:** :func:`observe_full_suite_owner`.
     - **Hook:** a pre-push hook (the one git runs here, honouring ``core.hooksPath``, or
       one the repository ships through husky, ``.githooks``, lefthook or pre-commit)
       whose text runs a test suite sets the hook flag.
 
-    Whatever is not declared stays unknown (:attr:`GatePolicy.unknown`); readiness
-    asks the owner rather than the runtime guessing. ``report`` is accepted for
-    callers that already inspected the repository; nothing here needs it.
+    Whatever the repository does not say stays unknown (:attr:`GatePolicy.unknown`);
+    readiness asks the owner rather than the runtime guessing. A Makefile target or a
+    package script is never a gate by its name alone. ``report`` is accepted for callers
+    that already inspected the repository; nothing here needs it.
     """
     policy = GatePolicy()
     for where, text in _pre_push_hooks(root):
@@ -904,24 +1223,132 @@ def derive_gate_policy(root: Path, report: Onboarding | None = None) -> GatePoli
             break
 
     policy.declarations = declarations(root)
-    for found in policy.declarations:
-        if found.role == SCOPED and not policy.local_gate:
-            policy.local_gate, policy.local_gate_source = found.command, found.source
-            policy.evidence.append(f"scoped gate from {found.source}: {found.quote}")
-        elif found.role == FULL and not policy.full_suite_command:
-            policy.full_suite_command = found.command
-            policy.full_suite_command_source = found.source
-            policy.evidence.append(f"full suite from {found.source}: {found.quote}")
+    scoped = _first_group(policy.declarations, SCOPED)
+    full = _first_group(policy.declarations, FULL)
+    if scoped:
+        policy.local_gate, policy.local_gate_source = _joined(scoped)
+        policy.evidence.extend(f"scoped gate from {d.source}: {d.quote}" for d in scoped)
+    if full:
+        policy.full_suite_command, policy.full_suite_command_source = _joined(full)
+        policy.evidence.extend(f"full suite from {d.source}: {d.quote}" for d in full)
+    elif scoped:
+        tests = [d for d in scoped if d.kind in ("test", "e2e", "verify")]
+        if len(tests) == 1 and _only_test_command(policy.declarations, tests[0]):
+            policy.full_suite_command, policy.full_suite_command_source = _joined(tests)
+            policy.evidence.append(
+                f"full suite from {tests[0].source}: the quick gate's only test command"
+            )
+    if full and not scoped:
+        quick = _quick_gate_from_scripts(root, full)
+        if quick:
+            policy.local_gate, policy.local_gate_source = _joined(quick)
+            policy.evidence.extend(
+                f"scoped gate from {d.source}: the repository's `{d.quote}`" for d in quick
+            )
 
-    if policy.full_suite_command:
-        workflow = ci_runs(root, policy.full_suite_command)
-        if workflow:
-            policy.full_suite_owner, policy.full_suite_owner_source = "ci", workflow
-            policy.evidence.append(f"CI runs the full suite: {workflow}")
-        else:
-            policy.full_suite_owner = "supervisor"
-            policy.full_suite_owner_source = "no CI workflow runs it"
+    owner, source = observe_full_suite_owner(root, policy.full_suite_command)
+    policy.full_suite_owner, policy.full_suite_owner_source = owner, source
+    if owner == "ci" and source:
+        policy.evidence.append(f"CI runs the full suite on pull requests: {source}")
     return policy
+
+
+#: What a quick gate is made of: lint, type checks and unit or touched tests. A
+#: formatter rewrites files, and a scoped drift check or e2e run is not a gate.
+_QUICK_KINDS = frozenset({"lint", "typecheck", "test", "verify"})
+
+
+def _first_group(found: list[Declaration], role: str) -> list[Declaration]:
+    """The first group of declarations with ``role``, made only of what that role runs."""
+    group: str | None = None
+    chosen: list[Declaration] = []
+    for declaration in found:
+        if declaration.role != role or declaration.kind == "format":
+            continue
+        if role == SCOPED and declaration.kind not in _QUICK_KINDS:
+            continue
+        if group is None:
+            group = declaration.group
+        if declaration.group == group and declaration.command not in {d.command for d in chosen}:
+            chosen.append(declaration)
+    return chosen
+
+
+def _joined(parts: list[Declaration]) -> tuple[str, str]:
+    """One command and its source for a gate made of ``parts``."""
+    sources: list[str] = []
+    for part in parts:
+        if part.source not in sources:
+            sources.append(part.source)
+    return " && ".join(p.command for p in parts), ", ".join(f"{_REPO}{s}" for s in sources)
+
+
+def _only_test_command(found: list[Declaration], test: Declaration) -> bool:
+    return all(d.command == test.command for d in found if d.kind in ("test", "e2e", "verify"))
+
+
+#: The script (or target) names a quick gate is made of, in order, with alternatives.
+_QUICK_NAMES = (("lint",), ("typecheck", "type-check"), ("test:unit", "test-unit", "test"))
+
+
+def _quick_gate_from_scripts(root: Path, full: list[Declaration]) -> list[Declaration]:
+    """The quick gate a repository's scripts give, when its instructions name only a full suite.
+
+    Its root ``package.json`` scripts first; failing those, its Makefile targets. A
+    Makefile test target the full suite's own target depends on, or one that runs the
+    same test program, is the full suite, so it is not a quick gate (a backend's `make
+    test` is its sixteen-minute suite).
+    """
+    full_commands = {d.command for d in full}
+    scripts = _package_scripts(root)
+    chosen: list[Declaration] = []
+    if scripts:
+        runner = _node_runner(root)
+        for names in _QUICK_NAMES:
+            name = next((n for n in names if n in scripts), None)
+            command = f"{runner} {name}" if name else ""
+            if name and command not in full_commands:
+                line = scripts[name][0]
+                chosen.append(
+                    Declaration(
+                        SCOPED,
+                        command,
+                        f"package.json:{line}",
+                        f'"{name}": "{scripts[name][1]}"',
+                        kind=command_kind(command),
+                        group="package.json",
+                    )
+                )
+        if chosen:
+            return chosen
+    rules = _make_rules(root)
+    part_of_full: set[str] = set()
+    full_runners: set[str] = set()
+    for command in full_commands:
+        words = command.split()
+        if len(words) > 1 and words[0] == "make":
+            part_of_full |= _make_closure(rules, words[1])
+            full_runners |= _suite_runners(root, command)
+    for names in _QUICK_NAMES:
+        name = next((n for n in names if n in rules), None)
+        if name is None or f"make {name}" in full_commands:
+            continue
+        if command_kind(name) == "test" and (
+            _make_closure(rules, name) & part_of_full
+            or _suite_runners(root, f"make {name}") & full_runners
+        ):
+            continue
+        chosen.append(
+            Declaration(
+                SCOPED,
+                f"make {name}",
+                f"Makefile:{rules[name][0]}",
+                f"{name}:",
+                kind=command_kind(name),
+                group="Makefile",
+            )
+        )
+    return chosen
 
 
 def legacy_gate_policy(root: Path, report: Onboarding) -> GatePolicy:
@@ -971,11 +1398,12 @@ def gate_unknowns(row) -> list[str]:
 def apply_gate_policy(
     name: str, policy: GatePolicy, *, local_gate: str | None = None
 ) -> GatePolicy:
-    """Store ``policy`` for ``name`` where nothing is set yet, and return what is stored.
+    """Store ``policy`` for ``name`` and return what is stored.
 
-    A value somebody set with ``ppy repo set`` is theirs and is never replaced by what
-    the repository declares; an explicit ``local_gate`` (``ppy repo onboard
-    --local-gate``) always is, as the person's.
+    A value a person set (``ppy repo set``, source ``person``) is theirs and is never
+    replaced; an explicit ``local_gate`` (``ppy repo onboard --local-gate``) is stored
+    as the person's. Every other answer is what the repository says now
+    (:func:`settle_gate_policy`).
     """
     from papaya_agent_runtime import environment
     from papaya_agent_runtime.state import init_db, store
@@ -985,20 +1413,9 @@ def apply_gate_policy(
         row = store.get_repo(conn, name)
         if row is None:
             raise SolicitError(f"repo {name!r} is not registered")
-        fields: dict[str, object] = {}
-        sources = policy.sources()
-        if local_gate and local_gate.strip():
-            fields["local_gate"] = local_gate.strip()
-            sources.pop("local_gate", None)
-        elif not row["local_gate"] and policy.local_gate:
-            fields["local_gate"] = policy.local_gate
-        if not row["push_hook_runs_full_suite"] and policy.push_hook_runs_full_suite:
-            fields["push_hook_runs_full_suite"] = "yes"
-        if not row["full_suite_owner"] and policy.full_suite_owner:
-            fields["full_suite_owner"] = policy.full_suite_owner
-        if not row["full_suite_command"] and policy.full_suite_command:
-            fields["full_suite_command"] = policy.full_suite_command
-        environment.set_fields(conn, name, sources=sources, **fields)
+        settle_gate_policy(
+            conn, name, policy, Path(str(row["local_path"] or "")), local_gate=local_gate
+        )
         stored = environment.for_repo(store.get_repo(conn, name))
     finally:
         conn.close()
@@ -1015,18 +1432,116 @@ def apply_gate_policy(
     )
 
 
-def clear_heuristic_gate_policies() -> list[str]:
-    """The start remedy: drop every stored gate answer the old heuristics guessed.
+@dataclass(frozen=True)
+class GateChange:
+    """One stored gate answer that changed, and why."""
 
-    An answer marked ``heuristic`` is dropped. An answer with no source at all predates
-    sources: when it equals what :func:`legacy_gate_policy` gives for the base clone it
-    was guessed, so it is marked ``heuristic`` and dropped; otherwise a person set it,
-    and it is marked ``person`` and kept. A repository that lost an answer is read again
-    for what it declares. Returns one line per repository changed; never raises. Each
-    change is also a `config_change` event.
+    answer: str
+    before: str | None
+    after: str | None
+    source: str | None
+    #: ``guessed`` (the old heuristics' value, dropped), ``person`` (a value with no
+    #: source kept as a person's) or ``read`` (what the repository or CI says now).
+    why: str
+
+
+def _sourceless_answers_guessed(name: str, root: Path, stored: dict) -> bool:
+    """Were a repository's answers with no source all written by the old heuristics?
+
+    Answers stored before sources existed carry none, and a person's ``ppy repo set``
+    looks exactly like a guess that way. The old derivation wrote every empty answer at
+    once, so only a row whose every unsourced answer equals its guess was guessed; one
+    answer the heuristics could not have produced means a person has been here, and the
+    whole row is theirs (Shane's backend lost `make verify` and `ci` on 2026-09-17
+    because those two alone matched the guess).
     """
-    from papaya_agent_runtime import config_changes, environment, repos
-    from papaya_agent_runtime.state import init_db, store
+    unsourced = {a: value for a, (value, source) in stored.items() if value and not source}
+    if not unsourced or not root.is_dir():
+        return False
+    legacy = legacy_gate_policy(root, inspect(name))
+    return all(
+        getattr(legacy, answer) == value
+        or (answer == "full_suite_owner" and value == _LEGACY_SUPERVISOR_OWNER)
+        for answer, value in unsourced.items()
+    )
+
+
+def settle_gate_policy(
+    conn, name: str, policy: GatePolicy, root: Path, *, local_gate: str | None = None
+) -> list[GateChange]:
+    """Make ``name``'s stored gate answers what the repository says, keeping a person's.
+
+    - An answer with source ``person`` is never touched, by anything.
+    - An answer marked ``heuristic``, or unsourced answers the old heuristics guessed
+      (:func:`_sourceless_answers_guessed`), is dropped; other unsourced answers become
+      the person's.
+    - Every other answer becomes ``policy``'s: a repository that changed its
+      instructions is read as it is now, and one that stopped naming a gate loses it.
+    - The owner is observed for whatever full suite is stored, a person's included.
+
+    Returns what changed; writes nothing when nothing did.
+    """
+    from papaya_agent_runtime import environment
+    from papaya_agent_runtime.state import store
+
+    row = store.get_repo(conn, name)
+    if row is None:
+        raise SolicitError(f"repo {name!r} is not registered")
+    stored: dict[str, tuple[str | None, str | None]] = {
+        answer: (
+            str(row[answer] or "").strip() or None,
+            str(row[environment.source_column(answer)] or "").strip() or None,
+        )
+        for answer in environment.GATE_ANSWERS
+    }
+    fields: dict[str, object] = {}
+    changes: list[GateChange] = []
+
+    def put(answer: str, value: str | None, source: str | None, why: str) -> None:
+        before, before_source = stored[answer]
+        source = source if value else None
+        if (before, before_source) == (value, source):
+            return
+        stored[answer] = (value, source)
+        fields[answer], fields[environment.source_column(answer)] = value, source
+        if before != value or why == "person":
+            changes.append(GateChange(answer, before, value, source, why))
+
+    guessed = _sourceless_answers_guessed(name, root, stored)
+    for answer, (value, source) in list(stored.items()):
+        if value and source == environment.SOURCE_HEURISTIC:
+            put(answer, None, None, "guessed")
+        elif value and not source:
+            if guessed:
+                put(answer, None, None, "guessed")
+            else:
+                put(answer, value, environment.SOURCE_PERSON, "person")
+    if local_gate and local_gate.strip():
+        put("local_gate", local_gate.strip(), environment.SOURCE_PERSON, "person")
+    for answer in ("local_gate", "full_suite_command"):
+        if stored[answer][1] != environment.SOURCE_PERSON:
+            put(answer, getattr(policy, answer), getattr(policy, f"{answer}_source"), "read")
+    if stored["full_suite_owner"][1] != environment.SOURCE_PERSON:
+        owner, source = observe_full_suite_owner(root, stored["full_suite_command"][0])
+        put("full_suite_owner", owner, source, "read")
+    if policy.push_hook_runs_full_suite and not row["push_hook_runs_full_suite"]:
+        fields["push_hook_runs_full_suite"] = 1
+    if fields:
+        store.update_repo_fields(conn, name, **fields)
+    return changes
+
+
+def keep_gate_policies_right() -> list[str]:
+    """The start remedy: every registered repository's gates, as it says them now.
+
+    Runs :func:`settle_gate_policy` for each repository with a base clone: a person's
+    answers are kept, guessed ones are dropped, and everything else is read again from
+    the repository's instructions and its pull-request workflows, so an AGENTS.md that
+    already answered the gate question clears readiness's blocker without anyone
+    answering it. Returns one line per repository changed; never raises. Each changed
+    value is also a `config_change` event.
+    """
+    from papaya_agent_runtime import repos
 
     lines: list[str] = []
     try:
@@ -1036,68 +1551,77 @@ def clear_heuristic_gate_policies() -> list[str]:
     for row in rows:
         name = str(row.get("name") or "")
         try:
-            line = _clear_heuristic_policy(row, config_changes, environment, init_db, store)
+            line = _keep_gate_policy_right(row)
         except Exception as exc:  # noqa: BLE001 - one repository's remedy never stops the rest
-            line = f"{name}: could not check its gate policy for guessed answers: {exc}"
+            line = f"{name}: could not read its gate policy again: {exc}"
         if line:
             lines.append(line)
     return lines
 
 
-def _clear_heuristic_policy(row, config_changes, environment, init_db, store) -> str | None:
+def _keep_gate_policy_right(row) -> str | None:
+    from papaya_agent_runtime import config_changes, environment
+    from papaya_agent_runtime.state import init_db, store
+
     name = str(row["name"])
     root = Path(str(row.get("local_path") or ""))
-    legacy: GatePolicy | None = None
-    dropped: list[tuple[str, str]] = []
-    kept: dict[str, str] = {}
-    for answer in environment.GATE_ANSWERS:
-        value = str(row.get(answer) or "").strip()
-        if not value:
-            continue
-        source = str(row.get(environment.source_column(answer)) or "").strip()
-        if source == environment.SOURCE_HEURISTIC:
-            dropped.append((answer, value))
-            continue
-        if source:
-            continue
-        if legacy is None and root.is_dir():
-            legacy = legacy_gate_policy(root, inspect(name))
-        guessed = (legacy is not None and getattr(legacy, answer) == value) or (
-            answer == "full_suite_owner" and value == _LEGACY_SUPERVISOR_OWNER
-        )
-        if guessed:
-            dropped.append((answer, value))
-        elif legacy is not None:
-            kept[environment.source_column(answer)] = environment.SOURCE_PERSON
+    if not root.is_dir():
+        return None
     conn = init_db()
     try:
-        cleared = {answer: None for answer, _ in dropped}
-        cleared.update({environment.source_column(answer): None for answer, _ in dropped})
-        store.update_repo_fields(conn, name, **cleared, **kept)
+        changes = settle_gate_policy(conn, name, derive_gate_policy(root), root)
+        stored = environment.for_repo(store.get_repo(conn, name))
     finally:
         conn.close()
-    if not dropped:
+    if not changes:
         return None
-    for answer, value in dropped:
+    for change in changes:
+        if change.why == "person":
+            continue
         config_changes.record(
-            key=f"repos.{name}.{answer}",
-            before=value,
-            after=None,
+            key=f"repos.{name}.{change.answer}",
+            before=change.before,
+            after=change.after,
             why=(
-                f"{answer} `{value}` was guessed by the old gate heuristics, not declared by {name}"
+                f"{change.answer} `{change.before}` was guessed by the old gate heuristics, "
+                f"not declared by {name}"
+                if change.why == "guessed"
+                else f"{name}'s {change.answer} as its repository says it now"
             ),
-            evidence={"repository": name, "source": environment.SOURCE_HEURISTIC},
+            evidence={
+                "repository": name,
+                "source": environment.SOURCE_HEURISTIC
+                if change.why == "guessed"
+                else change.source,
+            },
         )
-    what = ", ".join(f"{answer} `{value}`" for answer, value in dropped)
-    line = f"{name}: cleared guessed gate answers ({what}); falling back to what {name} declares"
-    if root.is_dir():
-        stored = apply_gate_policy(name, derive_gate_policy(root))
-        missing = stored.unknown
-        line += (
-            f": {'; '.join(stored.describe()[:3])}"
-            if not missing
-            else f"; still unknown: {', '.join(missing)} (readiness asks the owner)"
+    parts: list[str] = []
+    guessed = [c for c in changes if c.why == "guessed"]
+    if guessed:
+        what = ", ".join(f"{c.answer} `{c.before}`" for c in guessed)
+        parts.append(f"cleared guessed gate answers ({what}); falling back to what {name} declares")
+    kept = [c for c in changes if c.why == "person"]
+    if kept:
+        parts.append(
+            "kept as a person's (set before sources were recorded): "
+            + ", ".join(f"{c.answer} `{c.after}`" for c in kept)
         )
+    read = [c for c in changes if c.why == "read" and c.after]
+    if read:
+        parts.append(
+            "read again: " + ", ".join(f"{c.answer} `{c.after}` ({c.source})" for c in read)
+        )
+    missing = [
+        label
+        for label, value in (
+            ("scoped gate", stored.local_gate),
+            ("full suite", stored.full_suite_command),
+        )
+        if not value
+    ]
+    if missing:
+        parts.append(f"still unknown: {', '.join(missing)} (readiness asks the owner)")
+    line = f"{name}: " + "; ".join(parts)
     log.info("[solicit] %s", line)
     return line
 

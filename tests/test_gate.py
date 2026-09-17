@@ -94,7 +94,8 @@ def test_the_gates_are_the_ones_the_repositorys_agents_md_declares(tmp_path, ppy
     workflows = clone / ".github" / "workflows"
     workflows.mkdir(parents=True)
     (workflows / "ci.yml").write_text(
-        "jobs:\n  t:\n    steps:\n      - uses: actions/checkout@v4\n      - run: make verify\n",
+        "on:\n  pull_request:\njobs:\n  t:\n    steps:\n      - uses: actions/checkout@v4\n"
+        "      - run: make verify\n",
         "utf-8",
     )
     _register(clone)
@@ -103,12 +104,12 @@ def test_the_gates_are_the_ones_the_repositorys_agents_md_declares(tmp_path, ppy
 
     stored = _stored()
     assert stored.local_gate == "make lint-check"
-    assert stored.local_gate_source == "AGENTS.md:5"
+    assert stored.local_gate_source == "repo:AGENTS.md:5"
     assert stored.full_suite_command == "make verify"
-    assert stored.full_suite_command_source == "AGENTS.md:5"
+    assert stored.full_suite_command_source == "repo:AGENTS.md:5"
     assert (stored.full_suite_owner, stored.full_suite_owner_source) == (
         "ci",
-        ".github/workflows/ci.yml:5",
+        "observed:.github/workflows/ci.yml:7",
     )
     assert stored.supervisor_runs_full_suite is False
     # The notes quote the repository's own words, with where they are.
@@ -135,7 +136,9 @@ def test_roles_come_from_lead_ins_headings_and_fenced_comments(tmp_path) -> None
         (solicit.SCOPED, "uv run pytest tests/unit", "CONTRIBUTING.md:10"),
     ]
     policy = solicit.derive_gate_policy(clone)
-    assert policy.local_gate == "uv run ruff check ."
+    # A list introduced once is one gate.
+    assert policy.local_gate == "uv run ruff check . && uv run pytest tests/unit"
+    assert policy.local_gate_source == "repo:CONTRIBUTING.md:9, repo:CONTRIBUTING.md:10"
     # No workflow runs it: the supervisor runs it once at the delivered head.
     assert policy.full_suite_owner == "supervisor"
 
@@ -189,7 +192,7 @@ def test_ensure_fills_the_policy_of_a_repo_onboarded_before_policies_existed(
     assert not result.registered and not result.onboarded
     assert (_stored().full_suite_command, _stored().full_suite_command_source) == (
         "make test",
-        "AGENTS.md:1",
+        "repo:AGENTS.md:1",
     )
 
 
@@ -258,28 +261,303 @@ def test_the_start_remedy_drops_guessed_gates_and_keeps_a_persons(
     conn.close()
 
     with caplog.at_level("INFO", logger="papaya_agent_runtime.solicit"):
-        lines = solicit.clear_heuristic_gate_policies()
+        lines = solicit.keep_gate_policies_right()
 
     app = _stored()
-    assert app.local_gate is None  # guessed, and AGENTS.md names no scoped gate
+    # Guessed, and AGENTS.md names no scoped gate; `make test` runs the full suite's pytest.
+    assert app.local_gate is None
     assert (app.full_suite_command, app.full_suite_command_source) == (
         "make verify",
-        "AGENTS.md:1",
+        "repo:AGENTS.md:1",
     )
     assert (app.full_suite_owner, app.full_suite_owner_source) == (
         "supervisor",
-        "no CI workflow runs it",
+        "observed:no pull-request workflow runs `make verify`",
     )
     kept = _stored("other")
     assert (kept.local_gate, kept.local_gate_source) == ("make lint-check", "person")
     # Not what the old derivation gives for this clone (it would have said supervisor).
     assert (kept.full_suite_owner, kept.full_suite_owner_source) == ("ci", "person")
-    assert len(lines) == 1
+    assert len(lines) == 2
     assert lines[0].startswith("app: cleared guessed gate answers (local_gate `make test`")
     assert "still unknown: scoped gate" in lines[0]
+    assert lines[1].startswith("other: kept as a person's")
     assert any("app: cleared guessed gate answers" in r.getMessage() for r in caplog.records)
-    # Said once: nothing left to clear on the next start.
-    assert solicit.clear_heuristic_gate_policies() == []
+    # Said once: nothing left to change on the next start.
+    assert solicit.keep_gate_policies_right() == []
+
+
+def _quiet_readiness(monkeypatch) -> None:
+    for check in ("_harness_problems", "_papaya_problems", "_config_problems", "_client_problems"):
+        monkeypatch.setattr(readiness, check, lambda problems: None)
+
+
+def _gate_blockers() -> list[str]:
+    return [p.scope for p in readiness.check().problems if p.code == "repo_without_gate_policy"]
+
+
+def test_a_persons_repo_set_values_survive_a_start_and_onboarding(
+    tmp_path, ppy_home, monkeypatch, capsys
+) -> None:
+    """Shane's backend, 2026-09-17 03:14 UTC: `make verify` and `ci`, set by hand, were
+    dropped at start because the old heuristics would have guessed those two, and the
+    reader then took `make broker-typecheck` (a table row's aside) for the full suite."""
+    clone = tmp_path / "backend"
+    clone.mkdir()
+    (clone / "Makefile").write_text(
+        "lint-check:\n\truff check app\nbroker-typecheck:\n\tmypy broker\n"
+        "verify: lint-check test\n\ttrue\ntest:\n\tcd backend && uv run pytest -v\n",
+        "utf-8",
+    )
+    (clone / "AGENTS.md").write_text(
+        "| Command | What it checks |\n| --- | --- |\n"
+        "| `make lint-check` | Non-mutating lint checks plus `make broker-typecheck`, which IS "
+        "a full gate over `services/credential-broker/app` |\n"
+        "| `make verify` | Full local gate. |\n",
+        "utf-8",
+    )
+    workflows = clone / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "verify.yml").write_text(
+        "on:\n  pull_request:\njobs:\n  tests:\n    uses: ./.github/workflows/backend-tests.yml\n",
+        "utf-8",
+    )
+    (workflows / "backend-tests.yml").write_text(
+        "on:\n  workflow_call:\njobs:\n  t:\n    steps:\n      - run: uv run pytest -q\n", "utf-8"
+    )
+    _register(clone, "backend")
+    conn = init_db()
+    # Set with `ppy repo set` at 01:16, before sources were recorded: no source at all.
+    store.update_repo_fields(
+        conn,
+        "backend",
+        local_gate="make lint-check",
+        full_suite_command="make verify",
+        full_suite_owner="ci",
+    )
+    conn.close()
+
+    solicit.keep_gate_policies_right()
+    solicit.onboard("backend")
+    solicit.keep_gate_policies_right()
+
+    stored = _stored("backend")
+    assert (stored.local_gate, stored.local_gate_source) == ("make lint-check", "person")
+    assert (stored.full_suite_command, stored.full_suite_command_source) == (
+        "make verify",
+        "person",
+    )
+    assert (stored.full_suite_owner, stored.full_suite_owner_source) == ("ci", "person")
+
+    # And one set today, with a source, survives the same way, whatever the repository says.
+    assert cli.main(["repo", "set", "backend", "--full-suite-command", "make test"]) == 0
+    solicit.onboard("backend")
+    assert solicit.keep_gate_policies_right() == []
+    assert (
+        _stored("backend").full_suite_command,
+        _stored("backend").full_suite_command_source,
+    ) == (
+        "make test",
+        "person",
+    )
+
+    capsys.readouterr()
+    assert cli.main(["repo", "show", "backend"]) == 0
+    shown = capsys.readouterr().out
+    assert "scoped gate: `make lint-check` (person)" in shown
+    assert "full suite: `make test` (person)" in shown
+    assert "full suite owner: ci (person)" in shown
+
+
+def _runtime_fixture(clone: Path) -> None:
+    (clone / "AGENTS.md").write_text(
+        "# Papaya Agent Runtime\n\n## Operating discipline\n\n"
+        "- Run `make lint`, `make fmt`, and `make test` before marking work complete.\n"
+        "- Use `uv` for all Python commands.\n",
+        "utf-8",
+    )
+    (clone / "Makefile").write_text(
+        "lint:\n\tuv run ruff check .\nfmt:\n\tuv run ruff format .\ntest:\n\tuv run pytest\n",
+        "utf-8",
+    )
+
+
+def _package(clone: Path, scripts: dict[str, str]) -> None:
+    (clone / "package.json").write_text(json.dumps({"scripts": scripts}, indent=2), "utf-8")
+    (clone / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", "utf-8")
+
+
+def _frontend_fixture(clone: Path) -> None:
+    (clone / "AGENTS.md").write_text(
+        "# Papaya Agent Map\n\n## Validation\n\n"
+        "Run commands from the repo root unless a doc says otherwise.\n\n"
+        "- `make install` - install frontend dependencies with pnpm.\n"
+        "- `make doc-garden` - docs-only focused gate.\n"
+        "- `make verify` - required full local gate; it does NOT run Vitest, so run\n"
+        "  `make frontend-unit` alongside it.\n"
+        "- `make desktop-verify` - desktop focused gate (install, lint, typecheck, build,\n"
+        "  unit, e2e); `make verify` does not run it.\n",
+        "utf-8",
+    )
+    _package(clone, {"lint": "eslint .", "typecheck": "tsc -b", "test": "vitest run"})
+    (clone / "Makefile").write_text(
+        "verify: install lint typecheck build\n\ttrue\nfrontend-unit:\n\tpnpm test\n", "utf-8"
+    )
+
+
+def _polyweave_fixture(clone: Path) -> None:
+    (clone / "AGENTS.md").write_text(
+        "# Papaya Polyweave\n\n## Working loop per change\n\n"
+        "5. Run typecheck, lint, tests (commands below).\n\n"
+        "## Environment & commands\n\n```bash\npnpm install\n"
+        "pnpm exec tsc --noEmit          # typecheck (single root tsconfig)\n"
+        "pnpm exec biome check --write . # lint + format\n"
+        "CI=1 pnpm exec vitest run       # full test suite (CI=1 for piped output)\n"
+        "pnpm test:e2e                   # 13-scenario fake-provider e2e suite\n"
+        "```\n\n"
+        "Locked two ways: `workspace-pin-contract.test.ts` proves every scoped name; `pnpm\n"
+        "workspace-pin:drift-check` re-reads the live wire.\n",
+        "utf-8",
+    )
+    _package(
+        clone,
+        {
+            "typecheck": "tsc --noEmit",
+            "lint": "biome check .",
+            "test": "vitest run",
+            "test:e2e": "vitest run packages/polyweave-server/test/e2e-fake-world.test.ts",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture", "quick", "full"),
+    [
+        (
+            _runtime_fixture,
+            ("make lint && make test", "repo:AGENTS.md:5"),
+            ("make test", "repo:AGENTS.md:5"),
+        ),
+        (
+            _frontend_fixture,
+            (
+                "pnpm lint && pnpm typecheck && pnpm test",
+                "repo:package.json:3, repo:package.json:4, repo:package.json:5",
+            ),
+            ("make verify && make frontend-unit", "repo:AGENTS.md:9, repo:AGENTS.md:10"),
+        ),
+        (
+            _polyweave_fixture,
+            (
+                "pnpm lint && pnpm typecheck && pnpm test",
+                "repo:package.json:4, repo:package.json:3, repo:package.json:5",
+            ),
+            ("pnpm test:e2e", "repo:AGENTS.md:14"),
+        ),
+    ],
+    ids=["papaya-agent-runtime", "papaya-frontend-monorepo", "papaya-polyweave-agent"],
+)
+def test_the_ways_repositories_actually_write_their_gates_are_read(
+    tmp_path, ppy_home, monkeypatch, fixture, quick, full
+) -> None:
+    """Each AGENTS.md already answered the question readiness asked its owner on 2026-09-17."""
+    _quiet_readiness(monkeypatch)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    fixture(clone)
+
+    policy = solicit.derive_gate_policy(clone)
+    assert (policy.local_gate, policy.local_gate_source) == quick
+    assert (policy.full_suite_command, policy.full_suite_command_source) == full
+    # Each chosen command is quoted with the line it came from.
+    for _command, sources in (quick, full):
+        for source in sources.split(", "):
+            assert any(f"from {source.removeprefix('repo:')}: " in e for e in policy.evidence)
+
+    # What the first start of repository-owned gates stored: nothing, or the wrong tier.
+    _register(clone)
+    solicit.onboard("app")
+    conn = init_db()
+    store.update_repo_fields(
+        conn,
+        "app",
+        local_gate="make verify" if fixture is _frontend_fixture else None,
+        local_gate_source="AGENTS.md:9" if fixture is _frontend_fixture else None,
+        full_suite_command=None,
+        full_suite_command_source=None,
+        full_suite_owner=None,
+        full_suite_owner_source=None,
+    )
+    conn.close()
+    assert _gate_blockers() == ["app"]
+
+    lines = solicit.keep_gate_policies_right()
+
+    assert lines and lines[0].startswith("app: read again: ")
+    stored = _stored()
+    assert (stored.local_gate, stored.local_gate_source) == quick
+    assert (stored.full_suite_command, stored.full_suite_command_source) == full
+    assert _gate_blockers() == [], "the false blocker clears without anyone answering"
+
+
+def test_a_workflow_that_runs_the_suite_on_pull_requests_makes_ci_the_owner_at_start(
+    tmp_path, ppy_home
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    (clone / "AGENTS.md").write_text(
+        "Run `make lint` while working, `make verify` before a PR.\n", "utf-8"
+    )
+    (clone / "Makefile").write_text(
+        "lint:\n\truff check .\nverify: lint test\n\ttrue\ntest:\n\tuv run pytest\n", "utf-8"
+    )
+    workflows = clone / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "on: [push]\njobs:\n  t:\n    uses: ./.github/workflows/t.yml\n", "utf-8"
+    )
+    (workflows / "t.yml").write_text(
+        "on:\n  workflow_call:\njobs:\n  t:\n    steps:\n      - run: |\n"
+        "          uv run pytest -q\n",
+        "utf-8",
+    )
+    _register(clone)
+    solicit.onboard("app")
+    # Only on push: nothing runs it on a pull request, so the supervisor does.
+    assert (_stored().full_suite_owner, _stored().full_suite_owner_source) == (
+        "supervisor",
+        "observed:no pull-request workflow runs `make verify`",
+    )
+
+    (workflows / "ci.yml").write_text(
+        "on:\n  push:\n  pull_request:\njobs:\n  t:\n    uses: ./.github/workflows/t.yml\n",
+        "utf-8",
+    )
+    lines = solicit.keep_gate_policies_right()
+
+    assert (_stored().full_suite_owner, _stored().full_suite_owner_source) == (
+        "ci",
+        "observed:.github/workflows/t.yml:7",
+    )
+    assert lines == ["app: read again: full_suite_owner `ci` (observed:.github/workflows/t.yml:7)"]
+
+
+def test_a_repo_with_no_instructions_still_raises_the_blocker_at_start(
+    tmp_path, ppy_home, monkeypatch
+) -> None:
+    _quiet_readiness(monkeypatch)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    _verify_makefile(clone)
+    _package(clone, {"lint": "eslint .", "typecheck": "tsc", "test": "vitest run"})
+    (clone / "README.md").write_text("An app.\n\nRun `pnpm test` to test it.\n", "utf-8")
+    _register(clone)
+    solicit.onboard("app")
+
+    assert solicit.keep_gate_policies_right() == []
+
+    assert (_stored().local_gate, _stored().full_suite_command) == (None, None)
+    assert _gate_blockers() == ["app"]
 
 
 def test_readiness_does_not_warn_twice_for_a_repo_nobody_onboarded(ppy_home, monkeypatch) -> None:

@@ -78,12 +78,17 @@ REPO_COLUMNS = (
 )
 
 #: The gate answers a repository gives (or a person overrides), each with a
-#: ``<column>_source`` beside it: where the repository says it (``AGENTS.md:12``), or
-#: :data:`SOURCE_PERSON`. :data:`SOURCE_HEURISTIC` marks a value the runtime once
-#: guessed, which the start remedy clears (`solicit.clear_heuristic_gate_policies`).
+#: ``<column>_source`` beside it: :data:`SOURCE_PERSON` (``ppy repo set``, never
+#: replaced by any remedy or onboarding), ``repo:<file>:<line>`` (the repository says
+#: it, quoted from there), or ``observed:<what>`` (the runtime saw it, e.g. the CI
+#: workflow line that runs the full suite). :data:`SOURCE_HEURISTIC` marks a value the
+#: runtime once guessed, which the start remedy clears (`solicit.keep_gate_policies_right`).
+#: `solicit` spells the two prefixes itself; keep them equal.
 GATE_ANSWERS = ("local_gate", "full_suite_command", "full_suite_owner")
 SOURCE_PERSON = "person"
 SOURCE_HEURISTIC = "heuristic"
+SOURCE_REPO = "repo:"
+SOURCE_OBSERVED = "observed:"
 #: Who may run the full suite, besides CI: the supervisor, once at the delivered head.
 OWNER_SUPERVISOR = "supervisor"
 
@@ -244,6 +249,19 @@ class RepoEnvironment:
             return "unknown"
         source = getattr(self, source_column(answer))
         return f"`{value}` ({source})" if source else f"`{value}`"
+
+    def gate_lines(self) -> list[str]:
+        """Each gate answer on its own line, its source beside it (`ppy repo show`)."""
+        owner = (
+            f"{self.full_suite_owner} ({self.full_suite_owner_source or 'default'})"
+            if self.full_suite_command
+            else "unknown (no full suite)"
+        )
+        return [
+            f"scoped gate: {self.sourced('local_gate')}",
+            f"full suite: {self.sourced('full_suite_command')}",
+            f"full suite owner: {owner}",
+        ]
 
     @property
     def compose_file(self) -> str | None:

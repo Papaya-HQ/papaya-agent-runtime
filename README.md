@@ -95,17 +95,32 @@ the brief, answer, review and check-in prompts send durable facts to
   guessed at. It also records the repository's **gate policy**, and **the repository
   owns it**: only what the repository itself declares is recorded. Its agent
   instructions (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, a docs testing page) are
-  read for the command they say to run while working (the scoped gate) and the one
-  they say to run before a pull request (the full suite), each stored with the file
-  and line it came from (`AGENTS.md:5`). The full suite's owner is `ci` when a CI
-  workflow runs that command (with the workflow line), else `supervisor`. A Makefile
-  target named `verify` is never taken for a gate by its name. Whatever the repository
-  does not say is **unknown**, and readiness raises a blocker to the owner with the
-  exact question ("which command is the quick gate, which is the full suite?").
+  read the way people write them: wrapped paragraphs and list items as one sentence,
+  lists of commands ("run `make lint`, `make fmt`, and `make test` before marking work
+  complete"), "while working", "before handing back", "before a PR", "full local gate",
+  "required full", e2e, a table row's description, and a command run "alongside" another.
+  Lint, type checks and unit or touched tests make the **quick gate** (formatters left
+  out, commands joined with `&&`); what the repository calls full, required, verify or
+  e2e is the **full suite**; a quick gate whose only test command is the repository's
+  only test command is both. When the instructions name a full suite but no quick
+  gate, the quick gate is the repository's own `lint`, `typecheck` and `test:unit` (or
+  `test`) package scripts, else its Makefile targets of those names (never a test target
+  that is part of the full suite). Every chosen command is stored with its source,
+  `repo:<file>:<line>` (`repo:AGENTS.md:57`). The full suite's owner is `ci` when a
+  workflow that runs on pull requests (or a reusable workflow one calls) runs it,
+  literally or through the test program its target or script runs, else `supervisor`,
+  with source `observed:<workflow>:<line>`. A Makefile target named `verify` is never a
+  gate by its name alone. Whatever the repository does not say is **unknown**, and
+  readiness raises a blocker to the owner with the exact question ("which command is the
+  quick gate, which is the full suite?").
   `ppy repo set <name> --local-gate "..." --full-suite-command "..."` records a
-  person's answer (source `person`), which a later onboarding never replaces. At
-  `ppy serve` start, every stored answer the runtime's old heuristics guessed is
-  dropped (logged, and a `config_change` event) and the repository is read again.
+  person's answer (source `person`), which **nothing ever replaces**: not onboarding,
+  not the start remedy. `ppy repo show <name>` prints each gate with its source. At
+  every `ppy serve` start the repository is read again: answers the runtime's old
+  heuristics guessed are dropped, answers stored before sources existed are kept as a
+  person's unless every one of them equals the old guess, the rest become what the
+  repository and its pull-request workflows say now, and each change is logged and a
+  `config_change` event.
 
 ## Three tiers of checking
 
