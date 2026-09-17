@@ -24,6 +24,9 @@ from papaya_agent_runtime.state import init_db, store
 
 PHASES = ("plan", "implement", "test", "review", "blocked", "done")
 
+#: A manager's note for a worker that is not a steer (:func:`post_guidance`).
+GUIDANCE_EVENT = "progress_guidance"
+
 
 class ProgressError(Exception):
     pass
@@ -63,6 +66,61 @@ def record(
         run_id=task["run_id"],
         task_id=task_id,
     )
+
+
+def post_guidance(task_id: int, note: str, *, conn: sqlite3.Connection | None = None) -> int:
+    """Leave a note for a worker that is not a steer: its next progress report hands it over.
+
+    A check-in's `continue, note <text>` (a reminder to post the plan, say) lands here.
+    Nothing interrupts the worker and nothing counts as the manager acting on it.
+    """
+    own = conn is None
+    conn = conn or init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        if task is None:
+            raise ProgressError(f"task {task_id} not found")
+        return store.append_event(
+            conn,
+            kind=GUIDANCE_EVENT,
+            payload={"task_id": task_id, "note": note.strip(), "by": store.BY_MANAGER},
+            run_id=task["run_id"],
+            task_id=task_id,
+        )
+    finally:
+        if own:
+            conn.close()
+
+
+def guidance_for(
+    task_id: int, report_event_id: int, *, conn: sqlite3.Connection | None = None
+) -> list[str]:
+    """The notes left since the report before ``report_event_id``, oldest first."""
+    own = conn is None
+    conn = conn or init_db()
+    try:
+        previous = conn.execute(
+            "SELECT MAX(id) AS id FROM events WHERE task_id = ? AND id < ? "
+            f"AND {store.PROGRESS_NOTE}",
+            (task_id, report_event_id),
+        ).fetchone()
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE task_id = ? AND kind = ? AND id > ? AND id < ? "
+            "ORDER BY id",
+            (task_id, GUIDANCE_EVENT, int(previous["id"] or 0), report_event_id),
+        ).fetchall()
+    finally:
+        if own:
+            conn.close()
+    notes = []
+    for row in rows:
+        try:
+            note = str(json.loads(row["payload"]).get("note") or "").strip()
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if note:
+            notes.append(note)
+    return notes
 
 
 def _parse_stamp(value: object) -> datetime | None:

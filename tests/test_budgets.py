@@ -167,6 +167,26 @@ def test_an_observation_flagged_stalled_is_left_out_of_the_silence_derivation(pp
     assert plan["repo"] == "repo-c" and plan["task_id"] == task_id
 
 
+def test_a_repo_whose_plans_take_twelve_minutes_learns_twelve_not_the_default(ppy_home) -> None:
+    """#55: the plan floor is the observed floor, and the default is twenty minutes."""
+    assert budgets.default_seconds(budgets.PLAN) == 20 * 60
+    for minutes in (12, 13):
+        budgets.observe("backend", budgets.PLAN, minutes * 60)
+    two = budgets.budget("backend", budgets.PLAN)
+    assert two.seconds >= 12 * 60
+    assert (two.source, two.floor) == (budgets.DEFAULT, 12 * 60)
+
+    budgets.observe("backend", budgets.PLAN, 12 * 60)
+    three = budgets.budget("backend", budgets.PLAN)
+    # p90 13m x 1.5 = 19m30s: under the 20-minute default, which is no longer the floor.
+    assert (three.source, three.seconds) == (budgets.DERIVED, 19.5 * 60)
+    assert "floor 12m" in three.line()
+    # Every other kind is still floored at its default.
+    for minutes in (1, 1, 1):
+        budgets.observe("backend", budgets.SILENCE, minutes * 60)
+    assert budgets.budget("backend", budgets.SILENCE).seconds == 15 * 60
+
+
 def test_the_p90_is_nearest_rank_over_the_newest_twenty(ppy_home) -> None:
     assert budgets.percentile([240, 360, 1200]) == 1200
     assert budgets.percentile(range(1, 21)) == 18

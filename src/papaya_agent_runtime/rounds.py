@@ -40,15 +40,15 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    runner's existing path sends back to its gate; a question (status `blocked`, or
    a last progress note that asks one) gets the answer turn; a `worker_stopped`
    worker with a branch ahead of base and nothing in flight gets the stopped-short
-   path; a live worker silent past its repository's silence budget, still planning
-   past its plan budget, first running for half its worker-session budget
-   (:mod:`papaya_agent_runtime.budgets`; with no history, `health.quiet_minutes`,
-   `health.plan_minutes` and `health.checkin_after`), or with a HEAD the forge does not
-   have and no new tip there for `health.push_by_minutes` (asked with `ls-remote` every
-   round; again every as many minutes until something lands) gets the **check-in
-   turn**; a person-wait
-   older than fifteen minutes is said on the ticket once ("waiting on you: …") and
-   the ticket is `blocked`.
+   path; a live worker silent past its repository's silence budget, past its plan
+   budget with no plan note and no tool call for `health.plan_idle_minutes` (or still
+   planning past three plan budgets, whatever it is doing), first running for half its
+   worker-session budget (:mod:`papaya_agent_runtime.budgets`; with no history,
+   `health.quiet_minutes`, `health.plan_minutes` and `health.checkin_after`), or with a
+   HEAD the forge does not have and no new tip there for `health.push_by_minutes`
+   (asked with `ls-remote` every round; again every as many minutes until something
+   lands) gets the **check-in turn**; a person-wait older than fifteen minutes is said
+   on the ticket once ("waiting on you: …") and the ticket is `blocked`.
 4. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
    (only terminal tasks, clean, every commit on a remote, base clone under
    `.ppy/repos`), then `git worktree prune` and `git fetch --prune` on the base
@@ -95,6 +95,14 @@ PERSON_WAIT_SECONDS = 15 * 60.0
 
 #: How long a worker may run with nothing new on its remote branch: `health.push_by_minutes`.
 DEFAULT_PUSH_BY_MINUTES = 45
+
+#: How long a worker past its plan budget with no plan note may go without a tool call
+#: before the plan check-in fires: `health.plan_idle_minutes`.
+DEFAULT_PLAN_IDLE_MINUTES = 5
+
+#: Past this many plan budgets, a worker still planning gets the plan check-in whatever
+#: it is doing.
+PLAN_HARD_FACTOR = 3
 
 #: How long a worker with no live session must have been silent before it is dead
 #: rather than between a runner exiting and its result being recorded.
@@ -156,6 +164,9 @@ class WorkerBudgets:
     midpoint_seconds: float
     #: Which of the three history stands behind, for the reason a check-in gives.
     sources: tuple[str, str, str] = ("default", "default", "default")
+    #: Past the plan budget with no plan note, this long with no tool call is stuck:
+    #: `health.plan_idle_minutes`.
+    plan_idle_seconds: float = DEFAULT_PLAN_IDLE_MINUTES * 60.0
 
 
 def worker_budgets(repo: str | None) -> WorkerBudgets:
@@ -186,7 +197,18 @@ def worker_budgets(repo: str | None) -> WorkerBudgets:
         plan_seconds=plan.seconds,
         midpoint_seconds=midpoint,
         sources=(quiet.source, plan.source, session.source),
+        plan_idle_seconds=_plan_idle_seconds(),
     )
+
+
+def _plan_idle_seconds() -> float:
+    """`health.plan_idle_minutes` in seconds; the default when there is no config yet."""
+    try:
+        from papaya_agent_runtime.config import load_config
+
+        return float(load_config().health.plan_idle_minutes) * 60
+    except Exception:  # noqa: BLE001 - rounds run before setup too
+        return DEFAULT_PLAN_IDLE_MINUTES * 60.0
 
 
 def _push_by_seconds() -> float:
@@ -241,6 +263,8 @@ class WorkerLook:
     stopped: tuple[int, str] | None
     #: Event ids of the newest `answer`/`steer`/... the manager did on this worker.
     last_acted_id: int
+    #: When the worker's session last made or ran a tool call, from its provider stream.
+    last_tool_at: datetime | None = None
 
     @property
     def latest_phase(self) -> str | None:
@@ -248,6 +272,11 @@ class WorkerLook:
 
     def running_seconds(self, now: datetime) -> float:
         return (now - self.created_at).total_seconds() if self.created_at else 0.0
+
+    def tool_idle_seconds(self, now: datetime) -> float:
+        """Since the last tool call; since dispatch for a worker that has made none."""
+        since = self.last_tool_at or self.created_at
+        return max(0.0, (now - since).total_seconds()) if since else 0.0
 
 
 def look_at_worker(task_id: int, *, now: datetime, quiet_after: timedelta) -> WorkerLook | None:
@@ -271,8 +300,11 @@ def look_at_worker(task_id: int, *, now: datetime, quiet_after: timedelta) -> Wo
         progress: list[tuple[int, str, str, str]] = []
         question = stopped = None
         last_acted = 0
+        last_tool_at: datetime | None = None
         for row in rows:
             kind, payload = str(row["kind"]), _payload(row)
+            if _is_tool_activity(kind, payload):
+                last_tool_at = _parse(row["created_at"]) or last_tool_at
             if kind == "worker_progress" and payload.get("phase"):
                 progress.append(
                     (
@@ -300,9 +332,22 @@ def look_at_worker(task_id: int, *, now: datetime, quiet_after: timedelta) -> Wo
             question=question,
             stopped=stopped,
             last_acted_id=last_acted,
+            last_tool_at=last_tool_at,
         )
     finally:
         conn.close()
+
+
+def _is_tool_activity(kind: str, payload: dict[str, Any]) -> bool:
+    """A provider stream event that says a tool call was made or is still running.
+
+    The same events `serve.worker_activity` reads for liveness lines: Claude's
+    `tool_progress` heartbeat and `assistant` messages with a `tool_use` block, and
+    Codex's `item.started`.
+    """
+    if kind in ("worker_tool_progress", "worker_item.started"):
+        return True
+    return kind == "worker_assistant" and bool(serve._tool_uses(payload))
 
 
 def round_records(ticket_task_id: int) -> list[tuple[int, dict[str, Any]]]:
@@ -1317,6 +1362,9 @@ class Rounds:
             return parts
         reason = "; ".join(why for _trigger, why in due)
         facts = await asyncio.to_thread(self._checkin_facts, worker, look, gate_now, steers)
+        reminder = self._plan_reminder(look, now, waits)
+        if reminder is not None:
+            facts = (*facts, ("plan note", reminder))
         seen: dict[str, str | None] = {}
         if push is not None and any(trigger == "push" for trigger, _why in due):
             seen = push_record(push, records, look)
@@ -1409,13 +1457,29 @@ class Rounds:
             and running >= plan_after
             and not any(p.get("trigger") == "plan" for p in mine)
         ):
-            due.append(
-                (
-                    "plan",
-                    f"still planning after {health.humanize(int(running))}, longer than "
-                    f"{int(plan_after // 60)}m; it should commit to a plan or say what blocks it",
+            # Planning too long is no plan *and* no progress (#55): a worker still making
+            # tool calls is doing the setup its brief asked for, and is left to it until
+            # it is past three plan budgets.
+            idle = look.tool_idle_seconds(now)
+            if running >= PLAN_HARD_FACTOR * plan_after:
+                due.append(
+                    (
+                        "plan",
+                        f"still planning after {health.humanize(int(running))}, past "
+                        f"{PLAN_HARD_FACTOR} times its {int(plan_after // 60)}m plan budget; "
+                        "it should commit to a plan or say what blocks it",
+                    )
                 )
-            )
+            elif look.latest_phase is None and idle >= waits.plan_idle_seconds:
+                due.append(
+                    (
+                        "plan",
+                        f"no plan note after {health.humanize(int(running))}, longer than "
+                        f"{int(plan_after // 60)}m, and no tool call for "
+                        f"{health.humanize(int(idle))}; it should commit to a plan or say what "
+                        "blocks it",
+                    )
+                )
         checkin_after = waits.midpoint_seconds
         if running >= checkin_after and not any(p.get("trigger") == "midpoint" for p in mine):
             due.append(
@@ -1442,6 +1506,28 @@ class Rounds:
                 minutes = int((now - pushed_at).total_seconds() // 60)
                 due.append(("push", f"nothing pushed in {minutes} minutes"))
         return due
+
+    @staticmethod
+    def _plan_reminder(
+        look: WorkerLook, now: datetime, waits: WorkerBudgets | None = None
+    ) -> str | None:
+        """The one line a check-in's facts carry for a busy worker with no plan note yet.
+
+        Past its plan budget but still making tool calls, the worker is not stuck, so
+        this is never a check-in of its own: it rides along on one that is due anyway.
+        """
+        waits = waits or worker_budgets(None)
+        running = look.running_seconds(now)
+        if look.latest_phase is not None or running < waits.plan_seconds:
+            return None
+        idle = look.tool_idle_seconds(now)
+        if idle >= waits.plan_idle_seconds:
+            return None
+        return (
+            f"no plan note yet after {health.humanize(int(running))}, while still working "
+            f"(last tool call {health.humanize(int(idle))} ago); a `continue, note` can "
+            "remind it to post one"
+        )
 
     async def _saw_push(
         self,

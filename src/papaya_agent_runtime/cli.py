@@ -1812,11 +1812,13 @@ def _cmd_progress(args: argparse.Namespace) -> int:
         print(f"task {args.task_id}: {progress.describe(latest)}")
         return 0
     try:
-        progress.record(args.task_id, phase=args.phase, note=args.note or "")
+        event_id = progress.record(args.task_id, phase=args.phase, note=args.note or "")
     except progress.ProgressError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"task {args.task_id}: {args.phase} recorded")
+    for note in progress.guidance_for(args.task_id, event_id):
+        print(f"note from your manager: {note}")
     return 0
 
 
