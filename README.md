@@ -360,6 +360,7 @@ ppy doctor                              # environment, capability drift, Papaya 
 ppy blockers                            # what this machine needs from a person, as commands
 ppy papaya status                       # which Papaya agent this machine is
 ppy papaya connect                      # sign in and pin this machine to an agent
+ppy papaya tools                        # give sessions here the agent's Papaya tools
 ppy repo discover                       # repos on the forge that aren't registered yet
 ppy repo add https://github.com/you/your-repo
 ppy repo onboard your-repo              # learn what it is, its build, tests, gate policy
