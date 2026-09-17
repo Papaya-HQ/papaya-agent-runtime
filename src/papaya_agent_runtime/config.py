@@ -65,6 +65,10 @@ class DeliveryPolicy:
     # Hours a pull request may sit green, mergeable and unrequested before the ticket
     # says so once (or, on a repo with `auto_merge`, the runtime merges it).
     merge_after_hours: int = 24
+    # What a work item moves to when its pull request merges. Empty means this workspace
+    # has not said: the runtime comments that it merged and asks, instead of guessing
+    # (Shane, 2026-09-17: statuses differ per workspace). Set from the answer.
+    merged_status: str = ""
 
 
 @dataclass
