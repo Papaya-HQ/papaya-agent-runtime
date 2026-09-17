@@ -416,9 +416,38 @@ def learn(
     except Exception as exc:  # noqa: BLE001 - a worker's turn must end whatever this does
         log.warning("[tool_learning] Could not record task %s's denials: %s", task_id, exc)
         return []
+    if task_id is not None:
+        _request_capabilities(task_id, new)
     if not any(p["in_family"] for p in new):
         return []
     return config_changes.apply(context=f"learned from task {task_id}'s denials")
+
+
+def _request_capabilities(task_id: int, new: list[dict]) -> None:
+    """A plain command the profile refused, outside the safe family, is a request.
+
+    The worker does not have to ask twice: the refusal itself is the need, decided by
+    this install's policy and, when policy cannot, put in front of a person
+    (`capability_requests`). Never raises.
+    """
+    from papaya_agent_runtime import capability_requests
+
+    for payload in new:
+        program = str(payload.get("program") or "")
+        if payload.get("kind") != PROFILE_GAP or payload.get("in_family") or not program:
+            continue
+        try:
+            capability_requests.request(
+                task_id,
+                program,
+                why="",
+                source=capability_requests.DENIAL,
+                command=payload.get("command"),
+            )
+        except Exception as exc:  # noqa: BLE001 - a request that cannot be made is logged
+            log.warning(
+                "[tool_learning] Could not request %s for task %s: %s", program, task_id, exc
+            )
 
 
 def _as_denial(payload: dict) -> dict:

@@ -80,6 +80,7 @@ class ClaudeAdapter(ProviderAdapter):
         # acceptEdits auto-accepts file edits without a full permission bypass.
         argv += ["--permission-mode", "acceptEdits"]
         allowed, _source = effective_allowed_tools()
+        allowed = [*allowed, *(t for t in spec.granted_tools if t not in allowed)]
         if allowed:
             argv += ["--allowedTools", ",".join(allowed)]
         if spec.denied_tools:

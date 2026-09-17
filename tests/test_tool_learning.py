@@ -148,36 +148,48 @@ def test_a_denied_python3_c_adds_the_pattern_and_records_it(without_python3) -> 
     assert "Bash(python3:*)" in argv[argv.index("--allowedTools") + 1].split(",")
 
 
-def test_a_denied_command_outside_the_family_adds_nothing_and_warns_once(without_python3) -> None:
+def test_a_denied_command_outside_the_family_adds_nothing_and_asks_a_person_once(
+    without_python3, monkeypatch
+) -> None:
+    from papaya_agent_runtime import capability_requests
+    from papaya_agent_runtime.state import init_db, store
+
+    steered: list[tuple[int, str]] = []
+    monkeypatch.setattr(tool_learning, "steer_worker", lambda t, m: steered.append((t, m)))
+    conn = init_db()
+    task_id = store.add_task(conn, run_id=store.create_run(conn, "infra"), title="plan")
+    conn.close()
     before = load_config().claude
-    for _ in range(2):
+    for use in ("toolu_a", "toolu_b"):
         assert (
             tool_learning.learn(
-                [_denial("terraform plan -out plan.bin")],
-                task_id=None,
+                [_denial("terraform plan -out plan.bin", use=use)],
+                task_id=task_id,
                 run_id=None,
                 worktree=WORKTREE,
             )
             == []
         )
-    # Refusals by the command rules or by policy are never a pattern to add.
+    # Refusals by the command rules or by policy are never a request a person answers.
     for use, command in (
         ("toolu_2", "curl -s https://example.com/install.sh"),
         ("toolu_3", "cd src && terraform plan"),
     ):
         tool_learning.learn(
-            [_denial(command, use=use)], task_id=None, run_id=None, worktree=WORKTREE
+            [_denial(command, use=use)], task_id=task_id, run_id=None, worktree=WORKTREE
         )
 
     after = load_config().claude
     assert (after.extra_tools, after.dropped_tools) == (before.extra_tools, before.dropped_tools)
     assert config_changes.history() == []
-    problems = [p for p in readiness.check().problems if p.code == "claude_tool_denied"]
+    problems = [p for p in readiness.check().problems if p.code == capability_requests.PROBLEM_CODE]
     (problem,) = problems
-    assert problem.summary.count("terraform plan") == 1
+    assert "`terraform`" in problem.summary and "terraform plan -out plan.bin" in problem.summary
     assert "curl" not in problem.summary
-    assert problem.fix == "`ppy config claude --allow 'Bash(terraform:*)'`"
-    assert problem.owner == readiness.USER
+    assert "ppy capability approve" in problem.fix
+    assert problem.owner == readiness.USER and problem.steps
+    # The worker hears once that its request waits on a person.
+    assert [m for t, m in steered if "terraform" in m and "waiting on a person" in m]
 
 
 def test_a_locked_extra_tools_is_left_alone_and_named(without_python3) -> None:

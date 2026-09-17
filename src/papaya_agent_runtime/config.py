@@ -374,6 +374,20 @@ class SweepPolicy:
 
 
 @dataclass
+class CapabilityPolicy:
+    """What this install grants a worker that asks (`capability_requests`).
+
+    The code's policy is the floor and the start: the safe family is granted without
+    asking, and the programs workers are never given are refused whatever this says.
+    ``auto_grant`` adds programs granted without a person; ``never`` adds programs
+    refused without one. Anything in neither waits on a person.
+    """
+
+    auto_grant: list[str] = field(default_factory=list)
+    never: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PapayaPolicy:
     """How this runtime behaves about Papaya when the machine is not connected."""
 
@@ -400,6 +414,7 @@ class MMConfig:
     sweep: SweepPolicy = field(default_factory=SweepPolicy)
     papaya: PapayaPolicy = field(default_factory=PapayaPolicy)
     gate: GatePolicy = field(default_factory=GatePolicy)
+    capabilities: CapabilityPolicy = field(default_factory=CapabilityPolicy)
 
     def validate(self) -> None:
         if self.manager.provider not in PROVIDERS:
@@ -507,6 +522,15 @@ class MMConfig:
                         if name != "locked"
                         else f"claude.locked holds a bad entry {entry!r}; name a key"
                     )
+        for name in ("auto_grant", "never"):
+            value = getattr(self.capabilities, name)
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", v)
+                for v in value
+            ):
+                raise ConfigError(
+                    f"capabilities.{name} must be a list of program names such as 'xcodegen'"
+                )
         max_per_day = self.self_report.max_per_day
         if isinstance(max_per_day, bool) or not isinstance(max_per_day, int) or max_per_day < 0:
             raise ConfigError("self_report.max_per_day must be zero or a positive integer")
@@ -560,6 +584,7 @@ class MMConfig:
             "sweep": asdict(self.sweep),
             "papaya": asdict(self.papaya),
             "gate": asdict(self.gate),
+            "capabilities": asdict(self.capabilities),
         }
 
 
@@ -596,6 +621,7 @@ def _from_dict(data: dict) -> MMConfig:
         sweep=SweepPolicy(**data.get("sweep", {})),
         papaya=PapayaPolicy(**data.get("papaya", {})),
         gate=GatePolicy(**data.get("gate", {})),
+        capabilities=CapabilityPolicy(**data.get("capabilities", {})),
     )
     return cfg
 

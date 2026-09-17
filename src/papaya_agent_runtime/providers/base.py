@@ -36,6 +36,9 @@ class TaskSpec:
     # Tool patterns refused on top of the allowlist: the repository's full suite,
     # which runs once at the delivered head, never as a worker's tool call.
     denied_tools: list[str] = field(default_factory=list)
+    # Tool patterns granted to this task alone by a person (`capability_requests`),
+    # added to the allowlist at every launch of this task and no other.
+    granted_tools: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -90,6 +90,20 @@ LANE_TICKET = "ticket"
 LANE_RECONCILE = "reconcile"
 
 
+def _granted_tools(task_id: int) -> list[str]:
+    """What a person granted this task alone. Never raises: a launch never waits on it."""
+    from papaya_agent_runtime import capability_requests
+
+    try:
+        conn = init_db()
+        try:
+            return capability_requests.granted_patterns(conn, task_id)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _adapter_for(provider: str):
     if provider == "fake":
         return FakeProvider()
@@ -691,6 +705,7 @@ class Supervisor:
             environment=prepared.block,
             process_env=prepared.process_env or {},
             denied_tools=environment.denied_tools(repo_row),
+            granted_tools=_granted_tools(task_id),
         )
         adapter = _adapter_for(provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
@@ -1029,6 +1044,7 @@ class Supervisor:
                 environment=prepared.block if prepared is not None else None,
                 process_env=(prepared.process_env if prepared is not None else None) or process_env,
                 denied_tools=environment.denied_tools(repo_row),
+                granted_tools=_granted_tools(task_id),
             )
             session_id = None
         else:
@@ -1047,6 +1063,7 @@ class Supervisor:
                 steer_message=packet,
                 process_env=process_env,
                 denied_tools=environment.denied_tools(repo_row),
+                granted_tools=_granted_tools(task_id),
             )
         adapter = _adapter_for(spec.provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
