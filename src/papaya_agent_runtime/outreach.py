@@ -511,9 +511,19 @@ def post_ticket(work_item_id: str, body: str, *, environ: dict[str, str] | None 
         return False
 
 
+#: Set to ``1`` to also raise a macOS desktop notification for what is due. Off by
+#: default: `osascript`'s notifications are attributed to Script Editor, so clicking one
+#: opens Script Editor rather than the ask (Shane, 2026-09-17) — noise, not a channel.
+DESKTOP_ENV = "PPY_OUTREACH_DESKTOP"
+
+
+def desktop_enabled() -> bool:
+    return os.environ.get(DESKTOP_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def notify_desktop(text: str) -> bool:
-    """A desktop notification on this machine, where one is possible. Never raises."""
-    if sys.platform != "darwin" or not text:
+    """A macOS desktop notification, only when :data:`DESKTOP_ENV` asks for one. Never raises."""
+    if not desktop_enabled() or sys.platform != "darwin" or not text:
         return False
     safe = text.replace("\\", "\\\\").replace('"', '\\"')
     try:
@@ -652,6 +662,7 @@ def lines(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[str]
 __all__ = [
     "CAPABILITY",
     "DECISION",
+    "DESKTOP_ENV",
     "PULL_REQUEST",
     "REMOTE",
     "REPEAT_AFTER_SECONDS",
@@ -665,6 +676,7 @@ __all__ = [
     "Plan",
     "collect",
     "deliver",
+    "desktop_enabled",
     "due",
     "headline",
     "lines",

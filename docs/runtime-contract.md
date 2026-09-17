@@ -79,7 +79,8 @@ ledger line, a ticket comment made once, or a question in a terminal nobody is
 watching. Under `ppy serve` there is no session to ask in, so the runtime keeps the
 reaching-out in code, the same way in both modes (`outreach.py`): every open ask is
 said to the person where they are — a comment on its work item, one message in their
-DM with this agent, a desktop notification on this machine — the round it appears,
+DM with this agent (a macOS desktop notification too, only with `PPY_OUTREACH_DESKTOP=1`;
+by default none, since `osascript`'s notifications open Script Editor) — the round it appears,
 and said again every two hours (`PPY_OUTREACH_REPEAT_SECONDS`) with which reminder it
 is, until the ask is gone (the todo closed, the request approved or denied, the pull
 request changed). `ppy serve` does it on its rounds; a session does it from the

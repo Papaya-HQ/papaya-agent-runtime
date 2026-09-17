@@ -460,6 +460,23 @@ def test_capability_requests_leave_the_blocker_dm_to_outreach(home) -> None:
     }
 
 
+def test_the_desktop_notification_is_off_unless_asked_for(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(outreach.subprocess, "run", run)
+    monkeypatch.setattr(outreach.sys, "platform", "darwin")
+    monkeypatch.delenv(outreach.DESKTOP_ENV, raising=False)
+    assert outreach.notify_desktop("Waiting on you: x") is False
+    assert calls == []
+    monkeypatch.setenv(outreach.DESKTOP_ENV, "1")
+    assert outreach.notify_desktop("Waiting on you: x") is True
+    assert calls and calls[0][0] == "osascript"
+
+
 def test_the_parity_registry_names_it_shared() -> None:
     from papaya_agent_runtime import parity
 
