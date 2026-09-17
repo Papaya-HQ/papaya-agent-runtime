@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from papaya_agent_runtime import board, handoff, hooks
+from papaya_agent_runtime import board, handoff, hooks, owed
 from papaya_agent_runtime.state import init_db, store
 
 
@@ -56,9 +56,10 @@ def test_session_start_is_quiet_when_nothing_is_open(ppy_home, monkeypatch) -> N
     assert response == {}
 
 
-def test_stop_blocks_once_when_work_is_open_and_no_next_step(ppy_home) -> None:
+def test_stop_blocks_once_when_work_is_open_and_no_next_step(ppy_home, monkeypatch) -> None:
     conn = init_db()
-    _open_task(conn)
+    _, task_id = _open_task(conn)
+    monkeypatch.setattr(owed, "watch_running", lambda: True)
 
     first = hooks.handle_hook_stdin("Stop", "{}")
     assert first["decision"] == "block"
@@ -68,8 +69,12 @@ def test_stop_blocks_once_when_work_is_open_and_no_next_step(ppy_home) -> None:
     again = hooks.handle_hook_stdin("Stop", json.dumps({"stop_hook_active": True}))
     assert "decision" not in again
 
-    # Once a next step is recorded, stopping is fine.
+    # A next step that names no task still leaves the finished worker untracked.
     board.add("deliver task 1", conn=conn)
+    assert hooks.handle_hook_stdin("Stop", "{}")["decision"] == "block"
+
+    # Once a next step is recorded against the task, stopping is fine.
+    board.add("deliver it", task_id=task_id, conn=conn)
     assert "decision" not in hooks.handle_hook_stdin("Stop", "{}")
 
 
