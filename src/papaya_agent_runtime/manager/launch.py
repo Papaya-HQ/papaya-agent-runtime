@@ -11,9 +11,11 @@ interactively in the Papaya Agent Runtime repository root with:
 
 - the repository ``bin/`` and provisioned ``.ppy/tools/bin`` prepended to PATH, so
   the manager calls ``ppy`` and companions directly;
-- the runtime role injected (Claude via ``--append-system-prompt``; both via the
-  seed prompt), pointing at ``docs/runtime-contract.md`` as the authoritative
-  contract for the session; and
+- the runtime role injected, pointing at ``docs/runtime-contract.md`` as the
+  authoritative contract for the session: Claude carries it as an appended system
+  prompt, interactive and headless alike; Codex has no such seam, so an interactive
+  session reads it through the seed prompt and a headless turn gets it prepended to
+  the turn prompt (:func:`codex_turn_prompt`); and
 - an optional objective seeded as the first message.
 
 The manager then operates the control plane itself — the user never runs ``ppy``.
@@ -345,6 +347,19 @@ def prepare_turn_tools(
 #: Set in a headless manager turn's environment (never in an interactive session).
 MANAGER_TURN_ENV = "PPY_MANAGER_TURN"
 
+#: What separates the runtime role from the turn prompt when both travel as one
+#: Codex prompt, so the turn's own heading is still the first line after it.
+_ROLE_SEPARATOR = "\n\n---\n\n"
+
+
+def codex_turn_prompt(turn: str) -> str:
+    """The runtime role, then the turn: one prompt, because `codex exec` has no system-prompt seam.
+
+    The same :data:`_ROLE` Claude gets through ``--append-system-prompt``, so a headless
+    turn carries the contract whichever provider drives it.
+    """
+    return _ROLE + _ROLE_SEPARATOR + turn
+
 
 def build_launch(
     *,
@@ -389,6 +404,12 @@ def build_launch(
 
     prov, mdl, rsn = resolve_profile(config, provider, model, reasoning)
     seed = turn if turn is not None else _seed_prompt(objective, configured=config is not None)
+    if prov == "codex" and turn is not None:
+        # Codex has no system-prompt flag. Until 2026-09-17 a Codex turn was launched
+        # with the bare turn prompt, so the contract reached it only if Codex followed
+        # `AGENTS.md` (whose first line tells a runtime session to stop reading it) two
+        # hops to the contract; Claude had it in its system prompt the whole time (#74).
+        seed = codex_turn_prompt(turn)
 
     if prov == "claude":
         argv = ["claude"]
