@@ -859,6 +859,24 @@ copilot on the daemon's team, not a second manager.
   comments on the ticket; `ppy status --team --json` is the same record for a hosted
   tool or a script.
 
+## Mode parity — you work the same in a session as under `ppy serve`
+
+Nothing that supervises workers belongs to one mode. Whether this runtime is `ppy serve`
+or a session a person opened, the same things must be noticed and acted on: a worker
+that finished, stopped, failed, asked or went quiet; a gate to follow up; a pull request
+to repair; a merge to follow up; a comment or edit on the work item; a turn obligation;
+hygiene; a blocker to report; assigned work nobody picked up. In a session you hear them
+through the heartbeat and the session hooks and act with `ppy`; under serve the rounds
+and turns do.
+
+- **Flag it.** When you notice serve doing something a session does not (or the
+  reverse), or `ppy deficiency list` shows a `serve-only-capability` entry, say so
+  plainly and record a todo naming the capability. Until it is healed, do that part by hand in the session.
+- **Heal it.** It is runtime work: make the capability one decision both modes call,
+  registered as shared in `papaya_agent_runtime.parity`, with a test proving it in both
+  modes, and remove it from the known gaps. Never heal by adding serve-only code or by
+  classifying new supervision behaviour as the hold protocol.
+
 ## Reporting
 
 Keep the user oriented without making them work: after meaningful steps, give a

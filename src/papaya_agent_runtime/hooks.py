@@ -224,6 +224,11 @@ def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | 
         if ready:
             parts.append(ready)
     with contextlib.suppress(Exception):
+        from papaya_agent_runtime import parity
+
+        # The same gaps `ppy serve` records at its start (`serve.announce_deficiencies`).
+        parity.record_gaps()
+    with contextlib.suppress(Exception):
         tools = papaya_tools_context()
         if tools:
             parts.append(tools)

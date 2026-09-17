@@ -38,6 +38,32 @@ perform normal, reversible work. Ask the user only for:
 - model/reasoning/spend ceiling changes; and
 - merging (off unless the user grants a standing policy).
 
+## Mode parity: nothing that supervises workers is serve-only
+
+The runtime runs as `ppy serve` and as an interactive session in a harness, and it
+must work just as well either way (standing rule, 2026-09-17). Every supervision
+capability (noticing a worker finished, stopped, failed, asked or went quiet; gate
+follow-up; pull request repair; merge follow-up; work item comments and edits; turn
+obligations; hygiene; start remedies; blocker reports; the assigned-work sweep) is
+built as **one decision in a module both modes call**, with each mode differing only in
+how it acts on it: serve through its rounds and turns, a session through the heartbeat
+(`ppy watch`), the session hooks and `ppy` commands.
+
+- `src/papaya_agent_runtime/parity.py` registers every decision point in
+  `rounds.Rounds`, `serve.TicketRunner` and serve's start remedies under a capability:
+  `shared`, `host` (the Papaya hold protocol only a holder can run), `scaffold`
+  (plumbing) or `gap`.
+- `tests/test_mode_parity.py` fails when serve gains an unregistered decision point,
+  when a shared capability is not reached from both modes, or when a new `gap` appears.
+  Never satisfy it by registering a new serve-only behaviour as a gap or by calling it
+  `host`/`scaffold` to get past the test: build it shared.
+- `parity.KNOWN_GAPS` only shrinks. Every serve start and every session start records
+  each open gap as a `serve-only-capability` deficiency (the self-report path to the
+  runtime's repository) until it is healed by making it shared (then remove it from
+  `KNOWN_GAPS`).
+- A change that adds or alters supervision behaviour proves the same scenario in both
+  modes in its tests.
+
 ## Workers
 
 Workers are ephemeral and scoped to one repository and task. They receive a

@@ -4126,6 +4126,11 @@ async def run(
 
 def announce_deficiencies(*, stderr) -> None:
     """One line at start when self-reported deficiencies are waiting to open as issues."""
+    from papaya_agent_runtime import parity
+
+    # Serve-only supervision is a runtime defect in both modes; the session hook records
+    # the same gaps at every session start.
+    parity.record_gaps()
     counts = deficiencies.summary()
     waiting = counts["waiting"]
     if not waiting:
