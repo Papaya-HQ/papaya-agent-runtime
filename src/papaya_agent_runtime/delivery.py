@@ -547,6 +547,8 @@ def record_merged(task_id: int, merged_sha: str, *, note: str | None = None) -> 
     A squash or rebase merge produces a *new* commit that the task's worktree has
     never seen, so the SHA is validated by shape only and taken at its word.
     """
+    from papaya_agent_runtime import reconcile
+
     if not _SHA_RE.match((merged_sha or "").strip()):
         raise DeliveryError(
             f"--merged wants the commit SHA the work landed as; {merged_sha!r} is not one "
@@ -571,13 +573,17 @@ def record_merged(task_id: int, merged_sha: str, *, note: str | None = None) -> 
                 f"replace it with {merged_sha}"
             )
         conn.rollback()
+        # Idempotent, but not a no-op: the lane can still be holding a slot for this
+        # pull request, and re-running --merged is how a person says so.
+        closed = reconcile.close_open_attempts(task_id, reconcile.OUTCOME_MERGED, conn=conn)
         return DeliveryResult(
             task_id=task_id,
             branch=branch,
             head_sha=recorded,
             pushed=False,
             pr_url=None,
-            note=f"merge {recorded[:8]} was already recorded; nothing changed",
+            note=f"merge {recorded[:8]} was already recorded; nothing changed"
+            + (f"; closed {closed} open reconcile attempt(s)" if closed else ""),
         )
     # Record the landing on the task, not only in the event stream: a delivered
     # task never leaves that status, so without a merge on the row the heartbeat
@@ -603,6 +609,9 @@ def record_merged(task_id: int, merged_sha: str, *, note: str | None = None) -> 
     from papaya_agent_runtime import standalone
 
     standalone.skip_if_local(conn, task_id, standalone.MERGED)
+    # The merge takes this branch out of the forge query for good, so the lane's own
+    # round can no longer close an attempt still open on it. This is the last moment.
+    reconcile.close_open_attempts(task_id, reconcile.OUTCOME_MERGED, conn=conn)
     # The task is over, so the database it brought up for itself is over too. This
     # is the last moment anything knows the stack belongs to this task.
     torn_down = compose.teardown_for_task(task_id, trigger="deliver --merged", conn=conn)

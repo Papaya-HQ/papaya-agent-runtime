@@ -16,12 +16,18 @@ This module is that procedure, one decision both modes run:
   every time;
 - :func:`observe` keeps the `outreach` table in step with it: an ask seen for the first
   time, an ask that is gone (answered, closed, decided) marked resolved;
-- :func:`due` says which asks to say now — never said, or said longer ago than
-  :data:`REPEAT_AFTER_SECONDS`;
+- :func:`due` says which asks to say now — only asks never said, or whose words
+  changed since they were said (:attr:`Ask.fingerprint`), and only once
+  :data:`REPEAT_AFTER_SECONDS` has passed since anything was last said. An ask
+  already said, unchanged, is never said again (Shane, 2026-09-17: the per-ask two-hour
+  clocks drifted into a message every fifteen minutes, repeating the same list);
 - :func:`message` and :func:`ticket_bodies` are the words: one grouped message for the
   owner's DM with this agent, and one comment per work item an ask belongs to;
-- :func:`record_said` writes down where it was said, so nothing is said twice in a
-  round and every repeat says which reminder it is.
+- :func:`record_said` writes down where it was said and what it said, so an unchanged
+  ask is never said twice.
+
+Nothing is ever posted in a channel: without a DM, the ticket comment is the only place
+an ask is said (Shane, 2026-09-17 — a public channel is not where his decisions go).
 
 `ppy serve` runs it every round (`rounds.Rounds._outreach_lane`) and posts through its
 own connection. A session runs it from the heartbeat (`watch.outreach_step`), from the
@@ -46,8 +52,9 @@ from papaya_agent_runtime.state import store
 
 log = logging.getLogger("papaya_agent_runtime.outreach")
 
-#: How long after an ask was last said before it is said again.
-REPEAT_AFTER_SECONDS = 2 * 60 * 60.0
+#: The least time between two deliveries. A delivery happens only when some ask is new
+#: or changed; an unchanged ask is never said again, however long it waits.
+REPEAT_AFTER_SECONDS = 6 * 60 * 60.0
 #: The environment override for :data:`REPEAT_AFTER_SECONDS`, in seconds.
 REPEAT_ENV = "PPY_OUTREACH_REPEAT_SECONDS"
 
@@ -113,6 +120,14 @@ class Ask:
     task_id: int | None = None
     work_item_id: str | None = None
     since: str | None = None
+
+    @property
+    def fingerprint(self) -> str:
+        """What the person is asked, so a changed requirement is said again and nothing else is."""
+        import hashlib
+
+        words = " ".join(f"{self.kind}|{self.work_item_id or ''}|{self.text}|{self.how}".split())
+        return hashlib.sha256(words.lower().encode("utf-8")).hexdigest()[:16]
 
     def public(self) -> dict[str, Any]:
         return {
@@ -286,7 +301,8 @@ def observe(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -> list
                 "ON CONFLICT(key) DO UPDATE SET kind = excluded.kind, task_id = excluded.task_id, "
                 "work_item_id = excluded.work_item_id, text = excluded.text, "
                 "first_seen_at = excluded.first_seen_at, last_seen_at = excluded.last_seen_at, "
-                "said_at = NULL, said_count = 0, said_via = NULL, resolved_at = NULL",
+                "said_at = NULL, said_count = 0, said_via = NULL, said_fingerprint = NULL, "
+                "resolved_at = NULL",
                 (
                     ask.key,
                     ask.kind,
@@ -303,6 +319,12 @@ def observe(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -> list
                 "UPDATE outreach SET text = ?, task_id = ?, work_item_id = ?, last_seen_at = ? "
                 "WHERE key = ?",
                 (ask.text, ask.task_id, ask.work_item_id, stamp, ask.key),
+            )
+            # Said before fingerprints were kept: take it as said as it reads now.
+            conn.execute(
+                "UPDATE outreach SET said_fingerprint = ? "
+                "WHERE key = ? AND said_count > 0 AND said_fingerprint IS NULL",
+                (ask.fingerprint, ask.key),
             )
     for row in conn.execute("SELECT key, text FROM outreach WHERE resolved_at IS NULL").fetchall():
         if row["key"] in open_keys:
@@ -321,18 +343,23 @@ def open_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     )
 
 
+def last_said_at(conn: sqlite3.Connection) -> datetime | None:
+    """When anything was last said to the person, open or since resolved."""
+    stamps = [_parse(r[0]) for r in conn.execute("SELECT said_at FROM outreach").fetchall()]
+    known = [s for s in stamps if s is not None]
+    return max(known) if known else None
+
+
 def due(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -> list[Ask]:
-    """The asks to say now: never said, or said longer ago than the repeat interval."""
-    repeat = repeat_after_seconds()
-    said: dict[str, datetime | None] = {}
-    for row in open_rows(conn):
-        said[str(row["key"])] = _parse(row["said_at"])
-    found = []
-    for ask in asks:
-        last = said.get(ask.key)
-        if last is None or (now - last).total_seconds() >= repeat:
-            found.append(ask)
-    return found
+    """The asks to say now: new or changed since last said, at most once per interval."""
+    said = {str(row["key"]): row["said_fingerprint"] for row in open_rows(conn)}
+    fresh = [ask for ask in asks if said.get(ask.key) != ask.fingerprint]
+    if not fresh:
+        return []
+    last = last_said_at(conn)
+    if last is not None and (now - last).total_seconds() < repeat_after_seconds():
+        return []
+    return fresh
 
 
 def was_said(conn: sqlite3.Connection, key: str) -> bool:
@@ -349,9 +376,9 @@ def record_said(
     stamp = _iso(now)
     for ask in asks:
         conn.execute(
-            "UPDATE outreach SET said_at = ?, said_count = said_count + 1, said_via = ? "
-            "WHERE key = ?",
-            (stamp, json.dumps(sorted(via)), ask.key),
+            "UPDATE outreach SET said_at = ?, said_count = said_count + 1, said_via = ?, "
+            "said_fingerprint = ? WHERE key = ?",
+            (stamp, json.dumps(sorted(via)), ask.fingerprint, ask.key),
         )
     store.append_event(
         conn,
@@ -365,9 +392,8 @@ def record_said(
 
 
 def _nth(count: int) -> str:
-    if count <= 0:
-        return ""
-    return f" · reminder {count}"
+    """Marks an ask said before: it is only said again because what it asks changed."""
+    return " · changed" if count > 0 else ""
 
 
 def _counts(conn: sqlite3.Connection, asks: list[Ask]) -> dict[str, int]:
@@ -384,7 +410,7 @@ def _counts(conn: sqlite3.Connection, asks: list[Ask]) -> dict[str, int]:
 
 
 def message(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime, host: str) -> str:
-    """The one DM for every ask due: what, since when, which reminder, how to unblock it."""
+    """The one DM for every ask due: what, since when, whether it changed, how to unblock it."""
     if not asks:
         return ""
     from papaya_agent_runtime import blockers
@@ -401,7 +427,10 @@ def message(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime, host: s
         stamp = f" — since {ago} ago" if ago else ""
         lines.append(f"{i}. {where}{ask.text}{stamp}{_nth(counts.get(ask.key, 0))}")
         lines.append(f"   → {ask.how}")
-    lines.append(f"I will say this again every {_every()} until each is answered.")
+    lines.append(
+        f"I'll only write again when something new or changed waits on you, at most every "
+        f"{_every()}. The full list any time: `ppy outreach`."
+    )
     return blockers.redact("\n".join(lines))
 
 
@@ -463,37 +492,6 @@ def plan(conn: sqlite3.Connection, *, now: datetime, host: str) -> tuple[Plan, l
 # ── the channels a session has ───────────────────────────────────────────────
 
 
-#: The channel to fall back to when this agent has no DM with its owner, by name.
-CHANNEL_ENV = "PPY_OUTREACH_CHANNEL"
-
-
-def _channel_rows(channels: Any) -> list[dict[str, Any]]:
-    if isinstance(channels, dict):
-        channels = channels.get("channels")
-    return (
-        [c for c in (channels or []) if isinstance(c, dict)] if isinstance(channels, list) else []
-    )
-
-
-def fallback_channel_id(channels: Any, *, wanted: str | None = None) -> str | None:
-    """A channel this agent is a member of to say things in when it has no DM.
-
-    ``wanted`` (:data:`CHANNEL_ENV`) names one; otherwise the member channel with the
-    fewest people, then by name — the closest thing to private among what it can see.
-    """
-    rows = [c for c in _channel_rows(channels) if c.get("is_member")]
-    if wanted:
-        for c in rows:
-            if str(c.get("name") or "").strip().lower() == wanted.strip().lower():
-                return str(c.get("id") or c.get("channel_id") or "") or None
-    rows.sort(key=lambda c: (int(c.get("member_count") or 0), str(c.get("name") or "")))
-    for c in rows:
-        identifier = str(c.get("id") or c.get("channel_id") or "").strip()
-        if identifier:
-            return identifier
-    return None
-
-
 async def _owner_mention(api: Any) -> dict[str, str] | None:
     """The person who connected this agent, as a mention payload; ``None`` if unknown."""
     from papaya_agent_client import api_client
@@ -519,8 +517,8 @@ async def _owner_mention(api: Any) -> dict[str, str] | None:
 
 
 async def say_in_workspace(api: Any, text: str) -> bool:
-    """Put ``text`` where its owner reads it: their DM with this agent, or a channel with
-    them mentioned. ``False`` when neither exists or the post did not land. Never raises.
+    """Put ``text`` in its owner's DM with this agent. ``False`` when there is no DM or the
+    post did not land. Never a channel — not even a private one. Never raises.
     """
     if api is None or not text:
         return False
@@ -534,22 +532,8 @@ async def say_in_workspace(api: Any, text: str) -> bool:
         if channel is not None:
             await api_client.post_agent_channel_message(api, channel, text)
             return True
-        channel = fallback_channel_id(channels, wanted=os.environ.get(CHANNEL_ENV))
-        if channel is None:
-            log.warning("[outreach] This agent is in no DM and no channel; nothing was posted")
-            return False
-        mention = await _owner_mention(api)
-        content = text
-        payload: dict[str, Any] = {"content": content}
-        if mention:
-            if mention["handle"]:
-                content = f"@{mention['handle']} — {text}"
-            payload = {"content": content, "mentions": [mention]}
-        workspace_id = api.agent_config["workspace_id"]
-        await api.request_json(
-            "POST", f"/workspaces/{workspace_id}/channels/{channel}/messages", json=payload
-        )
-        return True
+        log.info("[outreach] This agent has no DM with its owner; the ticket comment carries it")
+        return False
     except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
         log.warning("[outreach] Could not post to the workspace: %s", exc)
         return False
@@ -771,7 +755,6 @@ def lines(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[str]
 
 __all__ = [
     "CAPABILITY",
-    "CHANNEL_ENV",
     "DECISION",
     "DESKTOP_ENV",
     "PULL_REQUEST",
@@ -789,8 +772,8 @@ __all__ = [
     "deliver",
     "desktop_enabled",
     "due",
-    "fallback_channel_id",
     "headline",
+    "last_said_at",
     "lines",
     "message",
     "notify_desktop",

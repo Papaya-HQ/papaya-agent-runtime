@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -260,6 +260,7 @@ CREATE TABLE IF NOT EXISTS outreach (
     said_at TEXT,
     said_count INTEGER NOT NULL DEFAULT 0,
     said_via TEXT,
+    said_fingerprint TEXT,
     resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outreach_open ON outreach(resolved_at, first_seen_at);
@@ -494,6 +495,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for col in ("observation", "likely_cause", "measurement"):
             if col not in action_cols:
                 conn.execute(f"ALTER TABLE improvement_actions ADD COLUMN {col} TEXT")
+    if "said_fingerprint" not in _column_names(conn, "outreach"):
+        # What an ask said when it was last said: unchanged, it is never said again.
+        conn.execute("ALTER TABLE outreach ADD COLUMN said_fingerprint TEXT")
     conn.commit()
 
 

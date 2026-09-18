@@ -49,6 +49,10 @@ NEEDS_A_PERSON = "needs_a_person"
 OUTCOME_FIXED = "fixed"
 OUTCOME_FAILED = "failed"
 OUTCOME_MERGED = "merged"
+#: Over, with the forge no longer saying where the pull request landed — a merge on
+#: the record drops the branch out of :func:`watch.pr_states` for good. Not a failure:
+#: nothing was attempted and lost, so it never counts toward :data:`ATTEMPTS`.
+OUTCOME_ENDED = "ended"
 
 #: Attempts at one fingerprint that may fail before a person is asked.
 ATTEMPTS = 2
@@ -348,13 +352,20 @@ def attempt_over(entry: LaneEntry) -> str | None:
     """Has this attempt stopped running? ``merged``, ``ended``, or ``None`` if not yet.
 
     Over means nothing of it is still running — no live runner on the worker — and
-    either the worker delivered again since it started, or the ticket reached a phase
-    after which nothing more happens on its own (reported, released, handed back, …).
+    either the merge is on the worker's row, or the worker delivered again since it
+    started, or the ticket reached a phase after which nothing more happens on its own
+    (reported, released, handed back, …).
     """
     conn = db.init_db()
     try:
         if store.live_runners_for_task(conn, entry.worker_task_id):
             return None
+        # The merge on the row ends the attempt whatever the ticket says. It also drops
+        # the branch out of `watch.pr_states` forever, so this is the last chance to
+        # close the lane from what the forge knows (PAP: task 30 held a slot for 8h).
+        task = store.get_task(conn, entry.worker_task_id)
+        if task is not None and (task["merged_sha"] or ""):
+            return OUTCOME_MERGED
         ticket = entry.payload.get("ticket_task_id")
         if ticket is not None:
             if store.task_phase(conn, int(ticket)) == "done":
@@ -373,6 +384,46 @@ def attempt_over(entry: LaneEntry) -> str | None:
         return "ended" if delivered is not None else None
     finally:
         conn.close()
+
+
+def close_open_attempts(
+    worker_task_id: int,
+    outcome: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Finish every lane attempt still open on one worker, and say how many closed.
+
+    A merge recorded by hand (``ppy deliver --merged``) or observed by the watch ends
+    the attempt at that moment. Nothing else can close it afterwards — the merge takes
+    the branch out of the forge query — so the lane would hold its slot until a restart.
+    """
+    own = conn is None
+    conn = conn or db.init_db()
+    stamp = (now or datetime.now(UTC)).isoformat()
+    try:
+        closed = 0
+        for entry in open_lane(conn):
+            if entry.worker_task_id != worker_task_id:
+                continue
+            _append(
+                conn,
+                worker_task_id,
+                FINISHED,
+                {
+                    "started_event_id": entry.started_event_id,
+                    "fingerprint": entry.payload.get("fingerprint"),
+                    "head": entry.payload.get("head"),
+                    "outcome": outcome,
+                    "at": stamp,
+                },
+            )
+            closed += 1
+        return closed
+    finally:
+        if own:
+            conn.close()
 
 
 def pending_queue(conn: sqlite3.Connection | None = None) -> list[tuple[int, dict[str, Any]]]:
@@ -677,7 +728,12 @@ __all__ = [
     "QUEUED",
     "Reason",
     "STARTED",
+    "OUTCOME_ENDED",
+    "OUTCOME_FAILED",
+    "OUTCOME_FIXED",
+    "OUTCOME_MERGED",
     "attempt_over",
+    "close_open_attempts",
     "fingerprint",
     "history",
     "is_reconciliation",
