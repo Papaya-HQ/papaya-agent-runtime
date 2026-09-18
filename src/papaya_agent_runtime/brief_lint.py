@@ -542,6 +542,11 @@ def _allowed_prefixes(allowed: list[str]) -> tuple[bool, list[str]]:
 
 
 def _covered(command: str, prefixes: list[str]) -> bool:
+    """Whether one plain command matches an allowed ``Bash(...)`` prefix.
+
+    Also :func:`papaya_agent_runtime.preflight.check_gate`'s matcher: one
+    definition, so a brief and a gate are never judged against different rules.
+    """
     head = command.split()[0]
     base = head.rsplit("/", 1)[-1]
     for prefix in prefixes:

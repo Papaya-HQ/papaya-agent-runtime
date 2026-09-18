@@ -7,10 +7,13 @@ manager's own rule — related changes in one repository are a stack — was not
 applied at dispatch, because nothing at dispatch knew what the new brief touched
 or what the in-flight siblings were touching (issue #61).
 
-This module answers that at dispatch, the same way the migration advisory does
-(:mod:`papaya_agent_runtime.migrations`): a *suggestion* to start from the sibling's
-branch with ``--stack-on``, never a refusal. Two edits to one module off one head
-are fine as long as somebody sequences them.
+This module answers that at dispatch. It began as a suggestion, like the
+migration advisory (:mod:`papaya_agent_runtime.migrations`), but the unattended
+``ppy serve`` manager has nobody to read a printed advisory, and this repository
+had three tasks editing ``serve.py`` at once (runtime #94). It is now a refusal.
+Two edits to one module off one head are fine as long as somebody sequences them:
+``--stack-on`` the sibling, or ``--accept-preflight overlap --reason ...`` to
+decide it on the record.
 
 What a brief "touches" is read from two places: a ``Touches:`` line (paths,
 comma- or space-separated) and any backtick span that names a file or directory
@@ -214,29 +217,52 @@ def overlaps(conn, repo_id, paths: list[str], *, exclude: set[int] | None = None
     return found
 
 
-def dispatch_advisory(
-    conn, repo_row, paths: list[str], *, stack_on: int | None = None
-) -> str | None:
-    """What to tell the manager, at dispatch, about siblings editing the same files.
+def _stack_chain(conn, task_id: int | None) -> set[int]:
+    """A task and every task it is stacked on: work the new worker starts from."""
+    chain: set[int] = set()
+    while task_id is not None and int(task_id) not in chain:
+        chain.add(int(task_id))
+        row = store.get_task(conn, int(task_id))
+        task_id = row["stacked_on_task"] if row is not None else None
+    return chain
 
-    The task being stacked on is not reported: its edits are about to be part of
-    the new worker's starting commit, which is the point of ``--stack-on``.
+
+def task_for_branch(conn, repo_id, branch: str | None):
+    """The latest task in this repository whose lease branch is ``branch``, if any."""
+    if not branch or not repo_id:
+        return None
+    return conn.execute(
+        "SELECT * FROM tasks WHERE repo_id = ? AND branch = ? ORDER BY id DESC LIMIT 1",
+        (repo_id, branch),
+    ).fetchone()
+
+
+def dispatch_refusal(
+    conn, repo_row, paths: list[str], *, stack_on: int | None = None, base: str | None = None
+) -> str | None:
+    """Why this dispatch is refused for siblings editing the same files, or None.
+
+    The task being built on — named by ``--stack-on``, or by ``--base`` naming its
+    lease branch — and everything under it in its stack are not counted: their
+    edits are about to be part of the new worker's starting commit.
     """
-    exclude = {int(stack_on)} if stack_on else set()
+    exclude = _stack_chain(conn, stack_on)
+    by_branch = task_for_branch(conn, repo_row["id"], base)
+    if by_branch is not None:
+        exclude |= _stack_chain(conn, int(by_branch["id"]))
     found = overlaps(conn, repo_row["id"], paths, exclude=exclude)
     if not found:
         return None
     lines = [
-        "overlap advisory: work already in flight in this repository touches files this "
-        "brief names, and two branches editing one module off the same head conflict "
-        "when the second merges."
+        "work already in flight in this repository touches files this brief names, and "
+        "two branches editing one module off the same head conflict when the second merges."
     ]
     for item in found:
         lines.append(f"  {item.describe()}")
     suggestions = ", ".join(f"--stack-on {item.task_id}" for item in found)
     lines.append(
-        "  Nothing was refused. To build on that work instead of beside it, dispatch with "
-        f"{suggestions}."
+        f"  To build on that work instead of beside it, dispatch with {suggestions}; to run "
+        "beside it anyway, --accept-preflight overlap --reason ..."
     )
     return "\n".join(lines)
 
@@ -246,12 +272,13 @@ __all__ = [
     "IN_FLIGHT_WINDOW",
     "TOUCHES_KEY",
     "Overlap",
-    "dispatch_advisory",
+    "dispatch_refusal",
     "in_flight_tasks",
     "is_in_flight",
     "overlaps",
     "record_touches",
     "recorded_touches",
+    "task_for_branch",
     "task_paths",
     "touched_paths",
 ]

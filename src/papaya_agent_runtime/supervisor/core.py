@@ -501,22 +501,17 @@ class Supervisor:
             migration_advisory = None
             _advisory_failed(conn, "migration", exc)
 
-        # Whether another task in flight here already touches the files this brief
-        # names. Four parallel tasks on one module cost three hand-resolved
-        # conflicts on 2026-09-06 (issue #61); the sibling is named and --stack-on
-        # suggested. Also a suggestion, never a refusal.
-        overlap_advisory = None
-        touched: list[str] = []
-        try:
-            from papaya_agent_runtime import overlap as _overlap
-
-            touched = _overlap.touched_paths(instructions, repo_row["local_path"])
-            overlap_advisory = _overlap.dispatch_advisory(
-                conn, repo_row, touched, stack_on=stack_on
-            )
-        except Exception as exc:  # noqa: BLE001 - an advisory never costs the dispatch
-            overlap_advisory = None
-            _advisory_failed(conn, "overlap", exc)
+        # Sequencing (runtime #94): two workers on the same files off the same head,
+        # or a child stacked on a parent with nothing on its branch yet, are refused
+        # here, before any task state exists, unless waved through on the record.
+        overlap_advisory, touched = self._sequencing_checks(
+            conn,
+            repo_row,
+            instructions,
+            base=base,
+            stack_on=stack_on,
+            accepted=(trust or {}).get("accepted"),
+        )
 
         # Validate the task packet contract before doing any work.
         packet = {
@@ -578,6 +573,49 @@ class Supervisor:
             # argv, the thread — this execution is over and its slot goes back.
             self._release(execution)
             raise
+
+    def _sequencing_checks(
+        self, conn, repo_row, instructions: str, *, base, stack_on, accepted
+    ) -> tuple[str | None, list[str]]:
+        """Refuse an empty stack parent or overlapping in-flight work, unless accepted.
+
+        An accepted check has the refusal it waved through written into its
+        ``accepted`` entry, so the ``preflight_accepted`` event records it. Returns
+        the accepted overlap text (for the caller to print) and the brief's paths.
+        """
+        from papaya_agent_runtime import overlap as _overlap
+        from papaya_agent_runtime import preflight as _preflight
+        from papaya_agent_runtime import repos as _repos
+
+        entries = {a["check"]: a for a in accepted or []}
+
+        def refuse_or_record(check: str, text: str | None) -> str | None:
+            if text is None:
+                return None
+            if check not in entries:
+                raise SupervisorError(f"dispatch refused: {text}")
+            entries[check]["overridden"] = text
+            return text
+
+        parent = store.get_task(conn, stack_on) if stack_on is not None else None
+        if parent is None and base:
+            found = _overlap.task_for_branch(conn, repo_row["id"], base)
+            parent = found if found is not None and _overlap.is_in_flight(found) else None
+        if parent is not None:
+            refuse_or_record(
+                "empty-parent",
+                _preflight.empty_parent_refusal(
+                    parent,
+                    local_path=repo_row["local_path"],
+                    remote=_repos.upstream_remote(repo_row),
+                ),
+            )
+        touched = _overlap.touched_paths(instructions, repo_row["local_path"])
+        text = refuse_or_record(
+            "overlap",
+            _overlap.dispatch_refusal(conn, repo_row, touched, stack_on=stack_on, base=base),
+        )
+        return (f"overlap accepted on the record: {text}" if text else None), touched
 
     def _launch_dispatched(
         self,
