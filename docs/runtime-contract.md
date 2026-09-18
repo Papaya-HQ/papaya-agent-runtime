@@ -497,7 +497,11 @@ quietly; do not narrate the steps or report diagnostics.
    a re-reading. A merged or closed pull request is named once, on the tick it
    flips, and then drops off the line; when you merge one yourself, record it
    with `ppy deliver <task> --merged <sha>` so the heartbeat stops asking the
-   forge about a branch that is already home. Every tick wakes you; while
+   forge about a branch that is already home. **Merged is not done.** A work item
+   whose pull request merged moves to `review`, with one comment saying so, and to
+   `done` only once it is verified on staging, by whoever verifies it; never mark
+   an item done on the merge alone. A workspace that uses another status sets it
+   with `ppy config delivery --merged-status <status>`. Every tick wakes you; while
    anything is in flight or a merge is gated on CI, relay
    what it says to the user in plain terms — including "no change". That means
    you never hand-arm a watcher per pull request, and never sit on a `gh pr

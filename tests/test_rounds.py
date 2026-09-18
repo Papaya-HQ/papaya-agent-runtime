@@ -1265,10 +1265,11 @@ def test_a_delivered_ticket_whose_pr_merges_is_done_with_one_comment_and_cleaned
 
     assert asyncio.run(scenario()) == 0
     assert store.task_phase(init_db(), ticket) == serve.PHASE_DONE
-    # Statuses differ per workspace (Shane, 2026-09-17): with no rule it asks, moves nothing.
+    # Merged is not done (Shane, 2026-09-18): with no workspace rule it goes to review.
     [(item, body)] = papaya_api.comments()
-    assert item == "item-9" and body.startswith(f"Merged: {PR_URL}.") and "Should it move" in body
-    assert papaya_api.statuses() == []
+    assert item == "item-9" and body.startswith(f"Merged: {PR_URL}.")
+    assert "verified on staging" in body
+    assert papaya_api.statuses() == [("item-9", "review")]
     # Straight away, for that one task, not only on the hourly run.
     assert worker in pruned
     assert harness.jobs == [] and turns.names() == []

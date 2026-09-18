@@ -324,7 +324,7 @@ def _merged_entry(worker: int) -> dict:
     }
 
 
-def test_a_merge_asks_the_workspace_once_until_its_rule_is_known(ppy_home) -> None:
+def test_a_merge_moves_the_item_to_review_until_staging_and_a_rule_wins(ppy_home) -> None:
     from papaya_agent_runtime.config import MMConfig, load_config, save_config
 
     conn = init_db()
@@ -336,7 +336,7 @@ def test_a_merge_asks_the_workspace_once_until_its_rule_is_known(ppy_home) -> No
     supervision.merged_step([_merged_entry(worker)], post=post)
 
     [(body, status)] = said
-    assert "Should it move to done" in body and status is None
+    assert status == "review" and "verified on staging" in body and "?" not in body
 
     save_config(MMConfig())
     cfg = load_config()

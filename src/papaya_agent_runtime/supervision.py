@@ -715,20 +715,24 @@ def merged_status_rule() -> str:
     return ""
 
 
+#: Where a merged work item goes when the workspace set no other rule. Merged is not
+#: done: an item is done only once it is verified on staging, by whoever verifies it
+#: (Shane, 2026-09-18: "only after verified in staging"). Until then it sits in review.
+MERGED_DEFAULT_STATUS = "review"
+
+
 def merged_message(where: str, rule: str) -> tuple[str, str | None]:
     """The comment and the status for a merged pull request. No I/O.
 
-    With no rule it moves nothing and asks: statuses differ per workspace, and the answer
-    becomes this workspace's rule (`ppy config delivery --merged-status <status>`).
+    A workspace rule (`ppy config delivery --merged-status <status>`) wins; without one
+    the item moves to :data:`MERGED_DEFAULT_STATUS` and nobody is asked.
     """
     if rule:
         return f"Merged: {where}. Moved to {rule}, as this workspace asked.", rule
     return (
-        f"Merged: {where}. The change is on main, so this item is out of date. Should it "
-        "move to done, or to another status this workspace uses (for example until it is "
-        "verified on staging)? Say which and I will do that for every merged pull request "
-        "from now on.",
-        None,
+        f"Merged: {where}. It is on main; this item stays in review until it is verified "
+        "on staging, and moves to done then.",
+        MERGED_DEFAULT_STATUS,
     )
 
 
