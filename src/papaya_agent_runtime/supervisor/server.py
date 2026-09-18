@@ -308,6 +308,10 @@ class SupervisorServer:
                         reference_repos=request.get("reference_repos") or None,
                         papaya_event_key=request.get("papaya_event_key"),
                         papaya_event_metadata=request.get("papaya_event_metadata"),
+                        expect_base=request.get("expect_base"),
+                        starting_sha=request.get("starting_sha"),
+                        accepted_preflight=request.get("accepted_preflight") or None,
+                        preflight_reason=request.get("preflight_reason"),
                     ),
                 }
             if cmd == "task_status":

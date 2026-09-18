@@ -976,6 +976,36 @@ def _ticket_run_id() -> int | None:
     return int(raw) if raw.isdigit() else None
 
 
+def _dispatch_trust(args: argparse.Namespace, instructions: str, provider: str):
+    """Run the dispatch trust checks for a registered repo; unregistered is the supervisor's."""
+    from papaya_agent_runtime import preflight
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    repo_row = store.get_repo(conn, args.repo)
+    if repo_row is None:
+        return preflight.DispatchTrust()
+    base, lease_source = args.base, None
+    if args.stack_on is not None:
+        parent = store.get_task(conn, args.stack_on)
+        if parent is not None and parent["branch"]:
+            base, lease_source = base or parent["branch"], parent["worktree_path"]
+    allowed: list[str] = []
+    if provider == "claude":
+        from papaya_agent_runtime.providers.claude import effective_allowed_tools
+
+        allowed, _source = effective_allowed_tools()
+    return preflight.trust_checks(
+        repo_row,
+        instructions,
+        provider=provider,
+        accepted=list(dict.fromkeys(args.accept_preflight)),
+        base_branch=base,
+        lease_source=lease_source,
+        allowed=allowed,
+    )
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     from papaya_agent_runtime import brief_lint, health, preflight
     from papaya_agent_runtime.config import default_worker_provider
@@ -988,6 +1018,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         return 1
 
     # Preflight first: refuse before any task state exists, and say why plainly.
+    if args.accept_preflight and not (args.reason or "").strip():
+        print(
+            "dispatch: --accept-preflight needs --reason saying why the check is waved through",
+            file=sys.stderr,
+        )
+        return 2
     if args.brief and args.instructions:
         print("dispatch: pass --brief <file> or --instructions, not both", file=sys.stderr)
         return 1
@@ -1046,6 +1082,19 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 "pass --provider claude or --provider codex for real work"
             )
 
+    # The remote, starting commit and gate a worker is about to be handed (runtime
+    # #94). The lease itself is checked by the supervisor once it exists.
+    trust = preflight.DispatchTrust()
+    try:
+        trust = _dispatch_trust(args, instructions, provider)
+    except preflight.PreflightError as exc:
+        hint = f" (override: --accept-preflight {exc.check} --reason ...)" if exc.check else ""
+        print(f"dispatch refused: {exc}{hint}", file=sys.stderr)
+        return 1
+    for check, text in trust.overridden.items():
+        if text:
+            print(f"preflight {check} accepted ({args.reason}): {text}")
+
     run_id = args.run_id if args.run_id is not None else _ticket_run_id()
 
     client = SupervisorClient()
@@ -1062,6 +1111,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             stack_on=args.stack_on,
             ends_at=args.ends_at,
             reference_repos=args.reference_repos or None,
+            expect_base=trust.expect_base,
+            starting_sha=trust.starting_sha,
+            accepted_preflight=trust.accepted(),
+            preflight_reason=args.reason,
         )
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)
@@ -3360,6 +3413,26 @@ def build_parser() -> argparse.ArgumentParser:
             "the forge's copy when it has one, else the local lease branch; recorded "
             "on the task so `ppy deliver` opens the PR against it"
         ),
+    )
+    from papaya_agent_runtime.preflight import CHECKS
+
+    dispatch.add_argument(
+        "--accept-preflight",
+        dest="accept_preflight",
+        action="append",
+        choices=list(CHECKS),
+        default=[],
+        metavar="CHECK",
+        help=(
+            f"let the dispatch through a failing preflight check: {', '.join(CHECKS)} "
+            "(repeatable; there is no blanket skip). Needs --reason; each is recorded as "
+            "a preflight_accepted event on the task"
+        ),
+    )
+    dispatch.add_argument(
+        "--reason",
+        default=None,
+        help="why a --accept-preflight check is being waved through (recorded on the task)",
     )
     dispatch.set_defaults(func=_cmd_dispatch)
 

@@ -340,8 +340,10 @@ which gets an isolated worktree.
 
 **Keep the base clone current, and always call `ppy` by its launcher.** `ppy repo
 sync <name>` fast-forwards the clone's default branch to the remote tip; run it
-before dispatching work that has no explicit starting branch, or the worker starts
-from whatever the clone was cloned at. Sync refuses a base clone with uncommitted or
+before dispatching work that has no explicit starting branch. A dispatch moves its
+fresh lease onto the forge's default branch and refuses a lease that is not on the
+intended base, so a stale clone costs a refused dispatch rather than a worker on
+the wrong commit. Sync refuses a base clone with uncommitted or
 untracked files rather than fast-forwarding over them. And if you ever `cd` into a
 base clone, invoke the control plane by its absolute launcher path — a bare `ppy`
 from that directory creates a junk `.ppy/` state tree inside the clone (sync reports
@@ -685,6 +687,22 @@ When the user gives you an objective:
    the line; `--strict` refuses the dispatch instead. A cause stated as fact is how
    25 of 102 cycle-4 reflections started; a labelled hypothesis with a probe is how a
    wrong one costs five minutes instead of forty.
+   `ppy dispatch` also refuses a starting point or gate the worker cannot trust,
+   before any task exists, and says which check refused: **remote** (the base
+   clone's `origin` is a forge URL for a different repository than the registered
+   forge; ssh and https spellings of one repo are equal, and a local-path origin is
+   fine), **base** (after one fetch, the brief's "you must see `<sha>`" commit or the
+   `--base` branch is not on the forge remote — read from the forge, never from a
+   stale local origin), **gate** (Claude workers only: a segment of the repo's
+   recorded local gate is off the worker allowlist, opens with `NAME=value`, or
+   names a `make` target the base's Makefile does not have). Then the supervisor
+   checks the **lease**: a default dispatch is moved onto the forge's default
+   branch, and the lease HEAD must equal the intended base (a brief's named commit
+   must be under it); otherwise the task fails with a `preflight_refused` event, the
+   lease is released and no worker starts. `ppy repo sync <name>` is the usual fix.
+   To go ahead anyway, `--accept-preflight <remote|base|lease|gate>` (repeatable,
+   no blanket skip) with a required `--reason`; each is recorded on the task as a
+   `preflight_accepted` event carrying what it waved through.
 4. Track progress with a **non-blocking snapshot** — `ppy run <run_id>` (task states,
    actionable events, usage) and `ppy task <task_id>` (latest progress report) — and keep
    your **intent in the ledger**: `ppy todo add "…"` the moment you know a next step,
