@@ -65,8 +65,8 @@ def _launch_tools(task_id: int) -> list[str]:
 def test_a_program_policy_does_not_cover_waits_on_a_person_and_is_one_request(home) -> None:
     task_id = _task()
 
-    first = cr.request(task_id, "xcodegen", why="regenerate the Xcode project")
-    again = cr.request(task_id, "Bash(xcodegen:*)", why="asked twice")
+    first = cr.request(task_id, "terraform", why="plan the staging stack")
+    again = cr.request(task_id, "Bash(terraform:*)", why="asked twice")
 
     assert first.state == cr.PENDING
     assert again.id == first.id
@@ -78,14 +78,14 @@ def test_a_program_policy_does_not_cover_waits_on_a_person_and_is_one_request(ho
 def test_the_safe_family_and_the_install_policy_grant_without_a_person(home) -> None:
     task_id = _task()
     cfg = load_config()
-    cfg.capabilities.auto_grant = ["xcodegen"]
+    cfg.capabilities.auto_grant = ["terraform"]
     save_config(cfg)
 
-    granted = cr.request(task_id, "xcodegen")
+    granted = cr.request(task_id, "terraform")
     family = cr.request(task_id, "jq")
 
     assert (granted.state, family.state) == (cr.AUTO_GRANTED, cr.AUTO_GRANTED)
-    assert "Bash(xcodegen:*)" in load_config().claude.extra_tools
+    assert "Bash(terraform:*)" in load_config().claude.extra_tools
     # A grant reaches a running worker only through a relaunch, so it is steered.
     assert any("granted" in message for _task_id, message in home)
 
@@ -127,14 +127,14 @@ def test_config_holds_program_names_only(ppy_home) -> None:
 
 def test_approving_grants_the_task_alone_and_its_next_launch_carries_it(home) -> None:
     task_id, other = _task(), _task()
-    request = cr.request(task_id, "xcodegen", why="regenerate the project")
+    request = cr.request(task_id, "terraform", why="plan the stack")
 
     decided = cr.decide_request(request.id, approve=True)
 
     assert decided.state == cr.GRANTED and decided.scope == "task"
-    assert "Bash(xcodegen:*)" in _launch_tools(task_id)
-    assert "Bash(xcodegen:*)" not in _launch_tools(other)
-    assert "Bash(xcodegen:*)" not in load_config().claude.extra_tools
+    assert "Bash(terraform:*)" in _launch_tools(task_id)
+    assert "Bash(terraform:*)" not in _launch_tools(other)
+    assert "Bash(terraform:*)" not in load_config().claude.extra_tools
     assert any(t == task_id and "granted" in m for t, m in home)
     conn = init_db()
     row = conn.execute("SELECT answer, scope FROM decisions").fetchone()
@@ -143,13 +143,13 @@ def test_approving_grants_the_task_alone_and_its_next_launch_carries_it(home) ->
 
 def test_approving_always_grants_every_worker_on_this_machine(home) -> None:
     task_id = _task()
-    request = cr.request(task_id, "xcodegen")
+    request = cr.request(task_id, "terraform")
 
     decided = cr.decide_request(request.id, approve=True, always=True)
 
     assert decided.scope == "install"
-    assert "Bash(xcodegen:*)" in load_config().claude.extra_tools
-    assert "Bash(xcodegen:*)" in _launch_tools(_task())
+    assert "Bash(terraform:*)" in load_config().claude.extra_tools
+    assert "Bash(terraform:*)" in _launch_tools(_task())
     assert config_changes.history()[0]["evidence"]["request_id"] == request.id
 
 
@@ -168,7 +168,7 @@ def test_denying_needs_a_reason_and_tells_the_worker_it(home) -> None:
 
 def test_a_resolved_request_or_an_ended_task_cannot_be_answered(home) -> None:
     task_id = _task()
-    request = cr.request(task_id, "xcodegen")
+    request = cr.request(task_id, "terraform")
     cr.decide_request(request.id, approve=True)
     with pytest.raises(cr.CapabilityError, match="already granted"):
         cr.decide_request(request.id, approve=False, reason="changed my mind")
@@ -177,8 +177,32 @@ def test_a_resolved_request_or_an_ended_task_cannot_be_answered(home) -> None:
     late = cr.request(closed, "psql")
     conn = init_db()
     store.set_task_status(conn, closed, "closed")
-    with pytest.raises(cr.CapabilityError, match="closed"):
+    with pytest.raises(cr.CapabilityError, match="moot"):
         cr.decide_request(late.id, approve=True)
+
+
+def test_a_request_on_a_task_that_ended_is_moot_and_asks_nobody(home) -> None:
+    task_id = _task()
+    request = cr.request(task_id, "terraform")
+    conn = init_db()
+    store.set_task_status(conn, task_id, "delivered")
+    assert cr.pending(conn) == []
+    assert cr.get(conn, request.id).state == cr.MOOT
+    assert not [p for p in readiness.check().problems if p.code == cr.PROBLEM_CODE]
+
+
+def test_the_tools_workers_asked_a_person_for_are_granted_by_the_runtime(home) -> None:
+    task_id = _task()
+    for program in ("chrome-devtools-axi", "nvm", "shasum", "ps", "xcodegen", "xcodebuild"):
+        assert cr.request(task_id, program).state == cr.AUTO_GRANTED, program
+
+
+def test_the_gh_wrapper_and_kill_are_refused_like_gh(home) -> None:
+    task_id = _task()
+    wrapped = cr.request(task_id, "gh-axi")
+    assert wrapped.state == cr.REFUSED
+    assert "pull requests is the runtime's" in (wrapped.reason or "")
+    assert cr.request(task_id, "kill").state == cr.REFUSED
 
 
 # ── from a denial, and in front of a person ─────────────────────────────────
@@ -189,7 +213,7 @@ def test_a_denied_plain_command_becomes_a_request_a_person_is_asked_about(home) 
     denial = {
         "tool_name": "Bash",
         "tool_use_id": "toolu_1",
-        "tool_input": {"command": "xcodegen generate"},
+        "tool_input": {"command": "terraform plan"},
     }
 
     tool_learning.learn([denial], task_id=task_id, run_id=None, worktree="/w")
@@ -197,9 +221,9 @@ def test_a_denied_plain_command_becomes_a_request_a_person_is_asked_about(home) 
     conn = init_db()
     [request] = cr.pending(conn)
     assert (request.program, request.source, request.command) == (
-        "xcodegen",
+        "terraform",
         cr.DENIAL,
-        "xcodegen generate",
+        "terraform plan",
     )
     assert any("waiting on a person" in m for _t, m in home)
     [problem] = [p for p in readiness.check().problems if p.code == cr.PROBLEM_CODE]
@@ -211,7 +235,7 @@ def test_a_denied_plain_command_becomes_a_request_a_person_is_asked_about(home) 
 def test_the_cli_declares_lists_and_answers(home, capsys) -> None:
     task_id = _task()
 
-    assert main(["need", str(task_id), "--capability", "xcodegen", "--why", "regen"]) == 0
+    assert main(["need", str(task_id), "--capability", "terraform", "--why", "regen"]) == 0
     assert "waiting on a person" in capsys.readouterr().out
     assert main(["capability", "list", "--json"]) == 0
     [listed] = json.loads(capsys.readouterr().out)
