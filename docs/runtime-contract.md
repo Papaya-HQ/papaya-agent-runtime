@@ -62,7 +62,10 @@ next steps that sat (`ledger due:`), the heartbeat does the mechanical parts its
 while no `ppy serve` runs, and the Stop hook refuses to end a turn while one of them
 is yours to take. An open next step recorded against a task does not discharge it;
 only a deferral with a reason does (`ppy todo add --task <id> --blocked-on
-user|review|task:<id> "..."`, `ppy todo block <id> --on ...`).
+user|review|task:<id> "..."`, `ppy todo block <id> --on ...`). A `task:<id>` wait is
+released by the rounds and the heartbeat as soon as that task has ended (delivered,
+closed, cancelled or failed), read from the record every interval rather than from the
+moment it ended, so a missed delivery never strands the step waiting on it.
 
 This applies with equal force to a status question. "What is the team working on"
 is not a read-only turn: run the preflight, do the work the board shows is due, then
