@@ -369,12 +369,28 @@ def last_ledger_turn(conn: sqlite3.Connection) -> dict[str, Any] | None:
 
 #: The event a released task wait leaves, for `ppy tail` and the tests.
 WAIT_RELEASED_EVENT = "todo_wait_released"
-#: The worker states that end what a `task:<id>` wait was waiting for.
-FINISHED_FOR_A_WAIT = ("delivered", "closed", "cancelled", "failed")
+#: The worker states that end what a `task:<id>` wait was waiting for: the task ended,
+#: or its work came back to the manager. A worker that said done is not still working:
+#: PAP-245's review step, recorded against its own worker and waiting on it, kept the
+#: owed lane away from that finished worker for six hours (2026-09-18).
+FINISHED_FOR_A_WAIT = (
+    "delivered",
+    "closed",
+    "cancelled",
+    "failed",
+    "worker_done",
+    "worker_stopped",
+    "needs_recovery",
+)
+#: How long an `access` wait stands before the step is tried again: access that failed
+#: once (a token refused mid-rotation) usually works on the next try, and nothing else
+#: ever clears the wait.
+ACCESS_RETRY_SECONDS = 60 * 60.0
 
 
-def release_finished_waits(conn: sqlite3.Connection) -> list[str]:
-    """Open next steps waiting on a task that has since ended become due. Never raises.
+def release_finished_waits(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[str]:
+    """Open next steps waiting on a task that has since ended become due, and a step
+    waiting on access is tried again after :data:`ACCESS_RETRY_SECONDS`. Never raises.
 
     Nothing else clears a `task:<id>` wait, and the moment the task ends is easy to miss
     (a restart, a delivery handled by another path): PAP-246's Calendar layer waited on
@@ -383,7 +399,24 @@ def release_finished_waits(conn: sqlite3.Connection) -> list[str]:
     ledger lane then takes the step up like any other.
     """
     lines: list[str] = []
+    now = now or datetime.now(UTC)
     try:
+        for row in conn.execute(
+            "SELECT id, text, updated_at FROM todos WHERE status = 'open' "
+            "AND (blocked_on = 'access' OR blocked_on LIKE 'access:%')"
+        ).fetchall():
+            since = _parse(row["updated_at"])
+            if since is not None and (now - since).total_seconds() < ACCESS_RETRY_SECONDS:
+                continue
+            store.update_todo(conn, int(row["id"]), blocked_on=None)
+            store.append_event(
+                conn,
+                kind=WAIT_RELEASED_EVENT,
+                payload={"todo_id": int(row["id"]), "access": True},
+            )
+            lines.append(
+                f"todo #{int(row['id'])} is tried again after waiting on access — {row['text']}"
+            )
         rows = conn.execute(
             "SELECT id, text, blocked_on FROM todos WHERE status = 'open' "
             "AND blocked_on LIKE 'task:%'"
@@ -528,7 +561,7 @@ def interactive_step(
     """
     if supervision.serve_running():
         return [], []
-    lines: list[str] = release_finished_waits(conn)
+    lines: list[str] = release_finished_waits(conn, now=now)
     turns: list[OwedDecision] = []
     try:
         for decision in owed_decisions(conn, now=now):

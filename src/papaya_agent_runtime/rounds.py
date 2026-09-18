@@ -1320,7 +1320,7 @@ class Rounds:
         First, a step waiting on a task that has ended is released
         (`lanes.release_finished_waits`), so it is due this round, not never.
         """
-        released = await store.run_in_thread(lanes.release_finished_waits)
+        released = await store.run_in_thread(lanes.release_finished_waits, now=now)
         due = await store.run_in_thread(lanes.ledger_due, now=now)
         if not due:
             return released
