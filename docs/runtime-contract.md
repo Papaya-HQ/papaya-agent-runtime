@@ -477,7 +477,14 @@ quietly; do not narrate the steps or report diagnostics.
    fifteen minutes and no live ticket covers becomes a person's blocker, which
    `ppy serve` reports to them, so a machine with no session open still tells
    somebody. Start `./bin/ppy watch --follow` as a background monitor in your
-   harness (`--follow` because a monitor's output is a pipe, and piped the command
+   harness — one whose every line reaches you as it prints (Claude Code: the Monitor
+   tool), never a background job whose output lands in a file nobody reads: that is
+   how a session dispatched three workers and learned of their deliveries and merges
+   only when the person asked (2026-09-18). Each milestone a line brings for work you
+   dispatched or hold — a plan to read, a block, a done note, a delivery, a merge, a
+   failure — is yours to act on and to tell the person when it arrives, not when they
+   ask; a session that dispatches is the runtime for that work, whichever mode it
+   started in (`--follow` because a monitor's output is a pipe, and piped the command
    prints one tick and exits, so a tool call never hangs on it; it prints one line
    of team state now and every five minutes: who is
    in flight and alive, which tasks are waiting on you, the *open* pull requests
