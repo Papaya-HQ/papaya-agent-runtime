@@ -803,7 +803,7 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
         except SupervisorOwned as exc:
             print(f"refusing to start: {exc}", file=sys.stderr)
             return 1
-        lifeline.start()
+        lifeline.start_or_record("ppy supervisor serve")
 
         def terminated(_signum, _frame) -> None:
             raise KeyboardInterrupt
@@ -821,6 +821,9 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
             lifeline.stop()
         print("supervisor stopped")
         return 0
+
+    if args.supervisor_cmd == "start":
+        return _supervisor_start(args)
 
     client = SupervisorClient()
     try:
@@ -844,6 +847,47 @@ def _cmd_supervisor(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     return 2
+
+
+def _supervisor_start(args: argparse.Namespace) -> int:
+    """`ppy supervisor start`: the supervisor, detached from this terminal and harness.
+
+    A harness-tracked background task is the first thing a harness reclaims under
+    memory pressure, and it ends with the session; `supervisor serve` then treats the
+    hangup as a shutdown and stops every worker. This starts it in a session of its
+    own instead, and returns only once it holds the owner lock and answers.
+    """
+    from papaya_agent_runtime import takeover
+    from papaya_agent_runtime.paths import ppy_home
+    from papaya_agent_runtime.supervisor.client import (
+        SupervisorUnavailable,
+        ensure_supervisor,
+        supervisor_log_path,
+    )
+    from papaya_agent_runtime.supervisor.server import default_socket_path
+
+    log = supervisor_log_path()
+    try:
+        client, launched = ensure_supervisor(timeout=args.timeout)
+        pid = client.ping().get("pid")
+    except SupervisorUnavailable as exc:
+        print(f"supervisor did not start: {exc}", file=sys.stderr)
+        return 1
+    if not launched:
+        print(f"supervisor already running (pid {pid}) at {default_socket_path()}")
+        return 0
+    home = str(ppy_home().resolve())
+    holder = takeover.inspect(home)
+    if not holder.held or holder.pid != pid:
+        # Another launch won the owner race: say which one runs, not the one that lost.
+        print(
+            f"supervisor running (pid {pid}) at {default_socket_path()}, but it does not "
+            f"hold {takeover.lock_path(home)}; see {log}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"supervisor started detached (pid {pid}) at {default_socket_path()}; log {log}")
+    return 0
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -944,6 +988,27 @@ def _registered_repo_origin(repo: str) -> str | None:
         return None
 
 
+def _brief_preflight(
+    text: str, *, ends_at: str, provider: str | None, repo: str | None, title: str
+) -> list:
+    """The brief lint plus its preflight checks: the worker's allowlist and prior attempts.
+
+    `ppy brief lint` and `ppy dispatch --brief` both call this, so a brief the
+    manager checks before dispatching gets the findings dispatch would print.
+    """
+    from papaya_agent_runtime import brief_lint, prior_attempts
+    from papaya_agent_runtime.config import default_worker_provider
+    from papaya_agent_runtime.state import init_db
+
+    prior = prior_attempts.describe(init_db(), repo, title) if repo and title else None
+    return brief_lint.preflight(
+        text,
+        ends_at=ends_at,
+        allowed=brief_lint.claude_allowlist(provider or default_worker_provider()),
+        prior=prior,
+    )
+
+
 def _cmd_brief(args: argparse.Namespace) -> int:
     """`ppy brief lint <file>`: what a worker cannot recover from in this brief."""
     from papaya_agent_runtime import brief_lint, preflight
@@ -953,7 +1018,10 @@ def _cmd_brief(args: argparse.Namespace) -> int:
     except preflight.PreflightError as exc:
         print(f"brief lint: {exc}", file=sys.stderr)
         return 1
-    findings = brief_lint.lint_brief(text, ends_at=args.ends_at)
+    title = args.title or preflight.title_from_brief(text) or ""
+    findings = _brief_preflight(
+        text, ends_at=args.ends_at, provider=args.provider, repo=args.repo, title=title
+    )
     kind = "defect brief" if brief_lint.is_defect_brief(text) else "brief"
     if not findings:
         print(f"{args.file}: {kind}, no findings")
@@ -976,6 +1044,36 @@ def _ticket_run_id() -> int | None:
     return int(raw) if raw.isdigit() else None
 
 
+def _dispatch_trust(args: argparse.Namespace, instructions: str, provider: str):
+    """Run the dispatch trust checks for a registered repo; unregistered is the supervisor's."""
+    from papaya_agent_runtime import preflight
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    repo_row = store.get_repo(conn, args.repo)
+    if repo_row is None:
+        return preflight.DispatchTrust()
+    base, lease_source = args.base, None
+    if args.stack_on is not None:
+        parent = store.get_task(conn, args.stack_on)
+        if parent is not None and parent["branch"]:
+            base, lease_source = base or parent["branch"], parent["worktree_path"]
+    allowed: list[str] = []
+    if provider == "claude":
+        from papaya_agent_runtime.providers.claude import effective_allowed_tools
+
+        allowed, _source = effective_allowed_tools()
+    return preflight.trust_checks(
+        repo_row,
+        instructions,
+        provider=provider,
+        accepted=list(dict.fromkeys(args.accept_preflight)),
+        base_branch=base,
+        lease_source=lease_source,
+        allowed=allowed,
+    )
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     from papaya_agent_runtime import brief_lint, health, preflight
     from papaya_agent_runtime.config import default_worker_provider
@@ -988,6 +1086,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         return 1
 
     # Preflight first: refuse before any task state exists, and say why plainly.
+    if args.accept_preflight and not (args.reason or "").strip():
+        print(
+            "dispatch: --accept-preflight needs --reason saying why the check is waved through",
+            file=sys.stderr,
+        )
+        return 2
     if args.brief and args.instructions:
         print("dispatch: pass --brief <file> or --instructions, not both", file=sys.stderr)
         return 1
@@ -1004,20 +1108,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except preflight.PreflightError as exc:
         print(f"dispatch refused: {exc}", file=sys.stderr)
         return 1
-    if args.brief:
-        findings = brief_lint.lint_brief(instructions, ends_at=args.ends_at)
-        if findings:
-            # Wrong premises and self-contradicting scope cost 25 and 13 reflections
-            # in cycle 4 (issue #59); say so before the worker is out the door.
-            print(f"brief lint: {len(findings)} finding(s) in {args.brief}", file=sys.stderr)
-            print(brief_lint.render(findings, args.brief), file=sys.stderr)
-            if args.strict:
-                print(
-                    "dispatch refused: --strict and the brief lint found problems; fix the "
-                    "brief (see `ppy brief lint`) or dispatch without --strict",
-                    file=sys.stderr,
-                )
-                return 1
 
     title = args.title
     if not title:
@@ -1046,6 +1136,38 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 "pass --provider claude or --provider codex for real work"
             )
 
+    if args.brief:
+        # Read once the title and provider are settled: the allowlist is the one this
+        # worker gets, and a prior attempt is matched on this title (runtime #94).
+        findings = _brief_preflight(
+            instructions, ends_at=args.ends_at, provider=provider, repo=args.repo, title=title
+        )
+        if findings:
+            # Wrong premises and self-contradicting scope cost 25 and 13 reflections
+            # in cycle 4 (issue #59); say so before the worker is out the door.
+            print(f"brief lint: {len(findings)} finding(s) in {args.brief}", file=sys.stderr)
+            print(brief_lint.render(findings, args.brief), file=sys.stderr)
+            if args.strict:
+                print(
+                    "dispatch refused: --strict and the brief lint found problems; fix the "
+                    "brief (see `ppy brief lint`) or dispatch without --strict",
+                    file=sys.stderr,
+                )
+                return 1
+
+    # The remote, starting commit and gate a worker is about to be handed (runtime
+    # #94). The lease itself is checked by the supervisor once it exists.
+    trust = preflight.DispatchTrust()
+    try:
+        trust = _dispatch_trust(args, instructions, provider)
+    except preflight.PreflightError as exc:
+        hint = f" (override: --accept-preflight {exc.check} --reason ...)" if exc.check else ""
+        print(f"dispatch refused: {exc}{hint}", file=sys.stderr)
+        return 1
+    for check, text in trust.overridden.items():
+        if text:
+            print(f"preflight {check} accepted ({args.reason}): {text}")
+
     run_id = args.run_id if args.run_id is not None else _ticket_run_id()
 
     client = SupervisorClient()
@@ -1062,14 +1184,25 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             stack_on=args.stack_on,
             ends_at=args.ends_at,
             reference_repos=args.reference_repos or None,
+            expect_base=trust.expect_base,
+            starting_sha=trust.starting_sha,
+            accepted_preflight=trust.accepted(),
+            preflight_reason=args.reason,
         )
     except SupervisorUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 1
     if not resp.get("ok"):
-        print(f"dispatch failed: {resp.get('error')}", file=sys.stderr)
+        error = str(resp.get("error"))
+        # A sequencing refusal (overlap, empty-parent) already says it was refused.
+        print(
+            error if error.startswith("dispatch refused:") else f"dispatch failed: {error}",
+            file=sys.stderr,
+        )
         return 1
     print(f"dispatched task {resp['task_id']} in run {resp['run_id']} (branch {resp['branch']})")
+    if (resp.get("routing") or {}).get("line"):
+        print(resp["routing"]["line"])
     for advisory in ("migration_advisory", "overlap_advisory"):
         if resp.get(advisory):
             print(resp[advisory])
@@ -1423,10 +1556,51 @@ def _actor() -> str:
     return store.BY_MANAGER if os.environ.get(TICKET_RUN_ENV) else store.BY_PERSON
 
 
+def _add_verify_seconds(parser: argparse.ArgumentParser) -> None:
+    from papaya_agent_runtime.supervisor.client import DEFAULT_VERIFY_SECONDS
+
+    parser.add_argument(
+        "--verify-seconds",
+        dest="verify_seconds",
+        type=float,
+        default=DEFAULT_VERIFY_SECONDS,
+        help=(
+            "after a resume, wait this long to see the worker process running (or finished) "
+            "and exit 1 with an incident if it never appears; 0 skips the check "
+            f"(default {DEFAULT_VERIFY_SECONDS:g})"
+        ),
+    )
+
+
+#: Steer modes that start a worker session, so there is a process to look for.
+_STARTS_A_WORKER = ("resume", "interrupt_resume")
+
+
+def _verify_started(task_id: int, since: str, seconds: float) -> int:
+    """Say whether the worker a resume started is running. 1 when none appeared."""
+    from papaya_agent_runtime.supervisor.client import verify_worker
+
+    if seconds <= 0:
+        return 0
+    seen = verify_worker(task_id, since=since, timeout=seconds)
+    if seen.verdict == "missing":
+        print(seen.describe(task_id), file=sys.stderr)
+        return 1
+    print(seen.describe(task_id))
+    return 0
+
+
+def _now_stamp() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
+
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
 
     client = SupervisorClient()
+    since = _now_stamp()
     try:
         resp = client.resume_task(
             args.task_id, message=args.message, ends_at=args.ends_at, by=_actor()
@@ -1441,14 +1615,19 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         f"resuming task {args.task_id} (session {resp.get('resumed_session')}) — "
         f"status {resp.get('status', 'in_progress')} (ends at {resp.get('ends_at', args.ends_at)})"
     )
-    return 0
+    return _verify_started(args.task_id, since, args.verify_seconds)
 
 
 def _cmd_steer(args: argparse.Namespace) -> int:
-    from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
+    from papaya_agent_runtime.supervisor.client import (
+        DEFAULT_VERIFY_SECONDS,
+        SupervisorClient,
+        SupervisorUnavailable,
+    )
 
     client = SupervisorClient()
     replace = args.replace or getattr(args, "stop", False)
+    since = _now_stamp()
     try:
         resp = client.steer_task(
             args.task_id, args.message, delivery="replace" if replace else "append", by=_actor()
@@ -1469,6 +1648,10 @@ def _cmd_steer(args: argparse.Namespace) -> int:
         print(
             f"  steer event {item['event']} ({item['delivery']}, will be {item['will_be']}): "
             f"{item['preview']}"
+        )
+    if resp.get("mode") in _STARTS_A_WORKER:
+        return _verify_started(
+            args.task_id, since, getattr(args, "verify_seconds", DEFAULT_VERIFY_SECONDS)
         )
     return 0
 
@@ -1748,11 +1931,13 @@ def _cmd_health(args: argparse.Namespace) -> int:
         else health.quiet_threshold()
     )
     from papaya_agent_runtime import compose
+    from papaya_agent_runtime.supervisor import lifeline
 
     entries = health.check(quiet_after=quiet_after)
     tools = health.claude_tool_profile()
     stacks = compose.prunable_stacks()
     dispatch = health.dispatch_snapshot()
+    watcher = lifeline.status()
     if args.json:
         print(
             json.dumps(
@@ -1761,25 +1946,28 @@ def _cmd_health(args: argparse.Namespace) -> int:
                     "claude_tools": tools,
                     "prunable_compose_stacks": stacks,
                     "dispatch": dispatch,
+                    "lifeline": watcher,
                 },
                 indent=2,
             )
         )
         return 0
     print(health.describe_claude_tools(tools))
+    print(lifeline.describe(watcher))
     pool = dispatch["pool"]
     if pool["known"]:
         print(f"worktree pool: {pool['free_slots']} of {pool['total_slots']} slot(s) free")
     else:
         print(f"worktree pool: no fixed capacity ({pool['backend']} backend)")
     print(compose.describe_prunable(stacks))
+    unwatched = watcher["status"] == lifeline.MISSING
     if not entries:
         print("no workers in flight")
-        return 0 if tools["ok"] else 1
+        return 0 if tools["ok"] and not unwatched else 1
     for e in entries:
         print(health.describe(e))
     troubled = [e for e in entries if e["verdict"] != "alive"]
-    return 1 if troubled or not tools["ok"] else 0
+    return 1 if troubled or unwatched or not tools["ok"] else 0
 
 
 def _cmd_watch(args: argparse.Namespace) -> int:
@@ -2621,6 +2809,23 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gone_workers(conn) -> list[int]:
+    """In-flight worker tasks whose runner row says running with no process behind it."""
+    from papaya_agent_runtime import board
+    from papaya_agent_runtime.state import store
+    from papaya_agent_runtime.supervisor.dead_runners import pid_alive
+
+    marks = ",".join("?" for _ in board.IN_FLIGHT)
+    rows = conn.execute(
+        f"SELECT r.task_id, r.pid FROM runners r JOIN tasks t ON t.id = r.task_id "
+        f"WHERE r.status IN ('starting','running') AND r.pid IS NOT NULL "
+        f"AND t.status IN ({marks}) AND t.{store.WORKER_TASK} "
+        f"ORDER BY r.task_id",
+        tuple(board.IN_FLIGHT),
+    ).fetchall()
+    return sorted({int(r["task_id"]) for r in rows if not pid_alive(int(r["pid"]))})
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.paths import config_path, ppy_home
     from papaya_agent_runtime.repos import list_repos
@@ -2652,6 +2857,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
         running = sum(counts.get(k, 0) for k in board.IN_FLIGHT)
         waiting = sum(counts.get(k, 0) for k in board.NEEDS_ME)
         print(f"tasks:   {running} in flight, {waiting} waiting on me")
+        gone = _gone_workers(conn)
+        if gone:
+            print(
+                f"INCIDENT: {len(gone)} in-flight worker(s) with no live process — task(s) "
+                + ", ".join(str(t) for t in gone)
+                + "; run `ppy health`, then `ppy reconcile`, then `ppy resume <id>`"
+            )
         nxt = board.next_steps(conn)
         blocked = board.waiting(conn)
         print(f"todos:   {len(nxt)} next, {len(blocked)} waiting")
@@ -3277,7 +3489,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     supervisor = sub.add_parser("supervisor", help="run and control the supervisor")
     ssub = supervisor.add_subparsers(dest="supervisor_cmd", required=True)
-    ssub.add_parser("serve", help="run the supervisor (blocking)")
+    ssub.add_parser(
+        "serve",
+        help="run the supervisor in the foreground (blocking; a hangup stops its workers)",
+    )
+    sstart = ssub.add_parser(
+        "start",
+        help=(
+            "start the supervisor detached from this terminal and harness (own session, "
+            "log in run/supervisor.log); returns once it answers"
+        ),
+    )
+    sstart.add_argument(
+        "--timeout", type=float, default=15.0, help="seconds to wait for it to answer"
+    )
     ssub.add_parser("status", help="ping a running supervisor")
     ssub.add_parser("stop", help="ask a running supervisor to shut down")
     supervisor.set_defaults(func=_cmd_supervisor)
@@ -3361,6 +3586,26 @@ def build_parser() -> argparse.ArgumentParser:
             "on the task so `ppy deliver` opens the PR against it"
         ),
     )
+    from papaya_agent_runtime.preflight import CHECKS
+
+    dispatch.add_argument(
+        "--accept-preflight",
+        dest="accept_preflight",
+        action="append",
+        choices=list(CHECKS),
+        default=[],
+        metavar="CHECK",
+        help=(
+            f"let the dispatch through a failing preflight check: {', '.join(CHECKS)} "
+            "(repeatable; there is no blanket skip). Needs --reason; each is recorded as "
+            "a preflight_accepted event on the task"
+        ),
+    )
+    dispatch.add_argument(
+        "--reason",
+        default=None,
+        help="why a --accept-preflight check is being waved through (recorded on the task)",
+    )
     dispatch.set_defaults(func=_cmd_dispatch)
 
     brief = sub.add_parser("brief", help="check a task brief before dispatching it")
@@ -3379,6 +3624,28 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["review", "done"],
         default="done",
         help="terminal phase to check the brief against (default: done)",
+    )
+    blint.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "the registered repo it will be dispatched to: an ended task there with the same "
+            "title asks for a `## Prior attempt` section, as `ppy dispatch --brief` does"
+        ),
+    )
+    blint.add_argument(
+        "--title",
+        default=None,
+        help="the objective it will be dispatched under (default: the brief's first heading)",
+    )
+    blint.add_argument(
+        "--provider",
+        default=None,
+        choices=["fake", "claude", "codex"],
+        help=(
+            "the worker provider (default: the configured one); a Claude worker's commands "
+            "are checked against its allowlist"
+        ),
     )
     brief.set_defaults(func=_cmd_brief)
 
@@ -3511,6 +3778,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="override and persist the task's terminal phase (default: stored value)",
     )
+    _add_verify_seconds(resume)
     resume.set_defaults(func=_cmd_resume)
 
     steer = sub.add_parser("steer", help="steer a task (checkpoint or capability-gated interrupt)")
@@ -3524,6 +3792,7 @@ def build_parser() -> argparse.ArgumentParser:
             "before it (default: queued messages are all delivered together, in order)"
         ),
     )
+    _add_verify_seconds(steer)
     steer.set_defaults(func=_cmd_steer)
 
     stop = sub.add_parser(
@@ -3535,6 +3804,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stop.add_argument("task_id", type=int)
     stop.add_argument("--message", required=True, help="what the worker does instead")
+    _add_verify_seconds(stop)
     stop.set_defaults(func=_cmd_steer, stop=True, replace=True)
 
     answer = sub.add_parser("answer", help="answer a blocked task and record a durable decision")

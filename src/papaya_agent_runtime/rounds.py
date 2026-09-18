@@ -1149,8 +1149,12 @@ class Rounds:
         merge: Callable[[int, dict[str, Any], str], Any] | None = None,
         turns: lanes.TurnRunner | None = None,
         reporter: Any = None,
+        on_round: Callable[[], Awaitable[list[str]]] | None = None,
     ) -> None:
         self._built = built
+        #: What the process running the rounds checks of its own each round (`serve`:
+        #: the supervisor it depends on and its lifeline watcher); returns summary parts.
+        self._on_round = on_round
         self._runner = runner
         self._interval = float(interval)
         self._stderr = stderr
@@ -1254,7 +1258,8 @@ class Rounds:
 
     async def _round(self) -> list[str]:
         now = self._clock()
-        parts = await self._pull_requests(now)
+        parts = await self._on_round() if self._on_round is not None else []
+        parts += await self._pull_requests(now)
         if not self._standalone():
             parts += await self._reclaim(await asyncio.to_thread(ticket_tasks))
             # Work items no held ticket listens to: the same check a session's heartbeat

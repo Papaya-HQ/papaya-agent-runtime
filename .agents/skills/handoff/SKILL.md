@@ -59,9 +59,10 @@ exceptions, no "nothing to hand off" — an empty ledger still gets a prompt.
 
 When a session starts with a pickup prompt, do what it says *before speaking*:
 
-1. **Reconnect to the team.** `ppy supervisor status`; if it's down, start it in the
-   background (`ppy supervisor serve`) — a daemon that died with the old terminal takes
-   every in-flight worker with it. Then `ppy reconcile` (dead runners →
+1. **Reconnect to the team.** `ppy supervisor status`; if it's down, start it detached
+   with `ppy supervisor start` — never `ppy supervisor serve` as a harness background
+   task, which the harness reclaims under memory pressure or ends with the session, and
+   the supervisor then stops every worker with it. Then `ppy reconcile` (dead runners →
    `needs_recovery`) and `ppy health` (silent workers). Resume what dropped with
    `ppy resume <id>`; check a quiet worker's latest report with `ppy task <id>` and steer
    or resume it.

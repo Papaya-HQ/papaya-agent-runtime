@@ -47,11 +47,23 @@ something speculative while the product outcome sits unfinished (issue #77).
   worker that knows the difference flags a dead route instead of inventing a second
   source.
 - **In scope.** The concrete capabilities, files or components, changes and
-  verification this task covers — what the worker is authorised to do.
+  verification this task covers — what the worker is authorised to do. End it with a
+  **`Pre-authorised adjacent changes:`** line naming the small packaging or config
+  edits the scope implies (a pyproject entry, a lockfile, a generated file, a skill
+  link) or `none`; `ppy brief lint` asks for it. Without it those edits land under
+  "Outside scope, required to build" and cost a review round.
 - **Out of scope.** Explicit exclusions and stopping boundaries, including the
   tempting adjacent work: legacy compatibility, redesigns, speculative abstractions,
   unrelated cleanup, additional hardening not needed for the agreed outcome. Name
   them; "nothing else" is not a boundary a worker can check against.
+
+- **Prior attempt** (re-dispatches only). When a closed, failed or cancelled task in
+  the same repository carried the same title, the brief owes a `## Prior attempt`
+  section: what it did, why it ended, what this attempt does differently. Look it up
+  before you write the brief — `prior_attempts.describe(conn, repo, title)` names the
+  task, how it ended and the recorded reason; the brief lint
+  (`brief_lint.preflight`) flags a re-dispatch without the section, so the worker
+  never learns mid-task from a repo note that the last try was rejected.
 
 These four travel. The runtime appends them verbatim to every resume and steer
 packet as a *standing scope* block, so a continuation stands on its own and cannot
@@ -80,9 +92,23 @@ brief and the packet the worker receives after a steer.
   the worker must fill: "Outside scope, required to build" and "Flagged, not done".
 - **The plan-note gate.** Require a `--phase plan` note (≤ 16 lines) before code that
   maps each Goal to the files that deliver it and names anything the plan would need
-  that Out of scope excludes — and say you will read it against the four sections.
-  A plan that serves a mechanism no Goal asks for, or that quietly reaches into an
-  exclusion, is steered before implementation, not reviewed after it.
+  that Out of scope excludes. The section states exactly one of
+  `blocking: stop after posting and wait for the manager's reply` or
+  `non-blocking: post it, then proceed`; `ppy brief lint` flags a plan note with
+  neither. Four workers proceeded past a gate that never said whether to wait (tasks
+  245, 247, 248, 252). A plan that serves a mechanism no Goal asks for, or that
+  quietly reaches into an exclusion, is steered before implementation, not reviewed
+  after it — which only happens when the gate is `blocking`.
+- **External facts are cited or marked unknown.** Every external contract the brief
+  depends on — a package release and its API, a route, an envelope field — is stated
+  with its source (file and line in a local clone, or the release tag) or explicitly
+  marked `unknown`. Four tasks lost time to unstated external facts (237, 241, 242,
+  243).
+- **Release and version-bump briefs.** The file list is pasted from
+  `git show --stat <previous release commit>`, with that command, never transcribed;
+  the previous release commit is the release commit, not the merge. `ppy brief lint`
+  flags a release brief that lists files without the command. Three release briefs
+  repeated the same wrong hand-transcribed list (tasks 235, 239, 246).
 
 ## 2. UI work: name the design reference
 
@@ -230,6 +256,18 @@ against each other and the worker has to guess which copy is current.
   between, the budget-versus-infrastructure decision goes to the user with the
   evidence — not a third code round.
 
+## 6a. Only name commands the worker can run
+
+A Claude worker runs under `claude.allowed_tools` (`ppy config claude --show`), and a
+command it refuses becomes a denial and a "Flagged, not done" entry. The brief lint's
+allowlist check (`brief_lint.preflight` with `brief_lint.claude_allowlist("claude")`)
+reads a Claude brief's literal commands — fenced blocks, and inline code that starts
+with a shell command — and names each one the allowlist would deny, with the
+substitute where one is known: `chmod` → `git update-index --chmod=+x <file>` then
+`git checkout-index -f -- <file>`; `unzip` → `python3 -m zipfile -e <archive> <dir>`;
+`rm` → `git rm` / `git clean -f`. Rewrite the command, or do that step yourself before
+dispatch. Codex workers have a real shell and are not checked.
+
 ## 7. Don't restate the environment's command rules
 
 A `claude` dispatch already prepends them: one plain command per call, no pipes /
@@ -242,7 +280,9 @@ Codex workers have a real shell and are deliberately not given the block.
 
 ## 8. Before you send it
 
-`test -s` the file; `ppy brief lint` it (the four outcome sections, and the defect
-shape when it is one); confirm disk and pool capacity (`ppy dispatch` checks the
+`test -s` the file; `ppy brief lint` it (the four outcome sections, the pre-authorised
+line, the plan gate, the release list, and the defect shape when it is one); for a
+Claude worker, check its commands against the allowlist (6a) and, for a re-dispatch,
+that it has a Prior attempt section; confirm disk and pool capacity (`ppy dispatch` checks the
 disk); read the brief once as the worker: is there any instruction it would have to
 guess, and could it tell from the brief alone when it is done and when to stop?

@@ -251,6 +251,13 @@ class SupervisorServer:
         if self._last_health_tick is not None and now - self._last_health_tick < TICK_SECONDS:
             return
         self._last_health_tick = now
+        # A supervisor started by `ppy supervisor start` has no manager rounds, so its
+        # own tick is what restarts a lifeline watcher that has gone. A no-op in a
+        # process that never started one.
+        with contextlib.suppress(Exception):
+            from papaya_agent_runtime.supervisor import lifeline
+
+            lifeline.keep_alive("the supervisor")
         try:
             from papaya_agent_runtime import health
             from papaya_agent_runtime.state import init_db
@@ -308,6 +315,10 @@ class SupervisorServer:
                         reference_repos=request.get("reference_repos") or None,
                         papaya_event_key=request.get("papaya_event_key"),
                         papaya_event_metadata=request.get("papaya_event_metadata"),
+                        expect_base=request.get("expect_base"),
+                        starting_sha=request.get("starting_sha"),
+                        accepted_preflight=request.get("accepted_preflight") or None,
+                        preflight_reason=request.get("preflight_reason"),
                     ),
                 }
             if cmd == "task_status":

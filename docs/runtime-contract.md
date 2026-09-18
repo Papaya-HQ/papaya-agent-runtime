@@ -340,8 +340,10 @@ which gets an isolated worktree.
 
 **Keep the base clone current, and always call `ppy` by its launcher.** `ppy repo
 sync <name>` fast-forwards the clone's default branch to the remote tip; run it
-before dispatching work that has no explicit starting branch, or the worker starts
-from whatever the clone was cloned at. Sync refuses a base clone with uncommitted or
+before dispatching work that has no explicit starting branch. A dispatch moves its
+fresh lease onto the forge's default branch and refuses a lease that is not on the
+intended base, so a stale clone costs a refused dispatch rather than a worker on
+the wrong commit. Sync refuses a base clone with uncommitted or
 untracked files rather than fast-forwarding over them. And if you ever `cd` into a
 base clone, invoke the control plane by its absolute launcher path — a bare `ppy`
 from that directory creates a junk `.ppy/` state tree inside the clone (sync reports
@@ -665,8 +667,18 @@ When the user gives you an objective:
    <file> --provider <claude|codex> [--model ...] [--reasoning ...]`. A brief
    names its own task: with `--brief`, the objective comes from the brief's first
    Markdown heading, so `--title` is only for overriding it (and is still required
-   when you dispatch without a brief). Prefer the smallest eligible worker; the
-   ceiling is enforced in code, so you cannot exceed it by accident.
+   when you dispatch without a brief). Leave `--model`/`--reasoning` off unless you
+   have a reason: an unpinned dispatch is routed by its brief. A contract-heavy
+   brief — an actual database migration (a path under `migrations/` or
+   `alembic/versions/`, `down_revision`, or an instruction to add a new
+   migration; merely mentioning "migration" does not count), new routes or
+   endpoints, a state machine, or more than five numbered items under In scope —
+   goes to the ceiling's model and reasoning; anything else gets the configured
+   default. An explicit `--model` or `--reasoning` always wins. The dispatch
+   output, its response and its `dispatched` event carry a
+   `routing: <tier> (<model>/<reasoning>) — <rule>` line, so the choice is on the
+   record. The ceiling is enforced in code, so nothing — routed or pinned — can
+   exceed it.
    Every brief opens with four outcome sections — `## Goals` (observable outcomes,
    acceptance criteria, the authoritative contract), `## Intent` (why, for whom, the
    outcome as distinct from any suggested approach), `## In scope` and `## Out of
@@ -692,6 +704,34 @@ When the user gives you an objective:
    the line; `--strict` refuses the dispatch instead. A cause stated as fact is how
    25 of 102 cycle-4 reflections started; a labelled hypothesis with a probe is how a
    wrong one costs five minutes instead of forty.
+   `ppy dispatch` also refuses a starting point or gate the worker cannot trust,
+   before any task exists, and says which check refused: **remote** (the base
+   clone's `origin` is a forge URL for a different repository than the registered
+   forge; ssh and https spellings of one repo are equal, and a local-path origin is
+   fine), **base** (after one fetch, the brief's "you must see `<sha>`" commit or the
+   `--base` branch is not on the forge remote — read from the forge, never from a
+   stale local origin), **gate** (Claude workers only: a segment of the repo's
+   recorded local gate is off the worker allowlist, opens with `NAME=value`, or
+   names a `make` target the base's Makefile does not have). Then the supervisor
+   checks the **lease**: a default dispatch is moved onto the forge's default
+   branch, and the lease HEAD must equal the intended base (a brief's named commit
+   must be under it); otherwise the task fails with a `preflight_refused` event, the
+   lease is released and no worker starts. `ppy repo sync <name>` is the usual fix.
+   The supervisor also refuses two sequencing mistakes before the task row exists:
+   **overlap** (a task in flight in the same repository touches a path the brief
+   names, and `--stack-on` does not name it or its stack chain; the refusal names
+   each such task, its paths and the `--stack-on <id>` to use) and **empty-parent**
+   (the `--stack-on` task, or the in-flight task whose lease branch `--base` names,
+   has no commits beyond its own base on the forge, in the base clone or in its lease
+   worktree; one unpushed lease commit is enough). To go ahead anyway,
+   `--accept-preflight <remote|base|lease|gate|overlap|empty-parent>` (repeatable,
+   no blanket skip) with a required `--reason`; each is recorded on the task as a
+   `preflight_accepted` event carrying what it waved through.
+   `ppy dispatch --brief` also runs the brief preflight with the lint: a command the
+   brief tells a Claude worker to run that its allowlist denies (with the substitute
+   when one is known), and a missing `## Prior attempt` section when an ended task in
+   the repository had the same title. `ppy brief lint <file> --repo <name>
+   [--provider claude]` shows the same findings before you dispatch.
 4. Track progress with a **non-blocking snapshot** — `ppy run <run_id>` (task states,
    actionable events, usage) and `ppy task <task_id>` (latest progress report) — and keep
    your **intent in the ledger**: `ppy todo add "…"` the moment you know a next step,
@@ -777,8 +817,10 @@ that see one slice with no context.
   opens the pull request against it without being told again. (`--base <branch>`
   still works when you genuinely mean a branch rather than a task.) The parent
   does not have to have pushed: a lease branch the forge has not seen yet is
-  taken from the base clone, so every layer of a stack can be dispatched the
-  moment its brief is ready — never poll the forge for the parent's branch.
+  taken from the base clone or the parent's lease worktree, so a layer can be
+  dispatched as soon as the one below has committed — never poll the forge for the
+  parent's branch. A parent with no commits at all is refused (`empty-parent`):
+  the child would start from the parent's base and be a sibling in all but name.
 - **`ppy stack <task_id>` is how you read a stack.** It renders bottom-up — the
   order it has to merge in — with each layer's branch, pull request and its base,
   review state, and whether that base still matches the layer below, which is the
@@ -792,10 +834,11 @@ that see one slice with no context.
 - **Independent changes still get independent pull requests.** Stack when the
   second change builds on, touches the same files as, or would conflict with the
   first. Two unrelated fixes in one repository are two bottom layers, not a stack.
-  `ppy dispatch` tells you when a brief names files a task in flight is already
-  touching (put a `Touches:` line in every brief so it can), and suggests the
-  `--stack-on`; four parallel tasks on one module cost three hand-resolved
-  conflicts and three extra CI runs on 2026-09-06. `ppy review show` and the
+  `ppy dispatch` refuses a brief that names files a task in flight is already
+  touching (put a `Touches:` line in every brief so it can) and names the
+  `--stack-on` to use; four parallel tasks on one module cost three hand-resolved
+  conflicts and three extra CI runs on 2026-09-06, and this repository once had
+  three tasks editing `serve.py` at once. `ppy review show` and the
   pull request body then state the merge order, and `ppy deliver` will not open
   an upper layer past an unmerged parent unless you pass `--base` yourself.
 - **Merge bottom-up, one layer at a time, only when merging is authorised.** After
@@ -989,9 +1032,9 @@ readable at a glance by someone who just wants to know if it's done.
 | Worktree head start | `ppy repo provision <name>` shows what a fresh worktree gets before its worker starts; `--command "uv sync --frozen"` runs that in each new worktree (its exit status is recorded, and a failure never fails the dispatch), `--reuse-venv backend/.venv` links the virtualenv the base clone already has into the same place, `--clear` turns both off. Opt-in per repo — a repo with nothing configured behaves exactly as before. Every worker already gets a writable `UV_CACHE_DIR` (shared, under `.ppy/cache/uv`, so the second dispatch is warm) and a writable `PPY_HOME`, so `ppy progress` and `uv` never need a sandbox escalation |
 | Migration collisions | `ppy repo set <name> [--migrations-glob <glob>]` records where this repo keeps its database migrations (default `**/alembic/versions/*.py`; no flags shows what is configured, an empty string restores the default). With that, `ppy dispatch` prints an advisory when another unmerged task in the same repo already adds a migration — naming that task, its lease branch and the file, and suggesting `--stack-on <task>` — and `ppy review show` flags it outright when the reviewed diff's added migration declares the same `down_revision` as another in-flight or delivered-not-merged task's. Both are advisory: nothing is refused, no Alembic is run, nothing is rebased. Two migrations off one head are fine right up until both merge, and then they are two heads and a red migration-graph test. "In flight" is a task in `in_progress`, `worker_done`, `worker_stopped` or `blocked` that has a live runner or was touched in the last 7 days (plus, at review, delivered-but-unmerged tasks); `failed` and `needs_recovery` tasks never count. A task's migrations are read from its own commits — its lease worktree only while its active lease owns that path, else its branch in the base clone — never from whatever now sits at a recycled slot path; an in-flight task whose branch exists nowhere is listed under `MIGRATION CHECK INCOMPLETE` rather than passed silently |
 | Repo environment | `ppy repo set <name> [--compose-stack yes\|no\|<file>] [--db-port-base <port>] [--db-url-template <template>] [--test-db-url-template <template>] [--source-line-ceiling <lines>] [--needs-elevated-localhost] [--push-hook-runs-full-suite yes\|no] [--local-gate "<cmd>"] [--full-suite-owner ci] [--full-suite-command "<cmd>"] [--evidence-dir <dir>]` records the facts about a repo's environment. URL templates accept `{port}`, `{name}` and `{task_id}`. Every worker process first drops the manager's `VIRTUAL_ENV`, `DATABASE_URL` and `TEST_DATABASE_URL`, then receives its resolved `COMPOSE_PROJECT_NAME`, repo-specific port variable, database URLs, shared writable `UV_CACHE_DIR`, and task-private `RUFF_CACHE_DIR`/`MYPY_CACHE_DIR`. The rendered block states registered sandbox and source-ceiling facts, names `.txt` receipts, and supplies one copy-paste local-gate line with those exact values. A non-compose repo receives no database exports or database prose; a compose repo with no URL templates says both URL variables are absent. The evidence directory remains `<worktree>/.ppy-evidence/`, inside the worktree, excluded from git and listed by `ppy review show`. |
-| Overlap advisory | `ppy dispatch` also prints an advisory when a task in flight in the same repo touches files or modules the new brief names — naming the task, its lease branch and the shared paths, and suggesting `--stack-on <task>`. What a brief touches is read from a `Touches: path, path/` line and from backtick spans that name a file or directory that exists in the repo; it is recorded on the task, and a sibling's actual diff counts too once it has commits. In flight means a live working status, a lease worktree still on disk, and activity in the last seven days — a task nobody closed a month ago is not a sibling. Advisory only: nothing is refused |
-| Brief lint | `ppy brief lint <file> [--ends-at review\|done]` — Goals, Intent, In scope and Out of scope present and non-empty in every brief; for a defect brief also Symptom before Hypotheses, a probe per hypothesis, an Expected discrepancies row per hypothesis; scope rules against the required cases; terminal-phase prose agrees with `--ends-at`; no evidence under `/tmp`; one line per finding with the line number, exit 1 on findings. `ppy dispatch --brief` runs it with the dispatch value too and warns; `--strict` refuses |
-| Supervisor | `ppy supervisor serve|status|stop`. One supervisor per `PPY_HOME` is enforced by an exclusive OS lock (`<PPY_HOME>/run/supervisor.lock`) held for the serving lifetime: a second `serve` — simultaneous or later, whatever socket path it names — refuses with the owner's pid and changes nothing; a crashed owner's stale socket and pid file are replaced by the next start, which is the only one allowed to remove them. Owning the lock says nothing about worker processes that outlived the previous owner: they stay counted until `reconcile` sees them gone |
+| Overlap refusal | `ppy dispatch` refuses, before any task row exists, when a task in flight in the same repo touches files or modules the new brief names and `--stack-on` does not name it (or a task under it in its stack) — naming the task, its lease branch and the shared paths, and the `--stack-on <task>` to use. `--accept-preflight overlap --reason ...` runs it beside the sibling on the record. What a brief touches is read from a `Touches: path, path/` line and from backtick spans that name a file or directory that exists in the repo; it is recorded on the task, and a sibling's actual diff counts too once it has commits. In flight means a live working status, a lease worktree still on disk, and activity in the last seven days — a task nobody closed a month ago, or one delivered, merged or closed, is not a sibling |
+| Brief lint | `ppy brief lint <file> [--ends-at review\|done] [--repo <name>] [--title "..."] [--provider claude\|codex\|fake]` — Goals, Intent, In scope and Out of scope present and non-empty in every brief; for a defect brief also Symptom before Hypotheses, a probe per hypothesis, an Expected discrepancies row per hypothesis; scope rules against the required cases; terminal-phase prose agrees with `--ends-at`; no evidence under `/tmp`; for a Claude worker (the configured provider unless `--provider` says otherwise), commands its allowlist denies; with `--repo`, a missing `## Prior attempt` when an ended task there had the same title (`--title`, else the brief's first heading); one line per finding with the line number, exit 1 on findings. `ppy dispatch --brief` runs the same checks with the dispatch's values and warns; `--strict` refuses |
+| Supervisor | `ppy supervisor start|serve|status|stop`. `start` runs it detached — its own session, stdin from /dev/null, output to `<PPY_HOME>/run/supervisor.log` — and returns once it holds the owner lock and answers, printing pid, socket and log; with one already answering it says so and exits 0. `serve` is the blocking foreground form, and a hangup stops its workers. Its lifeline watcher (which stops the workers if the supervisor dies abruptly) is checked every minute and restarted if it has gone; `ppy health` shows it as alive, restarted or missing. One supervisor per `PPY_HOME` is enforced by an exclusive OS lock (`<PPY_HOME>/run/supervisor.lock`) held for the serving lifetime: a second `serve` — simultaneous or later, whatever socket path it names — refuses with the owner's pid and changes nothing; a crashed owner's stale socket and pid file are replaced by the next start, which is the only one allowed to remove them. Owning the lock says nothing about worker processes that outlived the previous owner: they stay counted until `reconcile` sees them gone |
 | Worktrees & disk | `ppy worktree list [--repo R]` (slot, task, status, branch, dirty/clean, size) — it walks the pool directories on disk as well as the leases, so a slot no active lease owns (a released lease, or one an earlier ppy instance created) shows as `orphaned` instead of hiding; `ppy worktree prune [--repo R] [--dry-run]` (removes the worktrees of `delivered`/`closed`/`cancelled` tasks **and** the orphaned slots, under one rule: clean, and every commit already on a remote; everything else is kept and listed with the reason). A slot no lease owns but which a task that is not over (`failed`, `needs_recovery`, `worker_stopped`, …) still records as its worktree is never taken — it is listed with that task named, because `ppy resume` can still run there |
 | Delegate | `ppy dispatch --repo ... --title ... --provider ... [--model] [--reasoning] [--stack-on <task_id>] [--ends-at review\|done]` — before creating a task it refuses when Treehouse has no reusable slot and no room to grow below its configured `max_trees` (remedy: `ppy worktree prune`); an unreadable ceiling leaves capacity unknown and the gate open. It also refuses when a compose-enabled repo has more stale task stacks than `health.max_stale_stacks` (default 4; remedies: `ppy task close` / `ppy worktree prune`). Terminal phase defaults to `done` and is stored on the task. A review-ending worker commits, files `--phase review`, does not call done or push, and hands control to the manager for review and delivery. `--stack-on` builds on that task: its lease branch becomes the starting point and the stack parent is recorded, so `ppy stack` and `ppy deliver` follow the chain. A `claude` dispatch automatically prepends command rules and the repo environment block; Codex gets the environment block alone. Don't restate either in the brief. |
 | Gates past the tool cap | `ppy gate run [<repo>] [--task <id>] [--full] [--wait <seconds>]` — a command that may run longer than ten minutes must not be run as a tool call; use `ppy gate run`, or push and let the hook run it. Never background a gate and wait. The supervisor runs the repo's recorded local gate (or `--full-suite-command` with `--full`) in the task's worktree (or the base clone, given only a repo) as its own subprocess with no timeout; the call prints a progress line every minute and returns within `--wait` (default 540s): exit 0 green, 1 red, 75 still running — the same command again attaches instead of starting another. The result is a `gate_result` event on the task (command, duration, summary line, exit code, head SHA, output path) plus a `receipts.txt` line. `ppy serve` decides on it: green at the worker's head is reviewable, red is steered with the summary, a stopped worker with none is steered to run it. `ppy repo onboard [--local-gate <cmd>]`, `ppy repo ensure` and every `ppy serve` start read the gate policy (hook flag, local gate, full suite and its owner) from what the repository says and what its pull-request workflows run, never replacing a value a person set (`ppy repo show <repo>` prints each with its source: `person`, `repo:<file>:<line>`, `observed:<where>`); when the instructions name no full suite it is discovered from pull-request CI's check steps, then the build files, so readiness raises `repo_without_gate_policy` only for an onboarded repo whose instructions, CI, build files and hooks give nothing |
@@ -1004,9 +1047,9 @@ readable at a glance by someone who just wants to know if it's done.
 | Event feed | `ppy tail [--since 10m] [--follow]` — the daemon's events, one line each, oldest first, from the state tables; `--follow` streams new ones until interrupted |
 | Await (blocking primitive) | `ppy wait <run_id> [--timeout]` — scripts/tests only; **not** in a live turn (use `--timeout 0` to drain) |
 | Answer a worker | `ppy answer <task_id> --answer ... [--scope]` |
-| Steer / resume | `ppy steer <task_id> --message ... [--replace]` applies provider-capability-aware steering; `ppy stop <task_id> --message ...` is the replacing steer (stop the current turn, resume with this message alone). From a session these record `by: person`, from a `ppy serve` turn `by: manager`. `ppy resume <task_id> [--message] [--ends-at review\|done]` defaults to the task's stored terminal phase; an explicit value replaces and persists it. Resume reapplies the task process environment, rebuilds a missing pristine worktree into a fresh lease on the same branch/base, verifies that newly minted or retained lease owns the task path, synchronizes a cascaded branch before launch, and never reuses a released lease identity or a path now owned by another task. On a `worker_stopped` task, a bare resume sends the worker back with what was cut short; see [`task-lifecycle.md`](task-lifecycle.md). |
+| Steer / resume | `ppy steer <task_id> --message ... [--replace]` applies provider-capability-aware steering; `ppy stop <task_id> --message ...` is the replacing steer (stop the current turn, resume with this message alone). From a session these record `by: person`, from a `ppy serve` turn `by: manager`. `ppy resume <task_id> [--message] [--ends-at review\|done]` defaults to the task's stored terminal phase; an explicit value replaces and persists it. Resume reapplies the task process environment, rebuilds a missing pristine worktree into a fresh lease on the same branch/base, verifies that newly minted or retained lease owns the task path, synchronizes a cascaded branch before launch, and never reuses a released lease identity or a path now owned by another task. On a `worker_stopped` task, a bare resume sends the worker back with what was cut short; see [`task-lifecycle.md`](task-lifecycle.md). A resume, and a steer or stop that starts a session, then waits up to `--verify-seconds` (default 20; 0 skips) and prints `task <id>: worker alive (pid N)`, or an `INCIDENT:` line and exit 1 when no worker process ever appeared — check `ppy health` and the supervisor log before resuming again. `ppy status` prints an `INCIDENT:` line for any in-flight worker whose runner has no live process. |
 | Review | `ppy review show <task_id>` (worker report, the capture/receipt paths it named with sizes and openable image lines, the standing approval note, a migration-collision flag when this diff's added migration shares a `down_revision` with another unmerged task's, the layer's place in its stack and the merge order when a stack parent is recorded, then the diffstat), `ppy review approve <task_id> [--note "what you checked"] [--findings ...]`, `ppy review request-changes <task_id> --findings ...`, `ppy review status <task_id>` (also prints the approval note) |
-| Deliver | `ppy deliver <task_id> [--no-pr] [--base ...] [--remote ...] [--title "..."] [--body-file FILE]` — pushes to the repo's registered forge and opens the pull request there (`--remote` overrides); composes the pull request body from the archived brief, reports, approval note, and stack order. It refuses a diff containing commits owned by another open task and names both tasks: keep the native layer PRs and use `ppy stack merge`, never a composition PR. Existing stack-base refusals still apply. `--body-file` and `--title` override generated text. `ppy deliver <task_id> --merged <sha>` idempotently records an externally merged commit, pushes nothing, and takes the task's compose stack down. |
+| Deliver | `ppy deliver <task_id> [--no-pr] [--base ...] [--remote ...] [--title "..."] [--body-file FILE]` — pushes to the repo's registered forge and opens the pull request there (`--remote` overrides); composes the pull request body from the archived brief, reports, approval note, and stack order. It refuses a diff containing commits owned by another open task (a cherry-picked copy counts; a commit on a child's stack parent is the parent's, not the child's) and names both tasks: keep the native layer PRs and use `ppy stack merge`, never a composition PR. Existing stack-base refusals still apply. `--body-file` and `--title` override generated text. `ppy deliver <task_id> --merged <sha>` idempotently records an externally merged commit, pushes nothing, and takes the task's compose stack down. |
 | Close out / repair | `ppy task close <id> --reason "..."` (terminal `closed`, frees the slot and takes the task's compose stack down), `ppy task set-status <id> <status> --note "..."`, `ppy task push <id>` (push a lease worktree onto its own branch by hand — the manual form of what the harness does for a done-but-unpushed worker; prints the SHA it pushed or the refusal it got), `ppy lease release <task_id> [--reason ...]` |
 | Per-task compose stacks | For a repo with `--compose-stack` set, dispatch records `compose_project=task_<id>` (and `db_port`) itself, source `dispatch`. Otherwise `ppy task env set <id> compose_project=<name>` records the stack a task brought up, and is taken as given because you typed it. A worker naming `COMPOSE_PROJECT_NAME=...` in a `ppy progress` note is picked up automatically **only when it is that task's own stack** (`task_<id>` or `<prefix>_task_<id>`) — teardown destroys volumes, and a note mentioning a shared stack must never arm one; anything else is dropped with a `compose_project_ignored` event naming it. `ppy task env show <id> [--json]` lists what's recorded. `ppy deliver --merged`, `ppy task close`, and `ppy worktree prune` then run `docker compose -p <name> down -v --remove-orphans` for it and print what went. No docker, or a stack already gone, is never an error. `ppy health` lists stacks named `task_<n>`/`*_task_<n>` whose task is already over as prunable — that's the Docker network ceiling filling up |
 | Stacks | `ppy stack <task_id|run_id>` — the stack bottom-up with each PR's state and next action. `ppy stack merge <task_id> [--all]` uses the forge's ordinary merge commit strategy, lowest unmerged layer first; after each confirmed merge it records the forge merge SHA and retargets direct child PRs to the default branch. `--all` repeats upward and stops before touching a layer whose required check is red, naming the check. Merge authority must be enabled. `ppy stack rebuild <task_id>` applies the existing cascade-safe remote sync and never force-pushes a diverged branch. |
@@ -1019,7 +1062,9 @@ readable at a glance by someone who just wants to know if it's done.
 | Recover | `ppy reconcile` |
 
 If the `ppy` supervisor is not running when you need to dispatch or wait, start it
-yourself (`ppy supervisor serve` in the background) — do not ask the user to.
+yourself with `ppy supervisor start` — do not ask the user to. Never run `ppy supervisor
+serve` as a harness background task: the harness reclaims those under memory pressure and
+ends them with the session, and the supervisor then stops every worker it runs.
 
 ### Papaya backend environment recipe
 

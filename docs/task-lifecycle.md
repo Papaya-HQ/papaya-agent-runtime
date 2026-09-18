@@ -13,7 +13,7 @@ the manager schedules, nags, and reports off it, and the heartbeat treats
 | `worker_done` | The worker finished a turn and reached its stored terminal phase. A `done` task also has nothing unpushed; a `review` task stays local for manager review and delivery. Neither may leave a backgrounded command hanging. |
 | `worker_stopped` | The turn ended mid-gate. Not terminal, not a failure — the work is there and unfinished, and `ppy resume` picks it up. |
 | `blocked` | The worker asked a question and stopped. |
-| `failed` | The worker's *current* session ended without a result. |
+| `failed` | The worker's *current* session ended without a result — or no worker ever started: dispatch refused the lease because it was not on the intended base (a `preflight_refused` event with `check: lease`, `expected` and `actual`; the lease is released). |
 | `needs_recovery` | The runner process vanished without recording a result. |
 | `delivered` | Pushed (and normally a PR opened) after an approved review. |
 

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from papaya_agent_runtime.paths import ensure_layout, run_dir
@@ -35,15 +36,24 @@ def ensure_supervisor(*, timeout: float = 5.0) -> tuple[SupervisorClient, bool]:
         return client, False
 
     ensure_layout()
-    log_path = run_dir() / "supervisor.log"
+    log_path = supervisor_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    import papaya_agent_runtime
+
+    # `python -m papaya_agent_runtime` needs the package's `src` on the path, which
+    # `bin/ppy` sets for itself and nothing guarantees for this child.
+    src = os.path.dirname(os.path.dirname(papaya_agent_runtime.__file__))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     with log_path.open("ab") as log:
+        # A session of its own, no terminal and no parent a harness tracks: a harness
+        # reclaiming its background tasks, or ending with its session, cannot reach it.
         subprocess.Popen(  # noqa: S603 - fixed interpreter/module argv
             [sys.executable, "-m", "papaya_agent_runtime", "supervisor", "serve"],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
-            env=dict(os.environ),
+            env=env,
             start_new_session=True,
             close_fds=True,
         )
@@ -59,6 +69,77 @@ def ensure_supervisor(*, timeout: float = 5.0) -> tuple[SupervisorClient, bool]:
     raise SupervisorUnavailable(
         f"could not start the supervisor within {timeout:g}s; see {Path(log_path)}"
     )
+
+
+def supervisor_log_path() -> Path:
+    return run_dir() / "supervisor.log"
+
+
+#: How long `ppy resume` and an interrupting `ppy steer` wait to see the worker.
+DEFAULT_VERIFY_SECONDS = 20.0
+
+#: Task statuses that mean the resumed worker already ran and recorded its end.
+_FINISHED = ("worker_done", "worker_stopped", "blocked", "failed", "delivered", "needs_recovery")
+
+
+@dataclass(frozen=True)
+class Liveness:
+    """What a resume came to: ``alive``, ``finished`` or ``missing`` (an incident)."""
+
+    verdict: str
+    task_status: str | None
+    pid: int | None
+    runner_status: str | None
+
+    def describe(self, task_id: int) -> str:
+        if self.verdict == "alive":
+            return f"task {task_id}: worker alive (pid {self.pid})"
+        if self.verdict == "finished":
+            return f"task {task_id}: worker already finished — status {self.task_status}"
+        return (
+            f"INCIDENT: task {task_id}: no live worker process seen after the resume (task "
+            f"status {self.task_status}, runner {self.runner_status or 'none'}); run "
+            "`ppy health` and check the supervisor log before resuming again"
+        )
+
+
+def verify_worker(
+    task_id: int,
+    *,
+    since: str,
+    timeout: float = DEFAULT_VERIFY_SECONDS,
+    poll: float = 0.1,
+) -> Liveness:
+    """Wait up to ``timeout`` for the task's newest runner to have a live pid, or a result.
+
+    Only a runner row started at or after ``since`` (an ISO UTC stamp taken before the
+    request) counts: the row of the session a resume replaces says nothing about it.
+    """
+    from papaya_agent_runtime.state import init_db, store
+    from papaya_agent_runtime.supervisor.dead_runners import pid_alive
+
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        conn = init_db()
+        try:
+            task = store.get_task(conn, task_id)
+            row = conn.execute(
+                "SELECT * FROM runners WHERE task_id = ? AND started_at >= ? "
+                "ORDER BY started_at DESC, rowid DESC LIMIT 1",
+                (task_id, since),
+            ).fetchone()
+        finally:
+            conn.close()
+        status = task["status"] if task is not None else None
+        pid = row["pid"] if row is not None else None
+        runner_status = row["status"] if row is not None else None
+        if row is not None and runner_status in ("starting", "running") and pid_alive(pid):
+            return Liveness("alive", status, pid, runner_status)
+        if row is not None and row["result_recorded"] and status in _FINISHED:
+            return Liveness("finished", status, pid, runner_status)
+        if time.monotonic() >= deadline:
+            return Liveness("missing", status, pid, runner_status)
+        time.sleep(poll)
 
 
 def _by(by: str | None) -> dict:
@@ -77,7 +158,7 @@ class SupervisorClient:
             sock.connect(self.socket_path)
         except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
             raise SupervisorUnavailable(
-                f"no supervisor at {self.socket_path} (start with `ppy supervisor serve`)"
+                f"no supervisor at {self.socket_path} (start with `ppy supervisor start`)"
             ) from exc
         with sock:
             return send_request(sock, request)

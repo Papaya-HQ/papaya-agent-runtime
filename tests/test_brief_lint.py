@@ -52,6 +52,7 @@ a particular scorer change.
 ## In scope
 
 The scorer's null-thread handling and the backfill job, plus their tests.
+Pre-authorised adjacent changes: none.
 
 ## Out of scope
 
@@ -70,7 +71,7 @@ Users need it; the outcome is what matters, not the approach.
 
 ## In scope
 
-This module and its tests.
+This module and its tests. Pre-authorised adjacent changes: none.
 
 ## Out of scope
 
@@ -373,7 +374,7 @@ def _without(text: str, heading: str) -> str:
 
 def test_every_brief_owes_the_four_outcome_sections() -> None:
     bare = "# Add the export button\n\nPut a button on the toolbar.\n"
-    found = messages(bare)
+    found = [m for m in messages(bare) if " section" in m]
     assert len(found) == 4
     for name in ("Goals", "Intent", "In scope", "Out of scope"):
         assert any(f"no {name} section — add `## {name}`" in m for m in found), name
@@ -400,9 +401,10 @@ def test_a_missing_or_empty_section_is_named_with_its_line() -> None:
     # A heading with only a sub-heading under it is still empty.
     hollow = GOOD_DEFECT.replace(
         "## In scope\n\nThe scorer's null-thread handling and the backfill job, plus their "
-        "tests.\n",
+        "tests.\nPre-authorised adjacent changes: none.\n",
         "## In scope\n\n### Later\n",
     )
+    assert hollow != GOOD_DEFECT
     assert any("`## In scope` is empty" in m for m in messages(hollow))
 
 
