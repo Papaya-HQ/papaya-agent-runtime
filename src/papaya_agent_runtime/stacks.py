@@ -184,11 +184,76 @@ def sync_worktree_with_remote(task_id: int) -> dict:
     - Both sides have commits -> refuse, naming both commits. A force-push here
       would destroy work; which side is right is the manager's call, not ours.
     - Anything else -> no-op.
+
+    Either way, a stacked task whose worktree now builds on a newer head of its
+    parent's branch records that head as its ``base_sha`` (see
+    :func:`refresh_stacked_base`).
     """
     conn = init_db()
     task = store.get_task(conn, task_id)
     if task is None:
         raise StackError(f"task {task_id} not found")
+    result = _sync_worktree(conn, task)
+    refresh_stacked_base(conn, task)
+    return result
+
+
+def refresh_stacked_base(conn, task) -> str | None:
+    """Record the parent head a stacked task is built on as its ``base_sha``.
+
+    A child dispatched onto a parent branch with no commits yet records the
+    default branch's SHA: that is all there was to start from. Once the parent
+    pushes and the child rebases onto it, that ``base_sha`` still claims every
+    parent commit as the child's own; on 2026-09-17 it made delivery of the
+    parent refuse itself as a composition with its own child.
+
+    The parent's branch is fetched from the task's push remote; its head is
+    recorded when the worktree's HEAD contains it and the recorded base does not
+    already. Only moves forward; a parent that has merged is left alone (its
+    branch is gone or about to be, and the child now builds on the default
+    branch). Returns the new ``base_sha``, or None when nothing changed.
+    """
+    parent_id = task["stacked_on_task"]
+    parent_branch = (task["stacked_on"] or "").strip()
+    worktree = task["worktree_path"]
+    if not parent_id or not parent_branch or not worktree:
+        return None
+    parent = store.get_task(conn, int(parent_id))
+    if parent is None or parent["merged_sha"]:
+        return None
+    fetched, _out = _git(worktree, "fetch", "--quiet", push_remote(conn, task), parent_branch)
+    if fetched != 0:
+        return None
+    rc, parent_head = _git(worktree, "rev-parse", "FETCH_HEAD")
+    recorded = task["base_sha"] or ""
+    if rc != 0 or not parent_head or parent_head == recorded:
+        return None
+    contains, _out = _git(worktree, "merge-base", "--is-ancestor", parent_head, "HEAD")
+    if contains != 0:
+        return None
+    if recorded:
+        behind, _out = _git(worktree, "merge-base", "--is-ancestor", parent_head, recorded)
+        if behind == 0:
+            return None
+    store.update_task_fields(conn, int(task["id"]), base_sha=parent_head)
+    store.append_event(
+        conn,
+        kind="base_refreshed",
+        payload={
+            "task_id": int(task["id"]),
+            "parent_task_id": int(parent_id),
+            "parent_branch": parent_branch,
+            "from": recorded or None,
+            "to": parent_head,
+        },
+        run_id=task["run_id"],
+        task_id=int(task["id"]),
+    )
+    return parent_head
+
+
+def _sync_worktree(conn, task) -> dict:
+    task_id = int(task["id"])
     try:
         state = task_branch_state(conn, task)
     except StackError:
