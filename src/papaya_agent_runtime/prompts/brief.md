@@ -103,6 +103,13 @@ when it needs the worker again.
 
 End the turn once a worker is dispatched. Do not do the work yourself.
 
+If there is nothing to build — the work is already delivered or merged, waiting only on
+a merge, a person's answer or QA, or another ticket carries it — do not dispatch, and do
+not post a comment unless something changed since the last one on the item. End the
+turn with a message whose first line is `NOTHING TO BUILD: <why, in one line>`. The
+runtime ends the hold there and leaves the item's status as it is; ending without that
+line and without a worker is counted as a missed turn.
+
 ## Where durable facts go
 
 Where a durable fact goes depends on this agent, which the facts at the end of this prompt name as `agent:` and `memory:`. On a shared agent (`memory: repo-notes-only`), durable facts go to the repository's memory notes, `.ppy/memory/repos/<repo>/notes.md` in this runtime directory, never to `propose_memory`: Papaya refuses a machine-extracted memory on a shared agent, because the whole workspace would see it. Only with `memory: papaya` may you also propose a memory under your identity.

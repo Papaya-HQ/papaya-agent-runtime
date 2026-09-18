@@ -1341,6 +1341,56 @@ def test_the_items_status_follows_the_work_and_nowhere_else(
     ]
 
 
+def test_a_brief_turn_with_nothing_to_build_ends_the_hold_without_a_hand_back(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """Shane, 2026-09-18: finished items were handed back as "didn't run this" and reset
+    to `todo`, again on every restart. Nothing to build is an ending, not a miss."""
+    item = "item-10"
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            return "Checked the item.\n\nNOTHING TO BUILD: PR #729 merged and QA passed it"
+        return None
+
+    papaya_api = FakePapaya()
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([_assigned(102, item, "Newest first sort")]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, papaya_api))
+        await _until(lambda: len(harness.results) == 1, what="the ticket to end")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+    assert turns.names() == [prompts.BRIEF]
+    assert [s for i, s in papaya_api.statuses() if i == item] == ["in_progress"]
+    assert [b for i, b in papaya_api.comments() if i == item] == [
+        "Picked up; choosing the repository and writing the brief."
+    ]
+    phases = history(102)
+    assert serve.PHASE_REPORTED in phases and serve.PHASE_DECLINED not in phases
+    conn = init_db()
+    try:
+        assert serve.resumable_phase(conn, int(ticket_task(102)["id"])) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("transcript", "reason"),
+    [
+        ("NOTHING TO BUILD: merged in #729", "merged in #729"),
+        ("looked\n**NOTHING TO BUILD: waits on a merge**", "waits on a merge"),
+        ("There is NOTHING TO BUILD: here, maybe.", None),
+        ("", None),
+    ],
+)
+def test_nothing_to_build_reads_its_line(transcript: str, reason: str | None) -> None:
+    assert serve.nothing_to_build(TurnResult(exit_code=0, transcript=transcript)) == reason
+
+
 def test_a_blocked_question_runs_the_answer_turn_and_returns_to_dispatched(
     ppy_home, client_home, ready, registered_repo
 ) -> None:
