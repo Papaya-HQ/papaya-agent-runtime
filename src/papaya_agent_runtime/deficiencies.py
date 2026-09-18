@@ -83,6 +83,8 @@ PROMPT_DEFECT = "prompt-defect"
 SERVE_ONLY_CAPABILITY = "serve-only-capability"
 #: `ppy deliver` pushed, and then `gh` refused to open or update the pull request.
 DELIVERY_FAILED = "delivery-failed"
+#: The lifeline watcher that stops a dead supervisor's workers could not start, or had exited.
+LIFELINE_DOWN = "lifeline-down"
 
 #: Ledger statuses: below its threshold; ready for an issue; an issue exists.
 WATCHING = "watching"
@@ -311,6 +313,22 @@ KINDS: dict[str, Kind] = {
         remedy=(
             "Make it one decision both modes call, register it as shared in `parity`, prove it "
             "in both modes in tests, and remove it from `parity.KNOWN_GAPS`."
+        ),
+    ),
+    LIFELINE_DOWN: Kind(
+        title="The supervisor's lifeline watcher was not running",
+        happened=(
+            "The watcher that stops a supervisor's workers when the supervisor dies abruptly "
+            "was not running: {detail}. Until it runs, an abrupt supervisor death leaves its "
+            "workers running with nobody answering for them."
+        ),
+        instead=(
+            "Tried to start it again and handed it every live runner's process group; a "
+            "manager turn's or gate's registration made while it was down is not replayed."
+        ),
+        remedy=(
+            "Find what ended the watcher (the error in the evidence, the supervisor log) and "
+            "stop it happening; a watcher that cannot start at all is an environment defect."
         ),
     ),
 }
@@ -1633,6 +1651,7 @@ def record_gate_past_tool_cap(task_id: int, run_id: int | None, command: str | N
 
 __all__ = [
     "DELIVERY_FAILED",
+    "LIFELINE_DOWN",
     "FIXED_CHECKINS",
     "FIXED_TURN_REPORTS",
     "GATE_PAST_TOOL_CAP",
