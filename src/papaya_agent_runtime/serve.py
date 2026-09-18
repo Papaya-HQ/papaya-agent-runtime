@@ -124,6 +124,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -4168,6 +4169,7 @@ async def run(
     rounds_seams: dict[str, Any] | None = None,
     self_report: deficiencies.Reporter | None = None,
     blocker_seams: dict[str, Any] | None = None,
+    keeper: SupervisorKeeper | None = None,
 ) -> int:
     """Set this checkout up, build the listener, report once, sweep, run until stopped.
 
@@ -4182,7 +4184,8 @@ async def run(
     issues about the runtime's own deficiencies; a test hands in one with a fake `gh`.
     `blocker_seams` are keyword seams for the blocker watch
     (:class:`~papaya_agent_runtime.blockers.Watch`): its timer, clock and GitHub
-    device flow.
+    device flow. `keeper` is `serve`'s hold on its supervisor (:class:`SupervisorKeeper`),
+    which every round checks; None runs no such check.
     """
     reporter = self_report or deficiencies.Reporter()
     # Before anything can open an issue: close the ones an older classifier got wrong.
@@ -4199,8 +4202,13 @@ async def run(
             runner=runner,
             server=server,
             sweep_sleep=sweep_sleep,
-            rounds_seams={"reporter": reporter, **(rounds_seams or {})},
+            rounds_seams={
+                "reporter": reporter,
+                **({"on_round": keeper.round} if keeper is not None else {}),
+                **(rounds_seams or {}),
+            },
             blocker_seams=blocker_seams,
+            keeper=keeper,
         )
     finally:
         deficiencies.remove_listener(reporter.flush_soon)
@@ -4252,6 +4260,7 @@ async def _run(
     sweep_sleep: Any,
     rounds_seams: dict[str, Any] | None,
     blocker_seams: dict[str, Any] | None = None,
+    keeper: SupervisorKeeper | None = None,
 ) -> int:
     from papaya_agent_client.embed import ListenerSetupError
 
@@ -4281,6 +4290,7 @@ async def _run(
             server=server,
             rounds_seams=rounds_seams,
             blocker_seams=blocker_seams,
+            keeper=keeper,
         )
     try:
         built = await _build(options, runner, stdout=stdout, extra=extra)
@@ -4365,12 +4375,26 @@ async def _run(
     sweeping = asyncio.create_task(sweeper.run())
     if server is not None:
         server.sweep_handler = functools.partial(sweeper.sweep_from_thread, event_loop)
+    if keeper is not None:
+        # A supervisor a round takes over (the adopted one went) is wired as the
+        # one this process started with would have been.
+        def wire_taken(taken: Any) -> None:
+            taken.on_shutdown = stop_listening
+            taken.sweep_handler = functools.partial(sweeper.sweep_from_thread, event_loop)
+
+        def stop_listening() -> None:
+            with contextlib.suppress(RuntimeError):
+                event_loop.call_soon_threadsafe(built.loop.request_stop)
+
+        keeper.wire = wire_taken
     try:
         await built.loop.run()
     finally:
-        if server is not None:
-            server.sweep_handler = None
-            server.on_shutdown = None
+        if keeper is not None:
+            keeper.wire = None
+        for owned in {id(s): s for s in (server, keeper and keeper.server) if s}.values():
+            owned.sweep_handler = None
+            owned.on_shutdown = None
         for background in (walking, sweeping, watching):
             background.cancel()
         for background in (walking, sweeping, watching):
@@ -4428,6 +4452,7 @@ async def _run_standalone(
     server: Any,
     rounds_seams: dict[str, Any] | None,
     blocker_seams: dict[str, Any] | None,
+    keeper: SupervisorKeeper | None = None,
 ) -> int:
     """`ppy serve` on a machine with no Papaya connection: every part that needs none.
 
@@ -4462,6 +4487,12 @@ async def _run_standalone(
                 event_loop.call_soon_threadsafe(stopped.set)
 
         server.on_shutdown = stop_serving
+    if keeper is not None:
+
+        def wire_taken(taken: Any) -> None:
+            taken.on_shutdown = lambda: event_loop.call_soon_threadsafe(stopped.set)
+
+        keeper.wire = wire_taken
     _say(STANDALONE_START, stderr=stderr)
     await asyncio.to_thread(standalone.say_invitation, stderr, prefix="ppy serve: ")
 
@@ -4476,8 +4507,10 @@ async def _run_standalone(
     try:
         await stopped.wait()
     finally:
-        if server is not None:
-            server.on_shutdown = None
+        if keeper is not None:
+            keeper.wire = None
+        for owned in {id(s): s for s in (server, keeper and keeper.server) if s}.values():
+            owned.on_shutdown = None
         for background in (walking, watching):
             background.cancel()
         for background in (walking, watching):
@@ -4529,9 +4562,12 @@ def serve(
     if server is not None:
         # What this serve starts dies with it, even when it dies without running
         # another line of Python.
-        lifeline.start()
+        lifeline.start_or_record("ppy serve")
+    keeper = SupervisorKeeper(server, stderr=stderr, takeover_seams=takeover_seams)
     try:
-        return asyncio.run(run(options, stdout=stdout, stderr=stderr, extra=extra, server=server))
+        return asyncio.run(
+            run(options, stdout=stdout, stderr=stderr, extra=extra, server=server, keeper=keeper)
+        )
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
@@ -4548,13 +4584,14 @@ def serve(
         # stops what it started: every worker is asked to stop and given
         # `supervisor.stop_timeout` to be recorded stopped, its session kept for
         # the next start's rounds to resume. An adopted supervisor was not started
-        # here and keeps running.
-        if server is not None:
-            left = server.shutdown()
+        # here and keeps running; one a round took over after it went is this one's.
+        owned = keeper.server
+        if owned is not None:
+            left = owned.shutdown()
             if left:
                 print(
                     f"ppy serve: {len(left)} worker(s) had not stopped after "
-                    f"{server.stop_timeout:g}s; they are being killed",
+                    f"{owned.stop_timeout:g}s; they are being killed",
                     file=stderr,
                 )
             lifeline.stop()
@@ -4648,6 +4685,87 @@ def take_supervisor(*, stderr, seams: dict[str, Any] | None = None) -> tuple[Any
     return None, takeover.EXIT_CANNOT_START
 
 
+class SupervisorKeeper:
+    """`serve`'s hold on the supervisor it depends on, checked every manager round.
+
+    Owned (``server`` set), the round checks the lifeline watcher and restarts it if it
+    has gone (:func:`lifeline.keep_alive`). Adopted (``server`` None), the round checks
+    that the adopted supervisor still answers. Before 2026-09-18 nothing did: when an
+    adopted supervisor exited, `serve` kept listening and running rounds with no
+    supervisor behind them, so every dispatch, resume and steer a turn ran failed. Now
+    a round that finds it gone — no answer on the socket and the owner lock free — runs
+    the same decision a start runs (:func:`take_supervisor`), owns what that gives it,
+    starts its lifeline, and wires it as a start would (``wire``, set by the running
+    listener). `serve`'s exit then shuts down whichever supervisor it ended up owning.
+    """
+
+    def __init__(
+        self,
+        server: Any,
+        *,
+        stderr: Any,
+        takeover_seams: dict[str, Any] | None = None,
+        take: Callable[..., tuple[Any, int | None]] | None = None,
+        answers: Callable[[], bool] | None = None,
+        start_lifeline: Callable[[str], bool] | None = None,
+        keep_alive: Callable[[str], Any] | None = None,
+    ) -> None:
+        from papaya_agent_runtime.supervisor import lifeline
+
+        self.server = server
+        #: Called with a supervisor a round took over, to wire it into the listener.
+        self.wire: Callable[[Any], None] | None = None
+        self._stderr = stderr
+        self._seams = takeover_seams
+        self._take = take or take_supervisor
+        self._answers = answers or adopted_supervisor_answers
+        self._start_lifeline = start_lifeline or lifeline.start_or_record
+        self._keep_alive = keep_alive or lifeline.keep_alive
+
+    async def round(self) -> list[str]:
+        """This round's parts: a takeover, or a watcher restarted; usually nothing."""
+        if self.server is None:
+            return await asyncio.to_thread(self.recover)
+        seen = await asyncio.to_thread(self._keep_alive, "ppy serve")
+        line = seen.line() if hasattr(seen, "line") else ""
+        return [line] if line else []
+
+    def recover(self) -> list[str]:
+        """Take over from an adopted supervisor that has gone. Nothing while it answers."""
+        if self.server is not None or self._answers():
+            return []
+        server, status = self._take(stderr=self._stderr, seams=self._seams)
+        if status is not None:
+            return [
+                "the adopted supervisor has gone and this serve could not start one; "
+                "dispatch, resume and steer fail until it does (the next round tries again)"
+            ]
+        if server is None:
+            return ["the adopted supervisor had gone; adopted the one running now"]
+        self.server = server
+        self._start_lifeline("ppy serve")
+        if self.wire is not None:
+            self.wire(server)
+        return [
+            "the adopted supervisor had gone; this serve took over and owns the supervisor "
+            f"now (pid {os.getpid()})"
+        ]
+
+
+def adopted_supervisor_answers() -> bool:
+    """Does a supervisor still run this home? It answers a ping, or it holds the lock."""
+    from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
+
+    try:
+        SupervisorClient().ping()
+    except SupervisorUnavailable:
+        # Starting up or shutting down, the lock is held with no answer yet: not ours.
+        return takeover.lock_held(str(ppy_home().resolve()))
+    except Exception:  # noqa: BLE001 - an answer we cannot read is still an answer
+        return True
+    return True
+
+
 __all__ = [
     "HARNESSES",
     "PHASE_BLOCKED",
@@ -4673,6 +4791,7 @@ __all__ = [
     "HandBack",
     "Held",
     "ServeOptions",
+    "SupervisorKeeper",
     "TicketRunner",
     "Worker",
     "brief_has_goals",

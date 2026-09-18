@@ -180,8 +180,8 @@ def warnings_for(data: dict[str, Any]) -> list[str]:
         why = "hung" if sup.get("hung") else "not running"
         out.append(
             f"Supervisor is {why}: task(s) {ids} are NOT making progress and nothing will "
-            "pick up their results. On resume, start it (`ppy supervisor serve` in the "
-            "background), then `ppy reconcile`."
+            "pick up their results. On resume, start it detached (`ppy supervisor start`), "
+            "then `ppy reconcile`."
         )
     if by_verdict["dead"]:
         ids = ", ".join(str(e["task_id"]) for e in by_verdict["dead"])
@@ -322,7 +322,8 @@ def render_pickup_prompt(
         "docs/runtime-contract.md; run preflight silently). Do all of this BEFORE you say "
         "anything to me:",
         "1. Reconnect to the team: `./bin/ppy supervisor status` — if it's down, start it "
-        "in the background (`./bin/ppy supervisor serve`) — then `./bin/ppy reconcile` and "
+        "detached (`./bin/ppy supervisor start`, never a harness background task) — then "
+        "`./bin/ppy reconcile` and "
         "`./bin/ppy health` to find dead or stuck workers.",
         f"2. Read the handoff snapshot at `{path}` (as of {data['generated_at']}: "
         f"{summary}) — it holds the ledger, every open run and task, and the known risks "

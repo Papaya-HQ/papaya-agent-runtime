@@ -27,8 +27,11 @@ Prefer the reversible repair over stopping to ask.
 - **Environment/config looks off** → `ppy doctor`. Missing companion → `ppy tools
   install`. Capability-matrix **drift** → re-probe before trusting interrupt/resume
   steering, and tell the user in one sentence.
-- **Supervisor down** when you need to dispatch or wait → start it yourself
-  (`ppy supervisor serve` in the background), confirm with `ppy supervisor status`.
+- **Supervisor down** when you need to dispatch or wait → start it yourself with
+  `ppy supervisor start`, which detaches it and returns once it answers. Not
+  `ppy supervisor serve` as a harness background task: the harness reclaims those under
+  memory pressure and ends them with the session, and the supervisor then stops every
+  worker. `ppy health` shows its lifeline watcher; missing means act.
 - **Half-alive runners or stuck tasks** → `ppy health` to see who's dead, quiet, or
   planless; `ppy reconcile` for dead runners; `ppy task <id>` then steer/resume for the
   quiet ones. Then continue.

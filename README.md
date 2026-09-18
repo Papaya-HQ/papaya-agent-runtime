@@ -369,7 +369,7 @@ ppy repo budgets your-repo              # how long things take there, and how lo
 ppy repo locate "hover card"            # which registered repos contain these strings
 ppy serve                               # the always-on manager: supervisor + Papaya loop
 ppy sweep                               # ask the running serve to look for assigned work now
-ppy supervisor serve                    # per-task runners, durable state
+ppy supervisor start                    # per-task runners, durable state; detached, outlives the session
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
 ppy review show <task_id> && ppy review approve <task_id>   # diffs from HEAD's merge-base with the PR's base
