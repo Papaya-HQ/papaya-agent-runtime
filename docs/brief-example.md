@@ -28,6 +28,7 @@ done" rather than inventing a second source.
 - `web/orders/page.py`, `web/orders/templates/order.html`, and their tests.
 - A read of `delivery_events` through the existing repository class.
 - The copy file's three new strings, added verbatim from `docs/copy/orders.md`.
+- Pre-authorised adjacent changes: the fixture index `tests/fixtures/orders/index.json`.
 
 ## Out of scope
 
@@ -72,9 +73,9 @@ scope section excludes; never invent a substitute requirement.
 
 ## Plan note
 
-Before any code, `ppy progress <task> --phase plan --note …` (≤ 16 lines) mapping
-each Goal to the files that deliver it and naming anything you would need that
-Out of scope excludes. The manager reads it against this brief before you go on.
+blocking: stop after posting and wait for the manager's reply. Before any code,
+`ppy progress <task> --phase plan --note …` (≤ 16 lines) mapping each Goal to the
+files that deliver it and naming anything you would need that Out of scope excludes.
 
 ## Closeout checklist
 
@@ -120,6 +121,7 @@ done" rather than inventing a second source.
 - `web/orders/page.py`, `web/orders/templates/order.html`, and their tests.
 - A read of `delivery_events` through the existing repository class.
 - The copy file's three new strings, added verbatim from `docs/copy/orders.md`.
+- Pre-authorised adjacent changes: the fixture index `tests/fixtures/orders/index.json`.
 
 ## Out of scope
 - No courier-tool integration, polling, or webhook — the table is the source.
