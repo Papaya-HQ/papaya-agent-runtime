@@ -354,7 +354,19 @@ class Supervisor:
         reference_repos: list[str] | None = None,
         papaya_event_key: str | None = None,
         papaya_event_metadata: str | None = None,
+        expect_base: str | None = None,
+        starting_sha: str | None = None,
+        accepted_preflight: list[dict] | None = None,
+        preflight_reason: str | None = None,
     ) -> dict:
+        # What `ppy dispatch`'s trust checks settled (runtime #94): the lease is
+        # checked against it once it exists, and every accepted check is recorded.
+        trust = {
+            "expect_base": expect_base,
+            "starting_sha": starting_sha,
+            "accepted": accepted_preflight or [],
+            "reason": preflight_reason,
+        }
         if not papaya_event_key:
             return self._dispatch_task_once(
                 repo=repo,
@@ -368,6 +380,7 @@ class Supervisor:
                 stack_on=stack_on,
                 ends_at=ends_at,
                 reference_repos=reference_repos,
+                trust=trust,
             )
 
         from papaya_agent_runtime import papaya_events
@@ -405,6 +418,7 @@ class Supervisor:
                 reference_repos=reference_repos,
                 papaya_event_key=papaya_event_key,
                 papaya_event_metadata=papaya_event_metadata,
+                trust=trust,
             )
         finally:
             with self._lock:
@@ -426,6 +440,7 @@ class Supervisor:
         reference_repos: list[str] | None = None,
         papaya_event_key: str | None = None,
         papaya_event_metadata: str | None = None,
+        trust: dict | None = None,
     ) -> dict:
         # A caller that names no provider gets the configured worker provider. It
         # used to get `fake`, which on 2026-09-04 sent a real task to a stub worker
@@ -556,6 +571,7 @@ class Supervisor:
                 reference_repos=reference_repos,
                 papaya_event_key=papaya_event_key,
                 papaya_event_metadata=papaya_event_metadata,
+                trust=trust,
             )
         except BaseException:
             # Whatever failed — the lease, the branch, provisioning, the adapter's
@@ -585,6 +601,7 @@ class Supervisor:
         reference_repos: list[str] | None = None,
         papaya_event_key: str | None = None,
         papaya_event_metadata: str | None,
+        trust: dict | None = None,
     ) -> dict:
         if run_id is None:
             run_id = store.create_run(conn, title)
@@ -646,18 +663,24 @@ class Supervisor:
             )
             raise SupervisorError(f"task {task_id}: no worktree lease: {exc}") from exc
         base_sha = lease.base_sha
-        if base:
-            # Stacked work starts from the exact tip of the branch it builds on, not
-            # from the repo's base. A worker cannot be redirected after it starts,
-            # and a wrong starting commit cost a dispatch on 2026-08-30.
+        # Stacked work starts from the exact tip of the branch it builds on, not
+        # from the repo's base. A worker cannot be redirected after it starts,
+        # and a wrong starting commit cost a dispatch on 2026-08-30. A default
+        # dispatch starts from the forge's default branch the same way: a reused
+        # pool slot is parked wherever its last task left it, and in Middle Manager
+        # that refused a correct dispatch at the lease check. No forge, no reset.
+        start_branch = base
+        if not start_branch and repo_row["forge_url"]:
+            start_branch = repo_row["default_branch"] or "main"
+        if start_branch:
             try:
                 from papaya_agent_runtime import repos as _repos
 
                 base_sha = _start_from_branch(
                     lease.worktree_path,
-                    base,
+                    start_branch,
                     _repos.upstream_remote(repo_row),
-                    local_source=_lease_worktree_for_branch(conn, base),
+                    local_source=_lease_worktree_for_branch(conn, base) if base else None,
                 )
             except SupervisorError as exc:
                 store.set_task_status(conn, task_id, "failed")
@@ -673,6 +696,53 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self.release_task_lease(task_id, remove_branch=True)
                 raise
+        # The lease must sit on the base `ppy dispatch` resolved from the forge, or
+        # the worker starts on a commit nobody meant (runtime #94).
+        trust = trust or {}
+        accepted = {a["check"]: a.get("overridden") for a in trust.get("accepted") or []}
+        from papaya_agent_runtime import preflight as _preflight
+
+        refusal = _preflight.lease_refusal(
+            lease.worktree_path,
+            expect_base=trust.get("expect_base"),
+            starting_sha=trust.get("starting_sha"),
+        )
+        if refusal is not None and "lease" not in accepted:
+            store.set_task_status(conn, task_id, "failed")
+            store.append_event(
+                conn,
+                kind="preflight_refused",
+                payload={
+                    "task_id": task_id,
+                    "check": "lease",
+                    "expected": refusal.expected,
+                    "actual": refusal.actual,
+                    "summary": refusal.message,
+                },
+                run_id=run_id,
+                task_id=task_id,
+            )
+            with self._lock:
+                self._leases[task_id] = (lease, repo_row["local_path"])
+            with contextlib.suppress(Exception):
+                self.release_task_lease(task_id, remove_branch=True)
+            raise SupervisorError(f"task {task_id}: dispatch refused: {refusal.message}")
+        if refusal is not None:
+            accepted["lease"] = refusal.message
+        for check, overridden in accepted.items():
+            store.append_event(
+                conn,
+                kind="preflight_accepted",
+                payload={
+                    "task_id": task_id,
+                    "check": check,
+                    "reason": trust.get("reason"),
+                    "overridden": overridden,
+                    "summary": f"preflight check {check} accepted: {trust.get('reason')}",
+                },
+                run_id=run_id,
+                task_id=task_id,
+            )
         store.update_task_fields(
             conn,
             task_id,
