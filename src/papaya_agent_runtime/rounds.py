@@ -1496,6 +1496,28 @@ class Rounds:
             return parts
 
         answer = self._question(look)
+        if answer is None and "answer" not in queued:
+            # A capability the worker asked for is the manager's to decide, in the answer
+            # turn: nobody else is asked unless that turn escalates it. The worker keeps
+            # working meanwhile, so the rest of the round still looks at it.
+            request = await asyncio.to_thread(supervision.undecided_capability, worker.task_id)
+            if request is not None and not _done_before(
+                records, "answer", worker_task_id=worker.task_id, event_id=request[0]
+            ):
+                event_id, question = request
+                reason = f"worker task {worker.task_id} asked for a capability"
+                ticket.nudges.append(
+                    serve.Nudge("capability", reason, detail=question, event_id=event_id)
+                )
+                await asyncio.to_thread(
+                    record_round,
+                    task_id,
+                    "answer",
+                    worker_task_id=worker.task_id,
+                    event_id=event_id,
+                )
+                parts.append(f"{reason}: deciding it")
+                return parts
         if answer is not None and "answer" not in queued:
             event_id, question = answer
             if not _done_before(

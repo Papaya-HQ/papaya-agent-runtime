@@ -77,6 +77,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "capability_decisions",
+        SHARED,
+        "a worker's capability request is decided by the manager; only an escalation asks a person",
+        serve=("TicketRunner._decide_capability",),
+        shared="papaya_agent_runtime.capability_requests",
+        # A session sees the manager's undecided requests in readiness, which the
+        # session-start hook and `ppy status` print.
+        interactive=("papaya_agent_runtime.readiness",),
+    ),
+    Capability(
         "worker_checkins",
         SHARED,
         "a live worker silent past its budget, planning too long, or not pushing gets a check-in",

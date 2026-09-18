@@ -245,7 +245,16 @@ SENT_BACK_LINE = "Sent the worker back with findings; still working."
 #: `_say`'s key for that comment, which is not a phase of its own.
 SAID_SENT_BACK = "sent_back"
 
-ACTED_KINDS = ("answer", "steer", "resumed", "auto_answered", "review_requested", "delivered")
+ACTED_KINDS = (
+    "answer",
+    "steer",
+    "resumed",
+    "auto_answered",
+    "review_requested",
+    "delivered",
+    # A capability request decided, or escalated to a person, is the manager acting.
+    "capability_decision",
+)
 
 #: The event kind, on a delivered worker's task, that the rounds write when its
 #: pull request's CI went red or a review asked for changes. Read like a stopped
@@ -266,7 +275,7 @@ class Nudge:
     other turns, and the turn decides what is said to the worker.
     """
 
-    #: `checkin`, `answer` or `stopped`.
+    #: `checkin`, `answer`, `capability` or `stopped`.
     kind: str
     #: Why the rounds looked, in the words a turn and a progress line can use.
     reason: str
@@ -1598,6 +1607,9 @@ class TicketRunner:
         if nudge.kind == "answer":
             ticket.trigger = Trigger(PHASE_BLOCKED, nudge.event_id, nudge.detail, kind="question")
             return await self._answer(ticket)
+        if nudge.kind == "capability":
+            await self._decide_capability(ticket, nudge)
+            return None
         if nudge.kind == "stopped":
             ticket.trigger = Trigger(
                 PHASE_REVIEWING, nudge.event_id, nudge.detail, failure=True, kind=WORKER_STOPPED
@@ -1884,6 +1896,22 @@ class TicketRunner:
             if isinstance(outcome, HandBack):
                 return outcome
             tail = outcome
+
+    async def _decide_capability(self, ticket: Ticket, nudge: Nudge) -> None:
+        """One answer turn to decide a worker's capability request; nothing on the ticket.
+
+        The worker is still working, so the ticket does not move to blocked and nobody is
+        told: the turn grants, denies, or escalates it, and only an escalation reaches a
+        person (through the outreach procedure). A turn that decides nothing leaves the
+        request as the manager's readiness problem.
+        """
+        assert ticket.worker is not None
+        status = await asyncio.to_thread(ticket_status_line, ticket.held.task_id)
+        ticket.trigger = Trigger(PHASE_DISPATCHED, nudge.event_id, nudge.detail, kind="capability")
+        try:
+            await self._turn(ticket, prompts.ANSWER, self._answer_facts(ticket, "", [], status))
+        finally:
+            ticket.trigger = None
 
     async def _review(self, ticket: Ticket) -> HandBack | str:
         """Review-and-deliver, or steer: until the worker is delivered or sent back."""
@@ -2469,7 +2497,10 @@ class TicketRunner:
             # A comment asking where the work is gets answered from this, never invented.
             "this ticket's status, from the record (`ppy status --team`)": status,
             "the worker's question": (
-                trigger.detail if trigger is not None and trigger.phase == PHASE_BLOCKED else ""
+                trigger.detail
+                if trigger is not None
+                and (trigger.phase == PHASE_BLOCKED or trigger.kind == "capability")
+                else ""
             ),
             "new comments on the work item, by someone other than you": _comments_fact(
                 comments or []

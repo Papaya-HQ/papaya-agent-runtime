@@ -961,6 +961,58 @@ def test_a_worker_asking_a_question_gets_the_answer_turn_next_round(
     assert question in turns.calls[1].prompt
 
 
+def test_a_capability_request_is_decided_by_the_manager_and_nobody_is_told(
+    ppy_home, client_home, ready, registered_repo, assigned, pruned, monkeypatch
+) -> None:
+    """Shane, 2026-09-18: nobody should hear about a problem the runtime can solve."""
+    from papaya_agent_runtime import capability_requests, tool_learning
+
+    monkeypatch.setattr(tool_learning, "steer_worker", lambda _task, _message: None)
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            worker = working_worker(turn.run_id, note="Wiring the endpoint.")
+            capability_requests.request(worker, "terraform", why="plan the staging stack")
+        elif turn.name == prompts.ANSWER:
+            conn = init_db()
+            try:
+                [request] = capability_requests.pending(conn)
+            finally:
+                conn.close()
+            capability_requests.decide_request(request.id, approve=True, by="manager")
+        return "CHECK-IN: continue" if turn.name == prompts.CHECKIN else None
+
+    turns, timer, clock, papaya_api = FakeTurns(act), Timer(), WallClock(), FakePapaya()
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        task = _serve(
+            harness, client_home, _runner(turns, papaya_api), _seams(timer, clock, pruned)
+        )
+        await _dispatched(timer)
+        clock.advance(minutes=1)
+        await timer.round()
+        await _until(lambda: prompts.ANSWER in turns.names(), what="the answer turn")
+        clock.advance(minutes=1)
+        await timer.round()
+        await asyncio.sleep(scale(0.2))
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    assert turns.names().count(prompts.ANSWER) == 1
+    answer = turns.calls[turns.names().index(prompts.ANSWER)].prompt
+    assert "Capability request" in answer and "`terraform`" in answer
+    conn = init_db()
+    try:
+        [decided] = capability_requests.all_requests(conn)
+    finally:
+        conn.close()
+    assert decided.state == capability_requests.GRANTED and decided.decided_by == "manager"
+    assert serve.PHASE_BLOCKED not in history()
+    assert not [b for _item, b in papaya_api.comments() if "terraform" in b or "Blocked" in b]
+
+
 def test_a_question_waiting_fifteen_minutes_on_a_person_is_said_once_and_blocks_the_ticket(
     ppy_home, client_home, ready, registered_repo, assigned, pruned
 ) -> None:
