@@ -119,15 +119,19 @@ def test_a_tracked_task_reaches_its_papaya_record(home) -> None:
     assert outreach.work_item_of(conn, 9999) is None
 
 
-def test_a_pending_capability_request_is_an_ask(home, monkeypatch) -> None:
+def test_only_an_escalated_capability_request_is_an_ask(home, monkeypatch) -> None:
     conn = init_db()
     worker = _worker(conn)
     monkeypatch.setattr(capability_requests, "decide", lambda program: capability_requests.PENDING)
     made = capability_requests.request(worker, "xcodegen", why="regenerate the project")
+    # Pending is the manager's to decide: nobody is asked.
+    assert [a for a in outreach.collect(init_db()) if a.kind == outreach.CAPABILITY] == []
+    capability_requests.escalate(made.id, why="it needs the Apple developer account")
     asks = outreach.collect(init_db())
     ask = next(a for a in asks if a.kind == outreach.CAPABILITY)
     assert ask.key == f"capability:{made.id}"
     assert "`xcodegen`" in ask.text and "regenerate the project" in ask.text
+    assert "only you can decide it because: it needs the Apple developer account" in ask.text
     assert f"ppy capability approve {made.id}" in ask.how
     assert ask.since is not None
 
@@ -147,7 +151,8 @@ def test_a_request_on_a_task_that_is_over_is_nobody_s_to_answer(home, monkeypatc
     conn = init_db()
     worker = _worker(conn)
     monkeypatch.setattr(capability_requests, "decide", lambda program: capability_requests.PENDING)
-    capability_requests.request(worker, "chrome-devtools-axi", why="")
+    made = capability_requests.request(worker, "chrome-devtools-axi", why="")
+    capability_requests.escalate(made.id, why="a signed-in browser profile")
     conn = init_db()
     assert [a.kind for a in outreach.collect(conn)] == [outreach.CAPABILITY]
     store.set_task_status(conn, worker, "delivered")
@@ -321,6 +326,7 @@ def test_the_message_names_the_machine_the_wait_and_how_to_unblock_each(home, mo
     worker = _worker(conn)
     monkeypatch.setattr(capability_requests, "decide", lambda program: capability_requests.PENDING)
     made = capability_requests.request(worker, "xcodegen", why="regenerate")
+    capability_requests.escalate(made.id, why="the signing identity")
     conn = init_db()
     todo = store.add_todo(conn, "ship without contributors?", task_id=worker, blocked_on="user")
     conn.execute("UPDATE todos SET created_at = ? WHERE id = ?", (NOW.isoformat(), todo))

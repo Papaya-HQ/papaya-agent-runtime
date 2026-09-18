@@ -148,7 +148,7 @@ def test_a_denied_python3_c_adds_the_pattern_and_records_it(without_python3) -> 
     assert "Bash(python3:*)" in argv[argv.index("--allowedTools") + 1].split(",")
 
 
-def test_a_denied_command_outside_the_family_adds_nothing_and_asks_a_person_once(
+def test_a_denied_command_outside_the_family_adds_nothing_and_asks_the_manager_once(
     without_python3, monkeypatch
 ) -> None:
     from papaya_agent_runtime import capability_requests
@@ -182,14 +182,15 @@ def test_a_denied_command_outside_the_family_adds_nothing_and_asks_a_person_once
     after = load_config().claude
     assert (after.extra_tools, after.dropped_tools) == (before.extra_tools, before.dropped_tools)
     assert config_changes.history() == []
-    problems = [p for p in readiness.check().problems if p.code == capability_requests.PROBLEM_CODE]
+    code = capability_requests.MANAGER_PROBLEM_CODE
+    problems = [p for p in readiness.check().problems if p.code == code]
     (problem,) = problems
     assert "`terraform`" in problem.summary and "terraform plan -out plan.bin" in problem.summary
     assert "curl" not in problem.summary
     assert "ppy capability approve" in problem.fix
-    assert problem.owner == readiness.USER and problem.steps
-    # The worker hears once that its request waits on a person.
-    assert [m for t, m in steered if "terraform" in m and "waiting on a person" in m]
+    assert problem.owner == readiness.RUNTIME
+    # The worker hears once that its request waits on the manager, not a person.
+    assert [m for t, m in steered if "terraform" in m and "waiting on the manager" in m]
 
 
 def test_a_locked_extra_tools_is_left_alone_and_named(without_python3) -> None:

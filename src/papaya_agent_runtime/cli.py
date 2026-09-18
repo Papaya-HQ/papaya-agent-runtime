@@ -165,7 +165,10 @@ def _config_capabilities(args: argparse.Namespace) -> int:
         "granted without asking: the safe family" + "".join(f", {p}" for p in after["auto_grant"])
     )
     print("never granted: " + ", ".join(sorted(capability_requests.floor() | set(after["never"]))))
-    print("anything else waits on a person: `ppy capability list`")
+    print(
+        "anything else the manager decides, escalating to a person only what it cannot: "
+        "`ppy capability list`"
+    )
     return 0
 
 
@@ -2027,7 +2030,7 @@ REFERENCE_REQUEST = "reference_repo_requested"
 
 
 def _cmd_need(args: argparse.Namespace) -> int:
-    """A worker declares a capability it needs; policy decides or a person is asked."""
+    """A worker declares a capability it needs; policy decides, then the manager."""
     from papaya_agent_runtime import capability_requests
 
     if args.reference_repo:
@@ -2189,7 +2192,11 @@ def _cmd_capability(args: argparse.Namespace) -> int:
             found = (
                 capability_requests.all_requests(conn, task_id=args.task)
                 if args.all or args.task is not None
-                else capability_requests.pending(conn)
+                else [
+                    r
+                    for r in capability_requests.all_requests(conn)
+                    if r.state in capability_requests.OPEN
+                ]
             )
         finally:
             conn.close()
@@ -2197,9 +2204,18 @@ def _cmd_capability(args: argparse.Namespace) -> int:
             print(json.dumps([r.public() for r in found], indent=2))
             return 0
         if not found:
-            print("no capability requests" + ("" if args.all else " waiting on a person"))
+            print("no capability requests" + ("" if args.all else " waiting on a decision"))
         for item in found:
             print(item.line())
+        return 0
+    if args.capability_cmd == "escalate":
+        try:
+            raised = capability_requests.escalate(args.request_id, why=args.why, by=_actor())
+        except capability_requests.CapabilityError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(raised.line())
+        print("a person is asked through the outreach procedure; the worker keeps waiting")
         return 0
     try:
         decided = capability_requests.decide_request(
@@ -2207,6 +2223,7 @@ def _cmd_capability(args: argparse.Namespace) -> int:
             approve=args.capability_cmd == "approve",
             always=bool(getattr(args, "always", False)),
             reason=getattr(args, "reason", "") or "",
+            by=_actor(),
         )
     except capability_requests.CapabilityError as exc:
         print(str(exc), file=sys.stderr)
@@ -3802,10 +3819,13 @@ def build_parser() -> argparse.ArgumentParser:
     reference.set_defaults(func=_cmd_reference)
 
     capability = sub.add_parser(
-        "capability", help="workers' capability requests: list them, approve or deny one"
+        "capability",
+        help="workers' capability requests: list them, approve, deny or escalate one",
     )
     capsub = capability.add_subparsers(dest="capability_cmd", required=True)
-    cap_list = capsub.add_parser("list", help="requests waiting on a person (--all for every one)")
+    cap_list = capsub.add_parser(
+        "list", help="requests waiting on a decision (--all for every one)"
+    )
     cap_list.add_argument("--all", action="store_true")
     cap_list.add_argument("--task", type=int, default=None)
     cap_list.add_argument("--json", action="store_true")
@@ -3819,6 +3839,12 @@ def build_parser() -> argparse.ArgumentParser:
     cap_deny = capsub.add_parser("deny", help="refuse a pending request, with the reason")
     cap_deny.add_argument("request_id", type=int)
     cap_deny.add_argument("--reason", required=True)
+    cap_escalate = capsub.add_parser(
+        "escalate",
+        help="hand a request to a person, only when it needs what only a person has",
+    )
+    cap_escalate.add_argument("request_id", type=int)
+    cap_escalate.add_argument("--why", required=True, help="what only a person can decide here")
     capability.set_defaults(func=_cmd_capability)
 
     outreach_cmd = sub.add_parser(

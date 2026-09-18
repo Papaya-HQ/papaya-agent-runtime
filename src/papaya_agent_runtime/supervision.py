@@ -214,6 +214,34 @@ def checkins_due(
     return due
 
 
+def undecided_capability(task_id: int) -> tuple[int, str] | None:
+    """The oldest capability request on this worker the manager has not decided, as the
+    question its answer turn gets; ``None`` when there is none. Both modes read this."""
+    from papaya_agent_runtime import capability_requests
+    from papaya_agent_runtime.state import db
+
+    conn = db.init_db()
+    try:
+        waiting = [r for r in capability_requests.pending(conn) if r.task_id == task_id]
+    finally:
+        conn.close()
+    if not waiting:
+        return None
+    item = waiting[0]
+    why = f" because: {item.why}" if item.why else ""
+    ran = f" (it ran `{item.command}`)" if item.command else ""
+    return item.id, (
+        f"Capability request {item.id}: may worker task {task_id} run `{item.program}`{why}"
+        f"{ran}? This is yours to decide, not a person's. Grant it "
+        f"(`ppy capability approve {item.id}`, with `--always` when every worker should have "
+        f"it) when it serves the brief inside the worker's own worktree; deny it with a reason "
+        f'(`ppy capability deny {item.id} --reason "..."`) when the runtime does that part '
+        "itself (the forge, process control) or it reaches outside the task. Escalate "
+        f'(`ppy capability escalate {item.id} --why "..."`) only when it needs what only a '
+        "person has: a credential, money, access nobody here can judge."
+    )
+
+
 def plan_reminder(look: Any, now: datetime, waits: Any = None) -> str | None:
     """The one line a check-in carries for a busy worker with no plan note yet. No I/O.
 

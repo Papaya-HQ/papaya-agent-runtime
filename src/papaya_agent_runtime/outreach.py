@@ -217,7 +217,8 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
     from papaya_agent_runtime import capability_requests, owed
 
     found = []
-    for item in capability_requests.pending(conn):
+    # Only what the manager escalated: a request it can decide is never a person's.
+    for item in capability_requests.escalated(conn):
         task = store.get_task(conn, item.task_id)
         # A request on a task that is over (delivered, closed) can be decided for nobody
         # (`ppy capability` refuses it too) and is not a person's to answer.
@@ -225,13 +226,14 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
             continue
         why = f" — {item.why}" if item.why else ""
         command = f" (it ran `{item.command}`)" if item.command else ""
+        only = f"; only you can decide it because: {item.reason}" if item.reason else ""
         # A request's id is the id of the event that recorded it.
         since = conn.execute("SELECT created_at FROM events WHERE id = ?", (item.id,)).fetchone()
         found.append(
             Ask(
                 key=f"capability:{item.id}",
                 kind=CAPABILITY,
-                text=f"worker task {item.task_id} needs `{item.program}`{why}{command}",
+                text=f"worker task {item.task_id} needs `{item.program}`{why}{command}{only}",
                 how=(
                     f"`ppy capability approve {item.id}` (add `--always` for every worker on "
                     f'this machine) or `ppy capability deny {item.id} --reason "..."`'

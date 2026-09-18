@@ -1,4 +1,4 @@
-"""A worker asks for a capability it lacks; the runtime grants it or asks a person.
+"""A worker asks for a capability it lacks; the runtime decides, and a person only when it must.
 
 Every install has different permissions. Until 2026-09-17 a worker found out what it
 could not run by trying: task 11 lost fifteen minutes to `xcodegen` denials and then
@@ -13,21 +13,28 @@ Now there is one loop, the same whether the worker declared the need or was deni
    or a plain command refused for a gap in the profile, becomes a request on the task.
 2. **Decided** against this install's policy: a program on the floor (:func:`floor`,
    plus `capabilities.never`) is refused with the rule; one in the safe family or in
-   `capabilities.auto_grant` is granted at once; anything else is pending a person.
+   `capabilities.auto_grant` is granted at once; anything else is pending the manager.
 3. **Granted** for the task (its next launch carries the pattern) or, with `--always`,
    for this install (`claude.extra_tools`); **denied** with a reason. Either way the
    worker is steered with the outcome, and a pending one is told to go on with other
    work or stop at a checkpoint.
-4. **Escalated.** A pending request is a person's blocker (:func:`problems`), which
-   readiness raises, `ppy serve` reports, and an interactive session sees at start.
+4. **The manager decides.** A pending request is the manager's (Shane, 2026-09-18: "I,
+   or anyone using the runtime should never hear about any problem that you can solve
+   yourself"): `ppy serve`'s rounds hand it to the answer turn, a session sees it as the
+   manager's readiness problem, and either grants or denies it with a reason.
+5. **Escalated** (`ppy capability escalate <id> --why "..."`) only when it needs what
+   only a person has — a credential, money, access nobody here can judge. Only then is
+   it a person's blocker, which the outreach procedure says to them.
 
 Requests live on the event log (``capability_request``, ``capability_decision``), so
 there is no table to migrate and the history reads like the rest of a task's.
 
-    state \\ event   auto_grant     never      other      approve      approve --always   deny
-    (new)           auto_granted   refused    pending    —            —                  —
-    pending         —              —          —          granted      granted (+policy)  denied
+    state \\ event  auto_grant    never     other     approve   approve --always  deny     escalate
+    (new)          auto_granted  refused   pending   —         —                 —        —
+    pending        —             —         —         granted   granted (+policy) denied   escalated
+    escalated      —             —         —         granted   granted (+policy) denied   —
     resolved        a repeat returns the existing request; approve/deny say it is resolved
+    (task ended)    a pending or escalated request reads `moot` and asks nobody
 """
 
 from __future__ import annotations
@@ -48,15 +55,21 @@ GRANTED = "granted"
 AUTO_GRANTED = "auto_granted"
 DENIED = "denied"
 REFUSED = "refused"
+#: Waiting on a person: the manager escalated it, saying why only a person can decide.
+ESCALATED = "escalated"
 #: Pending on a task that has since ended: nobody's to answer, and nobody is asked.
 MOOT = "moot"
-STATES = (PENDING, GRANTED, AUTO_GRANTED, DENIED, REFUSED, MOOT)
+STATES = (PENDING, GRANTED, AUTO_GRANTED, DENIED, REFUSED, ESCALATED, MOOT)
+#: Not yet decided: the manager's (pending) or a person's (escalated).
+OPEN = (PENDING, ESCALATED)
 
 DECLARED = "declared"
 DENIAL = "denied_command"
 
 #: The readiness problem code for a request waiting on a person.
 PROBLEM_CODE = "capability_request_pending"
+#: The readiness problem code for a request the manager has not decided yet.
+MANAGER_PROBLEM_CODE = "capability_request_undecided"
 
 _PROGRAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _PATTERN = re.compile(r"^Bash\(([A-Za-z0-9][A-Za-z0-9._+-]*)(?::\*)?\)$")
@@ -182,7 +195,7 @@ def _load(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> list
             }
         else:
             request = requests.get(int(payload.get("request_id") or 0))
-            if request is not None and request["state"] == PENDING:
+            if request is not None and request["state"] in OPEN:
                 request.update(
                     state=payload["state"],
                     decided_by=payload.get("by"),
@@ -191,7 +204,7 @@ def _load(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> list
                 )
     ended = _ended_tasks(conn, {int(r["task_id"]) for r in requests.values()})
     for r in requests.values():
-        if r["state"] == PENDING and int(r["task_id"]) in ended:
+        if r["state"] in OPEN and int(r["task_id"]) in ended:
             r["state"] = MOOT
     return [Request(**r) for r in requests.values()]
 
@@ -220,7 +233,13 @@ def get(conn: sqlite3.Connection, request_id: int) -> Request | None:
 
 
 def pending(conn: sqlite3.Connection) -> list[Request]:
+    """Requests the manager has not decided yet."""
     return [r for r in _load(conn) if r.state == PENDING]
+
+
+def escalated(conn: sqlite3.Connection) -> list[Request]:
+    """Requests the manager escalated: the only ones a person is asked about."""
+    return [r for r in _load(conn) if r.state == ESCALATED]
 
 
 def granted_patterns(conn: sqlite3.Connection, task_id: int) -> list[str]:
@@ -296,7 +315,7 @@ def decide_request(
     reason: str = "",
     by: str = "person",
 ) -> Request:
-    """A person's answer to a pending request."""
+    """The answer to an open request: the manager's, or a person's once escalated."""
     from papaya_agent_runtime.state import init_db, store
 
     conn = init_db()
@@ -308,7 +327,7 @@ def decide_request(
             raise CapabilityError(
                 f"task {found.task_id} has ended; request {request_id} is moot and needs no answer"
             )
-        if found.state != PENDING:
+        if found.state not in OPEN:
             raise CapabilityError(f"request {request_id} is already {found.state}")
         task = store.get_task(conn, found.task_id)
         assert task is not None
@@ -338,6 +357,42 @@ def decide_request(
         _grant_for_install(decided, by=by)
     _tell_worker(decided)
     return decided
+
+
+def escalate(request_id: int, *, why: str, by: str = "manager") -> Request:
+    """Hand a pending request to a person, saying what only they can decide."""
+    from papaya_agent_runtime.state import init_db, store
+
+    if not why.strip():
+        raise CapabilityError(
+            "say what only a person can decide here (a credential, money, access nobody "
+            "here can judge); anything else is yours to approve or deny"
+        )
+    conn = init_db()
+    try:
+        found = get(conn, request_id)
+        if found is None:
+            raise CapabilityError(f"there is no capability request {request_id}")
+        if found.state == MOOT:
+            raise CapabilityError(
+                f"task {found.task_id} has ended; request {request_id} is moot and needs no answer"
+            )
+        if found.state != PENDING:
+            raise CapabilityError(f"request {request_id} is already {found.state}")
+        task = store.get_task(conn, found.task_id)
+        assert task is not None
+        store.append_event(
+            conn,
+            kind=DECISION_EVENT,
+            payload={"request_id": request_id, "state": ESCALATED, "reason": why.strip(), "by": by},
+            run_id=task["run_id"],
+            task_id=found.task_id,
+        )
+        raised = get(conn, request_id)
+    finally:
+        conn.close()
+    assert raised is not None
+    return raised
 
 
 def _record_decision(conn, decided: Request, *, always: bool, run_id: int) -> None:
@@ -406,8 +461,9 @@ def worker_message(found: Request) -> str:
             f"Your request for {name} was denied: {found.reason}. Do the work without it, and "
             'if the task cannot be done without it, record that under "Flagged, not done".'
         )
+    who = "a person" if found.state == ESCALATED else "the manager"
     return (
-        f"Your request for {name} is waiting on a person (request {found.id}). Go on with "
+        f"Your request for {name} is waiting on {who} (request {found.id}). Go on with "
         "any work that does not need it. If nothing is left that can be done without it, "
         "commit, report `--phase blocked` naming the request, and stop: you are resumed "
         "with the answer."
@@ -422,9 +478,9 @@ def _tell_worker(found: Request) -> None:
 
 
 def problems() -> list[Any]:
-    """Each pending request as a person's non-blocking problem, for readiness."""
+    """Open requests for readiness: the manager's to decide, or a person's once escalated."""
     from papaya_agent_runtime.paths import db_path
-    from papaya_agent_runtime.readiness import USER, Problem
+    from papaya_agent_runtime.readiness import RUNTIME, USER, Problem
     from papaya_agent_runtime.state import init_db
 
     if not db_path().exists():
@@ -432,7 +488,7 @@ def problems() -> list[Any]:
     try:
         conn = init_db()
         try:
-            waiting = pending(conn)
+            waiting = [r for r in _load(conn) if r.state in OPEN]
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - a verdict never fails on its own evidence
@@ -441,12 +497,32 @@ def problems() -> list[Any]:
     for item in waiting:
         why = f" — {item.why}" if item.why else ""
         command = f" (denied `{item.command}`)" if item.command else ""
+        if item.state == PENDING:
+            found.append(
+                Problem(
+                    code=MANAGER_PROBLEM_CODE,
+                    summary=(
+                        f"worker task {item.task_id} needs `{item.program}`{why}{command}: "
+                        f"request {item.id} is the manager's to decide"
+                    ),
+                    fix=(
+                        f"`ppy capability approve {item.id}` or `ppy capability deny "
+                        f'{item.id} --reason "..."`; `ppy capability escalate {item.id} '
+                        '--why "..."` only for what only a person can decide'
+                    ),
+                    owner=RUNTIME,
+                    blocking=False,
+                    title=f"Decide whether a worker may run `{item.program}`",
+                    scope=f"capability:{item.id}",
+                )
+            )
+            continue
         found.append(
             Problem(
                 code=PROBLEM_CODE,
                 summary=(
                     f"worker task {item.task_id} needs `{item.program}`{why}{command}: "
-                    f"request {item.id} is waiting on a person"
+                    f"request {item.id} is waiting on a person ({item.reason})"
                 ),
                 fix=(
                     f"`ppy capability approve {item.id}` (add `--always` for every worker on "
@@ -457,6 +533,7 @@ def problems() -> list[Any]:
                 title=f"A worker needs `{item.program}`",
                 steps=(
                     f"worker task {item.task_id} asked to run `{item.program}`{why}",
+                    f"only you can decide it because: {item.reason}",
                     f"to allow it for this task: ppy capability approve {item.id}",
                     f"for every worker on this machine: ppy capability approve {item.id} --always",
                     f'to refuse: ppy capability deny {item.id} --reason "<why>"',

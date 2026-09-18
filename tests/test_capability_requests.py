@@ -208,7 +208,7 @@ def test_the_gh_wrapper_and_kill_are_refused_like_gh(home) -> None:
 # ── from a denial, and in front of a person ─────────────────────────────────
 
 
-def test_a_denied_plain_command_becomes_a_request_a_person_is_asked_about(home) -> None:
+def test_a_denied_plain_command_becomes_a_request_the_manager_decides(home) -> None:
     task_id = _task()
     denial = {
         "tool_name": "Bash",
@@ -225,24 +225,46 @@ def test_a_denied_plain_command_becomes_a_request_a_person_is_asked_about(home) 
         cr.DENIAL,
         "terraform plan",
     )
-    assert any("waiting on a person" in m for _t, m in home)
+    assert any("waiting on the manager" in m for _t, m in home)
+    problems = readiness.check().problems
+    assert not [p for p in problems if p.code == cr.PROBLEM_CODE]
+    [mine] = [p for p in problems if p.code == cr.MANAGER_PROBLEM_CODE]
+    assert mine.owner == readiness.RUNTIME and not mine.blocking
+    assert f"ppy capability approve {request.id}" in mine.fix
+    assert mine.scope == f"capability:{request.id}"
+
+
+def test_only_an_escalated_request_is_a_person_s_and_they_hear_why(home) -> None:
+    task_id = _task()
+    request = cr.request(task_id, "terraform", why="plan the staging stack")
+    with pytest.raises(cr.CapabilityError, match="only a person can decide"):
+        cr.escalate(request.id, why="  ")
+    raised = cr.escalate(request.id, why="it needs the cloud account's credentials")
+    assert raised.state == cr.ESCALATED
+    conn = init_db()
+    assert cr.pending(conn) == [] and [r.id for r in cr.escalated(conn)] == [request.id]
     [problem] = [p for p in readiness.check().problems if p.code == cr.PROBLEM_CODE]
-    assert problem.owner == readiness.USER and not problem.blocking
-    assert f"ppy capability approve {request.id}" in "\n".join(problem.steps)
-    assert problem.scope == f"capability:{request.id}"
+    assert problem.owner == readiness.USER
+    assert "cloud account's credentials" in "\n".join(problem.steps)
+    # A person's answer still decides it.
+    assert cr.decide_request(request.id, approve=True).state == cr.GRANTED
+    with pytest.raises(cr.CapabilityError, match="already granted"):
+        cr.escalate(request.id, why="again")
 
 
 def test_the_cli_declares_lists_and_answers(home, capsys) -> None:
     task_id = _task()
 
     assert main(["need", str(task_id), "--capability", "terraform", "--why", "regen"]) == 0
-    assert "waiting on a person" in capsys.readouterr().out
+    assert "waiting on the manager" in capsys.readouterr().out
     assert main(["capability", "list", "--json"]) == 0
     [listed] = json.loads(capsys.readouterr().out)
+    assert main(["capability", "escalate", str(listed["id"]), "--why", "cloud credentials"]) == 0
+    assert "escalated" in capsys.readouterr().out
     assert main(["capability", "approve", str(listed["id"])]) == 0
     assert "task" in capsys.readouterr().out
     assert main(["capability", "list"]) == 0
-    assert "no capability requests waiting on a person" in capsys.readouterr().out
+    assert "no capability requests waiting on a decision" in capsys.readouterr().out
 
 
 def test_the_worker_rules_say_to_ask_in_the_plan_phase() -> None:
