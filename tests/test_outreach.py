@@ -190,20 +190,72 @@ def test_a_new_ask_is_said_the_round_it_appears_on_the_ticket_and_in_the_dm(home
     assert len(said) == 1
 
 
-def test_an_ask_already_said_is_not_said_again_until_the_repeat_interval(home) -> None:
+def test_an_unchanged_ask_is_never_said_again(home) -> None:
     conn = init_db()
     store.add_todo(conn, "which wording", blocked_on="user")
     channels = Channels()
     outreach.step(conn, now=NOW, dm=channels.post_dm, ticket=channels.post_ticket)
+    for hours in (1, 6, 24, 24 * 7):
+        outreach.step(
+            conn, now=NOW + timedelta(hours=hours), dm=channels.post_dm, ticket=channels.post_ticket
+        )
+    assert len(channels.dms) == 1 and len(channels.tickets) == 0
+    assert outreach.open_rows(conn)[0]["said_count"] == 1
+
+
+def test_a_changed_ask_is_said_again_marked_changed(home) -> None:
+    conn = init_db()
+    todo = store.add_todo(conn, "which wording", blocked_on="user")
+    channels = Channels()
+    outreach.step(conn, now=NOW, dm=channels.post_dm, ticket=channels.post_ticket)
+    conn.execute("UPDATE todos SET text = ? WHERE id = ?", ("which wording, A or B", todo))
+    conn.commit()
+    later = NOW + timedelta(seconds=outreach.REPEAT_AFTER_SECONDS)
+    outreach.step(conn, now=later, dm=channels.post_dm, ticket=channels.post_ticket)
+    assert len(channels.dms) == 2
+    assert "which wording, A or B" in channels.dms[1] and "· changed" in channels.dms[1]
+    # Whitespace and case are not a changed requirement.
+    conn.execute("UPDATE todos SET text = ? WHERE id = ?", ("Which  wording, A or B", todo))
+    conn.commit()
     outreach.step(
-        conn, now=NOW + timedelta(minutes=30), dm=channels.post_dm, ticket=channels.post_ticket
+        conn, now=later + timedelta(days=1), dm=channels.post_dm, ticket=channels.post_ticket
+    )
+    assert len(channels.dms) == 2
+
+
+def test_deliveries_are_at_most_one_per_interval_and_carry_only_what_is_new(home) -> None:
+    conn = init_db()
+    store.add_todo(conn, "first", blocked_on="user")
+    channels = Channels()
+    outreach.step(conn, now=NOW, dm=channels.post_dm, ticket=channels.post_ticket)
+    store.add_todo(conn, "second", blocked_on="user")
+    outreach.step(
+        conn, now=NOW + timedelta(minutes=20), dm=channels.post_dm, ticket=channels.post_ticket
+    )
+    store.add_todo(conn, "third", blocked_on="user")
+    outreach.step(
+        conn, now=NOW + timedelta(hours=5), dm=channels.post_dm, ticket=channels.post_ticket
     )
     assert len(channels.dms) == 1
     later = NOW + timedelta(seconds=outreach.REPEAT_AFTER_SECONDS)
     outreach.step(conn, now=later, dm=channels.post_dm, ticket=channels.post_ticket)
     assert len(channels.dms) == 2
-    assert "reminder 1" in channels.dms[1]
-    assert outreach.open_rows(conn)[0]["said_count"] == 2
+    assert "second" in channels.dms[1] and "third" in channels.dms[1]
+    assert "first" not in channels.dms[1]
+    assert channels.dms[1].startswith("Waiting on you")
+
+
+def test_an_ask_said_before_fingerprints_is_not_said_again(home) -> None:
+    conn = init_db()
+    store.add_todo(conn, "which wording", blocked_on="user")
+    outreach.observe(conn, outreach.collect(conn), now=NOW)
+    conn.execute("UPDATE outreach SET said_at = ?, said_count = 3", (NOW.isoformat(),))
+    conn.commit()
+    channels = Channels()
+    outreach.step(
+        conn, now=NOW + timedelta(days=1), dm=channels.post_dm, ticket=channels.post_ticket
+    )
+    assert channels.dms == []
 
 
 def test_the_repeat_interval_comes_from_the_environment(home, monkeypatch) -> None:
@@ -258,7 +310,8 @@ def test_a_session_counts_as_a_channel_only_when_nothing_remote_landed(home) -> 
     conn2 = init_db()
     store.add_todo(conn2, "another", blocked_on="user")
     landed = Channels()
-    outreach.step(conn2, now=NOW, dm=landed.post_dm, ticket=landed.post_ticket, session=True)
+    later = NOW + timedelta(seconds=outreach.REPEAT_AFTER_SECONDS)
+    outreach.step(conn2, now=later, dm=landed.post_dm, ticket=landed.post_ticket, session=True)
     rows = {r["key"]: json.loads(r["said_via"]) for r in outreach.open_rows(conn2)}
     assert "session" not in rows[[k for k in rows if k != "todo:1"][0]]
 
@@ -280,7 +333,7 @@ def test_the_message_names_the_machine_the_wait_and_how_to_unblock_each(home, mo
     assert "since 2h" in text
     assert f"ppy capability approve {made.id}" in text
     assert "ship without contributors?" in text
-    assert "I will say this again every 2h until each is answered." in text
+    assert "at most every 6h" in text and "`ppy outreach`" in text
 
 
 def test_nothing_private_leaves_in_the_words(home) -> None:
@@ -346,9 +399,13 @@ def test_the_stop_hook_bounces_once_with_what_nothing_remote_reached(home, monke
     assert "Put each in your reply" in reason
     # Said in the session now: the next Stop is not held for it.
     assert hooks.outreach_stop_step(conn) is None
-    # And a Stop with the workspace reachable says it there and holds nothing.
+    # And a Stop with the workspace reachable, the interval since past, says it there
+    # and holds nothing.
     conn2 = init_db()
     store.add_todo(conn2, "another", blocked_on="user")
+    long_ago = datetime.now(UTC) - timedelta(seconds=outreach.REPEAT_AFTER_SECONDS + 60)
+    conn2.execute("UPDATE outreach SET said_at = ?", (long_ago.isoformat(),))
+    conn2.commit()
     landed = Channels()
     monkeypatch.setattr(outreach, "post_dm", landed.post_dm)
     monkeypatch.setattr(outreach, "post_ticket", landed.post_ticket)
@@ -494,45 +551,14 @@ def test_the_message_goes_to_the_dm_when_there_is_one() -> None:
     ]
 
 
-def test_without_a_dm_the_message_goes_to_a_member_channel_with_the_owner_mentioned() -> None:
+def test_without_a_dm_nothing_is_posted_in_any_channel() -> None:
     channels = [
-        {
-            "id": "c-team",
-            "name": "team",
-            "channel_type": "public",
-            "is_member": True,
-            "member_count": 7,
-        },
-        {
-            "id": "c-bugs",
-            "name": "bugs",
-            "channel_type": "public",
-            "is_member": True,
-            "member_count": 4,
-        },
-        {"id": "c-x", "name": "x", "channel_type": "public", "is_member": False, "member_count": 1},
+        {"id": "c-team", "name": "team", "channel_type": "public", "is_member": True},
+        {"id": "c-me", "name": "me", "channel_type": "private", "is_member": True},
     ]
     api = FakeApi(channels)
-    assert asyncio.run(outreach.say_in_workspace(api, "Waiting on you: x")) is True
-    path, payload = api.posted[0]
-    assert path == "/workspaces/ws/channels/c-bugs/messages"
-    assert payload["content"].startswith("@shanewolf — Waiting on you: x")
-    assert payload["mentions"] == [
-        {"type": "user", "id": "u-shane", "handle": "shanewolf", "display_name": "Shane Wolf"}
-    ]
-
-
-def test_the_fallback_channel_can_be_named(monkeypatch) -> None:
-    channels = [
-        {"id": "c-team", "name": "team", "is_member": True, "member_count": 7},
-        {"id": "c-bugs", "name": "bugs", "is_member": True, "member_count": 4},
-    ]
-    monkeypatch.setenv(outreach.CHANNEL_ENV, "Team")
-    assert outreach.fallback_channel_id(channels, wanted="Team") == "c-team"
-    api = FakeApi(channels)
-    asyncio.run(outreach.say_in_workspace(api, "x"))
-    assert api.posted[0][0].endswith("/c-team/messages")
-    assert outreach.fallback_channel_id([{"id": "c", "is_member": False}]) is None
+    assert asyncio.run(outreach.say_in_workspace(api, "Waiting on you: x")) is False
+    assert api.posted == []
 
 
 def test_nothing_to_post_into_is_not_said(monkeypatch) -> None:
