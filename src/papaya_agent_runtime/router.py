@@ -1,8 +1,12 @@
 """Worker routing and hard ceiling enforcement.
 
 The runtime — not the manager prompt — enforces the configured worker ceiling.
-Routing selects the smallest eligible worker profile and escalates only on
-explicit request, never above the ceiling.
+A dispatch that names a model or reasoning keeps it; one that names neither is
+routed by its brief (``routing.route``): a contract-heavy brief — an actual
+database migration, new routes or endpoints, a state machine, or more than five
+numbered In scope items — takes the ceiling's model and reasoning, anything else
+the configured default. Every profile is checked here afterwards, so nothing is
+ever routed above the ceiling.
 """
 
 from __future__ import annotations

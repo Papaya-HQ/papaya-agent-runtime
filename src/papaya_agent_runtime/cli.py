@@ -1201,6 +1201,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
         return 1
     print(f"dispatched task {resp['task_id']} in run {resp['run_id']} (branch {resp['branch']})")
+    if (resp.get("routing") or {}).get("line"):
+        print(resp["routing"]["line"])
     for advisory in ("migration_advisory", "overlap_advisory"):
         if resp.get(advisory):
             print(resp[advisory])
