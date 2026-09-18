@@ -136,8 +136,68 @@ def _resolved_ref(worktree: str, *candidates: str | None) -> str | None:
     return None
 
 
+def _patch_ids(worktree: str, commits: set[str]) -> dict[str, str]:
+    """Stable patch-id -> commit for ``commits``; merges and empty commits have none."""
+    if not commits:
+        return {}
+    shown = _run(["git", "-C", worktree, "log", "-p", "--no-color", "--no-walk", *sorted(commits)])
+    if shown.returncode != 0 or not shown.stdout:
+        return {}
+    ids = subprocess.run(
+        ["git", "-C", worktree, "patch-id", "--stable"],
+        input=shown.stdout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if ids.returncode != 0:
+        return {}
+    pairs = (line.split() for line in ids.stdout.splitlines())
+    return {pair[0]: pair[1] for pair in pairs if len(pair) == 2}
+
+
+def _stack_parent_head(worktree: str, sibling, *, remote: str, delivering: int) -> str | None:
+    """The head of the branch ``sibling`` is stacked on, as far as it may be trusted.
+
+    A child that was dispatched onto an empty parent branch records the default
+    branch's SHA as its ``base_sha``; once it rebases onto the parent's pushed
+    head, ``base_sha..HEAD`` holds the parent's commits too. On 2026-09-17 that
+    refused delivery of a parent because its own child "carried" its commits.
+    Whatever the parent's branch reaches is the parent's, not the child's.
+
+    When the parent is the task being delivered, only its *published* head
+    counts: its local head is exactly what is under inspection, and excluding it
+    would wave through a child commit that found its way onto the parent's branch.
+    """
+    parent_branch = (sibling["stacked_on"] or "").strip()
+    if not parent_branch:
+        return None
+    published = f"{remote}/{parent_branch}"
+    if sibling["stacked_on_task"] is not None and int(sibling["stacked_on_task"]) == delivering:
+        return _resolved_ref(worktree, published)
+    return _resolved_ref(worktree, published, parent_branch)
+
+
+def _own_commits(
+    worktree: str, sibling, *, head: str, remote: str, default_branch: str, delivering: int
+) -> set[str]:
+    """The commits ``sibling`` wrote itself: none that main or its stack parent already holds."""
+    excluded = [sibling["base_sha"]]
+    for ref in (
+        _resolved_ref(worktree, f"{remote}/{default_branch}"),
+        _stack_parent_head(worktree, sibling, remote=remote, delivering=delivering),
+    ):
+        if ref:
+            excluded.append(ref)
+    return set(_git_lines(worktree, "rev-list", head, *(f"^{ref}" for ref in excluded)))
+
+
 def composition_tasks(conn, task, *, remote: str, base: str | None, head: str) -> list[dict]:
-    """Open sibling tasks whose own commits appear in this task's proposed PR diff."""
+    """Open sibling tasks whose own commits appear in this task's proposed PR diff.
+
+    A commit counts when its SHA is in the diff, or when a copy of it is — the same
+    patch cherry-picked under a new SHA carries the sibling's work just the same.
+    """
     worktree = task["worktree_path"]
     if not worktree:
         return []
@@ -160,6 +220,7 @@ def composition_tasks(conn, task, *, remote: str, base: str | None, head: str) -
         (task["repo_id"], task["id"]),
     ).fetchall()
     conflicts: list[dict] = []
+    proposed_patches: dict[str, str] | None = None
     for sibling in rows:
         sibling_head = _resolved_ref(
             worktree,
@@ -180,8 +241,25 @@ def composition_tasks(conn, task, *, remote: str, base: str | None, head: str) -
         sibling_base = sibling["base_sha"]
         if not sibling_head or not sibling_base:
             continue
-        own_commits = set(_git_lines(worktree, "rev-list", f"{sibling_base}..{sibling_head}"))
-        shared = sorted(proposed & own_commits)
+        own_commits = _own_commits(
+            worktree,
+            sibling,
+            head=sibling_head,
+            remote=remote,
+            default_branch=default_branch,
+            delivering=int(task["id"]),
+        )
+        shared_shas = proposed & own_commits
+        copied = own_commits - shared_shas
+        if copied:
+            if proposed_patches is None:
+                proposed_patches = _patch_ids(worktree, proposed)
+            shared_shas |= {
+                proposed_patches[pid]
+                for pid in _patch_ids(worktree, copied)
+                if pid in proposed_patches
+            }
+        shared = sorted(shared_shas)
         if shared:
             conflicts.append(
                 {
