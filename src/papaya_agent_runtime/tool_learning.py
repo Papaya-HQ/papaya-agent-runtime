@@ -83,7 +83,9 @@ READ_ONLY = (
     "head",
     "jq",
     "ls",
+    "ps",
     "rg",
+    "shasum",
     "sort",
     "stat",
     "tail",
@@ -100,13 +102,18 @@ TOOLCHAINS = (
     "node",
     "npm",
     "npx",
+    "nvm",
     "pnpm",
     "pytest",
     "python",
     "python3",
     "ruff",
     "uv",
+    "xcodebuild",
+    "xcodegen",
 )
+#: The browser a worker checks its own UI in: screenshots, console, the page it serves.
+BROWSER = ("chrome-devtools-axi",)
 #: File verbs, learned only from a call whose every path is inside the worktree.
 WORKTREE_WRITES = ("cp", "mkdir", "mv", "rm", "tee", "touch")
 #: Read-only unless told otherwise; the checks in :func:`classify` refuse the rest.
@@ -116,6 +123,7 @@ CONDITIONAL = ("awk", "find", "sed")
 SAFE_FAMILY: dict[str, str] = {
     **dict.fromkeys(READ_ONLY, "read"),
     **dict.fromkeys(TOOLCHAINS, "run"),
+    **dict.fromkeys(BROWSER, "run"),
     **dict.fromkeys(WORKTREE_WRITES, "write"),
     **dict.fromkeys(CONDITIONAL, "conditional"),
 }
@@ -132,6 +140,10 @@ NEVER = frozenset(
         "eval",
         "exec",
         "gh",
+        # The provisioned wrapper of `gh`: the forge is the runtime's, never a worker's.
+        "gh-axi",
+        # Stopping processes is the supervisor's; a worker's own run stops on its own.
+        "kill",
         "nc",
         "open",
         "osascript",
@@ -543,6 +555,12 @@ def policy_rule(program: str) -> str:
 
     if program == FULL_SUITE_PROGRAM:
         return FULL_SUITE_REFUSAL
+    if program in ("gh", "gh-axi"):
+        return (
+            f"A worker never runs `{program}`: pushing, opening, reading and merging pull "
+            "requests is the runtime's. If you need a pull request's state, say what in your "
+            "progress report and it is supplied."
+        )
     if program in ENVIRONMENT_FORBIDS:
         return (
             f"A worker does not run `{program}` here: when this repository has a database "

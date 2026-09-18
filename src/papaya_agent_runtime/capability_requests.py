@@ -48,7 +48,9 @@ GRANTED = "granted"
 AUTO_GRANTED = "auto_granted"
 DENIED = "denied"
 REFUSED = "refused"
-STATES = (PENDING, GRANTED, AUTO_GRANTED, DENIED, REFUSED)
+#: Pending on a task that has since ended: nobody's to answer, and nobody is asked.
+MOOT = "moot"
+STATES = (PENDING, GRANTED, AUTO_GRANTED, DENIED, REFUSED, MOOT)
 
 DECLARED = "declared"
 DENIAL = "denied_command"
@@ -187,7 +189,25 @@ def _load(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> list
                     reason=payload.get("reason"),
                     scope=payload.get("scope"),
                 )
+    ended = _ended_tasks(conn, {int(r["task_id"]) for r in requests.values()})
+    for r in requests.values():
+        if r["state"] == PENDING and int(r["task_id"]) in ended:
+            r["state"] = MOOT
     return [Request(**r) for r in requests.values()]
+
+
+def _ended_tasks(conn: sqlite3.Connection, task_ids: set[int]) -> set[int]:
+    """The tasks among ``task_ids`` that are over or gone: a request on one reaches nobody."""
+    if not task_ids:
+        return set()
+    marks = ",".join("?" for _ in task_ids)
+    live = {
+        int(row[0]): str(row[1])
+        for row in conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({marks})", tuple(task_ids)
+        ).fetchall()
+    }
+    return {t for t in task_ids if live.get(t) is None or live[t] in TERMINAL_STATUSES}
 
 
 def all_requests(conn: sqlite3.Connection, *, task_id: int | None = None) -> list[Request]:
@@ -284,14 +304,14 @@ def decide_request(
         found = get(conn, request_id)
         if found is None:
             raise CapabilityError(f"there is no capability request {request_id}")
+        if found.state == MOOT:
+            raise CapabilityError(
+                f"task {found.task_id} has ended; request {request_id} is moot and needs no answer"
+            )
         if found.state != PENDING:
             raise CapabilityError(f"request {request_id} is already {found.state}")
         task = store.get_task(conn, found.task_id)
-        if task is None or task["status"] in TERMINAL_STATUSES:
-            status = task["status"] if task else "gone"
-            raise CapabilityError(
-                f"task {found.task_id} is {status}; a capability for it would reach nobody"
-            )
+        assert task is not None
         if not approve and not reason.strip():
             raise CapabilityError("say why it is denied: the worker is told the reason")
         if approve and found.program in _policy()[1]:
