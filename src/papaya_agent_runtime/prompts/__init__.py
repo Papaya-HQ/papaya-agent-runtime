@@ -62,6 +62,13 @@ REPORT_ADDENDUM = (
 #: this. The runner reruns such a turn later instead of counting it as a miss.
 WAITING_PREFIX = "WAITING:"
 
+#: How a brief turn says the ticket needs no worker: its work is already delivered or
+#: merged, or a later ticket carries it. The runner ends the hold as reported, leaves the
+#: work item's status alone, and never counts it as a missed turn or hands it back — a
+#: hand-back reset finished items to `todo` and told the owner "didn't run this" on every
+#: restart (Shane, 2026-09-18).
+NOTHING_TO_BUILD_PREFIX = "NOTHING TO BUILD:"
+
 #: The rule every turn and worker is given about gates longer than a tool call. A
 #: harness caps a tool call at ten minutes and backgrounds anything longer, and a
 #: backgrounded command dies with the session (PAP-213). The prompt files carry it
@@ -216,6 +223,7 @@ __all__ = [
     "TEN_MINUTE_RULE",
     "TURNS",
     "WAITING_PREFIX",
+    "NOTHING_TO_BUILD_PREFIX",
     "load",
     "path",
     "render",

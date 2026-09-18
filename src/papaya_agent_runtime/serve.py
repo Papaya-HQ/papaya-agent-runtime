@@ -797,6 +797,17 @@ def waiting_reason(result: object) -> str | None:
     return None
 
 
+def nothing_to_build(result: object) -> str | None:
+    """Why a brief turn said the ticket needs no worker, or ``None`` if it did not say so."""
+    text = result.tail() if hasattr(result, "tail") else str(result or "")
+    for line in reversed(text.splitlines()):
+        stripped = line.strip().lstrip("*_`> ").strip()
+        if stripped.startswith(prompts.NOTHING_TO_BUILD_PREFIX):
+            reason = stripped.removeprefix(prompts.NOTHING_TO_BUILD_PREFIX)
+            return reason.strip().rstrip("*_`").strip() or "(no reason given)"
+    return None
+
+
 def rerun_delay(waits: int, gate_budget: float | None = None) -> float:
     """Seconds before rerunning a turn that has ended `WAITING:` ``waits`` times in a row.
 
@@ -1389,10 +1400,14 @@ class TicketRunner:
                 else await asyncio.to_thread(_max_event_id)
             )
         if held.resume_from is None:
+            again = await asyncio.to_thread(picked_up_before, held.task_id)
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
-            said = "Picked up; choosing the repository and writing the brief."
-            await self._say(ticket, PHASE_BRIEFING, said)
+            if not again:
+                # Said once per ticket: an item offered again (a new assignment event,
+                # a restart) already has this line, and saying it again is noise.
+                said = "Picked up; choosing the repository and writing the brief."
+                await self._say(ticket, PHASE_BRIEFING, said)
         else:
             # A redelivered ticket that was already being worked goes back to where
             # it was. Nothing is picked up twice: no second brief, no second status,
@@ -1480,6 +1495,11 @@ class TicketRunner:
             ) is not None:
                 waits, tail = waits + 1, waited
                 continue
+            if (why := nothing_to_build(result)) is not None:
+                # Not a miss and not a hand-back: the item keeps its status, and a
+                # restart does not offer it again as declined.
+                await self._enter(ticket, PHASE_REPORTED, f"Nothing to build: {why}")
+                return PHASE_REPORTED
             outcome = self._missed(ticket, misses, "dispatching a worker", result)
             if isinstance(outcome, HandBack):
                 return outcome
@@ -2980,6 +3000,15 @@ def phase_history(conn, task_id: int) -> list[str]:
         (task_id, store.TICKET_PHASE_EVENT),
     ).fetchall()
     return [str(_payload(row).get("phase") or "") for row in rows]
+
+
+def picked_up_before(task_id: int) -> bool:
+    """Was this ticket's task picked up by an earlier hold (the pickup is recorded first)?"""
+    conn = db.init_db()
+    try:
+        return phase_history(conn, task_id).count(PHASE_PICKED_UP) > 1
+    finally:
+        conn.close()
 
 
 def sent_back_before(task_id: int) -> bool:
