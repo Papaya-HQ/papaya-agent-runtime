@@ -660,8 +660,18 @@ When the user gives you an objective:
    <file> --provider <claude|codex> [--model ...] [--reasoning ...]`. A brief
    names its own task: with `--brief`, the objective comes from the brief's first
    Markdown heading, so `--title` is only for overriding it (and is still required
-   when you dispatch without a brief). Prefer the smallest eligible worker; the
-   ceiling is enforced in code, so you cannot exceed it by accident.
+   when you dispatch without a brief). Leave `--model`/`--reasoning` off unless you
+   have a reason: an unpinned dispatch is routed by its brief. A contract-heavy
+   brief — an actual database migration (a path under `migrations/` or
+   `alembic/versions/`, `down_revision`, or an instruction to add a new
+   migration; merely mentioning "migration" does not count), new routes or
+   endpoints, a state machine, or more than five numbered items under In scope —
+   goes to the ceiling's model and reasoning; anything else gets the configured
+   default. An explicit `--model` or `--reasoning` always wins. The dispatch
+   output, its response and its `dispatched` event carry a
+   `routing: <tier> (<model>/<reasoning>) — <rule>` line, so the choice is on the
+   record. The ceiling is enforced in code, so nothing — routed or pinned — can
+   exceed it.
    Every brief opens with four outcome sections — `## Goals` (observable outcomes,
    acceptance criteria, the authoritative contract), `## Intent` (why, for whom, the
    outcome as distinct from any suggested approach), `## In scope` and `## Out of

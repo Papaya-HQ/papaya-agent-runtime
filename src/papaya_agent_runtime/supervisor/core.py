@@ -528,9 +528,13 @@ class Supervisor:
         except SchemaError as exc:
             raise SupervisorError(f"invalid task packet: {exc}") from exc
 
-        # Enforce the hard worker ceiling for real providers (runtime, not prompt).
+        # Enforce the hard worker ceiling for real providers (runtime, not prompt),
+        # after routing has picked a tier for a brief the caller left unpinned.
+        routing: dict | None = None
         if provider in ("claude", "codex"):
-            model, reasoning = self._resolve_and_enforce(provider, model, reasoning)
+            model, reasoning, routing = self._route_and_enforce(
+                provider, model, reasoning, instructions
+            )
         if provider == "claude":
             # A Claude worker with no allowed tools has no shell: it cannot run the
             # suite, commit, or even report progress. That used to happen silently
@@ -562,6 +566,7 @@ class Supervisor:
                 touched=touched,
                 migration_advisory=migration_advisory,
                 overlap_advisory=overlap_advisory,
+                routing=routing,
                 ends_at=ends_at,
                 reference_repos=reference_repos,
                 papaya_event_key=papaya_event_key,
@@ -636,6 +641,7 @@ class Supervisor:
         migration_advisory: str | None,
         overlap_advisory: str | None,
         ends_at: str,
+        routing: dict | None = None,
         reference_repos: list[str] | None = None,
         papaya_event_key: str | None = None,
         papaya_event_metadata: str | None,
@@ -808,6 +814,7 @@ class Supervisor:
                 "lease": lease.id,
                 "stacked_on": base,
                 "stacked_on_task": stack_on,
+                "routing": routing,
             },
             run_id=run_id,
             task_id=task_id,
@@ -916,8 +923,25 @@ class Supervisor:
             "db_port": prepared.db_port,
             "evidence_path": prepared.evidence_path,
             "overlap_advisory": overlap_advisory,
+            "routing": routing,
             "ends_at": ends_at,
         }
+
+    def _route_and_enforce(
+        self, provider: str, model: str | None, reasoning: str | None, instructions: str
+    ) -> tuple[str, str, dict]:
+        """Pick the tier for a fresh dispatch, then prove it is within the ceiling."""
+        from papaya_agent_runtime import routing as _routing
+
+        try:
+            config = load_config()
+        except ConfigError as exc:
+            raise SupervisorError(f"run `ppy setup` first: {exc}") from exc
+        chosen = _routing.route(
+            config, provider=provider, instructions=instructions, model=model, reasoning=reasoning
+        )
+        model, reasoning = self._resolve_and_enforce(provider, chosen.model, chosen.reasoning)
+        return model, reasoning, chosen.as_dict()
 
     def _resolve_and_enforce(
         self, provider: str, model: str | None, reasoning: str | None
