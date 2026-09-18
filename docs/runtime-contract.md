@@ -74,16 +74,17 @@ user a choice between two things that are both already your job.
 
 A decision only a person can make — a product question you recorded against a task
 (`ppy todo add --blocked-on user "..."`), a capability a worker asked for that policy
-left to a person, a pull request the reconcile lane gave up on — is never left as a
-ledger line, a ticket comment made once, or a question in a terminal nobody is
-watching. Under `ppy serve` there is no session to ask in, so the runtime keeps the
+left to a person, a pull request the reconcile lane gave up on — is never left as
+just a ledger line or a question in a terminal nobody is watching. Under `ppy serve` there is no session to ask in, so the runtime keeps the
 reaching-out in code, the same way in both modes (`outreach.py`): every open ask is
 said to the person where they are — a comment on its work item, one message in their
 DM with this agent (a macOS desktop notification too, only with `PPY_OUTREACH_DESKTOP=1`;
-by default none, since `osascript`'s notifications open Script Editor) — the round it appears,
-and said again every two hours (`PPY_OUTREACH_REPEAT_SECONDS`) with which reminder it
-is, until the ask is gone (the todo closed, the request approved or denied, the pull
-request changed). `ppy serve` does it on its rounds; a session does it from the
+by default none, since `osascript`'s notifications open Script Editor), never a channel.
+It is said once, and again only if what it asks changes; deliveries are at most one
+every six hours (`PPY_OUTREACH_REPEAT_SECONDS`), so a new or changed ask waits for the
+next window rather than adding a message. An unchanged ask is not repeated: it stays in
+`ppy outreach`, `ppy status` and the session hooks until it is gone (the todo closed,
+the request approved or denied, the pull request changed). `ppy serve` does it on its rounds; a session does it from the
 heartbeat, at session start (the list is in front of you), at the end of every turn
 (what nothing remote could reach is bounced into your reply once), and by hand with
 `ppy outreach run`. Recording the decision is still your job: ask the question
