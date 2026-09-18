@@ -260,6 +260,28 @@ def test_a_step_waiting_on_a_task_that_ended_is_released_on_the_interval(home) -
     assert [i.todo_id for i in lanes.ledger_due(conn, now=NOW)] == [freed]
 
 
+def test_a_review_step_waiting_on_its_own_finished_worker_lets_the_review_happen(home) -> None:
+    """PAP-245 (2026-09-18): the step deferred the owed lane from a worker_done worker."""
+    conn = init_db()
+    worker = _worker(conn, "worker_done", note="done")
+    step = board.add("review it", task_id=worker, blocked_on=f"task:{worker}", conn=conn)
+    assert lanes._deferred(conn, worker)
+    lanes.release_finished_waits(conn, now=NOW)
+    assert store.get_todo(conn, step)["blocked_on"] is None
+    assert not lanes._deferred(conn, worker)
+
+
+def test_an_access_wait_is_tried_again_after_an_hour(home) -> None:
+    conn = init_db()
+    step = board.add("attach the frames to the ticket", blocked_on="access", conn=conn)
+    _age_todo(conn, step, 30)
+    assert lanes.release_finished_waits(conn, now=NOW) == []
+    _age_todo(conn, step, 61)
+    [line] = lanes.release_finished_waits(conn, now=NOW)
+    assert "tried again after waiting on access" in line
+    assert store.get_todo(conn, step)["blocked_on"] is None
+
+
 def test_the_heartbeat_releases_finished_waits_too(home) -> None:
     conn = init_db()
     closed = _worker(conn, "closed")
