@@ -367,6 +367,56 @@ def last_ledger_turn(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return {**_payload(row), "created_at": row["created_at"]}
 
 
+#: The event a released task wait leaves, for `ppy tail` and the tests.
+WAIT_RELEASED_EVENT = "todo_wait_released"
+#: The worker states that end what a `task:<id>` wait was waiting for.
+FINISHED_FOR_A_WAIT = ("delivered", "closed", "cancelled", "failed")
+
+
+def release_finished_waits(conn: sqlite3.Connection) -> list[str]:
+    """Open next steps waiting on a task that has since ended become due. Never raises.
+
+    Nothing else clears a `task:<id>` wait, and the moment the task ends is easy to miss
+    (a restart, a delivery handled by another path): PAP-246's Calendar layer waited on
+    its Gmail worker for good after that worker delivered (Shane, 2026-09-18). So every
+    round and every heartbeat reconciles it from the record, not from the event. The
+    ledger lane then takes the step up like any other.
+    """
+    lines: list[str] = []
+    try:
+        rows = conn.execute(
+            "SELECT id, text, blocked_on FROM todos WHERE status = 'open' "
+            "AND blocked_on LIKE 'task:%'"
+        ).fetchall()
+        for row in rows:
+            try:
+                waited = int(str(row["blocked_on"]).split(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            task = store.get_task(conn, waited)
+            status = str(task["status"]) if task is not None else "gone"
+            if task is not None and status not in FINISHED_FOR_A_WAIT:
+                continue
+            store.update_todo(conn, int(row["id"]), blocked_on=None)
+            store.append_event(
+                conn,
+                kind=WAIT_RELEASED_EVENT,
+                payload={"todo_id": int(row["id"]), "task_id": waited, "status": status},
+            )
+            lines.append(
+                f"todo #{int(row['id'])} no longer waits on task {waited} ({status}): "
+                f"its next step is due — {row['text']}"
+            )
+        if lines:
+            conn.commit()
+            from papaya_agent_runtime import board
+
+            board.write_board(conn)
+    except Exception as exc:  # noqa: BLE001 - a round keeps going
+        lines.append(f"could not release waits on finished tasks: {exc}")
+    return lines
+
+
 def ledger_due(
     conn: sqlite3.Connection, *, now: datetime | None = None, grace: float = LEDGER_GRACE_SECONDS
 ) -> list[LedgerItem]:
@@ -478,7 +528,7 @@ def interactive_step(
     """
     if supervision.serve_running():
         return [], []
-    lines: list[str] = []
+    lines: list[str] = release_finished_waits(conn)
     turns: list[OwedDecision] = []
     try:
         for decision in owed_decisions(conn, now=now):

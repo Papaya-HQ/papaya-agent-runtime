@@ -237,6 +237,37 @@ def test_a_next_step_that_sat_is_due_and_a_fresh_or_blocked_one_is_not(home) -> 
     assert "close the stale branch" in item.said()
 
 
+def test_a_step_waiting_on_a_task_that_ended_is_released_on_the_interval(home) -> None:
+    """PAP-246 (2026-09-18): the Calendar layer waited on its delivered Gmail worker for good."""
+    conn = init_db()
+    delivered = _worker(conn, "delivered")
+    running = _worker(conn, "in_progress")
+    freed = board.add("brief the Calendar layer", blocked_on=f"task:{delivered}", conn=conn)
+    held = board.add("review the other one", blocked_on=f"task:{running}", conn=conn)
+    person = board.add("ask about the wording", blocked_on="user", conn=conn)
+
+    lines = lanes.release_finished_waits(conn)
+
+    assert lines == [
+        f"todo #{freed} no longer waits on task {delivered} (delivered): its next step is due"
+        " — brief the Calendar layer"
+    ]
+    assert store.get_todo(conn, freed)["blocked_on"] is None
+    assert store.get_todo(conn, held)["blocked_on"] == f"task:{running}"
+    assert store.get_todo(conn, person)["blocked_on"] == "user"
+    assert lanes.release_finished_waits(conn) == []  # once
+    _age_todo(conn, freed, 45)
+    assert [i.todo_id for i in lanes.ledger_due(conn, now=NOW)] == [freed]
+
+
+def test_the_heartbeat_releases_finished_waits_too(home) -> None:
+    conn = init_db()
+    closed = _worker(conn, "closed")
+    board.add("follow up", blocked_on=f"task:{closed}", conn=conn)
+    lines, _turns = lanes.interactive_step(conn, NOW)
+    assert any("no longer waits on task" in line for line in lines)
+
+
 def test_a_ledger_turn_that_leaves_a_step_twice_hands_it_to_a_person(home) -> None:
     conn = init_db()
     todo_id = board.add("post PR #720 on its work item", conn=conn)

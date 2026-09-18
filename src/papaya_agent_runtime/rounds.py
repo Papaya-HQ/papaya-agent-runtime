@@ -1315,11 +1315,16 @@ class Rounds:
         return found
 
     async def _ledger_lane(self, now: datetime) -> list[str]:
-        """Next steps that sat in the ledger get the ledger turn (`lanes.ledger_due`)."""
+        """Next steps that sat in the ledger get the ledger turn (`lanes.ledger_due`).
+
+        First, a step waiting on a task that has ended is released
+        (`lanes.release_finished_waits`), so it is due this round, not never.
+        """
+        released = await store.run_in_thread(lanes.release_finished_waits)
         due = await store.run_in_thread(lanes.ledger_due, now=now)
         if not due:
-            return []
-        return await self._turns.take_up_ledger(due)
+            return released
+        return released + await self._turns.take_up_ledger(due)
 
     async def _outreach_lane(self, now: datetime) -> list[str]:
         """Everything waiting on a person is said to them, and again on a clock (`outreach`).
