@@ -944,6 +944,27 @@ def _registered_repo_origin(repo: str) -> str | None:
         return None
 
 
+def _brief_preflight(
+    text: str, *, ends_at: str, provider: str | None, repo: str | None, title: str
+) -> list:
+    """The brief lint plus its preflight checks: the worker's allowlist and prior attempts.
+
+    `ppy brief lint` and `ppy dispatch --brief` both call this, so a brief the
+    manager checks before dispatching gets the findings dispatch would print.
+    """
+    from papaya_agent_runtime import brief_lint, prior_attempts
+    from papaya_agent_runtime.config import default_worker_provider
+    from papaya_agent_runtime.state import init_db
+
+    prior = prior_attempts.describe(init_db(), repo, title) if repo and title else None
+    return brief_lint.preflight(
+        text,
+        ends_at=ends_at,
+        allowed=brief_lint.claude_allowlist(provider or default_worker_provider()),
+        prior=prior,
+    )
+
+
 def _cmd_brief(args: argparse.Namespace) -> int:
     """`ppy brief lint <file>`: what a worker cannot recover from in this brief."""
     from papaya_agent_runtime import brief_lint, preflight
@@ -953,7 +974,10 @@ def _cmd_brief(args: argparse.Namespace) -> int:
     except preflight.PreflightError as exc:
         print(f"brief lint: {exc}", file=sys.stderr)
         return 1
-    findings = brief_lint.lint_brief(text, ends_at=args.ends_at)
+    title = args.title or preflight.title_from_brief(text) or ""
+    findings = _brief_preflight(
+        text, ends_at=args.ends_at, provider=args.provider, repo=args.repo, title=title
+    )
     kind = "defect brief" if brief_lint.is_defect_brief(text) else "brief"
     if not findings:
         print(f"{args.file}: {kind}, no findings")
@@ -1040,20 +1064,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except preflight.PreflightError as exc:
         print(f"dispatch refused: {exc}", file=sys.stderr)
         return 1
-    if args.brief:
-        findings = brief_lint.lint_brief(instructions, ends_at=args.ends_at)
-        if findings:
-            # Wrong premises and self-contradicting scope cost 25 and 13 reflections
-            # in cycle 4 (issue #59); say so before the worker is out the door.
-            print(f"brief lint: {len(findings)} finding(s) in {args.brief}", file=sys.stderr)
-            print(brief_lint.render(findings, args.brief), file=sys.stderr)
-            if args.strict:
-                print(
-                    "dispatch refused: --strict and the brief lint found problems; fix the "
-                    "brief (see `ppy brief lint`) or dispatch without --strict",
-                    file=sys.stderr,
-                )
-                return 1
 
     title = args.title
     if not title:
@@ -1081,6 +1091,25 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 "worker writes a stub and refuses to push to a remote that is not a local path; "
                 "pass --provider claude or --provider codex for real work"
             )
+
+    if args.brief:
+        # Read once the title and provider are settled: the allowlist is the one this
+        # worker gets, and a prior attempt is matched on this title (runtime #94).
+        findings = _brief_preflight(
+            instructions, ends_at=args.ends_at, provider=provider, repo=args.repo, title=title
+        )
+        if findings:
+            # Wrong premises and self-contradicting scope cost 25 and 13 reflections
+            # in cycle 4 (issue #59); say so before the worker is out the door.
+            print(f"brief lint: {len(findings)} finding(s) in {args.brief}", file=sys.stderr)
+            print(brief_lint.render(findings, args.brief), file=sys.stderr)
+            if args.strict:
+                print(
+                    "dispatch refused: --strict and the brief lint found problems; fix the "
+                    "brief (see `ppy brief lint`) or dispatch without --strict",
+                    file=sys.stderr,
+                )
+                return 1
 
     # The remote, starting commit and gate a worker is about to be handed (runtime
     # #94). The lease itself is checked by the supervisor once it exists.
@@ -1120,7 +1149,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     if not resp.get("ok"):
-        print(f"dispatch failed: {resp.get('error')}", file=sys.stderr)
+        error = str(resp.get("error"))
+        # A sequencing refusal (overlap, empty-parent) already says it was refused.
+        print(
+            error if error.startswith("dispatch refused:") else f"dispatch failed: {error}",
+            file=sys.stderr,
+        )
         return 1
     print(f"dispatched task {resp['task_id']} in run {resp['run_id']} (branch {resp['branch']})")
     for advisory in ("migration_advisory", "overlap_advisory"):
@@ -3452,6 +3486,28 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["review", "done"],
         default="done",
         help="terminal phase to check the brief against (default: done)",
+    )
+    blint.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "the registered repo it will be dispatched to: an ended task there with the same "
+            "title asks for a `## Prior attempt` section, as `ppy dispatch --brief` does"
+        ),
+    )
+    blint.add_argument(
+        "--title",
+        default=None,
+        help="the objective it will be dispatched under (default: the brief's first heading)",
+    )
+    blint.add_argument(
+        "--provider",
+        default=None,
+        choices=["fake", "claude", "codex"],
+        help=(
+            "the worker provider (default: the configured one); a Claude worker's commands "
+            "are checked against its allowlist"
+        ),
     )
     brief.set_defaults(func=_cmd_brief)
 

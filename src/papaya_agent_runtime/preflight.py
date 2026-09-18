@@ -8,7 +8,8 @@ dispatch onto a nearly full disk, and archives the brief it sent next to the
 instance state so the exact packet a worker received is always recoverable.
 
 Since runtime #94 it also runs the trust checks (remote, base, lease, gate): the
-starting point and the gate a worker is handed are checked, not assumed.
+starting point and the gate a worker is handed are checked, not assumed. The
+sequencing checks (overlap, empty-parent) are refusals from the same set.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# One allowlist matcher for the gate check and the brief's allowlist check.
+from papaya_agent_runtime.brief_lint import _allowed_prefixes, _covered
 from papaya_agent_runtime.paths import ppy_home
 
 MIN_FREE_GB_ENV = "PPY_MIN_FREE_GB"
@@ -157,9 +160,10 @@ def archive_brief(repo: str, task_id: int, text: str) -> Path:
 # --------------------------------------------------------------------------- #
 
 #: The checks ``ppy dispatch --accept-preflight`` can name. There is no blanket skip.
-#: ``lease`` runs in the supervisor once the lease exists; the rest run in
-#: ``ppy dispatch`` itself. A new check is one more name here.
-CHECKS = ("remote", "base", "lease", "gate")
+#: ``remote``, ``base`` and ``gate`` run in ``ppy dispatch`` itself; ``overlap`` and
+#: ``empty-parent`` run in the supervisor before the task row exists, and ``lease``
+#: once the lease does. A new check is one more name here.
+CHECKS = ("remote", "base", "lease", "gate", "overlap", "empty-parent")
 
 #: The starting-commit line the brief templates use: "you must see `cb3a761`".
 _STARTING_SHA = re.compile(r"you must see\s+`?([0-9a-f]{7,40})\b`?", re.IGNORECASE)
@@ -319,32 +323,6 @@ def check_starting_commit(
         )
     assert full is not None
     return full
-
-
-def _allowed_prefixes(allowed: list[str]) -> tuple[bool, list[str]]:
-    """(everything allowed, command prefixes) from Claude tool patterns like ``Bash(git:*)``."""
-    prefixes: list[str] = []
-    for pattern in allowed:
-        pattern = pattern.strip()
-        if pattern == "Bash":
-            return True, []
-        match = re.fullmatch(r"Bash\((.+?)(?::\*)?\)", pattern)
-        if match:
-            prefixes.append(match.group(1).strip())
-    return False, prefixes
-
-
-def _covered(command: str, prefixes: list[str]) -> bool:
-    """Whether one plain command matches an allowed ``Bash(...)`` prefix."""
-    head = command.split()[0]
-    base = head.rsplit("/", 1)[-1]
-    for prefix in prefixes:
-        first = prefix.split()[0]
-        if command == prefix or command.startswith(prefix + " "):
-            return True
-        if head == first or base == first.rsplit("/", 1)[-1]:
-            return True
-    return False
 
 
 def _make_invocation(words: list[str]) -> tuple[list[str], list[str]]:
@@ -534,3 +512,76 @@ def trust_checks(
     for check in accepted:
         trust.overridden.setdefault(check, None)
     return trust
+
+
+# --------------------------------------------------------------------------- #
+# Sequencing: a stack parent must have something to stack on (runtime #94).
+#
+# In Middle Manager a child was stacked on a parent that had not committed yet.
+# The parent's branch was still its base, so the child started from `main`,
+# recorded `main` as its base, and was a sibling in all but name.
+# --------------------------------------------------------------------------- #
+
+
+def _forge_head(local_path: str, remote: str, branch: str) -> str | None:
+    """The branch's head on ``remote``, with its objects fetched when they are missing."""
+    listed = _git(local_path, "ls-remote", "--quiet", remote, f"refs/heads/{branch}")
+    words = listed.stdout.split() if listed.returncode == 0 else []
+    if not words:
+        return None
+    sha = words[0]
+    if _commit(local_path, sha) is None:
+        _git(local_path, "fetch", "--quiet", remote, branch)
+    return sha
+
+
+def _commits_beyond(cwd: str, base: str, head: str) -> int | None:
+    """How many commits ``head`` has that ``base`` does not; None when git cannot say."""
+    if head == base:
+        return 0
+    proc = _git(cwd, "rev-list", "--count", f"{base}..{head}")
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
+def empty_parent_refusal(parent, *, local_path: str, remote: str) -> str | None:
+    """Why ``parent`` has nothing to stack on yet, or None when it has (or cannot be judged).
+
+    The parent's branch is looked for where a child's start would find it: on the
+    forge, as the base clone's local branch, and in the parent's lease worktree.
+    It is empty only when it was found somewhere and every copy found has no
+    commits beyond the parent's own base, so a lease-only commit that was never
+    pushed counts as progress. Uncommitted edits do not: a child starts from commits.
+    """
+    base, branch = parent["base_sha"], parent["branch"]
+    if not base or not branch:
+        return None
+    heads: list[tuple[str, str, str]] = []
+    forge = _forge_head(local_path, remote, branch)
+    if forge:
+        heads.append((f"on {remote}", local_path, forge))
+    local = _commit(local_path, f"refs/heads/{branch}")
+    if local:
+        heads.append(("in the base clone", local_path, local))
+    worktree = parent["worktree_path"]
+    if worktree and Path(worktree).is_dir():
+        lease_head = _commit(worktree, "HEAD")
+        if lease_head:
+            heads.append(("in its lease worktree", worktree, lease_head))
+    if not heads:
+        return None
+    for _where, cwd, head in heads:
+        if _commits_beyond(cwd, base, head) != 0:
+            return None
+    where = ", ".join(dict.fromkeys(where for where, _cwd, _head in heads))
+    return (
+        f'the stack parent, task {parent["id"]} "{parent["title"]}" (branch {branch}), has no '
+        f"commits beyond its own base {base[:12]} ({where}) — the new worker would start "
+        "from that base, not from the parent's work. Wait for the parent's first push, then "
+        "dispatch again; to start from its base anyway, --accept-preflight empty-parent "
+        "--reason ..."
+    )

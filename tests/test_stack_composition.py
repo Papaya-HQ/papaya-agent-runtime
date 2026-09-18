@@ -108,10 +108,19 @@ def _in_progress_task(repo_name: str, title: str, run_id: int | None = None) -> 
 
 
 def _stack_on(client, repo_name: str, parent_id: int, title: str) -> int:
-    """Stack a child on a parent whose branch may still be empty."""
+    """Stack a child on a parent whose branch may still be empty.
+
+    That is refused at dispatch since runtime #94 item 3; these fixtures reproduce
+    the empty-parent shape on purpose, so they wave the check through on the record.
+    """
     parent = _task(parent_id)
     resp = client.dispatch_task(
-        repo=repo_name, title=title, run_id=parent["run_id"], stack_on=parent_id
+        repo=repo_name,
+        title=title,
+        run_id=parent["run_id"],
+        stack_on=parent_id,
+        accepted_preflight=[{"check": "empty-parent", "overridden": None}],
+        preflight_reason="reproducing an empty-parent stack",
     )
     assert resp["ok"], resp
     _wait_terminal(client, resp["task_id"])

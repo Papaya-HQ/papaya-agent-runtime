@@ -1,4 +1,4 @@
-"""Two tasks in one repository editing the same files are named at dispatch (issue #61)."""
+"""Two tasks in one repository editing the same files are refused at dispatch (issue #61, #94)."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def test_in_flight_needs_a_live_status_a_worktree_on_disk_and_recent_activity(
 
 
 # --------------------------------------------------------------------------- #
-# The advisory at dispatch
+# The refusal at dispatch
 # --------------------------------------------------------------------------- #
 
 
@@ -147,13 +147,24 @@ def test_dispatch_names_the_in_flight_task_touching_the_same_module(server, modu
         title="add a card",
         instructions="# Card\n\nEdit `src/radar/compose.py` to register the card.\n",
     )
-    assert second["ok"], second
-    advisory = second["overlap_advisory"]
-    assert advisory, "the second dispatch should have been told about the first"
-    assert f'task {first["task_id"]} "split the composer"' in advisory
-    assert "src/radar/compose.py" in advisory
-    assert f"--stack-on {first['task_id']}" in advisory
-    _wait_terminal(client, second["task_id"])
+    assert not second["ok"], "the second dispatch should have been refused for the first"
+    refusal = second["error"]
+    assert f'task {first["task_id"]} "split the composer"' in refusal
+    assert "src/radar/compose.py" in refusal
+    assert f"--stack-on {first['task_id']}" in refusal
+    assert "Nothing was refused" not in refusal
+
+    # Accepted on the record, it runs beside the first and says so.
+    accepted = client.dispatch_task(
+        repo=added.name,
+        title="add a card",
+        instructions="# Card\n\nEdit `src/radar/compose.py` to register the card.\n",
+        accepted_preflight=[{"check": "overlap", "overridden": None}],
+        preflight_reason="independent hunk",
+    )
+    assert accepted["ok"], accepted
+    assert f"--stack-on {first['task_id']}" in accepted["overlap_advisory"]
+    _wait_terminal(client, accepted["task_id"])
 
     # A different file in the same tree: nothing to say.
     third = client.dispatch_task(
@@ -164,16 +175,15 @@ def test_dispatch_names_the_in_flight_task_touching_the_same_module(server, modu
     _wait_terminal(client, third["task_id"])
 
     # A module directory covers the files inside it; the task being stacked on
-    # is not reported, the others are.
+    # is not named, the other siblings are.
     fourth = client.dispatch_task(
         repo=added.name,
         title="rework the module",
         instructions="Touches: src/radar/\n",
         stack_on=first["task_id"],
     )
-    assert fourth["ok"], fourth
-    advisory = fourth["overlap_advisory"]
-    assert advisory
-    assert f"--stack-on {first['task_id']}" not in advisory
-    assert f"--stack-on {second['task_id']}" in advisory
-    assert f"--stack-on {third['task_id']}" in advisory
+    assert not fourth["ok"], fourth
+    refusal = fourth["error"]
+    assert f"--stack-on {first['task_id']}" not in refusal
+    assert f"--stack-on {accepted['task_id']}" in refusal
+    assert f"--stack-on {third['task_id']}" in refusal
