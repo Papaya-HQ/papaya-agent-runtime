@@ -10,6 +10,10 @@ dump, and nothing the record does not say:
   on a person. :func:`render` prints it one line per item.
 - :func:`tail` is `ppy tail`: the event stream as one line per event, oldest first,
   from the same tables the daemon writes, with ``follow`` polling for new ones.
+- :func:`workers` / :func:`render_workers` is `ppy workers`: one block per in-flight
+  worker, named by the work item it serves (:func:`work_item`), with its last few
+  actions (:func:`worker_actions`). :class:`Paint` is the one colour helper both
+  views use; nothing is coloured unless :func:`colour_wanted` says so.
 - :func:`status_line` is the one line a held ticket carries on its work item, kept
   current by the runner where Papaya lets a comment be edited in place.
 - :func:`person_actions` is how the rounds tell a person's steer from their own, so a
@@ -87,6 +91,157 @@ def _clip(text: object, limit: int = 100) -> str:
 
 def _age(seconds: int | None) -> str:
     return health.humanize(seconds) if seconds is not None else "?"
+
+
+# ── colour ──────────────────────────────────────────────────────────────────
+
+#: The only styles the views use, as SGR codes. Nothing else is ever coloured.
+STYLES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33"}
+
+#: `--color` choices.
+COLOR_CHOICES = ("auto", "always", "never")
+
+#: How a health verdict is coloured.
+VERDICT_STYLES = {"alive": "green", "quiet": "yellow", "dead": "red"}
+
+#: Width a view clips to when stdout is not a terminal.
+DEFAULT_WIDTH = 100
+
+
+def is_tty(stream: Any) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def colour_wanted(
+    choice: str = "auto", stream: Any = None, environ: dict[str, str] | None = None
+) -> bool:
+    """Whether to colour: `always`/`never` as said; `auto` only for a terminal.
+
+    `auto` honours `NO_COLOR` (any non-empty value), `CLICOLOR=0` and `TERM=dumb`.
+    """
+    import os
+    import sys
+
+    if choice == "always":
+        return True
+    if choice == "never":
+        return False
+    env = os.environ if environ is None else environ
+    if env.get("NO_COLOR") or env.get("CLICOLOR") == "0" or env.get("TERM") == "dumb":
+        return False
+    return is_tty(sys.stdout if stream is None else stream)
+
+
+def terminal_width(stream: Any = None) -> int:
+    """The terminal's columns, or :data:`DEFAULT_WIDTH` when ``stream`` is not a terminal."""
+    import shutil
+    import sys
+
+    if not is_tty(sys.stdout if stream is None else stream):
+        return DEFAULT_WIDTH
+    return max(40, shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns)
+
+
+class Paint:
+    """Wraps text in the named :data:`STYLES`, or leaves it alone when disabled."""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+
+    def __call__(self, text: str, *styles: str | None) -> str:
+        codes = [STYLES[s] for s in styles if s]
+        if not self.enabled or not codes or not text:
+            return text
+        return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+
+#: A line as runs of text, each with its styles: clipped by visible width, then painted.
+Segment = tuple[str, tuple[str, ...]]
+
+
+def _seg(text: object, *styles: str | None) -> Segment:
+    return (str(text), tuple(s for s in styles if s))
+
+
+def clip_words(text: str, width: int) -> str:
+    """``text`` cut to ``width`` columns at a word boundary, with `…` when cut."""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    cut = text[: width - 1]
+    space = cut.rfind(" ")
+    if space > 0 and not text[width - 1].isspace():
+        cut = cut[:space]
+    return cut.rstrip() + "…"
+
+
+def fit(segments: list[Segment], width: int, paint: Paint) -> str:
+    """The segments painted, clipped to ``width`` visible columns without splitting a word."""
+    out, used = [], 0
+    for text, styles in segments:
+        if used + len(text) <= width:
+            out.append(paint(text, *styles))
+            used += len(text)
+            continue
+        if width - used > 1:
+            out.append(paint(clip_words(text, width - used), *styles))
+        break
+    return "".join(out).rstrip()
+
+
+# ── the work item a worker serves ───────────────────────────────────────────
+
+
+def _env(conn: sqlite3.Connection, task_id: int | None, key: str) -> str:
+    if task_id is None:
+        return ""
+    return str(store.get_task_env(conn, task_id, key) or "").strip()
+
+
+def work_item(
+    conn: sqlite3.Connection, worker_task_id: int, ticket: sqlite3.Row | None
+) -> dict[str, Any] | None:
+    """The work item a worker serves, as a person names it, and where that name came from.
+
+    ``source`` says which: `ticket` (the display id recorded when the ticket was
+    taken), `tracker` (a `ppy track` record on the worker or its ticket), or
+    `work item id` (a ticket taken before display ids were recorded). ``None`` for a
+    worker with no ticket and no tracker record.
+    """
+    from papaya_agent_runtime import papaya_events, tracker
+
+    ticket_id = int(ticket["id"]) if ticket is not None else None
+    title = _env(conn, ticket_id, papaya_events.WORK_ITEM_TITLE) or (
+        str(ticket["title"] or "") if ticket is not None else ""
+    )
+    key = _env(conn, ticket_id, papaya_events.WORK_ITEM_KEY)
+    if key:
+        return {"key": key, "title": title, "source": "ticket", "ticket_task_id": ticket_id}
+    for task_id in (worker_task_id, ticket_id):
+        record = _env(conn, task_id, tracker.RECORD_KEY)
+        if record:
+            return {
+                "key": record,
+                "title": title or _env(conn, task_id, tracker.TITLE_KEY),
+                "source": "tracker",
+                "ticket_task_id": ticket_id,
+            }
+    if ticket is None:
+        return None
+    try:
+        item_id = str(json.loads(ticket["metadata"]).get("work_item_id") or "")
+    except (TypeError, ValueError, IndexError, KeyError):
+        item_id = ""
+    return {
+        "key": f"work item {item_id[:8]}" if item_id else f"ticket task {ticket_id}",
+        "title": title,
+        "source": "work item id",
+        "ticket_task_id": ticket_id,
+    }
 
 
 # ── who acted on a worker ───────────────────────────────────────────────────
@@ -253,7 +408,7 @@ def _workers(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
         WORKER_STATUSES,
     ).fetchall()
     verdicts = {int(e["task_id"]): e for e in health.check(conn, now=now)}
-    tickets = {int(t["run_id"]): int(t["id"]) for t in _ticket_rows(conn)}
+    tickets = {int(t["run_id"]): t for t in _ticket_rows(conn)}
     workers = []
     for row in rows:
         task_id = int(row["id"])
@@ -261,14 +416,17 @@ def _workers(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
         note_payload = _payload(note) if note is not None else {}
         entry = verdicts.get(task_id)
         steers = person_actions(conn, task_id)
+        ticket = tickets.get(int(row["run_id"]))
         workers.append(
             {
                 "task_id": task_id,
-                "ticket_task_id": tickets.get(int(row["run_id"])),
+                "ticket_task_id": int(ticket["id"]) if ticket is not None else None,
+                "work_item": work_item(conn, task_id, ticket),
                 "repo": row["repo"],
                 "branch": row["branch"],
                 "status": str(row["status"]),
                 "running_seconds": _ago(now, row["created_at"]),
+                "running_since": str(row["created_at"]),
                 "session": entry["verdict"] if entry else None,
                 "silent_seconds": entry["silent_seconds"] if entry else None,
                 **_activity(conn, task_id),
@@ -276,6 +434,7 @@ def _workers(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
                 "note_phase": note_payload.get("phase"),
                 "note": _clip(note_payload.get("note"), 140) if note is not None else None,
                 "note_seconds": _ago(now, note["created_at"]) if note is not None else None,
+                "note_at": str(note["created_at"]) if note is not None else None,
                 "last_person_steer": steers[-1] if steers else None,
             }
         )
@@ -438,14 +597,21 @@ def _gate_words(g: dict[str, Any] | None) -> str | None:
     return f"{scope} running under the supervisor ({_age(g['seconds'])} in)"
 
 
-def _worker_line(w: dict[str, Any]) -> str:
+def _verdict_words(w: dict[str, Any]) -> str:
+    silent = f", silent {_age(w['silent_seconds'])}" if w["session"] == "quiet" else ""
+    return f"{w['session']}{silent}"
+
+
+def _worker_line(w: dict[str, Any], paint: Paint | None = None) -> str:
+    paint = paint or Paint()
     parts = [f"worker task {w['task_id']}"]
+    if w.get("work_item"):
+        parts.append(paint(w["work_item"]["key"], "bold"))
     if w["repo"]:
         parts.append(str(w["repo"]))
     parts.append(f"{w['status']} {_age(w['running_seconds'])}")
     if w["session"]:
-        silent = f", silent {_age(w['silent_seconds'])}" if w["session"] == "quiet" else ""
-        parts.append(f"session {w['session']}{silent}")
+        parts.append("session " + paint(_verdict_words(w), VERDICT_STYLES.get(str(w["session"]))))
     doing = _doing(w)
     if doing:
         parts.append(doing)
@@ -470,7 +636,7 @@ def _pr_line(p: dict[str, Any]) -> str:
     return " · ".join(parts)
 
 
-def render(snap: dict[str, Any]) -> list[str]:
+def render(snap: dict[str, Any], paint: Paint | None = None) -> list[str]:
     """`ppy status --team`: one line per item, under one heading per section."""
     lines = [f"team at {snap['at']}"]
 
@@ -479,7 +645,7 @@ def render(snap: dict[str, Any]) -> list[str]:
         lines.extend(f"  {item}" for item in items)
 
     section("held tickets", [_ticket_line(t) for t in snap["tickets"]])
-    section("workers", [_worker_line(w) for w in snap["workers"]])
+    section("workers", [_worker_line(w, paint) for w in snap["workers"]])
     section("pull requests", [_pr_line(p) for p in snap["pull_requests"]])
     lines.append(f"reconcile lane: {snap['lane']}")
     section(
@@ -731,11 +897,339 @@ def tail(
         sleep(interval)
 
 
+# ── one worker at a time: `ppy workers` ─────────────────────────────────────
+
+#: `--actions` default and ceiling.
+DEFAULT_ACTIONS = 5
+MAX_ACTIONS = 20
+
+#: What a Claude tool call's name reads as when it names a target, not a command.
+_TOOL_VERBS = {
+    "read": "read",
+    "edit": "edited",
+    "multiedit": "edited",
+    "write": "wrote",
+    "grep": "searched for",
+    "glob": "listed",
+    "webfetch": "fetched",
+    "websearch": "searched the web for",
+    "todowrite": "updated its todo list",
+}
+
+
+def _tool_call_words(block: dict[str, Any]) -> str:
+    from papaya_agent_runtime import serve
+
+    name = str(block.get("name") or "a tool")
+    arguments = block.get("input") if isinstance(block.get("input"), dict) else {}
+    if str(arguments.get("command") or "").strip():
+        return f"ran `{_clip(arguments['command'], 160)}`"
+    target = serve._tool_command(block)
+    verb = _TOOL_VERBS.get(name.lower())
+    if verb and not target:
+        return verb
+    if verb:
+        return f"{verb} {_clip(target, 160)}"
+    return f"used {name}" + (f" on {_clip(target, 160)}" if target else "")
+
+
+def _gate_scope(payload: dict[str, Any]) -> str:
+    full = payload.get("full", "full" in str(payload.get("key") or "").split(":"))
+    return "full suite" if full else "local gate"
+
+
+def _action_words(
+    row: Any, payload: dict[str, Any], shown_tools: set[str]
+) -> list[tuple[str, str | None]]:
+    """What one event says the worker did, as `(words, tone)`; `[]` for chatter.
+
+    ``tone`` is `pass`/`fail` for a gate result and ``None`` otherwise. ``shown_tools``
+    collects the tool calls already said, so a running tool's 30-second heartbeat is
+    one action, not one per beat.
+    """
+    from papaya_agent_runtime import gate, serve
+
+    kind = str(row["kind"])
+    if kind == "worker_assistant":
+        said: list[tuple[str, str | None]] = []
+        uses = serve._tool_uses(payload)
+        text = serve._assistant_text(payload)
+        if text:
+            said.append((f'said "{_clip(text, 140)}"', None))
+        for block in uses:
+            shown_tools.add(str(block.get("id") or ""))
+            said.append((_tool_call_words(block), None))
+        return said
+    if kind == "worker_tool_progress":
+        call = str(payload.get("parent_tool_use_id") or payload.get("tool_use_id") or "")
+        call = call.split("-heartbeat-")[0]
+        if not call or call in shown_tools:
+            return []
+        shown_tools.add(call)
+        return [(f"running {payload.get('tool_name') or 'a tool'}", None)]
+    if kind in ("worker_item.started", "worker_item.completed"):
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+        if item.get("command"):
+            command = _clip(item["command"], 160)
+            if kind.endswith("started"):
+                return [(f"ran `{command}`", None)]
+            code = item.get("exit_code")
+            ended = f" (exit {code})" if code is not None else ""
+            return [(f"finished `{command}`{ended}", None)]
+        if kind.endswith("completed") and item.get("type") == "agent_message" and item.get("text"):
+            return [(f'said "{_clip(item["text"], 140)}"', None)]
+        return []
+    if kind == gate.GATE_QUEUED:
+        reason = f": {_clip(payload.get('reason'), 120)}" if payload.get("reason") else ""
+        return [(f"{_gate_scope(payload)} queued{reason}", None)]
+    if kind == gate.GATE_STARTED:
+        command = f" `{_clip(payload.get('command'), 120)}`" if payload.get("command") else ""
+        return [(f"{_gate_scope(payload)} started{command}", None)]
+    if kind == gate.GATE_RESULT:
+        took = payload.get("duration_seconds")
+        after = f" in {_age(int(float(took)))}" if isinstance(took, int | float) else ""
+        if payload.get("exit_code") == 0:
+            return [(f"{_gate_scope(payload)} passed{after}", "pass")]
+        summary = f": {_clip(payload.get('summary'), 100)}" if payload.get("summary") else ""
+        return [
+            (
+                f"{_gate_scope(payload)} failed (exit {payload.get('exit_code')}){after}{summary}",
+                "fail",
+            )
+        ]
+    if kind == gate.GATE_KILLED:
+        return [(f"{_gate_scope(payload)} killed", "fail")]
+    if kind == "progress_guidance":
+        by = payload.get("by") or "the manager"
+        return [(f"note from {by}: {_clip(payload.get('note'), 140)}", None)]
+    line = event_line(row)
+    if line is None:
+        return []
+    for prefix in (f"task {row['task_id']} ", "runtime "):
+        if line.startswith(prefix):
+            line = line[len(prefix) :]
+            break
+    return [(line, None)]
+
+
+def worker_actions(
+    conn: sqlite3.Connection,
+    worker_task_id: int,
+    ticket_task_id: int | None,
+    *,
+    limit: int = DEFAULT_ACTIONS,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """The worker's newest ``limit`` actions, newest last, from its events and its check-ins.
+
+    Each is `{event_id, at (ISO), seconds (ago), what, tone}`. Reads only.
+    """
+    now = now or datetime.now(UTC)
+    rows = conn.execute(
+        "SELECT id, task_id, kind, payload, created_at FROM events WHERE task_id = ? "
+        "OR (task_id = ? AND kind = 'ticket_checkin' "
+        "AND json_extract(payload, '$.worker_task_id') = ?) ORDER BY id",
+        (worker_task_id, ticket_task_id if ticket_task_id is not None else -1, worker_task_id),
+    ).fetchall()
+    shown: set[str] = set()
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        for what, tone in _action_words(row, _payload(row), shown):
+            found.append(
+                {
+                    "event_id": int(row["id"]),
+                    "at": str(row["created_at"]),
+                    "seconds": _ago(now, row["created_at"]),
+                    "what": what,
+                    "tone": tone,
+                }
+            )
+    return found[-limit:] if limit > 0 else []
+
+
+def workers(
+    conn: sqlite3.Connection | None = None,
+    *,
+    now: datetime | None = None,
+    actions: int = DEFAULT_ACTIONS,
+) -> list[dict[str, Any]]:
+    """Every in-flight worker as `ppy workers` says it, with its last ``actions`` actions."""
+    own = conn is None
+    conn = conn or db.init_db()
+    now = now or datetime.now(UTC)
+    actions = max(0, min(MAX_ACTIONS, actions))
+    try:
+        found = []
+        for worker in _workers(conn, now):
+            worker["actions"] = worker_actions(
+                conn, worker["task_id"], worker["ticket_task_id"], limit=actions, now=now
+            )
+            found.append(worker)
+        return found
+    finally:
+        if own:
+            conn.close()
+
+
+def utc_clock(at: datetime | None = None) -> str:
+    """`HH:MM:SS UTC` for ``at`` (default now)."""
+    return (at or datetime.now(UTC)).astimezone(UTC).strftime("%H:%M:%S UTC")
+
+
+def _utc(stamp: object) -> str:
+    at = _parse(stamp)
+    return at.astimezone(UTC).strftime("%H:%M:%S UTC") if at is not None else "--:--:-- UTC"
+
+
+#: The width an action's relative age is padded to, so the words line up as a column.
+_AGO_WIDTH = len("(99h59m ago)")
+
+_TONE_STYLES = {"pass": "green", "fail": "red"}
+
+
+def _header(w: dict[str, Any], width: int, paint: Paint) -> str:
+    tail: list[Segment] = [_seg(f" · task {w['task_id']}")]
+    if w["repo"]:
+        tail.append(_seg(f" · {w['repo']}"))
+    tail.append(_seg(f" · {w['status']} {_age(w['running_seconds'])}"))
+    if w["session"]:
+        tail.append(_seg(" · "))
+        tail.append(_seg(_verdict_words(w), VERDICT_STYLES.get(str(w["session"]))))
+    item = w.get("work_item")
+    if item is None:
+        return fit([_seg("no ticket"), *tail], width, paint)
+    head = [_seg(item["key"], "bold")]
+    # The title gives way first, so the facts after it always fit.
+    room = width - len(item["key"]) - sum(len(t) for t, _ in tail) - 3
+    if item.get("title") and room >= 8:
+        head.append(_seg(" "))
+        head.append(_seg(f'"{clip_words(item["title"], room)}"', "bold"))
+    return fit([*head, *tail], width, paint)
+
+
+def render_workers(
+    found: list[dict[str, Any]], *, width: int = DEFAULT_WIDTH, paint: Paint | None = None
+) -> list[str]:
+    """`ppy workers`: one block per worker, a blank line between blocks."""
+    paint = paint or Paint()
+    if not found:
+        return ["no workers in flight"]
+    lines: list[str] = []
+    for w in found:
+        if lines:
+            lines.append("")
+        lines.append(_header(w, width, paint))
+        lines.append(fit([_seg(f"  doing: {_doing(w) or 'nothing recorded yet'}")], width, paint))
+        gate_said = _gate_words(w.get("gate"))
+        if gate_said:
+            lines.append(fit([_seg(f"  gate: {gate_said}")], width, paint))
+        if w["note"] is not None:
+            lines.append(
+                fit(
+                    [
+                        _seg(f"  note: [{w['note_phase']}] {w['note']} "),
+                        _seg(f"({_age(w['note_seconds'])} ago)", "dim"),
+                    ],
+                    width,
+                    paint,
+                )
+            )
+        if w["last_person_steer"]:
+            steer = w["last_person_steer"]["message"]
+            lines.append(fit([_seg(f'  steered by a person: "{steer}"')], width, paint))
+        acts = w.get("actions") or []
+        lines.append(f"  last {len(acts)} actions:" if acts else "  no actions recorded yet")
+        for act in acts:
+            lines.append(
+                fit(
+                    [
+                        _seg("    "),
+                        _seg(_utc(act["at"]), "dim"),
+                        _seg("  "),
+                        _seg(f"({_age(act['seconds'])} ago)".ljust(_AGO_WIDTH), "dim"),
+                        _seg("  "),
+                        _seg(act["what"], _TONE_STYLES.get(str(act.get("tone")))),
+                    ],
+                    width,
+                    paint,
+                )
+            )
+    return lines
+
+
+def workers_json(found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps."""
+
+    def iso(stamp: object) -> str | None:
+        at = _parse(stamp)
+        return at.isoformat() if at is not None else None
+
+    return [
+        {
+            **w,
+            "running_since": iso(w["running_since"]),
+            "note_at": iso(w["note_at"]),
+            "actions": [{**a, "at": iso(a["at"])} for a in w["actions"]],
+        }
+        for w in found
+    ]
+
+
+def _signature(conn: sqlite3.Connection) -> tuple[Any, ...]:
+    """What changes when any worker does something: newest event, task statuses."""
+    newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+    statuses = conn.execute("SELECT id, status FROM tasks ORDER BY id").fetchall()
+    return (int(newest), tuple((int(r["id"]), str(r["status"])) for r in statuses))
+
+
+def follow_workers(
+    write: Callable[[list[dict[str, Any]]], None],
+    *,
+    actions: int = DEFAULT_ACTIONS,
+    follow: bool = False,
+    sleep: Callable[[float], None] | None = None,
+    interval: float = 2.0,
+    polls: int | None = None,
+) -> int:
+    """`ppy workers [--follow]`: hand ``write`` the workers, then again whenever they change.
+
+    The same polling shape as :func:`tail`: ``polls`` bounds how many times a follow
+    looks again (``None`` is until interrupted). Returns how many times it wrote.
+    """
+    sleep = sleep or time.sleep
+    last: tuple[Any, ...] | None = None
+    written, looked = 0, 0
+    while True:
+        conn = db.init_db()
+        try:
+            signature = _signature(conn)
+            if signature != last:
+                write(workers(conn, actions=actions))
+                written += 1
+                last = signature
+        finally:
+            conn.close()
+        if not follow or (polls is not None and looked >= polls):
+            return written
+        looked += 1
+        sleep(interval)
+
+
 __all__ = [
     "BLOCKERS_EVENT",
+    "COLOR_CHOICES",
     "PR_OBSERVED_EVENT",
     "ROUND_SUMMARY_EVENT",
+    "Paint",
+    "colour_wanted",
     "event_line",
+    "follow_workers",
+    "render_workers",
+    "terminal_width",
+    "work_item",
+    "worker_actions",
+    "workers",
+    "workers_json",
     "feed",
     "parse_duration",
     "person_actions",

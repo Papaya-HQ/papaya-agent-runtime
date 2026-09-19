@@ -2767,7 +2767,7 @@ def _cmd_status_team(args: argparse.Namespace) -> int:
     if snap is None:
         print("team: no state yet (nothing has been picked up or dispatched on this machine)")
     else:
-        for line in team.render(snap):
+        for line in team.render(snap, team.Paint(team.colour_wanted("auto", sys.stdout))):
             print(line)
         _say_delta(prs={p["url"] or f"task {p['task_id']}": p for p in snap["pull_requests"]})
     standalone.say_invitation(sys.stdout)
@@ -2806,6 +2806,43 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
     with contextlib.suppress(KeyboardInterrupt):
         team.tail(lambda line: print(line, flush=True), since=since, follow=args.follow)
+    return 0
+
+
+def _cmd_workers(args: argparse.Namespace) -> int:
+    """Every in-flight worker: its work item, health, what it is doing, its last actions."""
+    import contextlib
+
+    from papaya_agent_runtime import team
+    from papaya_agent_runtime.paths import db_path
+
+    if not 1 <= args.actions <= team.MAX_ACTIONS:
+        print(f"workers: --actions is 1 to {team.MAX_ACTIONS}, not {args.actions}", file=sys.stderr)
+        return 2
+    if not db_path().exists() and not args.follow:
+        print("no workers in flight")
+        return 0
+    paint = team.Paint(False if args.json else team.colour_wanted(args.color, sys.stdout))
+    width = team.terminal_width(sys.stdout)
+    first = True
+
+    def write(found: list[dict]) -> None:
+        nonlocal first
+        if args.json:
+            print(json.dumps(team.workers_json(found), indent=2, sort_keys=True, default=str))
+        else:
+            if args.follow:
+                # Each reprint says when it was read, so a scrollback reads as a history.
+                if not first:
+                    print("")
+                print(paint(f"workers at {team.utc_clock()}", "dim"))
+            for line in team.render_workers(found, width=width, paint=paint):
+                print(line)
+        sys.stdout.flush()
+        first = False
+
+    with contextlib.suppress(KeyboardInterrupt):
+        team.follow_workers(write, actions=args.actions, follow=args.follow, polls=args.polls)
     return 0
 
 
@@ -4289,6 +4326,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--follow", "-f", action="store_true", help="keep printing new events until interrupted"
     )
     tail.set_defaults(func=_cmd_tail)
+
+    workers = sub.add_parser(
+        "workers",
+        help=(
+            "every in-flight worker: its work item, health, what it is doing now, its gate, "
+            "its latest note and its last few actions"
+        ),
+    )
+    workers.add_argument(
+        "--actions",
+        type=int,
+        default=5,
+        metavar="N",
+        help="how many of each worker's newest actions to list (1-20, default 5)",
+    )
+    workers.add_argument(
+        "--json", action="store_true", help="the same facts, machine-readable, ISO timestamps"
+    )
+    workers.add_argument(
+        "--follow", "-f", action="store_true", help="print again whenever a worker changes"
+    )
+    workers.add_argument(
+        "--polls", type=int, default=None, help=argparse.SUPPRESS
+    )  # bounds --follow, for tests
+    workers.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="colour the output: auto (a terminal without NO_COLOR/CLICOLOR=0), always, never",
+    )
+    workers.set_defaults(func=_cmd_workers)
 
     for name in ("start", "manager"):
         start = sub.add_parser(
