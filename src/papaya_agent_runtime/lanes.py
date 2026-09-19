@@ -285,6 +285,42 @@ def owed_decisions(
                 item.task_id, item.status, TURN, item.reason, turn=turn, repo=item.repo, tail=tail
             )
         )
+    found += capability_decisions(conn, covered=skip, already={d.task_id for d in found})
+    return found
+
+
+def capability_decisions(
+    conn: sqlite3.Connection, *, covered: Iterable[int] = (), already: Iterable[int] = ()
+) -> list[OwedDecision]:
+    """The answer turn for each live worker, with no ticket covering it, whose capability
+    request the manager has not decided.
+
+    A held ticket's worker gets it from the ticket's rounds (`Rounds._look_at`); this is
+    every other worker (dispatched from a session, or its ticket ended). On 2026-09-18
+    two `xcrun` requests from session-dispatched workers sat undecided for 25 minutes
+    because only the ticket path asked. One turn per request: a task-turn recorded after
+    the request means it was put to the manager already.
+    """
+    from papaya_agent_runtime import capability_requests
+
+    skip = set(covered) | set(already)
+    found: list[OwedDecision] = []
+    for request in capability_requests.pending(conn):
+        if request.task_id in skip:
+            continue
+        task = store.get_task(conn, request.task_id)
+        if task is None or task["status"] not in owed.RUNNING_STATUSES:
+            continue
+        record = last_turn(conn, request.task_id) or {}
+        if int(record.get("mark") or 0) >= request.id:
+            continue
+        asked = supervision.undecided_capability(request.task_id)
+        if asked is None:
+            continue
+        found.append(
+            OwedDecision(request.task_id, str(task["status"]), TURN, asked[1], turn=prompts.ANSWER)
+        )
+        skip.add(request.task_id)
     return found
 
 

@@ -25,6 +25,7 @@ from papaya_agent_runtime import (
     prompts,
     rounds,
     supervision,
+    tool_learning,
     watch,
 )
 from papaya_agent_runtime.cli import main
@@ -235,6 +236,33 @@ def test_a_next_step_that_sat_is_due_and_a_fresh_or_blocked_one_is_not(home) -> 
 
     assert item.todo_id == sat and item.seconds == 45 * 60
     assert "close the stale branch" in item.said()
+
+
+def test_a_ticketless_workers_capability_request_gets_the_answer_turn_once(
+    home, monkeypatch
+) -> None:
+    """2026-09-18: session-dispatched workers' `xcrun` requests sat undecided for 25 min."""
+    from papaya_agent_runtime import capability_requests
+
+    monkeypatch.setattr(tool_learning, "steer_worker", lambda _t, _m: None)
+    conn = init_db()
+    worker = _worker(conn, "in_progress")
+    request = capability_requests.request(worker, "terraform", why="plan the stack")
+
+    [decision] = [d for d in lanes.owed_decisions(conn, now=NOW) if d.task_id == worker]
+    assert decision.action == lanes.TURN and decision.turn == prompts.ANSWER
+    assert f"Capability request {request.id}" in decision.line
+    assert lanes.task_facts(worker, decision)["the worker's question"] == decision.line
+
+    # Put to the manager once: a turn recorded after the request settles it.
+    lanes.record_task_turn(
+        worker, action=lanes.TURN, turn=prompts.ANSWER, outcome=lanes.ACTED, mark=request.id
+    )
+    assert not [d for d in lanes.owed_decisions(conn, now=NOW) if d.task_id == worker]
+    # A covered (held-ticket) worker is the ticket path's, not this lane's.
+    other = _worker(conn, "in_progress")
+    capability_requests.request(other, "terraform")
+    assert not lanes.capability_decisions(conn, covered={other})
 
 
 def test_a_step_waiting_on_a_task_that_ended_is_released_on_the_interval(home) -> None:

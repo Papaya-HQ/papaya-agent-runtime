@@ -111,6 +111,8 @@ TOOLCHAINS = (
     "uv",
     "xcodebuild",
     "xcodegen",
+    # The Xcode toolchain's front door: simctl for simulator captures, swift, the SDK paths.
+    "xcrun",
 )
 #: The browser a worker checks its own UI in: screenshots, console, the page it serves.
 BROWSER = ("chrome-devtools-axi",)
