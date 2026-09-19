@@ -788,6 +788,10 @@ def merged_step(entries: list[dict[str, Any]], *, post, held: set[int] | None = 
             worker_id = int(entry["task_id"])
             ticket = rounds.ticket_for_worker(worker_id)
             if ticket is None or ticket.run_id not in tickets:
+                # No ticket: a worker dispatched from a session and linked to its work
+                # item with `ppy track` gets the same follow-up (2026-09-18: PAP-247,
+                # 248, 249 and 251 stayed `todo` after their pull requests merged).
+                lines += _merged_tracked(worker_id, entry, rule, post=post)
                 continue
             if held and ticket.task_id in held:
                 continue
@@ -808,6 +812,62 @@ def merged_step(entries: list[dict[str, Any]], *, post, held: set[int] | None = 
     except Exception as exc:  # noqa: BLE001 - a round or a heartbeat never ends on this
         lines.append(f"could not follow up merged pull requests: {exc}")
     return lines
+
+
+@dataclass(frozen=True)
+class TrackedRecord:
+    """A Papaya work item a worker was linked to with `ppy track`, posted to like a ticket."""
+
+    task_id: int
+    work_item_id: str
+
+    def event(self) -> Any:
+        from papaya_agent_runtime import papaya_events
+
+        return papaya_events.PapayaEvent(
+            id=None,
+            kind="",
+            subject=f"work_item:{self.work_item_id}",
+            payload={},
+            work_item_id=self.work_item_id,
+        )
+
+
+def _merged_tracked(worker_id: int, entry: dict[str, Any], rule: str, *, post) -> list[str]:
+    """The merged follow-up for a worker with no ticket but a Papaya tracker link, once."""
+    from papaya_agent_runtime import tracker
+    from papaya_agent_runtime.state import db, store
+
+    conn = db.init_db()
+    try:
+        link = tracker.task_link(conn, worker_id)
+        if (
+            not link
+            or (link.get("provider") or tracker.DEFAULT_PROVIDER) != tracker.DEFAULT_PROVIDER
+        ):
+            return []
+        done = conn.execute(
+            "SELECT 1 FROM events WHERE task_id = ? AND kind = ? LIMIT 1",
+            (worker_id, MERGED_FOLLOWUP),
+        ).fetchone()
+        if done is not None:
+            return []
+        where = entry.get("url") or f"PR #{entry['pr']}"
+        body, status = merged_message(where, rule)
+        post(TrackedRecord(worker_id, str(link["record"])), body, status)
+        store.append_event(
+            conn,
+            kind=MERGED_FOLLOWUP,
+            payload={"task_id": worker_id, "record": str(link["record"]), "status": status},
+            task_id=worker_id,
+        )
+        conn.commit()
+        return [
+            f"worker task {worker_id}'s pull request merged: {link['record']} "
+            + (f"moved to {status}" if status else "asked what it moves to")
+        ]
+    finally:
+        conn.close()
 
 
 GREEN_NOTHING = "nothing"
