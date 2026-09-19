@@ -658,7 +658,46 @@ def attention(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str
         for item_id, memo in sweep.parked_items().items()
     ]
     parked.sort(key=lambda p: -(p["seconds"] or 0))
-    return {"repeating": repeating, "parked": parked, "grown": grown, "counts": counts}
+    return {
+        "paused": _paused(conn, now),
+        "gave_up": _gave_up(conn, now),
+        "repeating": repeating,
+        "parked": parked,
+        "grown": grown,
+        "counts": counts,
+    }
+
+
+def _paused(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
+    """The provider usage limit manager turns are waiting out now, with its reset."""
+    from papaya_agent_runtime import limits
+
+    try:
+        found = limits.pause(conn, None, now)
+    except sqlite3.Error:
+        return []
+    if found is None:
+        return []
+    return [
+        {
+            "provider": found.provider,
+            "until": found.until.isoformat(timespec="seconds"),
+            "exact": found.exact,
+            "text": found.text,
+            "seconds": max(int((found.until - now).total_seconds()), 0),
+        }
+    ]
+
+
+def _gave_up(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
+    """Worker tasks the manager's turns gave up on, still standing (nothing new since)."""
+    from papaya_agent_runtime import lanes
+
+    try:
+        found = lanes.gave_up(conn, now)
+    except sqlite3.Error:
+        return []
+    return [{**g, "seconds": _ago(now, g["since"])} for g in found]
 
 
 def mark_looked(found: dict[str, Any]) -> None:
@@ -678,7 +717,14 @@ def peek(now: datetime | None = None) -> dict[str, Any]:
     from papaya_agent_runtime.paths import db_path
 
     if not db_path().exists():
-        return {"repeating": [], "parked": [], "grown": [], "counts": {}}
+        return {
+            "paused": [],
+            "gave_up": [],
+            "repeating": [],
+            "parked": [],
+            "grown": [],
+            "counts": {},
+        }
     conn = db.init_db()
     try:
         return attention(conn, now)
@@ -705,10 +751,32 @@ def a_persons_look(stream: Any, *, as_json: bool = False, reprint: bool = False)
 
 
 def attention_lines(found: dict[str, Any] | None) -> list[str]:
-    """One line per thing that needs a person: repeating, then parked, then grown."""
+    """One line per thing that needs a person: a usage-limit pause, give-ups, repeating,
+    parked, then grown."""
     if not found:
         return []
     lines = []
+    for p in found.get("paused") or []:
+        how = "" if p.get("exact") else " (no reset time could be read; trying again then)"
+        lines.append(
+            f"paused: {p.get('provider') or 'the provider'} usage limit until "
+            f"{_utc(p['until'])} (in {_age(p['seconds'])}){how}: {_clip(p.get('text'), 90)}"
+            " · manager turns wait for the reset and limit-stopped workers resume after it;"
+            " nothing is counted as a failure"
+        )
+    for g in found.get("gave_up") or []:
+        if g.get("task_id") is None:
+            lines.append(
+                f'gave up: todo #{g["todo_id"]} "{_clip(g.get("todo"), 60)}" since '
+                f"{_utc(g['since'])} ({_age(g['seconds'])} ago): {_clip(g['reason'], 60)} · "
+                f"do it, defer it with a reason, or drop it (`ppy todo drop {g['todo_id']}`)"
+            )
+            continue
+        lines.append(
+            f"gave up: worker task {g['task_id']} since {_utc(g['since'])} "
+            f"({_age(g['seconds'])} ago): {_clip(g['reason'], 90)} · anything new on the task "
+            f"takes it up again; or decide on it and close todo #{g['todo_id']}"
+        )
     for r in found.get("repeating") or []:
         ending = str(r.get("ending") or "")
         action = _REPEAT_ACTIONS.get(ending)
@@ -1376,7 +1444,8 @@ def workers_json(
 ) -> dict[str, Any]:
     """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps.
 
-    `{"workers": [...], "attention": {repeating, parked, grown}}`: the workers, then the
+    `{"workers": [...], "attention": {paused, gave_up, repeating, parked, grown}}`: the
+    workers, then the
     `needs attention` section as data (read only; JSON is never a person's look).
     """
 
@@ -1395,7 +1464,10 @@ def workers_json(
             }
             for w in found
         ],
-        "attention": {key: needs.get(key) or [] for key in ("repeating", "parked", "grown")},
+        "attention": {
+            key: needs.get(key) or []
+            for key in ("paused", "gave_up", "repeating", "parked", "grown")
+        },
     }
 
 

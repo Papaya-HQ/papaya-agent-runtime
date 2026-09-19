@@ -257,6 +257,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "provider_usage_limits",
+        SHARED,
+        "a turn or worker session the provider's usage limit ended is waited out until the "
+        "reset and run or resumed again, never counted as a miss or a failure",
+        serve=("TicketRunner._wait_out_limit", "TicketRunner._resume_after_limit"),
+        shared="papaya_agent_runtime.limits",
+        # The heartbeat's owed lane resumes a limit-ended worker and skips its turns while
+        # paused; `ppy workers` and `ppy status --team` say the pause.
+        interactive=("papaya_agent_runtime.lanes", "papaya_agent_runtime.team"),
+    ),
+    Capability(
         "ticket_hold_protocol",
         HOST,
         "holding a Papaya ticket: taking, reserving, keeping it alive, status lines, handing back",
@@ -321,6 +332,8 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._deliver",
             "TicketRunner._delivery_blocked",
             "TicketRunner._turn",
+            "TicketRunner._launch_turn",
+            "TicketRunner._provider",
             "TicketRunner._rerun_later",
             "TicketRunner._missed",
             "TicketRunner._observe_turn",

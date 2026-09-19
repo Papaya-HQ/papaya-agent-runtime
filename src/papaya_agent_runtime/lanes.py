@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -40,20 +41,22 @@ import sqlite3
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from papaya_agent_runtime import owed, papaya_events, prompts, review, supervision
+from papaya_agent_runtime import limits, owed, papaya_events, prompts, review, supervision
 from papaya_agent_runtime.state import db, store
 
 log = logging.getLogger("papaya_agent_runtime.lanes")
 
-#: What an owed worker gets: a manager turn keyed on it, a mechanical send-back, or a
-#: person-wait recorded against it.
+#: What an owed worker gets: a manager turn keyed on it, a mechanical send-back, a
+#: person-wait recorded against it, or (its session ended by the provider's usage
+#: limit, which has reset) its session resumed once.
 TURN = "turn"
 STEER = "steer"
 PERSON = "person"
+RESUME = "resume"
 
 #: The event kind, on a worker task, recording one task-keyed manager turn and how it ended.
 TASK_TURN_EVENT = "task_turn"
@@ -61,10 +64,12 @@ TASK_TURN_EVENT = "task_turn"
 LEDGER_TURN_EVENT = "ledger_turn"
 
 #: How a task turn ended: the worker was delivered, acted on (steered, answered,
-#: resumed), the turn said it is waiting on something, or it did neither.
+#: resumed), the turn said it is waiting on something, the provider's usage limit
+#: ended it (waited out until the reset, never a miss), or it did none of these.
 DELIVERED = "delivered"
 ACTED = "acted"
 WAITING = "waiting"
+LIMITED = limits.LIMITED
 MISSED = "missed"
 
 #: A turn that ends without doing its job is retried once with its tail; after that many
@@ -95,6 +100,8 @@ TURNS_AT_ONCE = 2
 
 #: The reason a task is blocked on a person after its turns gave up, as the todo says it.
 _TURNS_GAVE_UP = "the manager turn ended {n} times without {job}; decide on it"
+#: How the lane's own give-up todo starts, so it can be told from a person's deferral.
+_GAVE_UP_PREFIX = "worker task {task_id}: the manager turn ended "
 #: The reason a next step is blocked on a person after ledger turns left it twice.
 _LEDGER_GAVE_UP = (
     "user:two manager turns left it untouched; do it, defer it with a reason, or drop it"
@@ -153,6 +160,8 @@ class OwedDecision:
     repo: str | None = None
     #: The tail of the last turn's transcript, for a retry after a miss or a wait.
     tail: str = ""
+    #: For :data:`RESUME`: the limit ending being taken up (`limits.WorkerEnding`).
+    ending: Any = None
 
     @property
     def failure(self) -> bool:
@@ -165,19 +174,35 @@ class OwedDecision:
             TURN: f"needs the {self.turn} turn",
             STEER: "sent back to its gate",
             PERSON: "needs a person",
+            RESUME: "resumed after the usage limit reset",
         }[self.action]
         where = f" ({self.repo})" if self.repo else ""
         return f"worker task {self.task_id}{where} {self.status}: {what}: {self.line}"
 
 
-def _deferred(conn: sqlite3.Connection, task_id: int) -> bool:
-    """An open todo blocked on someone or something names this task: it was deferred."""
-    row = conn.execute(
-        "SELECT 1 FROM todos WHERE task_id = ? AND status = 'open' AND blocked_on IS NOT NULL "
-        "AND blocked_on != '' LIMIT 1",
+def _deferred(conn: sqlite3.Connection, task_id: int, now: datetime | None = None) -> bool:
+    """An open todo blocked on someone or something names this task: it was deferred.
+
+    The lane's own give-up todo stops counting once the give-up is lifted (news after
+    it, or the misses were the provider's usage limit): it recorded a verdict the
+    record no longer supports, not a person's decision. ``now`` is the caller's clock
+    (the owed lane passes its own); it only stands in for a turn record with no stamp.
+    """
+    now = now or datetime.now(UTC)
+    rows = conn.execute(
+        "SELECT text FROM todos WHERE task_id = ? AND status = 'open' AND blocked_on IS NOT NULL "
+        "AND blocked_on != ''",
         (task_id,),
-    ).fetchone()
-    return row is not None
+    ).fetchall()
+    lifted: bool | None = None
+    for row in rows:
+        if not str(row["text"]).startswith(_GAVE_UP_PREFIX.format(task_id=task_id)):
+            return True
+        if lifted is None:
+            lifted = not given_up(conn, task_id, now)
+        if not lifted:
+            return True
+    return False
 
 
 def last_turn(conn: sqlite3.Connection, task_id: int) -> dict[str, Any] | None:
@@ -190,6 +215,140 @@ def last_turn(conn: sqlite3.Connection, task_id: int) -> dict[str, Any] | None:
     if row is None:
         return None
     return {**_payload(row), "created_at": row["created_at"]}
+
+
+def _turn_records(conn: sqlite3.Connection, task_id: int, limit: int = 20):
+    """The task-turn records on a worker task, newest first."""
+    for row in conn.execute(
+        "SELECT payload, created_at FROM events WHERE task_id = ? AND kind = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (task_id, TASK_TURN_EVENT, limit),
+    ).fetchall():
+        yield {**_payload(row), "created_at": row["created_at"]}
+
+
+def limit_of(record: dict[str, Any], now: datetime) -> limits.Limit | None:
+    """The usage limit a turn record stands for, or ``None``.
+
+    A :data:`LIMITED` record carries its reset (bounded like every other reset). A
+    :data:`MISSED` record written before this outcome existed is read through the same
+    classifier from its tail and exit code, so a task stranded by limit endings counted
+    as misses (tasks 150 and 157, 2026-09-19) is due again once the reset has passed,
+    with no one editing state. ``now`` stands in for a record with no readable stamp.
+    """
+    at = _parse(record.get("created_at")) or now
+    if record.get("outcome") == LIMITED:
+        until = _parse(record.get("until"))
+        if until is None or until - at > limits.LONGEST_RESET:
+            until = at  # unreadable or unbelievable: over, not a long verdict
+        return limits.Limit(
+            record.get("provider"), str(record.get("text") or ""), at, until, exact=True
+        )
+    if record.get("outcome") != MISSED:
+        return None
+    return limits.classify_text(str(record.get("tail") or ""), record.get("exit_code"), at=at)
+
+
+def _misses_so_far(conn: sqlite3.Connection, task_id: int, now: datetime) -> int:
+    """Genuine misses in a row on the task, which the next miss adds to.
+
+    Limit endings are skipped over (they never count), and a give-up that news has
+    re-armed counts from zero again.
+    """
+    for record in _turn_records(conn, task_id):
+        if limit_of(record, now) is not None:
+            continue
+        if record.get("action") != TURN or record.get("outcome") != MISSED:
+            return 0
+        misses = int(record.get("misses") or 0)
+        if misses >= TURN_ATTEMPTS and _newest_news(conn, task_id) > int(
+            record.get("end_mark") or 0
+        ):
+            return 0
+        return misses
+    return 0
+
+
+def given_up(conn: sqlite3.Connection, task_id: int, now: datetime) -> dict[str, Any] | None:
+    """The give-up record, while the lane's turns still stand given up on the task.
+
+    Given up = the newest genuine turn record (limit endings skipped) is the last of
+    :data:`TURN_ATTEMPTS` misses, and nothing new has happened on the task since.
+    """
+    for record in _turn_records(conn, task_id):
+        if limit_of(record, now) is not None:
+            continue
+        if record.get("action") != TURN or record.get("outcome") != MISSED:
+            return None
+        if int(record.get("misses") or 0) < TURN_ATTEMPTS:
+            return None
+        if _newest_news(conn, task_id) > int(record.get("end_mark") or 0):
+            return None
+        return record
+    return None
+
+
+def gave_up(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
+    """Every give-up of the manager's turns that still stands, for `needs attention`.
+
+    Two kinds: a worker task two task turns missed (``task_id`` set), and a next step two
+    ledger turns left untouched (``task_id`` ``None``; the todo names it).
+    """
+    found = []
+    rows = conn.execute(
+        "SELECT id, task_id, text, created_at FROM todos WHERE status = 'open' "
+        "AND task_id IS NOT NULL AND text LIKE 'worker task % the manager turn ended %' "
+        "ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        task_id = int(row["task_id"])
+        if not str(row["text"]).startswith(_GAVE_UP_PREFIX.format(task_id=task_id)):
+            continue
+        if given_up(conn, task_id, now) is None:
+            continue
+        found.append(
+            {
+                "task_id": task_id,
+                "todo_id": int(row["id"]),
+                "reason": str(row["text"]).split(": ", 1)[-1],
+                "since": str(row["created_at"]),
+            }
+        )
+    for row in conn.execute(
+        "SELECT id, text, updated_at FROM todos WHERE status = 'open' AND blocked_on = ? "
+        "ORDER BY id",
+        (_LEDGER_GAVE_UP,),
+    ).fetchall():
+        found.append(
+            {
+                "task_id": None,
+                "todo_id": int(row["id"]),
+                "todo": str(row["text"]),
+                "reason": _LEDGER_GAVE_UP.removeprefix("user:"),
+                "since": str(row["updated_at"]),
+            }
+        )
+    return found
+
+
+def lift_give_up(task_id: int, now: datetime, conn: sqlite3.Connection | None = None) -> list[int]:
+    """Drop the lane's own give-up todo on a task whose give-up no longer stands."""
+    own = conn is None
+    conn = conn or db.init_db()
+    try:
+        if given_up(conn, task_id, now) is not None:
+            return []
+        dropped = []
+        for row in conn.execute(
+            "SELECT id, text FROM todos WHERE task_id = ? AND status = 'open'", (task_id,)
+        ).fetchall():
+            if str(row["text"]).startswith(_GAVE_UP_PREFIX.format(task_id=task_id)):
+                store.update_todo(conn, int(row["id"]), status="dropped")
+                dropped.append(int(row["id"]))
+        return dropped
+    finally:
+        if own:
+            conn.close()
 
 
 def _steers_sent(conn: sqlite3.Connection, task_id: int) -> int:
@@ -222,11 +381,18 @@ def _turn_due(conn: sqlite3.Connection, task_id: int, now: datetime) -> tuple[bo
     at = _parse(record.get("created_at"))
     age = (now - at).total_seconds() if at is not None else OWED_RETRY_SECONDS
     outcome = record.get("outcome")
+    limit = limit_of(record, now)
+    if limit is not None:
+        # The provider's wall, not the turn's failure: due again once it has reset.
+        return limit.over(now), ""
     if outcome == WAITING:
         waits = int(record.get("waits") or 1)
         return age >= serve.rerun_delay(waits, None), tail
     if outcome == MISSED:
-        return int(record.get("misses") or 0) < TURN_ATTEMPTS, tail
+        if int(record.get("misses") or 0) < TURN_ATTEMPTS:
+            return True, tail
+        # Given up; something new on the task since takes it up again.
+        return _newest_news(conn, task_id) > int(record.get("end_mark") or 0), ""
     # Delivered or acted on, and owed again: only something new on the task since, or
     # the retry.
     if _newest_news(conn, task_id) > int(record.get("end_mark") or 0):
@@ -250,7 +416,24 @@ def owed_decisions(
     for item in owed.collect(conn, now=now):
         if item.serve_owns or item.task_id in skip or item.status not in owed.OWED_STATUSES:
             continue
-        if _deferred(conn, item.task_id):
+        if _deferred(conn, item.task_id, now):
+            continue
+        ending = limits.worker_ending(conn, item.task_id)
+        if ending is not None:
+            # Its session hit the provider's usage limit: not a failed worker. Waited
+            # out while any turn on that provider is paused, then resumed once.
+            if limits.pause(conn, ending.limit.provider, now) is None:
+                found.append(
+                    OwedDecision(
+                        item.task_id,
+                        item.status,
+                        RESUME,
+                        f"its session was ended by the usage limit ({ending.limit.text})",
+                        message=limits.RESUME_MESSAGE,
+                        repo=item.repo,
+                        ending=ending,
+                    )
+                )
             continue
         followup = item.followup
         if followup is not None and followup.action == supervision.PERSON:
@@ -372,6 +555,11 @@ def hand_to_person(decision: OwedDecision) -> str:
     return f"worker task {decision.task_id} needs a person: {decision.line}"
 
 
+def resume_after_limit(decision: OwedDecision, *, steer=None) -> str:
+    """The one resume both modes make of a worker whose session the usage limit ended."""
+    return limits.resume_worker(decision.ending, steer=steer or supervision.steer_worker)
+
+
 # ── the ledger lane ─────────────────────────────────────────────────────────
 
 
@@ -434,7 +622,7 @@ def release_finished_waits(conn: sqlite3.Connection, *, now: datetime | None = N
     round and every heartbeat reconciles it from the record, not from the event. The
     ledger lane then takes the step up like any other.
     """
-    lines: list[str] = []
+    lines: list[str] = recover_limit_blocked_steps(conn)
     now = now or datetime.now(UTC)
     try:
         for row in conn.execute(
@@ -483,6 +671,105 @@ def release_finished_waits(conn: sqlite3.Connection, *, now: datetime | None = N
             board.write_board(conn)
     except Exception as exc:  # noqa: BLE001 - a round keeps going
         lines.append(f"could not release waits on finished tasks: {exc}")
+    return lines
+
+
+#: The event a next step unblocked by :func:`recover_limit_blocked_steps` leaves.
+LEDGER_BLOCK_LIFTED_EVENT = "ledger_block_lifted"
+
+#: How long before its `ledger_turn` record a ledger turn's transcript may have been
+#: written last. The record is written the moment the turn ends, so seconds in practice.
+_LEDGER_LOG_WINDOW_SECONDS = 300.0
+
+
+def _ledger_transcript(at: datetime) -> str | None:
+    """The transcript of the ledger turn recorded at ``at``: the newest `ledger-<n>.log`
+    last written in the window before it, or ``None`` when none can be placed."""
+    from papaya_agent_runtime.paths import runs_dir
+
+    turns = runs_dir() / "0" / "turns"
+    best: tuple[float, Path] | None = None
+    stamp = at.timestamp()
+    for path in turns.glob(f"{prompts.LEDGER}-*.log") if turns.is_dir() else ():
+        try:
+            written = path.stat().st_mtime
+        except OSError:
+            continue
+        in_window = stamp - _LEDGER_LOG_WINDOW_SECONDS <= written <= stamp + 2.0
+        if in_window and (best is None or written > best[0]):
+            best = (written, path)
+    if best is None:
+        return None
+    try:
+        return best[1].read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _ledger_turn_was_limited(at: datetime) -> bool:
+    """Did the ledger turn recorded at ``at`` end on the provider's usage limit?
+
+    Read through the one classifier. The transcript file does not keep the exit code, so
+    only a transcript that is nothing but the limit line counts: a turn that did work and
+    quoted the line is not a limit ending.
+    """
+    text = _ledger_transcript(at)
+    if text is None or len([line for line in text.splitlines() if line.strip()]) != 1:
+        return False
+    return limits.classify_text(text, 1, at=at) is not None
+
+
+def recover_limit_blocked_steps(conn: sqlite3.Connection) -> list[str]:
+    """Unblock next steps two ledger turns "left untouched" only because the limit ended them.
+
+    Before usage limits were told apart, a ledger turn the limit killed at once counted
+    as leaving every next step it carried untouched, and two of them blocked the step on
+    a person (``_LEDGER_GAVE_UP``). The recorded endings are re-read, exactly as the task
+    turns' are (:func:`limit_of`): a step is unblocked only when every one of the turns
+    that counted against it was a limit ending. A genuine two-miss block stays, and is
+    listed under `needs attention` (:func:`gave_up`). Never raises; idempotent.
+    """
+    lines: list[str] = []
+    try:
+        blocked = conn.execute(
+            "SELECT id, text, updated_at FROM todos WHERE status = 'open' AND blocked_on = ?",
+            (_LEDGER_GAVE_UP,),
+        ).fetchall()
+        for row in blocked:
+            todo_id = int(row["id"])
+            until = _parse(row["updated_at"])
+            if until is None:
+                continue
+            counted: list[datetime] = []
+            for turn in conn.execute(
+                "SELECT payload, created_at FROM events WHERE kind = ? ORDER BY id DESC LIMIT 200",
+                (LEDGER_TURN_EVENT,),
+            ).fetchall():
+                payload = _payload(turn)
+                at = _parse(payload.get("at") or turn["created_at"])
+                if at is None or at > until + timedelta(seconds=5):
+                    continue
+                if todo_id not in [int(t) for t in payload.get("todos") or [] if str(t).isdigit()]:
+                    continue
+                counted.append(at)
+                if len(counted) >= TURN_ATTEMPTS:
+                    break
+            if len(counted) < TURN_ATTEMPTS or not all(
+                _ledger_turn_was_limited(at) for at in counted
+            ):
+                continue
+            store.update_todo(conn, todo_id, blocked_on=None)
+            store.append_event(
+                conn,
+                kind=LEDGER_BLOCK_LIFTED_EVENT,
+                payload={"todo_id": todo_id, "turns": [at.isoformat() for at in counted]},
+            )
+            lines.append(
+                f"todo #{todo_id} is due again: the ledger turns that left it were ended by "
+                f"the usage limit, not by the work — {row['text']}"
+            )
+    except Exception as exc:  # noqa: BLE001 - a round keeps going
+        lines.append(f"could not recover next steps blocked by limit endings: {exc}")
     return lines
 
 
@@ -608,7 +895,13 @@ def interactive_step(
                     lines.append(f"could not send worker task {decision.task_id} back: {exc}")
             elif decision.action == PERSON:
                 lines.append(hand_to_person(decision))
+            elif decision.action == RESUME:
+                try:
+                    lines.append(resume_after_limit(decision, steer=steer))
+                except Exception as exc:  # noqa: BLE001 - the one attempt is recorded
+                    lines.append(f"could not resume worker task {decision.task_id}: {exc}")
             else:
+                lift_give_up(decision.task_id, now, conn)
                 turns.append(decision)
     except Exception as exc:  # noqa: BLE001 - the heartbeat keeps ticking
         lines.append(f"could not read what is owed: {exc}")
@@ -786,9 +1079,34 @@ class TurnRunner:
     def busy(self) -> int:
         return len(self.running)
 
+    def _provider(self) -> str | None:
+        """The provider this runner's turns launch on, or ``None`` when it cannot be read."""
+        from papaya_agent_runtime import serve
+        from papaya_agent_runtime.manager.launch import resolve_profile
+
+        try:
+            config = self._config() if self._config is not None else serve._load_config()
+            return resolve_profile(config, None, None, None)[0]
+        except Exception:  # noqa: BLE001 - an unreadable config pauses on any provider
+            return None
+
+    async def _paused(self) -> limits.Limit | None:
+        """The usage limit this runner's turns wait out now, said once in the log."""
+        found = await asyncio.to_thread(limits.paused, self._provider(), self._clock())
+        if found is not None:
+            limits.say_once(found, log)
+        return found
+
     async def take_up(self, decisions: list[OwedDecision]) -> list[str]:
-        """Act on the owed lane's decisions: send back, hand to a person, or start a turn."""
+        """Act on the owed lane's decisions: send back, hand to a person, resume, or a turn.
+
+        While the provider's usage limit stands, no turn is launched into it: the
+        decisions stay due and are taken up on the first round after the reset.
+        """
         lines: list[str] = []
+        paused = None
+        if any(d.action == TURN for d in decisions):
+            paused = await self._paused()
         for decision in decisions:
             if decision.action == STEER:
                 try:
@@ -799,10 +1117,21 @@ class TurnRunner:
             if decision.action == PERSON:
                 lines.append(await asyncio.to_thread(hand_to_person, decision))
                 continue
+            if decision.action == RESUME:
+                try:
+                    lines.append(
+                        await asyncio.to_thread(resume_after_limit, decision, steer=self._steer)
+                    )
+                except Exception as exc:  # noqa: BLE001 - the one attempt is recorded
+                    lines.append(f"could not resume worker task {decision.task_id}: {exc}")
+                continue
+            if paused is not None:
+                continue  # the first round after the reset
             if decision.task_id in self.running:
                 continue
             if self.busy() >= self._at_once:
                 continue  # next round, when a slot is free
+            await asyncio.to_thread(lift_give_up, decision.task_id, self._clock())
             self.running[decision.task_id] = asyncio.create_task(self._task_turn(decision))
             lines.append(f"worker task {decision.task_id}: running the {decision.turn} turn")
         return lines
@@ -810,6 +1139,8 @@ class TurnRunner:
     async def take_up_ledger(self, items: list[LedgerItem]) -> list[str]:
         """Start the ledger turn for the next steps that sat, unless one is running."""
         if not items or (self._ledger is not None and not self._ledger.done()):
+            return []
+        if await self._paused() is not None:
             return []
         self._ledger = asyncio.create_task(self._ledger_turn(items))
         return [f"running the ledger turn for {len(items)} next step(s)"]
@@ -827,20 +1158,30 @@ class TurnRunner:
             result = await self._turn(decision.turn, facts, run_id=run_id, task_id=task_id)
             end_mark = await asyncio.to_thread(serve._max_event_id)
             record = await asyncio.to_thread(last_turn_record, task_id)
+            limit = await self._limited(result, f"{decision.turn} turn", task_id)
             if await asyncio.to_thread(serve.delivered_since, task_id, mark):
                 outcome = DELIVERED
             elif await asyncio.to_thread(serve.acted_since, task_id, mark) or (
                 decision.turn == prompts.ANSWER
+                and limit is None
                 and await asyncio.to_thread(serve.worker_status, task_id) != "blocked"
             ):
                 outcome = ACTED
+            elif limit is not None:
+                outcome = LIMITED
             elif serve.waiting_reason(result) is not None:
                 outcome = WAITING
             else:
                 outcome = MISSED
             waits = int(record.get("waits") or 0) + 1 if outcome == WAITING else 0
-            misses = int(record.get("misses") or 0) + 1 if outcome == MISSED else 0
+            misses = await asyncio.to_thread(_misses_so_far_on, task_id, self._clock())
+            misses = misses + 1 if outcome == MISSED else misses if outcome == LIMITED else 0
             tail = result.tail() if hasattr(result, "tail") else str(result or "")
+            limited = (
+                {"until": limit.until.isoformat(), "provider": limit.provider, "text": limit.text}
+                if outcome == LIMITED and limit is not None
+                else {}
+            )
             await asyncio.to_thread(
                 record_task_turn,
                 task_id,
@@ -853,6 +1194,7 @@ class TurnRunner:
                 misses=misses,
                 tail=tail[-2000:] if outcome in (WAITING, MISSED) else "",
                 exit_code=getattr(result, "exit_code", None),
+                **limited,
             )
             if outcome == MISSED and misses >= TURN_ATTEMPTS:
                 job = (
@@ -872,9 +1214,26 @@ class TurnRunner:
         finally:
             self.running.pop(task_id, None)
 
+    async def _limited(self, result: Any, source: str, task_id: int | None) -> limits.Limit | None:
+        """Classify a turn's ending; a limit is kept as the pause and said once."""
+        return await asyncio.to_thread(
+            functools.partial(
+                limits.observe,
+                result,
+                provider=self._provider(),
+                at=self._clock(),
+                source=source,
+                task_id=task_id,
+            )
+        )
+
     async def _ledger_turn(self, items: list[LedgerItem]) -> None:
         try:
-            await self._turn(prompts.LEDGER, ledger_facts(items), run_id=None, task_id=None)
+            result = await self._turn(
+                prompts.LEDGER, ledger_facts(items), run_id=None, task_id=None
+            )
+            if await self._limited(result, "ledger turn", None) is not None:
+                return  # the provider's wall: nothing was left untouched by the turn
             await asyncio.to_thread(record_ledger_turn, items, now=self._clock())
         except asyncio.CancelledError:
             raise
@@ -969,6 +1328,14 @@ def last_turn_record(task_id: int) -> dict[str, Any]:
         conn.close()
 
 
+def _misses_so_far_on(task_id: int, now: datetime) -> int:
+    conn = db.init_db()
+    try:
+        return _misses_so_far(conn, task_id, now)
+    finally:
+        conn.close()
+
+
 __all__ = [
     "ACTED",
     "DEFICIENCY_EVERY_SECONDS",
@@ -977,9 +1344,11 @@ __all__ = [
     "LEDGER_GRACE_SECONDS",
     "LEDGER_RETRY_SECONDS",
     "LEDGER_TURN_EVENT",
+    "LIMITED",
     "MISSED",
     "OWED_RETRY_SECONDS",
     "PERSON",
+    "RESUME",
     "STEER",
     "TASK_TURN_EVENT",
     "TURN",
@@ -990,14 +1359,19 @@ __all__ = [
     "OwedDecision",
     "TurnRunner",
     "deficiency_step",
+    "gave_up",
+    "given_up",
     "hand_to_person",
     "interactive_step",
     "ledger_due",
     "ledger_facts",
+    "lift_give_up",
+    "limit_of",
     "owed_decisions",
     "record_ledger_turn",
     "record_person_wait",
     "record_task_turn",
+    "resume_after_limit",
     "send_back",
     "start_lines",
     "stop_reasons",
