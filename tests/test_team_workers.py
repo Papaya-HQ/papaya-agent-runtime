@@ -384,7 +384,9 @@ def test_json_carries_iso_timestamps_and_the_same_fields(world, capsys) -> None:
     assert cli.main(["workers", "--json", "--actions", "2"]) == 0
     out = capsys.readouterr().out
     assert not ESCAPE.search(out)
-    busy, quiet, loose = json.loads(out)
+    answer = json.loads(out)
+    assert answer["attention"] == {"repeating": [], "parked": [], "grown": []}
+    busy, quiet, loose = answer["workers"]
     assert busy["work_item"]["key"] == KEY and busy["work_item"]["title"] == TITLE
     assert (busy["status"], busy["session"], busy["note"]) == ("in_progress", "alive", NOTE)
     assert quiet["session"] == "quiet" and quiet["silent_seconds"] >= 50 * 60

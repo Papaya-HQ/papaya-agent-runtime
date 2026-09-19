@@ -652,8 +652,17 @@ sweep asks for it on every sweep. If Papaya still refuses (after its on-call fal
 takes an item, it refuses the owner's machines for a guard window), the sweep keeps one
 blocker for the owner — "Papaya keeps 3 idle items from this Mac: PAP-219, PAP-221,
 PAP-222; use Run on this Mac, or wait for the guard to lift" — changed when that set
-changes and cleared when it empties. An item refused on three sweeps running with no
-evidence of work is also recorded as an `idle-work-refused` deficiency.
+changes and cleared when it empties. An item refused for the same reason on three
+sweeps running with no evidence of work is also recorded as a
+`repeated-without-progress` deficiency: one row per refusal reason, each ticket in its
+evidence once a day, and an issue only from the second ticket or day. It shows under
+`needs attention` in `ppy workers` and `ppy status --team`.
+
+A ticket whose brief turn found nothing to build (waiting on a person, such as a QA
+recheck) is **parked**: the sweep, the reclaim on start and a session's list of waiting
+work all leave it alone until its `updated_at` moves past the park stamp, or somebody
+who is not an agent comments after the stamp. It is forgotten once it is no longer open
+and assigned here.
 
 On start, and on the first sweep after Papaya could not be reached, the sweep also
 **takes back what an earlier connection of this runtime held**. That is any open item

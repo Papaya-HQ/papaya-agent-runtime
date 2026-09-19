@@ -544,6 +544,197 @@ def _waiting(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
     return waiting
 
 
+# ── what the runtime keeps failing to do ────────────────────────────────────
+#
+# The runtime reported what it did and not what it kept failing to do: an hour of
+# identical pickup comments on PAP-210 and two days of one refusal (a deficiency row
+# at count 527) passed unnoticed because nothing surfaced either. `needs attention`
+# is one section, in `ppy workers` and `ppy status --team`, read from the ledger the
+# runtime already writes: tickets repeating without progress, tickets parked on a
+# person, and any deficiency whose count grew since the person last looked.
+
+#: How long a `repeated-without-progress` row stays named after it was last recorded.
+REPEATING_SHOWN_FOR = 24 * 60 * 60.0
+
+#: What a person can do about a repeating ticket, by how its holds ended.
+_REPEAT_ACTIONS = {
+    "reported": "each brief found nothing to build: answer or change the ticket, or close it",
+    "declined": "handed back each time: read the reason on the ticket",
+    "handed_back": "handed back each time: read the reason on the ticket",
+    "stalled": "stalled each time: check its worker with `ppy workers`",
+    "released": "released each time with no ending: read its holds with `ppy tail`",
+}
+_REFUSED_ACTION = "Papaya keeps refusing it here: use Run on this Mac, or reassign it"
+
+
+def attention_seen_path():
+    """Where each deficiency's count at the last look is kept: `.ppy/attention-seen.json`."""
+    from papaya_agent_runtime.paths import ppy_home
+
+    return ppy_home() / "attention-seen.json"
+
+
+def _seen_counts() -> dict[str, int]:
+    try:
+        data = json.loads(attention_seen_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): int(v) for k, v in data.items() if isinstance(v, int)}
+
+
+def attention(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
+    """`needs attention`, as data. Reads only; :func:`mark_looked` records the look.
+
+    ``repeating``: `repeated-without-progress` rows seen in the last day. ``parked``:
+    tickets the sweep skips as waiting on a person, with the reason and the stamp.
+    ``grown``: every other deficiency whose count is above the count at the last look
+    (a first look counts from one, so a row seen once is not a repetition), worst first.
+    """
+    from papaya_agent_runtime import deficiencies, sweep
+
+    now = now or datetime.now(UTC)
+    seen = _seen_counts()
+    rows = conn.execute(
+        "SELECT fingerprint, kind, title, detail, count, last_seen, evidence, status "
+        "FROM deficiencies WHERE status != ? ORDER BY last_seen DESC",
+        (deficiencies.RECLASSIFIED,),
+    ).fetchall()
+    repeating, grown, counts = [], [], {}
+    for row in rows:
+        counts[str(row["fingerprint"])] = int(row["count"])
+        seconds = _ago(now, row["last_seen"])
+        if row["kind"] == deficiencies.REPEATED_WITHOUT_PROGRESS:
+            if seconds is not None and seconds <= REPEATING_SHOWN_FOR:
+                try:
+                    entries = [
+                        e for e in json.loads(row["evidence"] or "[]") if isinstance(e, dict)
+                    ]
+                except ValueError:
+                    entries = []
+                evidence = entries[-1] if entries else {}
+                recent = [
+                    str(e["ticket"])
+                    for e in entries
+                    if e.get("ticket") and (_ago(now, e.get("at")) or 0) <= REPEATING_SHOWN_FOR
+                ]
+                repeating.append(
+                    {
+                        "ticket": evidence.get("ticket"),
+                        # A refusal row gathers every ticket refused that way in the day.
+                        "tickets": list(dict.fromkeys(recent)),
+                        "ending": evidence.get("code"),
+                        "detail": str(row["detail"]),
+                        "count": int(row["count"]),
+                        "last_seen": str(row["last_seen"]),
+                        "seconds": seconds,
+                    }
+                )
+            continue
+        more = int(row["count"]) - seen.get(str(row["fingerprint"]), 1)
+        if more > 0:
+            grown.append(
+                {
+                    "fingerprint": str(row["fingerprint"]),
+                    "kind": str(row["kind"]),
+                    "title": str(row["title"]),
+                    "count": int(row["count"]),
+                    "grown": more,
+                    "last_seen": str(row["last_seen"]),
+                    "seconds": seconds,
+                }
+            )
+    grown.sort(key=lambda d: (-d["grown"], -d["count"]))
+    parked = [
+        {
+            "work_item_id": item_id,
+            "ticket": str(memo.get("label") or sweep.ticket_label({"id": item_id})),
+            "reason": str(memo.get("reason") or ""),
+            "since": memo.get("declined_at"),
+            "stamp": memo.get("updated_at"),
+            "seconds": _ago(now, memo.get("declined_at")),
+        }
+        for item_id, memo in sweep.parked_items().items()
+    ]
+    parked.sort(key=lambda p: -(p["seconds"] or 0))
+    return {"repeating": repeating, "parked": parked, "grown": grown, "counts": counts}
+
+
+def mark_looked(found: dict[str, Any]) -> None:
+    """Record every deficiency's count as seen, so the next look names only new growth."""
+    path = attention_seen_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps(found.get("counts") or {}, sort_keys=True), encoding="utf-8")
+        temp.replace(path)
+    except OSError:
+        pass
+
+
+def peek(now: datetime | None = None) -> dict[str, Any]:
+    """`needs attention` now, read only: nothing is recorded as looked at."""
+    from papaya_agent_runtime.paths import db_path
+
+    if not db_path().exists():
+        return {"repeating": [], "parked": [], "grown": [], "counts": {}}
+    conn = db.init_db()
+    try:
+        return attention(conn, now)
+    finally:
+        conn.close()
+
+
+def look(now: datetime | None = None) -> dict[str, Any]:
+    """`needs attention` for a person looking now: read it, then record the look."""
+    found = peek(now)
+    mark_looked(found)
+    return found
+
+
+def a_persons_look(stream: Any, *, as_json: bool = False, reprint: bool = False) -> bool:
+    """Whether printing to ``stream`` is a person looking, so the look may be recorded.
+
+    Only a first print, not as JSON, to a terminal. A `--follow` reprint is the same
+    look; JSON is for a script; and a stdout that is not a terminal is an agent turn
+    or a pipe (turns are told to run `ppy status --team`), which must not use up the
+    growth a person has not seen.
+    """
+    return not as_json and not reprint and is_tty(stream)
+
+
+def attention_lines(found: dict[str, Any] | None) -> list[str]:
+    """One line per thing that needs a person: repeating, then parked, then grown."""
+    if not found:
+        return []
+    lines = []
+    for r in found.get("repeating") or []:
+        ending = str(r.get("ending") or "")
+        action = _REPEAT_ACTIONS.get(ending)
+        which = ""
+        if action is None:
+            # A refusal row is keyed on the reason; the tickets are in its evidence.
+            action = _REFUSED_ACTION
+            which = f": {', '.join(r.get('tickets') or [])}" if r.get("tickets") else ""
+        lines.append(
+            f"repeating: {r['detail']}{which} (last {_utc(r['last_seen'])}, "
+            f"{_age(r['seconds'])} ago) · {action}"
+        )
+    for p in found.get("parked") or []:
+        lines.append(
+            f"parked: {p['ticket']} waiting on a person since {_utc(p['since'])} "
+            f"({_age(p['seconds'])} ago), stamp {p['stamp'] or '?'}: {_clip(p['reason'], 90)}"
+            " · un-parks when the item changes or a person comments after the stamp"
+        )
+    for d in found.get("grown") or []:
+        lines.append(
+            f"deficiency {d['kind']}: {_clip(d['title'], 80)} · seen {d['count']}x "
+            f"(+{d['grown']} since the last look), last {_utc(d['last_seen'])}"
+        )
+    return lines
+
+
 def snapshot(conn: sqlite3.Connection | None = None, *, now: datetime | None = None) -> dict:
     """Everything `ppy status --team` says, as data. Reads only."""
     from papaya_agent_runtime import blockers, reconcile
@@ -561,6 +752,7 @@ def snapshot(conn: sqlite3.Connection | None = None, *, now: datetime | None = N
             "blockers": blockers.current(),
             "last_round": _last_round(conn, now),
             "waiting_on_a_person": _waiting(conn, now),
+            "attention": attention(conn, now),
         }
     finally:
         if own:
@@ -674,6 +866,9 @@ def render(snap: dict[str, Any], paint: Paint | None = None) -> list[str]:
             for w in snap["waiting_on_a_person"]
         ],
     )
+    if "attention" in snap:
+        # Recording the look is the command's, and only for a person (`a_persons_look`).
+        section("needs attention", attention_lines(snap["attention"]))
     return lines
 
 
@@ -1108,10 +1303,29 @@ def _header(w: dict[str, Any], width: int, paint: Paint) -> str:
 
 
 def render_workers(
-    found: list[dict[str, Any]], *, width: int = DEFAULT_WIDTH, paint: Paint | None = None
+    found: list[dict[str, Any]],
+    *,
+    width: int = DEFAULT_WIDTH,
+    paint: Paint | None = None,
+    needs: dict[str, Any] | None = None,
 ) -> list[str]:
-    """`ppy workers`: one block per worker, a blank line between blocks."""
+    """`ppy workers`: one block per worker, a blank line between blocks, then `needs attention`.
+
+    ``needs`` is :func:`attention`'s answer; left out, it is read now (:func:`peek`).
+    Rendering records nothing: the command records a person's look (`a_persons_look`).
+    """
     paint = paint or Paint()
+    lines = _worker_blocks(found, width, paint)
+    extra = attention_lines(peek() if needs is None else needs)
+    if extra:
+        lines.append("")
+        lines.append(paint(f"needs attention ({len(extra)}):", "bold"))
+        # Not clipped to the width: the end of each line is what to do about it.
+        lines.extend(f"  {line}" for line in extra)
+    return lines
+
+
+def _worker_blocks(found: list[dict[str, Any]], width: int, paint: Paint) -> list[str]:
     if not found:
         return ["no workers in flight"]
     lines: list[str] = []
@@ -1157,22 +1371,32 @@ def render_workers(
     return lines
 
 
-def workers_json(found: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps."""
+def workers_json(
+    found: list[dict[str, Any]], needs: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps.
+
+    `{"workers": [...], "attention": {repeating, parked, grown}}`: the workers, then the
+    `needs attention` section as data (read only; JSON is never a person's look).
+    """
 
     def iso(stamp: object) -> str | None:
         at = _parse(stamp)
         return at.isoformat() if at is not None else None
 
-    return [
-        {
-            **w,
-            "running_since": iso(w["running_since"]),
-            "note_at": iso(w["note_at"]),
-            "actions": [{**a, "at": iso(a["at"])} for a in w["actions"]],
-        }
-        for w in found
-    ]
+    needs = peek() if needs is None else needs
+    return {
+        "workers": [
+            {
+                **w,
+                "running_since": iso(w["running_since"]),
+                "note_at": iso(w["note_at"]),
+                "actions": [{**a, "at": iso(a["at"])} for a in w["actions"]],
+            }
+            for w in found
+        ],
+        "attention": {key: needs.get(key) or [] for key in ("repeating", "parked", "grown")},
+    }
 
 
 def _signature(conn: sqlite3.Connection) -> tuple[Any, ...]:
@@ -1225,6 +1449,12 @@ __all__ = [
     "event_line",
     "follow_workers",
     "render_workers",
+    "attention",
+    "attention_lines",
+    "a_persons_look",
+    "look",
+    "mark_looked",
+    "peek",
     "terminal_width",
     "work_item",
     "worker_actions",

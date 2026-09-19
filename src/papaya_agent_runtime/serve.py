@@ -703,7 +703,8 @@ def _one_line(text: object) -> str:
 
 
 def _is_agent_comment(comment: dict[str, Any]) -> bool:
-    return str(comment.get("author_type") or "") == "agent" or bool(comment.get("author_actor"))
+    # One authorship rule for the runner and the sweep's un-park check.
+    return sweep.is_agent_comment(comment)
 
 
 def _comment_ids(comments: list[dict[str, Any]]) -> frozenset[str]:
@@ -1390,6 +1391,63 @@ class TicketRunner:
             return
         deficiencies.record(kind, detail, evidence=evidence, scope=scope, scrub=scrub)
 
+    def _note_repetition(self, ticket: Ticket) -> None:
+        """Record `repeated-without-progress` when this pickup is one of too many. Blocking.
+
+        :data:`PICKUPS_BEFORE_DEFICIENCY` pickups of the same work item inside
+        :data:`PICKUP_WINDOW_SECONDS` with no phase beyond the brief. Recorded once a
+        day per ticket and ending (``deficiencies.record_once``), not once per pickup.
+        Never raises: noticing a loop must never be what breaks the hold.
+        """
+        item = ticket.held.event.work_item_id
+        if not item:
+            return
+        try:
+            conn = db.init_db()
+            try:
+                times, ending = repeated_pickups(conn, str(item))
+                label = ticket_label_of(conn, ticket.held.task_id, str(item))
+            finally:
+                conn.close()
+            if times < PICKUPS_BEFORE_DEFICIENCY:
+                return
+            deficiencies.record_once(
+                deficiencies.REPEATED_WITHOUT_PROGRESS,
+                picked_up_detail(label, ending),
+                within=sweep.REPEAT_SAID_EVERY,
+                evidence={
+                    "ticket": label,
+                    "code": ending,
+                    "times": times,
+                    "task_id": ticket.held.task_id,
+                    "run_id": ticket.held.run_id,
+                },
+                scope=f"ticket:{label}",
+                scrub=private_strings(ticket.held.event),
+            )
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            log.warning("[serve] Could not check %s for repeated pickups: %s", item, exc)
+
+    def _park(self, ticket: Ticket, why: str) -> None:
+        """Park a ticket a brief turn found nothing to build on, for the sweep. Blocking.
+
+        The stamp is taken after the turn, whose own comments may have moved the
+        item's `updated_at`, so only a change somebody makes later un-parks it.
+        """
+        event = ticket.held.event
+        if not event.work_item_id:
+            return
+        key = papaya_events.work_item_label(event)[0]
+        try:
+            sweep.remember_parked(
+                str(event.work_item_id),
+                updated_at=_memory_stamp(event),
+                reason=why,
+                label=key or sweep.ticket_label({"id": event.work_item_id}),
+            )
+        except Exception as exc:  # noqa: BLE001 - parking must not stop the ending
+            log.warning("[serve] Could not park %s: %s", ticket.job.subject, exc)
+
     async def _hold(self, ticket: Ticket) -> dict[str, Any]:
         held, job = ticket.held, ticket.job
         where = f" in {held.repo}" if held.repo else ""
@@ -1401,12 +1459,14 @@ class TicketRunner:
                 else await asyncio.to_thread(_max_event_id)
             )
         if held.resume_from is None:
-            again = await asyncio.to_thread(picked_up_before, held.task_id)
+            again = await asyncio.to_thread(announced_before, held.task_id)
+            await asyncio.to_thread(self._note_repetition, ticket)
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
             if not again:
-                # Said once per ticket: an item offered again (a new assignment event,
-                # a restart) already has this line, and saying it again is noise.
+                # Said once per assignment of the work item: an item offered again (a
+                # restart, a sweep, a comment) already has this line, and saying it
+                # again is noise. A hand-back ends the assignment; the next one is news.
                 said = "Picked up; choosing the repository and writing the brief."
                 await self._say(ticket, PHASE_BRIEFING, said)
         else:
@@ -1498,8 +1558,11 @@ class TicketRunner:
                 continue
             if (why := nothing_to_build(result)) is not None:
                 # Not a miss and not a hand-back: the item keeps its status, and a
-                # restart does not offer it again as declined.
+                # restart does not offer it again as declined. Parked for the sweep,
+                # though: forgotten, a stale `in_progress` item is offered again every
+                # sweep and briefed to the same answer (PAP-210, 2026-09-19).
                 await self._enter(ticket, PHASE_REPORTED, f"Nothing to build: {why}")
+                await asyncio.to_thread(self._park, ticket, why)
                 return PHASE_REPORTED
             outcome = self._missed(ticket, misses, "dispatching a worker", result)
             if isinstance(outcome, HandBack):
@@ -2639,21 +2702,13 @@ class TicketRunner:
                     log.warning("[serve] Could not comment on %s: %s", job.subject, exc)
         # Remembered for the sweep like a first-pickup decline: the task row now reads
         # `declined`, which the sweep treats as ended, so without this the brief turns
-        # would run again every sweep. The status and the comment just written move
-        # the item's `updated_at` themselves, so the stamp is taken after them — only
-        # a change somebody makes later reads as newer. Never earlier than the item's
-        # own `updated_at`, so a clock behind Papaya's cannot make it read as changed.
+        # would run again every sweep.
         if held.event.work_item_id:
-            work_item = held.event.payload.get("work_item")
-            known = work_item.get("updated_at") if isinstance(work_item, dict) else None
-            stamp = datetime.now(UTC).isoformat()
-            if known and sweep.declined_earlier({"updated_at": stamp}, {"updated_at": known}):
-                stamp = str(known)
             try:
                 await asyncio.to_thread(
                     sweep.remember_declined,
                     held.event.work_item_id,
-                    updated_at=stamp,
+                    updated_at=_memory_stamp(held.event),
                     reason=reason,
                 )
             except Exception as exc:  # noqa: BLE001 - remembering must not stop the hand-back
@@ -2923,6 +2978,22 @@ class TicketRunner:
             conn.close()
 
 
+def _memory_stamp(event: papaya_events.PapayaEvent) -> str:
+    """The `updated_at` a sweep memory is stamped with: now, never earlier than the item's.
+
+    Taken after anything this hold wrote on the item (a status, a comment), which may
+    move its `updated_at` itself, so only a change somebody makes later reads as newer.
+    Never earlier than the item's own `updated_at`, so a clock behind Papaya's cannot
+    make it read as changed.
+    """
+    work_item = event.payload.get("work_item")
+    known = work_item.get("updated_at") if isinstance(work_item, dict) else None
+    stamp = datetime.now(UTC).isoformat()
+    if known and sweep.declined_earlier({"updated_at": stamp}, {"updated_at": known}):
+        stamp = str(known)
+    return stamp
+
+
 def _declined_exit_code() -> int:
     """75, read from the client rather than restated, so the two cannot drift."""
     from papaya_agent_client.command_runner import DECLINED_EXIT_CODE
@@ -3006,13 +3077,137 @@ def phase_history(conn, task_id: int) -> list[str]:
     return [str(_payload(row).get("phase") or "") for row in rows]
 
 
-def picked_up_before(task_id: int) -> bool:
-    """Was this ticket's task picked up by an earlier hold (the pickup is recorded first)?"""
+#: The phases that end one assignment of a work item: after one of these, a pickup
+#: is a new assignment and news, so the pickup line is said again.
+ASSIGNMENT_ENDS = (PHASE_HANDED_BACK, PHASE_DECLINED, PHASE_DONE)
+
+#: The phases that show a pickup got somewhere: a worker was dispatched, or the
+#: ticket went on past its brief. Anything else is a pickup with nothing to show.
+PROGRESS_PHASES = (
+    PHASE_DISPATCHED,
+    PHASE_BLOCKED,
+    PHASE_REVIEWING,
+    PHASE_DELIVERING,
+    PHASE_HANDED_OVER,
+    PHASE_DONE,
+    PHASE_NEEDS_A_PERSON,
+)
+
+#: A ticket picked up this many times inside :data:`PICKUP_WINDOW_SECONDS`, with no
+#: phase in that window beyond the brief, is repeating itself.
+PICKUPS_BEFORE_DEFICIENCY = 3
+PICKUP_WINDOW_SECONDS = 60 * 60.0
+
+
+def work_item_of(conn, task_id: int) -> str | None:
+    """The work item id a ticket task was recorded for, or ``None``."""
+    row = conn.execute(
+        "SELECT json_extract(value, '$.work_item_id') FROM task_env "
+        "WHERE task_id = ? AND key = ? AND json_valid(value)",
+        (task_id, papaya_events.PAPAYA_EVENT_METADATA),
+    ).fetchone()
+    return str(row[0]) if row is not None and row[0] else None
+
+
+def item_phase_events(conn, work_item_id: str) -> list[tuple[int, int, str, str]]:
+    """Every phase any task of this work item went through: `(event id, task, phase, at)`."""
+    rows = conn.execute(
+        "SELECT events.id, events.task_id, events.payload, events.created_at FROM events "
+        "JOIN task_env ON task_env.task_id = events.task_id "
+        "WHERE events.kind = ? AND task_env.key = ? AND json_valid(task_env.value) "
+        "AND json_extract(task_env.value, '$.work_item_id') = ? ORDER BY events.id",
+        (store.TICKET_PHASE_EVENT, papaya_events.PAPAYA_EVENT_METADATA, work_item_id),
+    ).fetchall()
+    return [
+        (int(row["id"]), int(row["task_id"]), str(_payload(row).get("phase") or ""), row[3])
+        for row in rows
+    ]
+
+
+def announced_before(task_id: int) -> bool:
+    """Has this ticket's pickup line been said already, for this assignment of its item?
+
+    Keyed on the work item, not the task row: an offer carries a new event key every
+    time, so a ticket whose earlier hold ended without a resumable phase gets a new
+    task, and a task-keyed check read every such pickup as the first (PAP-210's eleven
+    identical comments). Any earlier pickup of the item says it was announced; a hand
+    back, a decline or done since then ends that assignment, so the next pickup is news.
+    The pickup this hold just recorded is not counted.
+    """
     conn = db.init_db()
     try:
-        return phase_history(conn, task_id).count(PHASE_PICKED_UP) > 1
+        item = work_item_of(conn, task_id)
+        if item is None:
+            return phase_history(conn, task_id).count(PHASE_PICKED_UP) > 1
+        events = item_phase_events(conn, item)
+        own = max(
+            (eid for eid, task, phase, _ in events if task == task_id and phase == PHASE_PICKED_UP),
+            default=None,
+        )
+        announced = False
+        for event_id, _task, phase, _at in events:
+            if event_id == own:
+                continue
+            if phase == PHASE_PICKED_UP:
+                announced = True
+            elif phase in ASSIGNMENT_ENDS:
+                announced = False
+        return announced
     finally:
         conn.close()
+
+
+def repeated_pickups(
+    conn, work_item_id: str, *, now: datetime | None = None, window: float | None = None
+) -> tuple[int, str]:
+    """How often this item was picked up in the window with nothing to show, and how it ended.
+
+    `(0, "")` when any phase in the window shows progress (:data:`PROGRESS_PHASES`): a
+    ticket that reached a worker is not looping, however often it was picked up. The
+    ending is the newest way a hold in the window ended other than a bare release
+    (`reported` for a brief turn that found nothing to build), else `released`.
+    """
+    now = now or datetime.now(UTC)
+    window = PICKUP_WINDOW_SECONDS if window is None else window
+    recent = []
+    for event in item_phase_events(conn, work_item_id):
+        at = _parse_stamp(event[3])
+        if at is not None and (now - at).total_seconds() <= window:
+            recent.append(event)
+    if any(phase in PROGRESS_PHASES for _, _, phase, _ in recent):
+        return 0, ""
+    pickups = sum(phase == PHASE_PICKED_UP for _, _, phase, _ in recent)
+    ending = next(
+        (
+            phase
+            for _, _, phase, _ in reversed(recent)
+            if phase and phase not in (PHASE_PICKED_UP, PHASE_RELEASED, *WORKING_PHASES)
+        ),
+        PHASE_RELEASED,
+    )
+    return pickups, ending
+
+
+def _parse_stamp(value: object) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def picked_up_detail(label: str, ending: str) -> str:
+    """A `repeated-without-progress` detail for a ticket picked up again and again."""
+    return (
+        f"{label} was picked up {PICKUPS_BEFORE_DEFICIENCY} times within an hour and never "
+        f"reached a worker; each hold ended {ending}"
+    )
+
+
+def ticket_label_of(conn, task_id: int, work_item_id: str) -> str:
+    """The display id recorded for a ticket task (`PAP-210`), else `work item <id8>`."""
+    key = store.get_task_env(conn, task_id, papaya_events.WORK_ITEM_KEY)
+    return str(key) if key else sweep.ticket_label({"id": work_item_id})
 
 
 def sent_back_before(task_id: int) -> bool:

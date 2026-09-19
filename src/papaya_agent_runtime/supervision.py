@@ -1211,11 +1211,11 @@ def full_suite_missing(worker_task_id: int) -> str | None:
 def assigned_unpicked(*, now: datetime | None = None, api=None) -> list[dict[str, Any]]:
     """Work items assigned to this agent that nothing here or elsewhere is working.
 
-    The same filters serve's sweep applies before it offers an item (`sweep.skip_reason`):
-    open, no live task here, not in progress elsewhere, not declined earlier with nothing
-    changed since. A session is shown them (session start, `ppy sweep`, the heartbeat)
-    and takes one up by briefing and dispatching it. Never raises; ``[]`` when not
-    connected.
+    The one gate serve's sweep applies before it offers an item (`sweep.gate`): open, no
+    live task here, not in progress elsewhere, not declined earlier with nothing changed
+    since, not parked on a person who has not answered. A session is shown them (session
+    start, `ppy sweep`, the heartbeat) and takes one up by briefing and dispatching it.
+    Never raises; ``[]`` when not connected.
     """
     import asyncio
 
@@ -1241,15 +1241,27 @@ def assigned_unpicked(*, now: datetime | None = None, api=None) -> list[dict[str
 
         answer = asyncio.run(api_client.list_assigned_work_items(api))
         items = sweep.sweep_order([i for i in sweep._items(answer) if sweep.is_open(i)])
+        # The listing succeeded: a parked ticket not in it was closed or reassigned.
+        sweep.forget_parked_absent({str(item["id"]) for item in items})
         live = sweep.live_work_item_ids()
         declined = sweep.declined_items()
-        return [
-            item
-            for item in items
-            if sweep.skip_reason(
-                item, now=now, live=live, declined=declined, stale_after=sweep.DEFAULT_STALE_AFTER
-            )
-            is None
-        ]
+        reads = sweep.PapayaReads(api)
+
+        async def waiting() -> list[dict[str, Any]]:
+            return [
+                item
+                for item in items
+                if await sweep.gate(
+                    item,
+                    now=now,
+                    live=live,
+                    declined=declined,
+                    stale_after=sweep.DEFAULT_STALE_AFTER,
+                    comments=reads.comments,
+                )
+                is None
+            ]
+
+        return asyncio.run(waiting())
     except Exception:  # noqa: BLE001 - a session is never stopped by an unreachable Papaya
         return []

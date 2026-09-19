@@ -75,7 +75,9 @@ UNHANDLED_EXCEPTION = "unhandled-exception"
 REPEATED_STEER = "repeated-steer"
 #: CI went red on a pull request the runtime delivered to its own repository.
 RUNTIME_CI_RED = "runtime-ci-red"
-#: Papaya refused this machine the same idle item on three sweeps running.
+#: Papaya refused this machine the same idle item on three sweeps running. Kept for the
+#: rows already in ledgers; the sweep records :data:`REPEATED_WITHOUT_PROGRESS` instead,
+#: once per ticket and reason, where this kind was one occurrence per streak.
 IDLE_WORK_REFUSED = "idle-work-refused"
 #: A turn did what its prompt tells it not to do for this agent (`propose_memory` on a shared one).
 PROMPT_DEFECT = "prompt-defect"
@@ -85,6 +87,13 @@ SERVE_ONLY_CAPABILITY = "serve-only-capability"
 DELIVERY_FAILED = "delivery-failed"
 #: The lifeline watcher that stops a dead supervisor's workers could not start, or had exited.
 LIFELINE_DOWN = "lifeline-down"
+#: One ticket kept coming back with nothing to show: picked up again and again without
+#: reaching a worker, or refused on sweep after sweep for the same reason.
+REPEATED_WITHOUT_PROGRESS = "repeated-without-progress"
+
+#: Kinds whose detail names one subject (`PAP-210`), fingerprinted on the detail as
+#: written: normalising would turn every ticket's number into the same `<n>`.
+EXACT_KINDS = frozenset({REPEATED_WITHOUT_PROGRESS})
 
 #: Ledger statuses: below its threshold; ready for an issue; an issue exists.
 WATCHING = "watching"
@@ -331,6 +340,26 @@ KINDS: dict[str, Kind] = {
             "stop it happening; a watcher that cannot start at all is an environment defect."
         ),
     ),
+    REPEATED_WITHOUT_PROGRESS: Kind(
+        title="A ticket kept coming back with nothing to show",
+        happened=(
+            "The same ticket came round again and again without the work moving: {detail}. "
+            "Each attempt looked like the first, so nothing said the runtime was repeating "
+            "itself."
+        ),
+        instead=(
+            "Recorded it once for this ticket and ending, and named it under `needs attention` "
+            "in `ppy workers` and `ppy status --team`; the attempts themselves went on."
+        ),
+        remedy=(
+            "Read the ending in the evidence: an ending the runtime forgets (it releases and "
+            "the sweep offers the ticket again) needs remembering, and a refusal nobody can "
+            "lift here needs a person or a routing change."
+        ),
+        # One stuck ticket is a `needs attention` line, not an issue: a second episode
+        # (the same loop another day, or a second ticket refused the same way) is.
+        threshold=2,
+    ),
 }
 
 #: The evidence fields an issue may carry. Anything else a caller passes is dropped.
@@ -351,6 +380,7 @@ EVIDENCE_FIELDS = (
     "pr",
     "transcript",
     "error",
+    "times",
 )
 
 #: How many occurrences a ledger row keeps in full.
@@ -533,7 +563,12 @@ def fingerprint(kind: str, detail: str) -> str:
     cause first (:func:`reduce_turn_report`); every other kind's detail is written
     by the runtime and only normalised.
     """
-    reduced = reduce_turn_report(detail) if kind == TURN_REPORT else normalise(detail)
+    if kind == TURN_REPORT:
+        reduced = reduce_turn_report(detail)
+    elif kind in EXACT_KINDS:
+        reduced = _one_line(detail).lower()
+    else:
+        reduced = normalise(detail)
     return hashlib.sha256(f"{kind}\n{reduced}".encode()).hexdigest()[:16]
 
 
@@ -652,6 +687,76 @@ def record(
     return found
 
 
+def record_once(
+    kind: str,
+    detail: str,
+    *,
+    within: float,
+    evidence: Mapping[str, Any] | None = None,
+    scope: str | None = None,
+    scrub: Iterable[str] = (),
+    clock: Callable[[], datetime] | None = None,
+    per: str = "",
+) -> Deficiency | None:
+    """:func:`record`, unless this fingerprint was already seen in the last ``within`` seconds.
+
+    For a signal that stays true while the thing it names goes on repeating: one
+    occurrence per episode, not one per repetition. ``per`` names an evidence field
+    (`ticket`) whose value gets its own window inside one fingerprint, so one row can
+    gather every ticket stuck the same way, each once. Returns ``None`` when skipped.
+    Never raises.
+    """
+    try:
+        key = fingerprint(kind, _clean_detail(detail, list(scrub)))
+        now = (clock or _now)()
+        wanted = redact((evidence or {}).get(per), list(scrub)) if per else None
+        for at in _seen_at(key, per, wanted):
+            if (now - at).total_seconds() < within:
+                return None
+    except Exception as exc:  # noqa: BLE001 - reporting the runtime must never break it
+        log.warning("[deficiencies] Could not read the %s ledger row: %s", kind, exc)
+        return None
+    return record(kind, detail, evidence=evidence, scope=scope, scrub=scrub, clock=clock)
+
+
+def _seen_at(key: str, per: str, wanted: object) -> list[datetime]:
+    """When this fingerprint was recorded: its last-seen, or each occurrence for ``per``."""
+    from papaya_agent_runtime.paths import db_path
+    from papaya_agent_runtime.state import init_db
+
+    if not db_path().exists():
+        return []
+    conn = init_db()
+    try:
+        row = conn.execute(
+            "SELECT last_seen, evidence FROM deficiencies WHERE fingerprint = ?", (key,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return []
+    if per:
+        try:
+            entries = json.loads(row["evidence"] or "[]")
+        except ValueError:
+            entries = []
+        stamps = [str(e.get("at")) for e in entries if isinstance(e, dict) and e.get(per) == wanted]
+    else:
+        stamps = [str(row["last_seen"])]
+    found = []
+    for stamp in stamps:
+        try:
+            seen = datetime.fromisoformat(stamp)
+        except ValueError:
+            continue
+        found.append(seen if seen.tzinfo is not None else seen.replace(tzinfo=UTC))
+    return found
+
+
+def _clean_detail(detail: str, scrub: list[str]) -> str:
+    return _one_line(redact(detail, scrub))[:300] or "(no detail)"
+
+
 def _record(
     kind: str,
     detail: str,
@@ -663,7 +768,7 @@ def _record(
     from papaya_agent_runtime.state import init_db
 
     spec = KINDS[kind]
-    clean = _one_line(redact(detail, scrub))[:300] or "(no detail)"
+    clean = _clean_detail(detail, scrub)
     key = fingerprint(kind, clean)
     at = _stamp(clock)
     entry = {"at": at, **_clean_evidence(evidence, scrub)}
@@ -1664,6 +1769,7 @@ __all__ = [
     "READINESS_UNREMEDIED",
     "RECLASSIFIED",
     "REPEATED_STEER",
+    "REPEATED_WITHOUT_PROGRESS",
     "REPORTED",
     "RUNTIME_CI_RED",
     "STALL_WHILE_LIVE",
@@ -1692,6 +1798,7 @@ __all__ = [
     "record_denials",
     "record_exception",
     "record_gate_past_tool_cap",
+    "record_once",
     "reclassified_body",
     "redact",
     "reduce_turn_report",
