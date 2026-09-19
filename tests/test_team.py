@@ -23,6 +23,7 @@ from papaya_agent_runtime import (
     reconcile,
     serve,
     standalone,
+    sweep,
     team,
 )
 from papaya_agent_runtime.state import init_db, store
@@ -34,6 +35,7 @@ NOTE = "Writing the endpoint handler."
 PR_URL = "https://github.com/acme/api/pull/42"
 QUESTION = "Should /things paginate?"
 ROUND_LINE = "round: checking in on worker task 2 (still planning)"
+PARKED_REASON = "the fix is on staging; waiting on QA's recheck"
 
 
 def _event(conn: Any, task_id: int, kind: str, payload: dict[str, Any]) -> int:
@@ -123,6 +125,8 @@ def world(ppy_home) -> dict[str, int]:
             )
         }
     ).save()
+    # A ticket a brief turn found nothing to build on, parked on a person.
+    sweep.remember_parked("item-300", updated_at=now, reason=PARKED_REASON, label="PAP-300")
     return {"ticket": ticket, "worker": worker, "delivered": delivered}
 
 
@@ -159,10 +163,13 @@ def test_status_team_renders_every_section_from_a_state_with_one_of_each(
     assert "forge_unauthenticated: gh is signed out" in under("blockers")
     assert any(line.startswith("last round (") and ROUND_LINE in line for line in lines)
     assert QUESTION in under("waiting on a person")
+    parked = under("needs attention")
+    assert "parked: PAP-300 waiting on a person since" in parked and PARKED_REASON in parked
+    assert "un-parks when the item changes or a person comments after the stamp" in parked
     # One line per item, one heading per section, the delta since the last check (#72),
     # and nothing else.
     assert lines[-1].startswith("delta: ")
-    assert len(lines) == 1 + 2 * 5 + 2 + 1
+    assert len(lines) == 1 + 2 * 6 + 2 + 1
 
 
 def test_status_team_json_carries_the_same_facts_machine_readably(world, capsys) -> None:
@@ -178,7 +185,9 @@ def test_status_team_json_carries_the_same_facts_machine_readably(world, capsys)
         "blockers",
         "last_round",
         "waiting_on_a_person",
+        "attention",
     }
+    assert [p["ticket"] for p in facts["attention"]["parked"]] == ["PAP-300"]
     (ticket,) = facts["tickets"]
     assert (ticket["task_id"], ticket["work_item_id"], ticket["phase"]) == (
         world["ticket"],

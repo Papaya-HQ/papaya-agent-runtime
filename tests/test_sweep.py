@@ -182,6 +182,41 @@ def test_how_long_in_progress_must_sit_is_configurable(ppy_home, assigned, monke
     assert built.loop.offered == ["item-1"]
 
 
+def test_a_parked_ticket_waits_on_a_person_until_somebody_who_is_not_an_agent_comments(
+    ppy_home, assigned
+) -> None:
+    """`updated_at` does not move for a comment; a person's comment still un-parks it."""
+    assigned.append(_item("PAP-210", "in_progress", days=5))
+    parked_at = _stamp(hours=1)
+    sweep.remember_parked("PAP-210", updated_at=parked_at, reason="waits on QA", label="PAP-210")
+    reads = Reads()
+    # The agent's own recheck request, after parking, is not an answer.
+    reads.thread["PAP-210"] = [{"author_type": "agent", "created_at": _stamp(minutes=30)}]
+    built = FakeBuilt(loop=FakeLoop(slots=1))
+
+    parked = asyncio.run(_sweeper(built, Clock(), reads=reads).sweep_once())
+    assert built.loop.offered == []
+    assert parked.summary() == "sweep found 1: 1 waiting on a person, 0 offered"
+
+    # QA answers on the thread.
+    reads.thread["PAP-210"].append({"author_type": "user", "created_at": _stamp(minutes=5)})
+    answered = asyncio.run(_sweeper(built, Clock(), reads=reads).sweep_once())
+    assert built.loop.offered == ["PAP-210"]
+    assert answered.waiting_on_a_person == 0
+
+
+def test_a_parked_ticket_changed_recently_is_offered_not_judged_in_progress_elsewhere(
+    ppy_home, assigned
+) -> None:
+    assigned.append(_item("PAP-210", "in_progress", minutes=10))
+    sweep.remember_parked("PAP-210", updated_at=_stamp(hours=1), reason="waits", label="PAP-210")
+    built = FakeBuilt(loop=FakeLoop(slots=1))
+
+    asyncio.run(_sweeper(built, Clock()).sweep_once())
+
+    assert built.loop.offered == ["PAP-210"]
+
+
 def _lines(stderr: io.StringIO) -> list[str]:
     return stderr.getvalue().splitlines()
 
@@ -478,11 +513,11 @@ def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_o
         return [b for b in ledger.open.values() if b.code == blockers.IDLE_WORK_KEPT]
 
     def refused_deficiencies() -> list[deficiencies.Deficiency]:
-        return [
-            d
-            for d in deficiencies.ledger(include_all=True)
-            if d.kind == deficiencies.IDLE_WORK_REFUSED
-        ]
+        found = deficiencies.ledger(include_all=True)
+        return sorted(
+            (d for d in found if d.kind == deficiencies.REPEATED_WITHOUT_PROGRESS),
+            key=lambda d: d.detail,
+        )
 
     async def sweep_after(minutes: float) -> sweep.SweepResult:
         clock.advance(minutes=minutes)
@@ -517,20 +552,62 @@ def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_o
     assert changed.title.startswith("Papaya keeps 2 idle items from this Mac: PAP-219, PAP-221;")
     assert changed.first_seen == first_seen
     assert published == [True, True]
-    # The third refusal running of PAP-219 and PAP-221, with no evidence of work.
-    [deficiency] = refused_deficiencies()
-    assert sorted(entry["ticket"] for entry in deficiency.evidence) == ["PAP-219", "PAP-221"]
-    assert all(entry["code"] == "handled_in_papaya" for entry in deficiency.evidence)
+    # The third refusal running of PAP-219 and PAP-221, with no evidence of work: one
+    # row per ticket, fingerprinted on the ticket and the reason.
+    found = refused_deficiencies()
+    assert [d.detail for d in found] == [
+        sweep.refused_detail("PAP-219", "handled_in_papaya"),
+        sweep.refused_detail("PAP-221", "handled_in_papaya"),
+    ]
+    assert [(d.evidence[0]["ticket"], d.evidence[0]["times"]) for d in found] == [
+        ("PAP-219", 3),
+        ("PAP-221", 3),
+    ]
+    assert not any(d.kind == deficiencies.IDLE_WORK_REFUSED for d in deficiencies.ledger())
 
-    # A fourth refusal does not record it again.
+    # A fourth and fifth refusal do not record it again: once per fingerprint, not
+    # once per repetition (the 527-count row of 2026-09-19).
     asyncio.run(sweep_after(5))
-    assert refused_deficiencies()[0].count == 2
+    asyncio.run(sweep_after(5))
+    assert [d.count for d in refused_deficiencies()] == [1, 1]
 
     # Nothing refused any more: the blocker clears.
     built.loop._events.routed_here.update({"work_item:PAP-219", "work_item:PAP-221"})
     asyncio.run(sweep_after(5))
     assert idle_blockers() == []
     assert published == [True, True, True]
+
+
+def test_a_refusal_streak_counts_only_sweeps_refused_for_the_same_reason(
+    ppy_home, assigned
+) -> None:
+    from papaya_agent_runtime import deficiencies
+
+    assigned.append({**_item("PAP-219", hours=2), "short_id": "PAP-219"})
+    built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
+    built.loop._events.holder = dict(FALLBACK_HOLDER)
+    clock = Clock()
+    sweeper = _sweeper(built, clock)
+
+    def recorded() -> list[str]:
+        return [
+            d.detail
+            for d in deficiencies.ledger(include_all=True)
+            if d.kind == deficiencies.REPEATED_WITHOUT_PROGRESS
+        ]
+
+    async def sweeps(n: int) -> None:
+        for _ in range(n):
+            clock.advance(minutes=5)
+            await sweeper.sweep_once()
+
+    asyncio.run(sweeps(2))
+    # The reason changes: the streak starts again.
+    built.loop._events.holder = dict(KEPT_IN_PAPAYA)
+    asyncio.run(sweeps(2))
+    assert recorded() == []
+    asyncio.run(sweeps(1))
+    assert recorded() == [sweep.refused_detail("PAP-219", "not_routed_here")]
 
 
 def test_the_summary_says_which_kept_work_is_being_worked_and_which_is_idle(

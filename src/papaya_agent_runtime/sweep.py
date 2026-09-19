@@ -37,7 +37,11 @@ What the sweep adds is only the choosing:
   **idle**: the memory is bypassed and it is asked for on every sweep. When Papaya
   still refuses it (the fallback's guard window), the refused idle items are one
   blocker a person sees (:func:`blockers.set_idle_work_kept`), and an item refused
-  on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps running is a deficiency;
+  for the same reason on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps running is one
+  `repeated-without-progress` deficiency a day;
+- a ticket a brief turn found nothing to build on is **parked**, waiting on a
+  person (:func:`remember_parked`): left alone until its `updated_at` moves or
+  somebody who is not an agent comments after the stamp;
 - a full pool ends the round, and the rest wait for the next one.
 
 On start, and on the first sweep after Papaya could not be reached (a reconnect),
@@ -142,6 +146,16 @@ RECLAIM_FAILED = "failed"
 
 #: Ticket phases that mean this runtime gave the work away on purpose.
 GIVEN_AWAY_PHASES = ("handed_back", "declined", "done")
+
+#: What a remembered item's `ended` says when a brief turn found nothing to build:
+#: the ticket is parked, waiting on a person (a QA recheck, a decision), not declined.
+PARKED = "waiting_on_a_person"
+
+#: The skip reason for a parked ticket nobody has changed or spoken on since.
+WAITING_ON_A_PERSON = "waiting on a person"
+
+#: How long one repeating ticket (one fingerprint) is recorded once for: a day.
+REPEAT_SAID_EVERY = 24 * 60 * 60.0
 
 
 def idle_claim_minutes() -> int:
@@ -258,6 +272,84 @@ def forget_declined(work_item_id: str) -> None:
         if data.pop(str(work_item_id), None) is not None:
             _write_items(declined_path(), data)
     forget_kept([work_item_id])
+
+
+# ── the tickets parked on a person ──────────────────────────────────────────
+#
+# A brief turn that finds nothing to build ("the fix is on staging; waiting on QA's
+# recheck") ends the hold without handing the ticket back: it is still this agent's,
+# and still `in_progress`. Forgotten, it is an `in_progress` item nobody has touched
+# for hours, so every sweep offered it, a new brief turn found nothing again, and the
+# item got the pickup line every five minutes (PAP-210, 2026-09-19). So the ending is
+# remembered beside the declines, with `ended` = :data:`PARKED`, and the sweep leaves
+# the ticket alone until the item's `updated_at` moves or somebody who is not an
+# agent comments after the stamp. A new pickup, from any path, forgets it.
+
+
+def remember_parked(
+    work_item_id: str, *, updated_at: str | None, reason: str, label: str = ""
+) -> None:
+    """Park a ticket a brief turn found nothing to build on, as it stood at the time."""
+    if not work_item_id:
+        return
+    now = datetime.now(UTC).isoformat()
+    with _declined_lock:
+        data = declined_items()
+        data[str(work_item_id)] = {
+            "updated_at": updated_at,
+            "reason": reason,
+            "declined_at": now,
+            "ended": PARKED,
+            "label": label,
+        }
+        _write_items(declined_path(), data)
+
+
+def is_parked(remembered: Mapping[str, Any] | None) -> bool:
+    return bool(remembered) and (remembered or {}).get("ended") == PARKED
+
+
+def parked_items() -> dict[str, dict[str, Any]]:
+    """Every parked ticket, `{work item id: {updated_at, reason, declined_at, label}}`."""
+    return {key: value for key, value in declined_items().items() if is_parked(value)}
+
+
+def person_spoke_since(comments: list[dict[str, Any]] | None, stamp: Any) -> bool:
+    """Whether anybody who is not an agent commented after ``stamp``.
+
+    Comments that could not be read say nothing: the ticket stays parked, and the
+    next sweep reads them again.
+    """
+    since = _timestamp(stamp)
+    if not comments or since is None:
+        return False
+    for comment in comments:
+        if str(comment.get("author_type") or "").strip().lower() == "agent":
+            continue
+        said = _timestamp(comment.get("created_at"))
+        if said is not None and said > since:
+            return True
+    return False
+
+
+def ticket_label(item: Mapping[str, Any]) -> str:
+    """How a deficiency names a work item: its display id, else `work item <id8>`.
+
+    Never the whole id: a 36-character id is redacted as opaque, and every ticket
+    would then share one fingerprint.
+    """
+    for name in ("short_id", "display_id", "key"):
+        if str(item.get(name) or "").strip():
+            return str(item[name]).strip()
+    return f"work item {str(item.get('id') or '')[:8]}"
+
+
+def refused_detail(label: str, reason: str) -> str:
+    """A `repeated-without-progress` detail for a ticket refused sweep after sweep."""
+    return (
+        f"{label} was refused here on {REFUSALS_BEFORE_DEFICIENCY} sweeps running "
+        f"for the same reason ({reason})"
+    )
 
 
 # ── the tickets Papaya keeps somewhere else ─────────────────────────────────
@@ -598,6 +690,8 @@ class SweepResult:
     declined_earlier: int = 0
     #: Of `skipped`, `in_progress` items touched too recently to be anybody's but their own.
     in_progress_elsewhere: int = 0
+    #: Of `skipped`, tickets parked when a brief turn found nothing to build, unchanged since.
+    waiting_on_a_person: int = 0
     #: Of `skipped`, the items Papaya keeps elsewhere and somebody is working, as
     #: `(holder name, count)`, most first.
     kept: tuple[tuple[str, int], ...] = ()
@@ -629,8 +723,16 @@ class SweepResult:
             parts.append(f"{self.declined_earlier} declined earlier")
         if self.in_progress_elsewhere:
             parts.append(f"{self.in_progress_elsewhere} in progress elsewhere")
+        if self.waiting_on_a_person:
+            parts.append(f"{self.waiting_on_a_person} {WAITING_ON_A_PERSON}")
         # Live here already, or held by another session this round.
-        taken = self.skipped - self.kept_total - self.declined_earlier - self.in_progress_elsewhere
+        taken = (
+            self.skipped
+            - self.kept_total
+            - self.declined_earlier
+            - self.in_progress_elsewhere
+            - self.waiting_on_a_person
+        )
         if taken:
             parts.append(f"{taken} already taken")
         parts.append(f"{self.offered} offered")
@@ -659,6 +761,7 @@ class SweepResult:
             "skipped": self.skipped,
             "declined_earlier": self.declined_earlier,
             "in_progress_elsewhere": self.in_progress_elsewhere,
+            "waiting_on_a_person": self.waiting_on_a_person,
             "kept": dict(self.kept),
             "idle": {name: {"count": n, "minutes": minutes} for name, n, minutes in self.idle},
             "waiting": self.waiting,
@@ -772,12 +875,17 @@ def skip_reason(
     item_id = str(item["id"])
     if f"work_item:{item_id}" in running or item_id in live:
         return "live here"
-    if (kept or {}).get(item_id) is None and in_progress_elsewhere(
-        item, now=now, stale_after=stale_after
+    remembered = declined.get(item_id)
+    # A parked ticket is this runtime's own: a recent touch is a change on it (QA's
+    # answer), not somebody else working it, so it is not judged "elsewhere".
+    if (
+        (kept or {}).get(item_id) is None
+        and not is_parked(remembered)
+        and in_progress_elsewhere(item, now=now, stale_after=stale_after)
     ):
         return "in progress elsewhere"
-    if declined_earlier(item, declined.get(item_id)):
-        return "declined earlier, unchanged"
+    if declined_earlier(item, remembered):
+        return WAITING_ON_A_PERSON if is_parked(remembered) else "declined earlier, unchanged"
     return None
 
 
@@ -840,8 +948,9 @@ class Sweeper:
         self._reclaim_due = True
         #: Idle items Papaya refused, by work item id: the name the blocker lists.
         self._refused_idle: dict[str, str] | None = None
-        #: Work item id -> sweeps running on which Papaya refused it while idle.
-        self._refusal_streak: dict[str, int] = {}
+        #: Work item id -> (reason, sweeps running on which Papaya refused it for that
+        #: reason while idle).
+        self._refusal_streak: dict[str, tuple[str, int]] = {}
         #: Reclaim lines, for tests and `ppy serve`'s log.
         self.reclaim_lines: list[str] = []
         self._interval = float(interval)
@@ -1073,14 +1182,20 @@ class Sweeper:
         return asked
 
     async def _record_refusals(
-        self, refused_now: dict[str, tuple[str, str]], reached: set[str], found: set[str]
+        self, refused_now: dict[str, tuple[str, str, str]], reached: set[str], found: set[str]
     ) -> None:
         """Bring the idle-work blocker and the refusal streaks in line with this sweep.
 
-        ``refused_now`` is `{work item id: (name, refusal reason)}` for the idle items
-        Papaya refused this sweep; ``reached`` the items this sweep got as far as asking
-        about; ``found`` every open item. An item a full pool kept this sweep from
+        ``refused_now`` is `{work item id: (name, refusal reason, label)}` for the idle
+        items Papaya refused this sweep; ``reached`` the items this sweep got as far as
+        asking about; ``found`` every open item. An item a full pool kept this sweep from
         reaching keeps its place in the blocker until a sweep reaches it.
+
+        An item refused for the same reason on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps
+        running is a `repeated-without-progress` deficiency, fingerprinted on the item
+        and the reason and recorded once a day however long the refusals go on: one
+        line a person reads, not one occurrence per sweep (the 527-count row of
+        2026-09-17..19).
         """
         from papaya_agent_runtime import blockers, deficiencies
 
@@ -1090,21 +1205,23 @@ class Sweeper:
             for item_id, name in (previous or {}).items()
             if item_id not in reached and item_id in found
         }
-        current = {**kept_over, **{item_id: name for item_id, (name, _) in refused_now.items()}}
+        current = {**kept_over, **{item_id: name for item_id, (name, _, _) in refused_now.items()}}
         for item_id in list(self._refusal_streak):
             if (item_id in reached and item_id not in refused_now) or item_id not in found:
                 del self._refusal_streak[item_id]
-        for item_id, (name, reason) in refused_now.items():
-            streak = self._refusal_streak.get(item_id, 0) + 1
-            self._refusal_streak[item_id] = streak
-            if streak == REFUSALS_BEFORE_DEFICIENCY:
+        for item_id, (_name, reason, label) in refused_now.items():
+            last_reason, last_streak = self._refusal_streak.get(item_id, (reason, 0))
+            streak = last_streak + 1 if last_reason == reason else 1
+            self._refusal_streak[item_id] = (reason, streak)
+            if streak >= REFUSALS_BEFORE_DEFICIENCY:
                 await asyncio.to_thread(
                     functools.partial(
-                        deficiencies.record,
-                        deficiencies.IDLE_WORK_REFUSED,
-                        f"{reason} refusal",
-                        evidence={"ticket": name, "code": reason},
-                        scope=f"ticket:{item_id}",
+                        deficiencies.record_once,
+                        deficiencies.REPEATED_WITHOUT_PROGRESS,
+                        refused_detail(label, reason),
+                        within=REPEAT_SAID_EVERY,
+                        evidence={"ticket": label, "code": reason, "times": streak},
+                        scope=f"ticket:{label}",
                     )
                 )
         self._refused_idle = current
@@ -1142,11 +1259,11 @@ class Sweeper:
         if self._reclaim_due:
             asked = await self._reclaim_earlier(items, live, now)
 
-        offered = skipped = earlier = elsewhere = waiting = 0
+        offered = skipped = earlier = elsewhere = waiting = parked = 0
         kept_by: dict[str, int] = {}
         idle_by: dict[str, list[int | None]] = {}
         newly_kept: dict[str, dict[str, Any]] = {}
-        refused_idle: dict[str, tuple[str, str]] = {}
+        refused_idle: dict[str, tuple[str, str, str]] = {}
         reached: set[str] = set()
         taken: list[str] = []
         for index, item in enumerate(items):
@@ -1170,11 +1287,19 @@ class Sweeper:
                 running=frozenset() if item_id in asked else built.loop.running_subjects,
                 kept=kept,
             )
+            if reason == WAITING_ON_A_PERSON:
+                # `updated_at` does not move for a comment, and a person's answer on
+                # the thread (QA's result) is exactly what un-parks the ticket.
+                stamp = (declined.get(item_id) or {}).get("updated_at")
+                if person_spoke_since(await self._reads.comments(item_id), stamp):
+                    log.debug("[sweep] %s: a person spoke since it was parked", subject)
+                    reason = None
             if reason is not None:
                 log.debug("[sweep] %s not offered: %s", subject, reason)
                 skipped += 1
                 elsewhere += reason == "in progress elsewhere"
                 earlier += reason == "declined earlier, unchanged"
+                parked += reason == WAITING_ON_A_PERSON
                 continue
             evidence: Evidence | None = None
             if item_id not in asked and kept_elsewhere(item, remembered, now=clock_now):
@@ -1233,7 +1358,7 @@ class Sweeper:
                 reason = refusal_skip_reason(refused) or "refused"
                 log.debug("[sweep] %s is kept by %s and idle; Papaya refused it", subject, name)
                 idle_by.setdefault(name, []).append(evidence.idle_minutes(now))
-                refused_idle[item_id] = (_short(item), reason)
+                refused_idle[item_id] = (_short(item), reason, ticket_label(item))
             else:
                 # Held by another session, taken over in Papaya, or not this
                 # playbook's to act on. Not ours this round.
@@ -1250,6 +1375,7 @@ class Sweeper:
             skipped=skipped,
             declined_earlier=earlier,
             in_progress_elsewhere=elsewhere,
+            waiting_on_a_person=parked,
             kept=tuple(sorted(kept_by.items(), key=lambda pair: (-pair[1], pair[0]))),
             idle=tuple(
                 sorted(
@@ -1292,7 +1418,10 @@ __all__ = [
     "ENDED_PHASES",
     "KEPT_RECHECK_EVERY",
     "OPEN_STATUSES",
+    "PARKED",
     "PRIORITY_RANK",
+    "REPEAT_SAID_EVERY",
+    "WAITING_ON_A_PERSON",
     "ROUTE_HERE_HINT",
     "STATUS_RANK",
     "SWEEP_INTERVAL_ENV",
@@ -1310,7 +1439,13 @@ __all__ = [
     "in_progress_elsewhere",
     "interval_from_env",
     "is_open",
+    "is_parked",
     "kept_elsewhere",
+    "parked_items",
+    "person_spoke_since",
+    "refused_detail",
+    "remember_parked",
+    "ticket_label",
     "kept_items",
     "kept_path",
     "live_work_item_ids",

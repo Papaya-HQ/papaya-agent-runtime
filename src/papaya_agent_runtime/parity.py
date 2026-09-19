@@ -277,6 +277,11 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._enter",
             "TicketRunner._say",
             "TicketRunner._hand_back",
+            # A hold ending with nothing to build parks the ticket for the sweep, and
+            # a pickup counts the pickups before it: both exist only where a Papaya
+            # ticket is taken and held, which a session never does.
+            "TicketRunner._park",
+            "TicketRunner._note_repetition",
             "TicketRunner._stopped",
             "TicketRunner._comment",
             "TicketRunner._setup_comment",
