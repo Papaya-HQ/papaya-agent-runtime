@@ -694,7 +694,7 @@ def _gave_up(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
     from papaya_agent_runtime import lanes
 
     try:
-        found = lanes.gave_up(conn)
+        found = lanes.gave_up(conn, now)
     except sqlite3.Error:
         return []
     return [{**g, "seconds": _ago(now, g["since"])} for g in found]
@@ -765,6 +765,13 @@ def attention_lines(found: dict[str, Any] | None) -> list[str]:
             " nothing is counted as a failure"
         )
     for g in found.get("gave_up") or []:
+        if g.get("task_id") is None:
+            lines.append(
+                f'gave up: todo #{g["todo_id"]} "{_clip(g.get("todo"), 60)}" since '
+                f"{_utc(g['since'])} ({_age(g['seconds'])} ago): {_clip(g['reason'], 60)} · "
+                f"do it, defer it with a reason, or drop it (`ppy todo drop {g['todo_id']}`)"
+            )
+            continue
         lines.append(
             f"gave up: worker task {g['task_id']} since {_utc(g['since'])} "
             f"({_age(g['seconds'])} ago): {_clip(g['reason'], 90)} · anything new on the task "

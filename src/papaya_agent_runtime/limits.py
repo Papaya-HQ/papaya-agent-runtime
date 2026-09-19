@@ -14,13 +14,17 @@ is the one place that says so:
   ending that failed (non-zero exit) counts, so a worker quoting "session limit" in its
   ordinary output is not a limit.
 - :func:`reset_instant` turns the line's reset time into an instant in its own zone.
-  The rules: a time with no zone, or one this machine cannot read, is never guessed at
-  (the pause is :func:`backoff` instead, capped at 30 minutes). A time of day is the next
-  such time after the ending was seen. A reset already past means the limit is over.
+  The rules: a time with no zone, or one this machine cannot read, is never guessed at.
+  A time of day just passed (within 15 minutes) is over; one further back is a stale
+  line, not tomorrow. Every reset, streamed or read, is bounded to eight days ahead.
+  Whenever no usable future reset comes out, the pause is :func:`backoff` instead
+  (5 minutes doubling to 30), growing per such ending in a row.
 - :func:`record` and :func:`pause` keep the pause as events in `state.db`, never in a
   process's memory, so a `ppy serve` restart still waits it out. Scope: per provider,
   per machine (this instance's ledger). A worker's `error` ending counts too, so a
-  worker hitting the wall pauses the manager's turns on the same provider.
+  worker hitting the wall pauses the manager's turns on the same provider. A turn on
+  that provider that ends normally afterwards ends the pause early (:data:`CLEAR_EVENT`):
+  the limit is evidently gone. :func:`pause` never raises.
 - :func:`worker_ending` finds a worker whose session the limit ended and that nothing
   has taken up since: it is resumed once after the reset, not reported as failed.
 """
@@ -77,8 +81,22 @@ _MONTHS = {
     )
 }
 
-#: A reset further away than this is not believed (the longest window is a week).
+#: A reset further away than this is not believed (the longest window is a week). It
+#: bounds every source of a reset: the text, a streamed epoch, and a recorded pause.
 LONGEST_RESET = timedelta(days=8)
+
+#: A time-of-day reset seen up to this long after that time has just passed: the limit
+#: is over, not back tomorrow. (The provider's clock and ours disagree by seconds; a turn
+#: that waited for the reset can also end a few minutes after it.)
+PAST_RESET_GRACE = timedelta(minutes=15)
+
+#: The furthest ahead a time-of-day reset is believed. The only window that names a
+#: bare time is the session window (five hours); a bare time further ahead than this is
+#: a line seen after its own reset, never tomorrow's, and backs off instead.
+LONGEST_TIME_OF_DAY = timedelta(hours=12)
+
+#: An epoch above this is in milliseconds, not seconds (seconds pass it in the year 5138).
+_MILLISECONDS = 1e11
 
 
 @dataclass(frozen=True)
@@ -134,7 +152,14 @@ def classify_text(
     last non-empty line is read, and only when ``exit_code`` says it failed. ``provider``
     narrows the patterns to that provider's; ``None`` tries them all. ``resets_at`` is an
     epoch the provider streamed alongside (a worker's `rate_limit_event`), which beats the
-    text. ``times`` is how many unreadable limits in a row this one is, for the backoff.
+    text when it is a sane one. ``times`` is how many limits without a usable reset this
+    one is in a row, for the backoff.
+
+    A reset that is unreadable, too far ahead, or already over when the limit was hit is
+    not usable: the provider has just said no, so the limit is evidently not over yet.
+    That ending backs off (:func:`backoff`: 5 minutes doubling to 30), growing with each
+    such ending in a row, so a wall that outlives its stated reset is never hit back to
+    back and never becomes a long pause either.
     """
     if not exit_code:
         return None
@@ -147,16 +172,45 @@ def classify_text(
             match = pattern.match(line)
             if match is None:
                 continue
-            until = None
-            if resets_at:
-                until = datetime.fromtimestamp(float(resets_at), UTC)
-            else:
-                until = reset_instant(match.group("when"), match.group("zone"), at)
-            exact = until is not None
+            until = bounded(epoch_instant(resets_at), at)
             if until is None:
+                until = bounded(reset_instant(match.group("when"), match.group("zone"), at), at)
+            exact = until is not None and until > at
+            if not exact:
                 until = at + timedelta(seconds=backoff(times))
             return Limit(provider=name, text=line, at=at, until=until, exact=exact)
     return None
+
+
+def epoch_instant(value: object) -> datetime | None:
+    """A streamed reset epoch as an instant, or ``None`` if it is not a sane one.
+
+    Seconds or milliseconds (told apart by size); a bool, a string, zero, a negative or
+    an unrepresentable number is no answer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    seconds = float(value)
+    if not seconds > 0:
+        return None
+    if seconds > _MILLISECONDS:
+        seconds /= 1000.0
+    try:
+        return datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def bounded(until: datetime | None, at: datetime) -> datetime | None:
+    """``until`` if it is believable for a limit seen at ``at``: no more than
+    :data:`LONGEST_RESET` ahead, and never before ``at`` (a past reset is over)."""
+    if until is None:
+        return None
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    if until - at > LONGEST_RESET:
+        return None
+    return max(until, at)
 
 
 def classify(
@@ -174,8 +228,15 @@ def classify(
 def reset_instant(when: str | None, zone: str | None, at: datetime) -> datetime | None:
     """The instant a limit line's reset names, in UTC, or ``None`` if it cannot be read.
 
-    ``at`` is when the line was seen. A time of day is the first such time after it;
-    a date with no year is in ``at``'s year, or the next when that date is long past.
+    ``at`` is when the line was seen. A date with no year is in ``at``'s year, or the next
+    when that date is long past. A time of day is:
+
+    - up to :data:`PAST_RESET_GRACE` before ``at``: just passed, so ``at`` (over);
+    - otherwise the next such time, if that is within :data:`LONGEST_TIME_OF_DAY`;
+    - otherwise no answer. Seen 16 minutes after `12:30pm` the next 12:30pm is a day
+      away, which no session window is: the line is stale, and the caller backs off
+      rather than pausing every turn for a day.
+
     No zone is no answer: a reset read in the wrong zone would be hours wrong.
     """
     if not when or not zone:
@@ -206,12 +267,12 @@ def reset_instant(when: str | None, zone: str | None, at: datetime) -> datetime 
     else:
         found = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if found <= local:
+            if local - found <= PAST_RESET_GRACE:
+                return at.astimezone(UTC)
             found = (found + timedelta(days=1)).replace(hour=hour, minute=minute)
-    instant = found.astimezone(UTC)
-    if instant - at > LONGEST_RESET:
-        return None
-    # A reset already past means the limit is over: it ends where it was seen.
-    return max(instant, at.astimezone(UTC))
+        if found - local > LONGEST_TIME_OF_DAY:
+            return None
+    return bounded(found.astimezone(UTC), at.astimezone(UTC))
 
 
 # ── the pause, kept as events ───────────────────────────────────────────────
@@ -237,7 +298,9 @@ def _parse(stamp: object) -> datetime | None:
 
 
 def _from_payload(payload: dict[str, Any]) -> Limit | None:
-    at, until = _parse(payload.get("at")), _parse(payload.get("until"))
+    """A recorded observation, or ``None`` when its reset is not believable any more."""
+    at = _parse(payload.get("at"))
+    until = bounded(_parse(payload.get("until")), at) if at is not None else None
     if at is None or until is None:
         return None
     return Limit(
@@ -250,14 +313,21 @@ def _from_payload(payload: dict[str, Any]) -> Limit | None:
 
 
 def unreadable_in_a_row(conn: sqlite3.Connection, provider: str | None, at: datetime) -> int:
-    """How many limits without a readable reset this provider hit back to back before ``at``."""
+    """How many limits without a usable reset this provider hit back to back before ``at``.
+
+    The chain breaks at an exact reset, a gap longer than the longest backoff, or a turn
+    that ended normally since (:data:`CLEAR_EVENT`).
+    """
     count = 0
+    cleared = _cleared_at(conn, provider)
     for row in conn.execute(
         "SELECT payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 10", (LIMIT_EVENT,)
     ).fetchall():
         seen = _from_payload(_payload(row))
         if seen is None or seen.provider != provider:
             continue
+        if cleared is not None and seen.at <= cleared:
+            break
         if seen.exact or at - seen.until > timedelta(seconds=backoff(10)):
             break
         count += 1
@@ -317,10 +387,18 @@ def observe(
     """After a manager turn: classify its ending and, if the limit ended it, keep the pause.
 
     Blocking (it writes the ledger); callers on an event loop run it on a thread. Said
-    once in the log. A limit whose reset cannot be read backs off longer each time in a row.
+    once in the log. A limit whose reset cannot be used backs off longer each time in a
+    row. A turn that ended normally while a pause stood ends that pause (a clear event):
+    the provider evidently answers again. Never raises.
     """
-    limit = classify(result, provider=provider, at=at)
-    if limit is None:
+    try:
+        limit = classify(result, provider=provider, at=at)
+        if limit is None:
+            if getattr(result, "exit_code", None) == 0:
+                clear(provider, at)
+            return None
+    except Exception:  # noqa: BLE001 - classifying an ending never ends a turn
+        log.exception("[limits] Could not classify a turn's ending")
         return None
     if not limit.exact:
         times = unreadable_count(limit.provider, at) + 1
@@ -382,21 +460,73 @@ def pause(conn: sqlite3.Connection, provider: str | None, now: datetime) -> Limi
 
     The newest end among every recorded observation, the manager's turns and the
     workers' `error` endings alike: one observation pauses every turn on that provider.
+    An observation older than a turn on that provider that ended normally is over.
+    Never raises: a record that cannot be read is no pause, and the owed lane and every
+    round call this unguarded.
     """
-    candidates: list[Limit] = []
+    try:
+        candidates: list[Limit] = []
+        for row in conn.execute(
+            "SELECT payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 20", (LIMIT_EVENT,)
+        ).fetchall():
+            seen = _from_payload(_payload(row))
+            if seen is not None:
+                candidates.append(seen)
+        candidates += [limit for _id, _task, limit in _worker_limits(conn)]
+        cleared = {name: _cleared_at(conn, name) for name in {c.provider for c in candidates}}
+        live = [
+            c
+            for c in candidates
+            if now < c.until
+            and (provider is None or c.provider in (None, provider))
+            and (cleared[c.provider] is None or c.at > cleared[c.provider])
+        ]
+        return max(live, key=lambda c: c.until) if live else None
+    except Exception:  # noqa: BLE001 - a pause is a courtesy, never a crash
+        log.exception("[limits] Could not read the usage-limit pause")
+        return None
+
+
+#: The event kind (on no task) recording that a turn on a provider ended normally while a
+#: pause stood: the pause is over, whatever reset it named.
+CLEAR_EVENT = "provider_limit_cleared"
+
+
+def _cleared_at(conn: sqlite3.Connection, provider: str | None) -> datetime | None:
+    """When a turn on ``provider`` last ended normally during a pause, or ``None``."""
     for row in conn.execute(
-        "SELECT payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 20", (LIMIT_EVENT,)
+        "SELECT payload FROM events WHERE kind = ? ORDER BY id DESC LIMIT 20", (CLEAR_EVENT,)
     ).fetchall():
-        seen = _from_payload(_payload(row))
-        if seen is not None:
-            candidates.append(seen)
-    candidates += [limit for _id, _task, limit in _worker_limits(conn)]
-    live = [
-        c
-        for c in candidates
-        if now < c.until and (provider is None or c.provider in (None, provider))
-    ]
-    return max(live, key=lambda c: c.until) if live else None
+        payload = _payload(row)
+        if provider is None or payload.get("provider") in (None, provider):
+            return _parse(payload.get("at"))
+    return None
+
+
+def clear(provider: str | None, at: datetime) -> bool:
+    """A turn on ``provider`` ended normally at ``at``: end any pause standing then.
+
+    Recorded only when a pause stood, so ordinary turns write nothing. Returns whether
+    one was ended. Never raises.
+    """
+    from papaya_agent_runtime.state import db, store
+
+    try:
+        conn = db.init_db()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        if pause(conn, provider, at) is None:
+            return False
+        store.append_event(
+            conn, kind=CLEAR_EVENT, payload={"provider": provider, "at": at.isoformat()}
+        )
+        log.warning("[limits] A %s turn ended normally: the usage-limit pause is over", provider)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        conn.close()
 
 
 def paused(provider: str | None, now: datetime) -> Limit | None:
@@ -452,7 +582,18 @@ class WorkerEnding:
 
 
 def worker_ending(conn: sqlite3.Connection, task_id: int) -> WorkerEnding | None:
-    """The worker's newest `error` ending, when it was the limit and it still stands."""
+    """The worker's newest `error` ending, when it was the limit and it still stands.
+
+    Never raises (the owed lane calls it for every owed worker): unreadable is ``None``.
+    """
+    try:
+        return _worker_ending(conn, task_id)
+    except Exception:  # noqa: BLE001
+        log.exception("[limits] Could not read worker task %d's ending", task_id)
+        return None
+
+
+def _worker_ending(conn: sqlite3.Connection, task_id: int) -> WorkerEnding | None:
     row = conn.execute(
         "SELECT e.id, e.task_id, e.payload, e.created_at, t.provider, t.status FROM events e "
         "JOIN tasks t ON t.id = e.task_id WHERE e.task_id = ? AND e.kind = 'error' "
@@ -504,7 +645,9 @@ def resume_worker(ending: WorkerEnding, *, steer) -> str:
 
 __all__ = [
     "LIMITED",
+    "CLEAR_EVENT",
     "LIMIT_EVENT",
+    "PAST_RESET_GRACE",
     "PATTERNS",
     "RESUMED_EVENT",
     "RESUME_MESSAGE",
@@ -512,7 +655,10 @@ __all__ = [
     "WorkerEnding",
     "backoff",
     "classify",
+    "bounded",
     "classify_text",
+    "clear",
+    "epoch_instant",
     "observe",
     "pause",
     "paused",

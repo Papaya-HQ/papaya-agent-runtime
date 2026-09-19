@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -96,23 +97,136 @@ def test_the_weekly_limit_line_resets_on_its_named_day() -> None:
     assert found.until == datetime(2026, 9, 22, 14, 0, tzinfo=UTC)  # 7am PDT
 
 
-def test_a_time_of_day_already_past_today_is_tomorrows() -> None:
-    # 20:00 UTC is 1pm PDT: "resets 12:30pm" can only mean tomorrow's 12:30pm.
-    seen = datetime(2026, 9, 19, 20, 0, tzinfo=UTC)
+@pytest.mark.parametrize("late", [timedelta(seconds=20), timedelta(minutes=14)])
+def test_a_time_of_day_just_passed_is_over_never_tomorrow(late) -> None:
+    """Seen seconds or minutes after `12:30pm`: the reset has just happened."""
+    seen = RESET + late
 
+    assert limits.reset_instant("12:30pm", "America/Los_Angeles", seen) == seen
     found = limits.classify_text(SESSION, 1, at=seen)
+    # The provider still said no, so not "over" either: the shortest backoff, not a day.
+    assert found is not None and not found.exact
+    assert found.until == seen + timedelta(minutes=5)
 
-    assert found is not None and found.until == RESET + timedelta(days=1)
+
+def test_a_time_of_day_past_the_grace_is_a_stale_line_and_backs_off() -> None:
+    """Seen 16 minutes after `12:30pm`, the next 12:30pm is a day away, which no session
+    window is: the line is not believed, and the ending backs off 5, 10, 20, 30 minutes."""
+    seen = RESET + timedelta(minutes=16)
+
+    assert limits.reset_instant("12:30pm", "America/Los_Angeles", seen) is None
+    first = limits.classify_text(SESSION, 1, at=seen)
+    fourth = limits.classify_text(SESSION, 1, at=seen, times=4)
+    assert first is not None and first.until == seen + timedelta(minutes=5)
+    assert fourth is not None and fourth.until == seen + timedelta(minutes=30)
 
 
-def test_a_named_reset_already_past_means_the_limit_is_over() -> None:
+def test_a_time_of_day_across_midnight_is_the_next_one() -> None:
+    seen = datetime(2026, 9, 20, 6, 0, tzinfo=UTC)  # 11pm PDT on the 19th
+    line = "You've hit your session limit · resets 3am (America/Los_Angeles)"
+
+    found = limits.classify_text(line, 1, at=seen)
+
+    assert found is not None and found.exact
+    assert found.until == datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+
+
+def test_a_named_reset_already_past_backs_off_instead_of_hammering() -> None:
     seen = datetime(2026, 9, 19, 18, 0, tzinfo=UTC)  # 11am PDT, after 7am
     line = "You've hit your weekly limit · resets Sep 19 at 7am (America/Los_Angeles)"
 
     found = limits.classify_text(line, 1, at=seen)
 
-    assert found is not None and found.exact and found.until == seen
-    assert found.over(seen)
+    assert found is not None and not found.exact
+    assert found.until == seen + timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    "resets_at",
+    [4e9, 0, -5, "1789846200", True, float("inf"), float("nan")],
+    ids=["year-2096", "zero", "negative", "string", "bool", "inf", "nan"],
+)
+def test_an_insane_streamed_reset_falls_back_to_the_text(resets_at) -> None:
+    found = limits.classify_text(SESSION, 1, at=SEEN, resets_at=resets_at)
+
+    assert found is not None and found.exact and found.until == RESET
+
+
+def test_a_millisecond_epoch_is_read_as_milliseconds() -> None:
+    streamed = datetime(2026, 9, 19, 19, 45, tzinfo=UTC)
+
+    found = limits.classify_text(SESSION, 1, at=SEEN, resets_at=int(streamed.timestamp() * 1000))
+
+    assert found is not None and found.until == streamed
+
+
+def test_a_recorded_pause_past_the_cap_or_unreadable_is_no_pause(home) -> None:
+    conn = init_db()
+    for until in ((SEEN + timedelta(days=30)).isoformat(), "not a time", None):
+        store.append_event(
+            conn,
+            kind=limits.LIMIT_EVENT,
+            payload={"provider": "claude", "at": SEEN.isoformat(), "until": until},
+        )
+    store.append_event(conn, kind=limits.LIMIT_EVENT, payload="not even a dict")
+
+    assert limits.pause(conn, "claude", SEEN + timedelta(minutes=1)) is None
+
+
+@pytest.mark.parametrize(
+    "resets_at",
+    [4e9, 1789846200000, 0, -1, "soon"],
+    ids=["year-2096", "milliseconds", "zero", "negative", "string"],
+)
+def test_the_owed_lane_survives_any_streamed_reset(home, resets_at) -> None:
+    """A worker stream with a bad `resetsAt` never breaks the round that reads it."""
+    conn = init_db()
+    task_id = _limit_stopped(conn, resets_at=resets_at)
+
+    found = limits.pause(conn, None, SEEN + timedelta(minutes=1))
+    decisions = lanes.owed_decisions(conn, now=SEEN + timedelta(minutes=1))
+
+    assert found is not None and found.until - SEEN <= limits.LONGEST_RESET
+    assert decisions == []  # paused: waited out, not a failure
+    after = lanes.owed_decisions(conn, now=found.until + timedelta(seconds=1))
+    assert [(d.task_id, d.action) for d in after] == [(task_id, lanes.RESUME)]
+
+
+def test_pause_never_raises(home, monkeypatch) -> None:
+    conn = init_db()
+
+    def broken(*_a, **_k):
+        raise RuntimeError("a corrupt row")
+
+    monkeypatch.setattr(limits, "_worker_limits", broken)
+
+    assert limits.pause(conn, "claude", SEEN) is None
+    assert lanes.owed_decisions(conn, now=SEEN) == []
+
+
+def test_a_turn_that_ends_normally_ends_the_pause_early(home) -> None:
+    conn = init_db()
+    limits.record(limits.Limit("claude", SESSION, SEEN, RESET, exact=True), source="review turn")
+    later = SEEN + timedelta(minutes=10)
+    assert limits.pause(conn, "claude", later) is not None
+
+    # A turn already running when the wall was hit, ending well afterwards.
+    assert (
+        limits.observe(
+            TurnResult(exit_code=0, transcript="done"), provider="claude", at=later, source="t"
+        )
+        is None
+    )
+
+    assert limits.pause(conn, "claude", later + timedelta(seconds=1)) is None
+    # A limit hit after the clear is a new pause.
+    newer = limits.Limit("claude", SESSION, later + timedelta(minutes=1), RESET, exact=True)
+    limits.record(newer, source="review turn")
+    assert limits.pause(conn, "claude", later + timedelta(minutes=2)) is not None
+    # With no pause standing, a normal ending records nothing.
+    before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    limits.observe(TurnResult(exit_code=0, transcript="ok"), provider="codex", at=later, source="t")
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == before
 
 
 @pytest.mark.parametrize(
@@ -339,8 +453,8 @@ def test_news_after_a_give_up_takes_the_task_up_again_with_a_fresh_count(home) -
     assert (decision.task_id, decision.action, decision.turn) == (task_id, lanes.TURN, "review")
     assert team.attention(conn, SEEN)["gave_up"] == []
     # The count starts again: one more miss is a retry, not a second give-up.
-    assert lanes._misses_so_far(conn, task_id) == 0
-    lanes.lift_give_up(task_id, conn)
+    assert lanes._misses_so_far(conn, task_id, SEEN) == 0
+    lanes.lift_give_up(task_id, SEEN, conn)
     assert board.waiting(conn) == []
     _missed(task_id, 1, tail="ended without deciding", exit_code=0)
     assert [d.task_id for d in lanes.owed_decisions(conn, now=SEEN)] == [task_id]
@@ -479,6 +593,80 @@ def test_a_worker_error_that_only_quotes_the_limit_is_a_failure(home) -> None:
     assert decision.action == lanes.TURN
 
 
+LEDGER_BLOCK = "user:two manager turns left it untouched; do it, defer it with a reason, or drop it"
+
+
+def _ledger_turn(conn, todos: list[int], at: datetime, transcript: str, home) -> None:
+    """What the old code left for one ledger turn: its transcript, then its record."""
+    turns = home / "runs" / "0" / "turns"
+    turns.mkdir(parents=True, exist_ok=True)
+    log = turns / f"ledger-{len(list(turns.glob('ledger-*.log'))) + 1}.log"
+    log.write_text(transcript, encoding="utf-8")
+    written = (at - timedelta(seconds=3)).timestamp()
+    os.utime(log, (written, written))
+    store.append_event(
+        conn,
+        kind=lanes.LEDGER_TURN_EVENT,
+        payload={"todos": todos, "left": {}, "at": at.isoformat()},
+    )
+
+
+def _blocked_by_two_ledger_turns(
+    conn, text: str, transcripts: tuple[str, str], home, start: datetime
+) -> int:
+    todo_id = board.add(text, conn=conn)
+    first, second = start, start + timedelta(minutes=10)
+    _ledger_turn(conn, [todo_id], first, transcripts[0], home)
+    _ledger_turn(conn, [todo_id], second, transcripts[1], home)
+    store.update_todo(conn, todo_id, blocked_on=LEDGER_BLOCK)
+    conn.execute("UPDATE todos SET updated_at = ? WHERE id = ?", (second.isoformat(), todo_id))
+    conn.commit()
+    return todo_id
+
+
+def test_next_steps_blocked_by_limit_killed_ledger_turns_recover_on_upgrade(home) -> None:
+    """The old code blocked a next step on a person after two limit-killed ledger turns
+    (runs/0/turns/ledger-41..54 were all the limit line). Re-read, they are due again;
+    a genuine two-miss block stays, and is listed under needs attention."""
+    conn = init_db()
+    assert lanes._LEDGER_GAVE_UP == LEDGER_BLOCK
+    limited = _blocked_by_two_ledger_turns(
+        conn, "close the stale branch", (SESSION + "\n", SESSION + "\n"), home, SEEN
+    )
+    genuine = _blocked_by_two_ledger_turns(
+        conn,
+        "post PR #720 on its work item",
+        ("Looked at todo; left it.\n", "Still not done; the PR is not open.\n"),
+        home,
+        SEEN + timedelta(hours=1),
+    )
+    mixed = _blocked_by_two_ledger_turns(
+        conn,
+        "merge the docs PR",
+        (SESSION + "\n", "Left it for later.\n"),
+        home,
+        SEEN + timedelta(hours=2),
+    )
+
+    lines = lanes.release_finished_waits(conn, now=SEEN + timedelta(hours=3))
+
+    conn = init_db()
+    assert store.get_todo(conn, limited)["blocked_on"] is None
+    assert store.get_todo(conn, limited)["status"] == "open"
+    assert store.get_todo(conn, genuine)["blocked_on"] == LEDGER_BLOCK
+    assert store.get_todo(conn, mixed)["blocked_on"] == LEDGER_BLOCK
+    assert any(f"todo #{limited} is due again" in line for line in lines)
+    later = datetime.now(UTC) + timedelta(hours=1)  # unblocking stamps the todo now
+    assert [i.todo_id for i in lanes.ledger_due(conn, now=later)] == [limited]
+    # Once: nothing more to lift on the next round.
+    assert not any("is due again" in x for x in lanes.release_finished_waits(conn, now=SEEN))
+    shown = team.attention_lines(team.attention(conn, SEEN + timedelta(hours=2)))
+    gave_up = [line for line in shown if line.startswith("gave up: todo")]
+    assert len(gave_up) == 2
+    assert any(f"todo #{genuine}" in line for line in gave_up)
+    assert not any(f"todo #{limited}" in line for line in gave_up)
+
+
 def test_needs_attention_names_a_give_up_with_its_reason(home) -> None:
     conn = init_db()
     task_id = _worker(conn, "worker_done")
@@ -553,6 +741,79 @@ def test_a_held_tickets_limited_turns_are_waited_out_not_handed_back(
         "brief turn",
         "review turn",
     ]
+
+
+def test_limit_endings_past_their_reset_back_off_one_launch_each(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """The provider still refuses after the reset it named: no back-to-back launches.
+
+    Seen at 11am PDT, `resets 7am` is long past: each such ending backs off 5, 10, then
+    20 minutes, one launch per ending, one progress line per new pause.
+    """
+    stale = "You've hit your session limit · resets 7am (America/Los_Angeles)"
+    wall = Wall(SEEN, step=timedelta(minutes=1))
+    launched: list[datetime] = []
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            test_serve._dispatch_then_finish(turn)
+        elif turn.name == prompts.REVIEW:
+            _deliver(turn)
+
+    turns = FakeTurns(act)
+
+    def harness(launch: Any, *, should_stop, transcript_path=None) -> TurnResult:
+        launched.append(wall.now)
+        if len(launched) <= 3:
+            return TurnResult(exit_code=1, transcript=stale + "\n")
+        return turns(launch, should_stop=should_stop, transcript_path=transcript_path)
+
+    runner = _runner(harness, FakePapaya())
+    runner._wall = wall
+
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, runner) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    assert len(launched) == 5  # three limited briefs, the brief, the review
+    gaps = [later - earlier for earlier, later in zip(launched, launched[1:4], strict=False)]
+    assert [g >= timedelta(minutes=m) for g, m in zip(gaps, (5, 10, 20), strict=True)] == [True] * 3
+    assert all(g < timedelta(minutes=m + 5) for g, m in zip(gaps, (5, 10, 20), strict=True))
+    details = [d for _s, _p, d in progress_lines]
+    assert sum("was ended by the provider's usage limit" in d for d in details) == 1
+    waits = [d for d in details if "waits for the usage limit to reset" in d]
+    assert len(waits) == 3 and len(set(waits)) == 3
+
+
+def test_a_comment_during_a_pause_is_heard_and_a_stop_ends_the_wait(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    papaya_api = FakePapaya()
+    launches: list[str] = []
+
+    def harness(launch: Any, *, should_stop, transcript_path=None) -> TurnResult:
+        launches.append(test_serve._which_turn(launch.seed_prompt))
+        papaya_api.comment_from("item-9", "Use the v2 endpoint, please.")
+        return TurnResult(exit_code=1, transcript=SESSION + "\n")
+
+    runner = _runner(harness, papaya_api)
+    runner._wall = Wall(SEEN)  # the clock never reaches the reset: only a stop ends it
+    heard = "A comment from"
+    events = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        task = test_serve._serve_ticket(events, client_home, runner)
+        await test_serve._until(
+            lambda: any(heard in d and "usage-limit pause" in d for _s, _p, d in progress_lines),
+            what="the comment to be heard during the pause",
+        )
+        events.loop.request_stop()
+        return await asyncio.wait_for(task, timeout=30)
+
+    assert asyncio.run(scenario()) == 0
+    assert launches == [prompts.BRIEF]  # nothing launched into the pause
+    assert serve.PHASE_HANDED_BACK not in history()
+    assert not any(body.startswith("handed back") for _i, body in papaya_api.comments())
 
 
 def _limit_events(conn) -> list[dict[str, Any]]:

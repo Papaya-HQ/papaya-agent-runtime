@@ -82,17 +82,26 @@ terminal line of an ending that failed is read, against the wording each provide
 actually seen to use (`limits.PATTERNS`; Claude's `You've hit your session limit ·
 resets 12:30pm (America/Los_Angeles)` and its weekly form — no Codex wording has been
 seen yet, so none is classified). Such an ending is recorded as `limited` with the reset
-it names, read in its own zone; a line with no zone or no readable time is never guessed
-at and backs off like a `WAITING:` rerun (5 minutes doubling, 30 at most). It never
+it names, read in its own zone and never more than eight days ahead, whether it came from
+the text or the worker's stream (seconds or milliseconds; anything else is ignored). A
+bare time seen up to 15 minutes after it has passed is over, never tomorrow's; further
+back it is a stale line. Whenever no usable future reset comes out — no zone, unreadable,
+stale, or already past while the provider still refuses — the ending backs off like a
+`WAITING:` rerun (5 minutes doubling, 30 at most) per such ending in a row, so the wall
+is never hit back to back and never becomes a day-long pause. A turn on that provider
+that ends normally meanwhile ends the pause early. It never
 counts as a miss, never hands a ticket back, never records a turn-failure deficiency and
 never comments on the ticket. One observation pauses every turn on that provider on this
 machine until the reset: `ppy serve` launches no brief, answer, review, check-in or
 ledger turn into it, the pause is kept as events so a restart still waits it out, and
 `ppy workers` and `ppy status --team` show it under `needs attention` with the reset
-time. A worker whose session the limit ended is not a failed worker: after the reset it
+time. A held ticket keeps listening while it waits: a person's comment is read, said as
+progress and read by the first turn after the reset, and a stop ends the wait. A worker whose session the limit ended is not a failed worker: after the reset it
 is resumed once, and only if that attempt cannot be made is it reviewed like any other
 stop. Endings recorded as misses before this existed are read through the same
-classifier, so a task stranded by them is due again once the reset has passed.
+classifier, so a task stranded by them is due again once the reset has passed; a next
+step that two limit-killed ledger turns blocked on a person is unblocked the same way
+(its turns' transcripts re-read), while a genuine two-miss block stays and is listed.
 
 A give-up is a verdict for as long as nothing changes. After two genuine misses a task
 turn records a person-wait, as before; anything new on the worker task after it — a

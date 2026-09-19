@@ -2440,18 +2440,26 @@ class TicketRunner:
         check-in) ever sees it — no miss, no hand-back, no deficiency, no comment on the
         ticket, only progress lines. And no turn is launched into a pause another turn
         or a worker already hit (`limits.pause`: per provider, on this machine).
+
+        Relaunches are bounded by the pause each ending records: a reset that is already
+        past or unreadable while the provider still refuses backs off (5 minutes doubling
+        to 30, per limit ending in a row), so N such endings are N launches spread over
+        that schedule. Progress says each new pause once, not each pass of the loop.
         """
+        said: set[str] = set()
         while True:
-            await self._wait_out_limit(ticket, f"The {turn} turn", self._provider())
+            await self._wait_out_limit(ticket, f"The {turn} turn", self._provider(), said)
             result, limit = await self._launch_turn(ticket, turn, facts)
             if limit is None:
                 return result
-            _report_progress(
-                ticket.job,
-                ticket.phase,
-                f"The {turn} turn was ended by the provider's usage limit, not by its work; "
-                "it runs again once the limit resets.",
-            )
+            if not said:
+                _report_progress(
+                    ticket.job,
+                    ticket.phase,
+                    f"The {turn} turn was ended by the provider's usage limit, not by its "
+                    "work; it runs again once the limit resets.",
+                )
+                said.add("ended")
 
     def _provider(self) -> str | None:
         """The provider this runner's turns launch on, or ``None`` when it cannot be read."""
@@ -2463,20 +2471,27 @@ class TicketRunner:
         except Exception:  # noqa: BLE001 - an unreadable config pauses on any provider
             return None
 
-    async def _wait_out_limit(self, ticket: Ticket, what: str, provider: str | None) -> None:
+    async def _wait_out_limit(
+        self, ticket: Ticket, what: str, provider: str | None, said: set[str] | None = None
+    ) -> None:
         """Hold, touching the activity stamp, while ``provider``'s usage limit stands.
 
-        On the wall clock the reset is named in, cut short only by a stop. Said once as a
-        progress line (never a comment) and once in the log.
+        On the wall clock the reset is named in. Each pause is said once as a progress
+        line (never a comment) and once in the log; ``said`` carries what was already
+        said across the caller's loop. The ticket is listened to as `_rerun_later` does:
+        a stop cuts the wait short, and a person's comment is read within the comment
+        interval, said as progress, and queued for the first turn after the reset (no
+        turn can run before it). A pause a normal ending cleared ends early.
         """
-        said = False
+        said = set() if said is None else said
         while True:
             paused = await asyncio.to_thread(limits.paused, provider, self._wall())
             if paused is None:
                 return
             limits.say_once(paused, log)
-            if not said:
-                said = True
+            key = paused.until.isoformat()
+            if key not in said:
+                said.add(key)
                 _report_progress(
                     ticket.job,
                     ticket.phase,
@@ -2485,6 +2500,18 @@ class TicketRunner:
             while self._wall() < paused.until:
                 await self._sleep(ticket)
                 ticket.job.touch_activity()
+                heard = _comment_ids(ticket.pending)
+                await self._listen(ticket)
+                for comment in ticket.pending:
+                    if str(comment.get("id")) not in heard:
+                        _report_progress(
+                            ticket.job,
+                            ticket.phase,
+                            f"A comment from {comment_author(comment)} arrived during the "
+                            "usage-limit pause; the first turn after the reset reads it.",
+                        )
+                if await asyncio.to_thread(limits.paused, provider, self._wall()) is None:
+                    break
 
     async def _resume_after_limit(self, ticket: Ticket) -> bool:
         """A worker the usage limit stopped is resumed once after the reset, not reviewed.
