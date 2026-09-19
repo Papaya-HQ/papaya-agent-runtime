@@ -28,6 +28,13 @@ from papaya_agent_runtime.state import store
 
 PAPAYA_EVENT_KEY = "papaya_event_key"
 PAPAYA_EVENT_METADATA = "papaya_event_metadata"
+#: A ticket task's work item as a person names it: its display id (`PAP-231`) and
+#: title, recorded once when the ticket is taken so `ppy workers` can say it.
+WORK_ITEM_KEY = "papaya_work_item_key"
+WORK_ITEM_TITLE = "papaya_work_item_title"
+#: Where a work item carries its display id: `WorkItemOut.short_id` on the full
+#: record, `display_id` on an event summary, then older names.
+_DISPLAY_ID_KEYS = ("short_id", "display_id", "key", "identifier", "ticket_key")
 #: Exported by `ppy serve` into a manager turn: the run of the ticket it holds.
 #: `ppy dispatch` files a worker under it when no `--run-id` is given, and a
 #: worker in that run is how the runner knows the ticket was dispatched.
@@ -449,9 +456,35 @@ def record_task(conn: sqlite3.Connection, task_id: int, event: PapayaEvent) -> N
     )
 
 
+def work_item_label(event: PapayaEvent) -> tuple[str, str]:
+    """The work item's display id (`PAP-231`) and title, each `""` when the event lacks it."""
+    item = event.payload.get("work_item")
+    if not isinstance(item, dict):
+        return "", ""
+    key = next(
+        (str(item[name]).strip() for name in _DISPLAY_ID_KEYS if str(item.get(name) or "").strip()),
+        "",
+    )
+    return key, str(item.get("title") or "").strip()
+
+
+def record_work_item_label(conn: sqlite3.Connection, task_id: int, event: PapayaEvent) -> None:
+    """Record the item's display id and title on its ticket task, once.
+
+    A value already there stays: the id never changes, and the title a ticket was
+    taken under is the one its work was briefed against.
+    """
+    key, title = work_item_label(event)
+    for name, value in ((WORK_ITEM_KEY, key), (WORK_ITEM_TITLE, title)):
+        if value and not store.get_task_env(conn, task_id, name):
+            store.set_task_env(conn, task_id, name, value, source="papaya_event")
+
+
 __all__ = [
     "PAPAYA_EVENT_KEY",
     "PAPAYA_EVENT_METADATA",
+    "WORK_ITEM_KEY",
+    "WORK_ITEM_TITLE",
     "STATUS_BLOCKED",
     "STATUS_IN_PROGRESS",
     "STATUS_REVIEW",
@@ -469,6 +502,8 @@ __all__ = [
     "parse_event",
     "post_work_item_comment",
     "record_task",
+    "record_work_item_label",
     "repository_spec",
     "set_work_item_status",
+    "work_item_label",
 ]

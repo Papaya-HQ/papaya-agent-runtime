@@ -534,8 +534,12 @@ quietly; do not narrate the steps or report diagnostics.
 10. **Arrive with the team's picture.** Last, `ppy status --team`: held tickets with
     phase and age, every worker with what it is doing now, delivered pull requests with
     CI, review and the reconcile lane, blockers, the last round's summary, and what
-    waits on a person. It works whether `ppy serve` is running or not. Summarise it in
-    words in your first reply and ask nothing about it; see **Copilot** below.
+    waits on a person. It works whether `ppy serve` is running or not. Then
+    `ppy workers`, the way to see the team's work: one block per in-flight worker
+    naming the work item it serves (`PAP-231 "title"`, or `no ticket`), its health,
+    what it is doing now, its gate, its latest note and its last few actions with
+    their times. Summarise both in words in your first reply and ask nothing about
+    them; see **Copilot** below.
 
 Preflight is invisible when it succeeds: the user just sees you open ready, knowing
 who you are and what you can work on.
@@ -966,7 +970,9 @@ trusting interrupt/resume steering, and tell the user in one sentence.
 When `ppy serve` is holding tickets and a person opens a session here, you are their
 copilot on the daemon's team, not a second manager.
 
-- **Arrive with `ppy status --team`** (preflight step 10), and say it in words.
+- **Arrive with `ppy status --team` and `ppy workers`** (preflight step 10), and say
+  them in words. When a person asks what a worker is doing, `ppy workers` is the answer
+  to read from.
 - **Read the feed before you speak.** `ppy tail --since 10m` prints the daemon's
   events one line each: pickups, phase changes, worker notes, check-in decisions,
   hygiene, pull request attention, blockers, deficiencies, round summaries. Run it at
@@ -1046,7 +1052,8 @@ readable at a glance by someone who just wants to know if it's done.
 | Heartbeat | `ppy watch --follow` (background monitor; one line every `--interval` seconds, default 300; without `--follow`, when stdout is not a terminal, it prints one tick and exits, so a tool call never hangs on it) — in-flight workers, tasks waiting on you, the turns only a session can take (`your turn:`), next steps that sat in the ledger (`ledger due:`), and for every finished or delivered task whose branch has an open pull request: number, base, CI verdict (naming the failing checks), and mergeability, plus what flipped since the last tick, ending in the delta since the last check (after `||`). While no `ppy serve` runs it also acts: the same lanes serve's rounds run — a stopped worker sent back to its gate, a decision handed to a person, delivered pull requests repaired, deficiencies opened as issues. When the forge reports a PR merged, that tick records the forge's merge commit (including squash merges), tears down the task's compose stack, says so, and retires the PR; a closed-unmerged PR is never recorded. `ppy deliver <task> --merged <sha>` remains the idempotent manual form. `--once` for one line, `--json` for machine output. Without `gh` it says `ci: unknown` rather than failing. It goes quiet on its own after two idle ticks (nothing in flight, nothing owed to you, no pending or failing checks, nothing new) and speaks again the moment that stops being true — leave it running rather than restarting it; `--exit-when-idle` makes it exit instead, for scripts |
 | External sweeps | `ppy watermark get <key>` (the newest comment timestamp already processed on a ticket URL or id; exit 1 and a plain message when unset, so the first sweep reads everything), `ppy watermark set <key> <iso-timestamp> [--note ...]` after the sweep has handled what was newer (stored as UTC; moving it back is allowed and named, for a re-read), `ppy watermark list [--json]`, `ppy watermark clear <key>`. A sweep asks the source only for comments newer than the watermark and runs on the cheapest model |
 | Status (non-blocking) | `ppy run <run_id>`, `ppy task <task_id>` (long form `ppy task show <task_id>`), `ppy status` — snapshot; returns immediately. A task whose turn ended mid-gate shows as `worker_stopped` with the reason named (no done note, unpushed commits, or a backgrounded command killed with the session) — that is work to resume, not work to review. Unpushed commits under a done note are the exception: the harness pushes the lease branch itself and the task lands `worker_done`, unless the remote refuses, and then the reason quotes the refusal |
-| Team picture | `ppy status --team [--json]` — held tickets (phase, age), workers (status, session, last tool and elapsed, last progress note, a person's last steer), delivered pull requests (state, CI, review, reconcile lane), the lane, blockers, the last round's summary, what waits on a person; one line per item, nothing the record does not say. `--json` is the same facts for a hosted tool or a script |
+| Workers | `ppy workers [--actions N] [--json] [--follow] [--color auto\|always\|never]` — one block per in-flight worker: the work item it serves (`PAP-231 "title"`, read from the display id `ppy serve` records when it takes a ticket; a ticket taken before that falls back to its `ppy track` record, then to `work item <id8>`; `no ticket` for a direct dispatch), task, repo, status and age, health (alive, quiet with how long silent, dead), what it is doing now, its gate, its latest note, and its last N actions (default 5, at most 20; newest last, `HH:MM:SS UTC (age) words`). Colour only on a terminal, never with `NO_COLOR`, `CLICOLOR=0` or `--json`; lines clip to the terminal (100 columns when piped). `--json` carries ISO timestamps; `--follow` reprints on change. Reads only |
+| Team picture | `ppy status --team [--json]` — held tickets (phase, age), workers (status, work item id, session, last tool and elapsed, last progress note, a person's last steer), delivered pull requests (state, CI, review, reconcile lane), the lane, blockers, the last round's summary, what waits on a person; one line per item, nothing the record does not say. `--json` is the same facts for a hosted tool or a script |
 | Waiting on a person | `ppy outreach [--json]` — every open ask (a decision recorded against a task, a capability request policy left to a person, a pull request the lane gave up on), how long it has waited, how many times it was said and where; `ppy outreach run` says what is due now through the work item, the agent's DM with the person and the desktop, and records it — the same procedure `ppy serve`'s rounds and the heartbeat run, so nothing is said twice in a round |
 | Event feed | `ppy tail [--since 10m] [--follow]` — the daemon's events, one line each, oldest first, from the state tables; `--follow` streams new ones until interrupted |
 | Await (blocking primitive) | `ppy wait <run_id> [--timeout]` — scripts/tests only; **not** in a live turn (use `--timeout 0` to drain) |

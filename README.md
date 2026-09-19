@@ -922,6 +922,15 @@ A person can open a session in this checkout while `ppy serve` runs and work bes
   the last round's summary, and what waits on a person. `--json` gives the same facts to
   a hosted tool or a script. The rounds record a summary line (`round_summary`) and each
   pull request's state when it changes (`pr_observed`), so both are on the record.
+- `ppy workers` is the way to see the team's work: one block per in-flight worker,
+  headed by the work item it serves (`PAP-231 "title"`, or `no ticket`), its task, repo,
+  status and health, then what it is doing now, its gate, its latest note and its last
+  five actions, each with a UTC time and how long ago (`--actions N` for up to 20).
+  `--json` gives the same with ISO timestamps, `--follow` reprints when a worker changes,
+  and `--color auto|always|never` colours only a terminal (honouring `NO_COLOR` and
+  `CLICOLOR=0`). `ppy serve` records a ticket's display id and title when it takes it;
+  a ticket taken before that is named by its `ppy track` record or `work item <id8>`.
+  `ppy status --team` names the same work item id on each worker line.
 - `ppy tail [--since 10m] [--follow]` prints the daemon's events one line each: pickups,
   phase changes, worker notes, check-in decisions, hygiene, pull request attention,
   blocker changes, deficiencies and round summaries.

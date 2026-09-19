@@ -2891,6 +2891,9 @@ class TicketRunner:
             )
             papaya_events.record_task(conn, task_id, event)
             resume_from = None
+        # What `ppy workers` names the ticket by; a ticket taken before this was
+        # recorded gets it on its next pick-up.
+        papaya_events.record_work_item_label(conn, task_id, event)
         if resume_from is None:
             record_phase(conn, task_id, PHASE_PICKED_UP)
         if event.work_item_id:
