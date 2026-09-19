@@ -385,7 +385,13 @@ def test_json_carries_iso_timestamps_and_the_same_fields(world, capsys) -> None:
     out = capsys.readouterr().out
     assert not ESCAPE.search(out)
     answer = json.loads(out)
-    assert answer["attention"] == {"repeating": [], "parked": [], "grown": []}
+    assert answer["attention"] == {
+        "paused": [],
+        "gave_up": [],
+        "repeating": [],
+        "parked": [],
+        "grown": [],
+    }
     busy, quiet, loose = answer["workers"]
     assert busy["work_item"]["key"] == KEY and busy["work_item"]["title"] == TITLE
     assert (busy["status"], busy["session"], busy["note"]) == ("in_progress", "alive", NOTE)

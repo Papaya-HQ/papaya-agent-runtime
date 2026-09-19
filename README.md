@@ -581,6 +581,13 @@ worker's job, not the review turn's: a worker whose session ended mid-gate is st
 the runner to run its gate to completion and report (twice at most, then the review turn
 gets the failure), so the review turn normally runs on `worker_done` and re-checks a gate
 result that is already on the record.
+**A usage limit is not a miss either.** A turn ended by the provider's usage limit
+(`You've hit your session limit · resets 12:30pm (America/Los_Angeles)`) is waited out
+until the reset it names and run again; no turn on that provider is launched while the
+limit stands, a worker session the limit ended is resumed once after the reset, and
+`ppy workers` shows the pause under `needs attention`. Nothing is counted, handed back or
+commented on for it. A task-keyed turn that gave up after two genuine misses is taken up
+again as soon as anything new happens on its worker.
 A worker pool that is full is not a miss: the ticket waits in `dispatched` and is never
 handed back for it. A restarted `serve` given a ticket it was already working picks it
 up from its last working phase rather than briefing it again.
@@ -817,7 +824,7 @@ the signals, recorded where they already happen:
 - **A live worker stalls.** The client stalls a held ticket while its worker's session is
   still live: the liveness lines above did not reach it in time.
 - **A turn misses its job.** A ticket is handed back because a turn ended twice without
-  doing its job, or a worker's gate was backgrounded past the tool cap with no
+  doing its job (a usage-limit ending never counts), or a worker's gate was backgrounded past the tool cap with no
   `ppy gate run` on record.
 - **A tool is refused.** Workers in one repository are denied the same plain command
   twice, and learning cannot fix it: the program is outside the safe family

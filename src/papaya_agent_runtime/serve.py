@@ -135,6 +135,7 @@ from papaya_agent_runtime import (
     capabilities,
     deficiencies,
     gate,
+    limits,
     papaya,
     papaya_events,
     progress,
@@ -1122,7 +1123,10 @@ class TicketRunner:
         agent_record=None,
         full_suite=None,
         review_base=None,
+        wall_clock=None,
     ) -> None:
+        #: The wall clock a usage limit's reset is compared with (an aware datetime).
+        self._wall = wall_clock or (lambda: datetime.now(UTC))
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
         self._check_readiness = check_readiness or readiness.check
@@ -2010,6 +2014,8 @@ class TicketRunner:
         waits = 0
         while True:
             await self._wait_on_person(ticket)
+            if await self._resume_after_limit(ticket):
+                return PHASE_DISPATCHED
             failure = ticket.trigger is not None and ticket.trigger.failure
             # A delivered worker whose pull request needs attention still reads
             # `delivered`; only a new delivery event counts as delivering again.
@@ -2427,6 +2433,98 @@ class TicketRunner:
         return result.tail() if hasattr(result, "tail") else str(result or "")
 
     async def _turn(self, ticket: Ticket, turn: str, facts: dict[str, object]) -> Any:
+        """Run one manager turn for this ticket to an ending that is the turn's own.
+
+        A turn the provider's usage limit ended did not fail at its job: it never ran.
+        It is waited out and run again here, so no caller (brief, answer, review,
+        check-in) ever sees it — no miss, no hand-back, no deficiency, no comment on the
+        ticket, only progress lines. And no turn is launched into a pause another turn
+        or a worker already hit (`limits.pause`: per provider, on this machine).
+        """
+        while True:
+            await self._wait_out_limit(ticket, f"The {turn} turn", self._provider())
+            result, limit = await self._launch_turn(ticket, turn, facts)
+            if limit is None:
+                return result
+            _report_progress(
+                ticket.job,
+                ticket.phase,
+                f"The {turn} turn was ended by the provider's usage limit, not by its work; "
+                "it runs again once the limit resets.",
+            )
+
+    def _provider(self) -> str | None:
+        """The provider this runner's turns launch on, or ``None`` when it cannot be read."""
+        from papaya_agent_runtime.manager.launch import resolve_profile
+
+        try:
+            config = self._config() if self._config is not None else _load_config()
+            return resolve_profile(config, None, None, None)[0]
+        except Exception:  # noqa: BLE001 - an unreadable config pauses on any provider
+            return None
+
+    async def _wait_out_limit(self, ticket: Ticket, what: str, provider: str | None) -> None:
+        """Hold, touching the activity stamp, while ``provider``'s usage limit stands.
+
+        On the wall clock the reset is named in, cut short only by a stop. Said once as a
+        progress line (never a comment) and once in the log.
+        """
+        said = False
+        while True:
+            paused = await asyncio.to_thread(limits.paused, provider, self._wall())
+            if paused is None:
+                return
+            limits.say_once(paused, log)
+            if not said:
+                said = True
+                _report_progress(
+                    ticket.job,
+                    ticket.phase,
+                    f"{what} waits for the usage limit to reset: {paused.said()}.",
+                )
+            while self._wall() < paused.until:
+                await self._sleep(ticket)
+                ticket.job.touch_activity()
+
+    async def _resume_after_limit(self, ticket: Ticket) -> bool:
+        """A worker the usage limit stopped is resumed once after the reset, not reviewed.
+
+        Its `error` ending is the provider's wall, not the worker failing: the review turn
+        would read it as a failure and a person would be asked about work that was fine.
+        Returns whether the worker was resumed (the ticket goes back to watching it).
+        """
+        worker, trigger = ticket.worker, ticket.trigger
+        if worker is None or trigger is None or trigger.kind != "error":
+            return False
+        ending = await asyncio.to_thread(worker_limit_ending, worker.task_id)
+        if ending is None:
+            return False
+        await self._wait_out_limit(
+            ticket, f"Resuming worker task {worker.task_id}", ending.limit.provider
+        )
+        try:
+            await asyncio.to_thread(limits.resume_worker, ending, steer=self._steer)
+        except Exception as exc:  # noqa: BLE001 - one attempt; the review turn has it then
+            log.warning("[serve] Could not resume worker task %d: %s", worker.task_id, exc)
+            _report_progress(
+                ticket.job,
+                ticket.phase,
+                f"Could not resume worker task {worker.task_id} after the usage limit: {exc}; "
+                "reviewing instead.",
+            )
+            return False
+        ticket.trigger = None
+        await self._enter(
+            ticket,
+            PHASE_DISPATCHED,
+            f"Worker task {worker.task_id} was stopped by the usage limit; resumed after "
+            "the reset.",
+        )
+        return True
+
+    async def _launch_turn(
+        self, ticket: Ticket, turn: str, facts: dict[str, object]
+    ) -> tuple[Any, limits.Limit | None]:
         """Launch one manager turn for this ticket and wait for it, on a thread."""
         from papaya_agent_runtime.manager.launch import (
             ManagerLaunchError,
@@ -2468,7 +2566,7 @@ class TicketRunner:
             with contextlib.suppress(OSError):
                 transcript.parent.mkdir(parents=True, exist_ok=True)
                 transcript.write_text(text + "\n", encoding="utf-8")
-            return TurnResult(exit_code=127, transcript=text)
+            return TurnResult(exit_code=127, transcript=text), None
         runner = self._run_turn or run_turn
         await self._mark_read(ticket)
         ticket.turn_running = turn
@@ -2481,6 +2579,20 @@ class TicketRunner:
             ticket.turn_running = None
             # Whatever was said while the turn ran is read as soon as it ends.
             ticket.comments_read_at = None
+        limit = await asyncio.to_thread(
+            functools.partial(
+                limits.observe,
+                result,
+                provider=self._provider(),
+                at=self._wall(),
+                source=f"{turn} turn",
+                task_id=ticket.held.task_id,
+            )
+        )
+        if limit is not None:
+            # Not a turn at all: nothing to time, and nothing it said is a report.
+            self._check_stop(ticket)
+            return result, limit
         await self._observe_turn(ticket, turn, self._clock() - started, result)
         said = runtime_report(result)
         shared = kind is not None and kind.memory == papaya.MEMORY_REPO_NOTES_ONLY
@@ -2495,7 +2607,7 @@ class TicketRunner:
                 self._deficiency, ticket, deficiencies.TURN_REPORT, said, turn=turn
             )
         self._check_stop(ticket)
-        return result
+        return result, None
 
     async def _memory_on_shared_agent(self, ticket: Ticket, turn: str, result: Any) -> bool:
         """Whether a turn on a shared agent still reached for `propose_memory`.
@@ -3727,6 +3839,15 @@ def _failure(kind: str, payload: dict[str, Any]) -> str:
     if payload.get("resume_message"):
         lines.append(str(payload["resume_message"]))
     return "\n".join(lines)
+
+
+def worker_limit_ending(worker_id: int) -> limits.WorkerEnding | None:
+    """`limits.worker_ending` on its own connection, for a thread."""
+    conn = db.init_db()
+    try:
+        return limits.worker_ending(conn, worker_id)
+    finally:
+        conn.close()
 
 
 def acted_since(worker_id: int, mark: int) -> bool:

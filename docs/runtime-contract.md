@@ -74,6 +74,33 @@ report. Nobody using the runtime should hear about a problem you can solve yours
 standing authority, a credential or a payment. Never end a turn offering the
 user a choice between two things that are both already your job.
 
+## A usage limit is waited out, and a give-up ends when something new happens
+
+A turn or a worker session the provider's usage limit ended did not fail at its job; it
+never ran. The runtime keeps this in one place (`limits.py`, both modes): only the
+terminal line of an ending that failed is read, against the wording each provider was
+actually seen to use (`limits.PATTERNS`; Claude's `You've hit your session limit ·
+resets 12:30pm (America/Los_Angeles)` and its weekly form — no Codex wording has been
+seen yet, so none is classified). Such an ending is recorded as `limited` with the reset
+it names, read in its own zone; a line with no zone or no readable time is never guessed
+at and backs off like a `WAITING:` rerun (5 minutes doubling, 30 at most). It never
+counts as a miss, never hands a ticket back, never records a turn-failure deficiency and
+never comments on the ticket. One observation pauses every turn on that provider on this
+machine until the reset: `ppy serve` launches no brief, answer, review, check-in or
+ledger turn into it, the pause is kept as events so a restart still waits it out, and
+`ppy workers` and `ppy status --team` show it under `needs attention` with the reset
+time. A worker whose session the limit ended is not a failed worker: after the reset it
+is resumed once, and only if that attempt cannot be made is it reviewed like any other
+stop. Endings recorded as misses before this existed are read through the same
+classifier, so a task stranded by them is due again once the reset has passed.
+
+A give-up is a verdict for as long as nothing changes. After two genuine misses a task
+turn records a person-wait, as before; anything new on the worker task after it — a
+`worker_done`, a push or pull request seen, a person's steer, answer or reply — takes
+the task up again with a fresh count, and the runtime drops its own give-up todo. With
+nothing new it stays given up and is listed under `needs attention` (`gave up:`) until
+someone decides.
+
 ## Anything waiting on a person is chased until it is answered
 
 A decision only a person can make — a product question you recorded against a task
