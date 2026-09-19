@@ -2769,6 +2769,8 @@ def _cmd_status_team(args: argparse.Namespace) -> int:
     else:
         for line in team.render(snap, team.Paint(team.colour_wanted("auto", sys.stdout))):
             print(line)
+        if team.a_persons_look(sys.stdout):
+            team.mark_looked(snap["attention"])
         _say_delta(prs={p["url"] or f"task {p['task_id']}": p for p in snap["pull_requests"]})
     standalone.say_invitation(sys.stdout)
     return 0
@@ -2828,17 +2830,22 @@ def _cmd_workers(args: argparse.Namespace) -> int:
 
     def write(found: list[dict]) -> None:
         nonlocal first
+        needs = team.peek()
         if args.json:
-            print(json.dumps(team.workers_json(found), indent=2, sort_keys=True, default=str))
+            print(
+                json.dumps(team.workers_json(found, needs), indent=2, sort_keys=True, default=str)
+            )
         else:
             if args.follow:
                 # Each reprint says when it was read, so a scrollback reads as a history.
                 if not first:
                     print("")
                 print(paint(f"workers at {team.utc_clock()}", "dim"))
-            for line in team.render_workers(found, width=width, paint=paint):
+            for line in team.render_workers(found, width=width, paint=paint, needs=needs):
                 print(line)
         sys.stdout.flush()
+        if team.a_persons_look(sys.stdout, as_json=args.json, reprint=not first):
+            team.mark_looked(needs)
         first = False
 
     with contextlib.suppress(KeyboardInterrupt):

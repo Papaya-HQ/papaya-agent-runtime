@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 import test_serve
-from papaya_agent_runtime import deficiencies, prompts, serve, sweep, team
+from papaya_agent_runtime import cli, deficiencies, prompts, serve, sweep, team
 from papaya_agent_runtime.state import store
 from papaya_agent_runtime.state.db import init_db
 from test_serve import (
@@ -347,11 +350,76 @@ def test_a_swept_ticket_with_nothing_to_build_is_parked_until_the_item_changes(
     assert _pickup_lines(papaya_api) == [PICKUP_LINE]
 
 
+@pytest.mark.parametrize("changed", [False, True], ids=["still-parked", "changed-since"])
+def test_a_restart_does_not_reclaim_a_parked_ticket_but_reclaims_a_changed_one(
+    ppy_home, client_home, ready, registered_repo, assigned, changed: bool
+) -> None:
+    """The reclaim on start goes through the same gate as the sweep.
+
+    A parked ticket's newest task ends `reported` then `released`, which is not given
+    away, so without the gate every restart and reconnect re-briefed it, and three
+    restarts filed a false repeating deficiency.
+    """
+    assigned.items = [
+        {
+            "id": ITEM,
+            "title": "Radar QA",
+            "status": "in_progress",
+            "short_id": KEY,
+            "updated_at": "2026-09-14T09:00:00+00:00",
+        }
+    ]
+    papaya_api = FakePapaya()
+    stderr = io.StringIO()
+
+    async def serve_once(harness: Harness, calls: int) -> int:
+        runner = await _serving(
+            harness,
+            client_home,
+            stderr,
+            sweep_sleep=test_serve.Ticks().sleep,
+            runner=_runner(FakeTurns(_nothing_to_build), papaya_api),
+        )
+        await _until(lambda: assigned.calls >= calls, what="the start sweep")
+        if calls == 1:
+            await _until(lambda: harness.results, what="the first hold to end")
+        else:
+            await asyncio.sleep(0.3)
+        if harness.jobs:
+            await _until(lambda: harness.results, what="the reclaimed hold to end")
+        harness.loop.request_stop()
+        return await runner
+
+    first = Harness(FakeEvents([]))
+    assert asyncio.run(serve_once(first, 1)) == 0
+    assert sweep.parked_items(), "the first hold did not park the ticket"
+    comments = papaya_api.comments()
+
+    if changed:
+        assigned.items[0]["updated_at"] = datetime.now(UTC).isoformat()
+    restart = Harness(FakeEvents([]))
+    assert asyncio.run(serve_once(restart, 2)) == 0
+
+    reclaim_lines = [line for line in stderr.getvalue().splitlines() if "reclaimed " in line]
+    if changed:
+        assert len(restart.jobs) == 1, "a changed parked ticket was not reclaimed"
+        assert _reclaimed(restart) and any(KEY in line for line in reclaim_lines)
+    else:
+        assert restart.jobs == [] and not _reclaimed(restart) and reclaim_lines == []
+        assert len(_ticket_tasks()) == 1
+        assert papaya_api.comments() == comments
+    assert _repeating() == []
+
+
+def _reclaimed(harness: Harness) -> bool:
+    return f"work_item:{ITEM}" in [subject for subject, _ in harness.events.reserves]
+
+
 # ── the surface: `needs attention` ──────────────────────────────────────────
 
 
 def test_needs_attention_names_repeating_parked_and_grown_and_a_look_resets_growth(
-    ppy_home,
+    ppy_home, capsys
 ) -> None:
     kind = deficiencies.REPEATED_WITHOUT_PROGRESS
     deficiencies.record_once(
@@ -360,12 +428,14 @@ def test_needs_attention_names_repeating_parked_and_grown_and_a_look_resets_grow
         within=60,
         evidence={"ticket": KEY, "code": "reported", "times": 3},
     )
-    deficiencies.record_once(
-        kind,
-        sweep.refused_detail("PAP-219", "not_routed_here"),
-        within=60,
-        evidence={"ticket": "PAP-219", "code": "not_routed_here", "times": 3},
-    )
+    for ticket in ("PAP-219", "PAP-221"):
+        deficiencies.record_once(
+            kind,
+            sweep.refused_detail("not_routed_here"),
+            within=60,
+            evidence={"ticket": ticket, "code": "not_routed_here", "times": 3},
+            per="ticket",
+        )
     for _ in range(4):
         deficiencies.record(deficiencies.IDLE_WORK_REFUSED, "not_routed_here refusal")
     for _ in range(2):
@@ -379,7 +449,11 @@ def test_needs_attention_names_repeating_parked_and_grown_and_a_look_resets_grow
     repeating = [line for line in lines if line.startswith("repeating: ")]
     assert len(repeating) == 2
     assert any(KEY in line and "each brief found nothing to build" in line for line in repeating)
-    assert any("PAP-219" in line and "use Run on this Mac" in line for line in repeating)
+    # One row for the refusal reason, naming every ticket refused that way.
+    assert any(
+        "(not_routed_here): PAP-219, PAP-221 (last" in line and "use Run on this Mac" in line
+        for line in repeating
+    )
     parked = [line for line in lines if line.startswith("parked: ")]
     assert parked and parked[0].startswith(f"parked: {KEY} waiting on a person since ")
     assert "stamp 2026-09-19T16:10:00+00:00: waits on QA" in parked[0]
@@ -397,12 +471,51 @@ def test_needs_attention_names_repeating_parked_and_grown_and_a_look_resets_grow
     [again] = [line for line in team.attention_lines(team.look()) if "deficiency" in line]
     assert "seen 5x (+1 since the last look)" in again
 
-    # `ppy workers` carries the same section after its worker blocks.
+    # `ppy workers` carries the same section after its worker blocks, and as JSON.
+    deficiencies.record(deficiencies.IDLE_WORK_REFUSED, "not_routed_here refusal")
+    assert cli.main(["workers", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["workers"] == []
+    assert [p["ticket"] for p in data["attention"]["parked"]] == [KEY]
+    assert [g["kind"] for g in data["attention"]["grown"]] == ["idle-work-refused"]
     conn = init_db()
     try:
         rendered = team.render_workers([], needs=team.attention(conn))
     finally:
         conn.close()
     assert rendered[0] == "no workers in flight"
-    heading = rendered.index("needs attention (3):")
+    heading = rendered.index("needs attention (4):")
     assert all(line.startswith("  ") for line in rendered[heading + 1 :])
+
+
+def test_only_a_persons_first_look_on_a_terminal_is_recorded(ppy_home, capsys, monkeypatch) -> None:
+    """An agent turn, a pipe, JSON or a `--follow` reprint must not use up the growth."""
+
+    class Stream:
+        def __init__(self, tty: bool) -> None:
+            self.tty = tty
+
+        def isatty(self) -> bool:
+            return self.tty
+
+    assert team.a_persons_look(Stream(True))
+    assert not team.a_persons_look(Stream(False))
+    assert not team.a_persons_look(Stream(True), as_json=True)
+    assert not team.a_persons_look(Stream(True), reprint=True)
+
+    for _ in range(3):
+        deficiencies.record(deficiencies.IDLE_WORK_REFUSED, "not_routed_here refusal")
+
+    def grown() -> list[int]:
+        return [g["grown"] for g in team.peek()["grown"]]
+
+    # capsys's stdout is not a terminal: what an agent's tool call sees.
+    for argv in (["workers"], ["workers", "--json"], ["status", "--team"]):
+        assert cli.main(argv) == 0
+        assert grown() == [2], f"{argv} consumed the growth"
+    capsys.readouterr()
+
+    # A person at a terminal.
+    monkeypatch.setattr(team, "a_persons_look", lambda stream, **kw: not kw.get("as_json"))
+    assert cli.main(["workers"]) == 0
+    assert grown() == []

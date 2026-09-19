@@ -703,7 +703,8 @@ def _one_line(text: object) -> str:
 
 
 def _is_agent_comment(comment: dict[str, Any]) -> bool:
-    return str(comment.get("author_type") or "") == "agent" or bool(comment.get("author_actor"))
+    # One authorship rule for the runner and the sweep's un-park check.
+    return sweep.is_agent_comment(comment)
 
 
 def _comment_ids(comments: list[dict[str, Any]]) -> frozenset[str]:

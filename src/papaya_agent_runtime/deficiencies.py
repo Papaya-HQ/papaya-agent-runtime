@@ -356,6 +356,9 @@ KINDS: dict[str, Kind] = {
             "the sweep offers the ticket again) needs remembering, and a refusal nobody can "
             "lift here needs a person or a routing change."
         ),
+        # One stuck ticket is a `needs attention` line, not an issue: a second episode
+        # (the same loop another day, or a second ticket refused the same way) is.
+        threshold=2,
     ),
 }
 
@@ -693,42 +696,61 @@ def record_once(
     scope: str | None = None,
     scrub: Iterable[str] = (),
     clock: Callable[[], datetime] | None = None,
+    per: str = "",
 ) -> Deficiency | None:
     """:func:`record`, unless this fingerprint was already seen in the last ``within`` seconds.
 
     For a signal that stays true while the thing it names goes on repeating: one
-    occurrence per episode, not one per repetition. Returns ``None`` when skipped.
+    occurrence per episode, not one per repetition. ``per`` names an evidence field
+    (`ticket`) whose value gets its own window inside one fingerprint, so one row can
+    gather every ticket stuck the same way, each once. Returns ``None`` when skipped.
     Never raises.
     """
     try:
         key = fingerprint(kind, _clean_detail(detail, list(scrub)))
-        last = _last_seen(key)
         now = (clock or _now)()
-        if last is not None and (now - last).total_seconds() < within:
-            return None
+        wanted = redact((evidence or {}).get(per), list(scrub)) if per else None
+        for at in _seen_at(key, per, wanted):
+            if (now - at).total_seconds() < within:
+                return None
     except Exception as exc:  # noqa: BLE001 - reporting the runtime must never break it
         log.warning("[deficiencies] Could not read the %s ledger row: %s", kind, exc)
         return None
     return record(kind, detail, evidence=evidence, scope=scope, scrub=scrub, clock=clock)
 
 
-def _last_seen(key: str) -> datetime | None:
+def _seen_at(key: str, per: str, wanted: object) -> list[datetime]:
+    """When this fingerprint was recorded: its last-seen, or each occurrence for ``per``."""
     from papaya_agent_runtime.paths import db_path
     from papaya_agent_runtime.state import init_db
 
     if not db_path().exists():
-        return None
+        return []
     conn = init_db()
     try:
         row = conn.execute(
-            "SELECT last_seen FROM deficiencies WHERE fingerprint = ?", (key,)
+            "SELECT last_seen, evidence FROM deficiencies WHERE fingerprint = ?", (key,)
         ).fetchone()
     finally:
         conn.close()
     if row is None:
-        return None
-    seen = datetime.fromisoformat(str(row["last_seen"]))
-    return seen if seen.tzinfo is not None else seen.replace(tzinfo=UTC)
+        return []
+    if per:
+        try:
+            entries = json.loads(row["evidence"] or "[]")
+        except ValueError:
+            entries = []
+        stamps = [str(e.get("at")) for e in entries if isinstance(e, dict) and e.get(per) == wanted]
+    else:
+        stamps = [str(row["last_seen"])]
+    found = []
+    for stamp in stamps:
+        try:
+            seen = datetime.fromisoformat(stamp)
+        except ValueError:
+            continue
+        found.append(seen if seen.tzinfo is not None else seen.replace(tzinfo=UTC))
+    return found
 
 
 def _clean_detail(detail: str, scrub: list[str]) -> str:

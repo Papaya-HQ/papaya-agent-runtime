@@ -37,8 +37,8 @@ What the sweep adds is only the choosing:
   **idle**: the memory is bypassed and it is asked for on every sweep. When Papaya
   still refuses it (the fallback's guard window), the refused idle items are one
   blocker a person sees (:func:`blockers.set_idle_work_kept`), and an item refused
-  for the same reason on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps running is one
-  `repeated-without-progress` deficiency a day;
+  for the same reason on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps running is a
+  `repeated-without-progress` occurrence, one row per reason, each ticket once a day;
 - a ticket a brief turn found nothing to build on is **parked**, waiting on a
   person (:func:`remember_parked`): left alone until its `updated_at` moves or
   somebody who is not an agent comments after the stamp;
@@ -314,8 +314,17 @@ def parked_items() -> dict[str, dict[str, Any]]:
     return {key: value for key, value in declined_items().items() if is_parked(value)}
 
 
+def is_agent_comment(comment: Mapping[str, Any]) -> bool:
+    """Whether an agent wrote ``comment``: the one authorship rule (`serve` uses it too).
+
+    An `author_actor` is what an agent's comment carries; a person's comment in the
+    app has only `author_type`.
+    """
+    return str(comment.get("author_type") or "") == "agent" or bool(comment.get("author_actor"))
+
+
 def person_spoke_since(comments: list[dict[str, Any]] | None, stamp: Any) -> bool:
-    """Whether anybody who is not an agent commented after ``stamp``.
+    """Whether anybody who is not an agent (:func:`is_agent_comment`) commented after ``stamp``.
 
     Comments that could not be read say nothing: the ticket stays parked, and the
     next sweep reads them again.
@@ -324,7 +333,7 @@ def person_spoke_since(comments: list[dict[str, Any]] | None, stamp: Any) -> boo
     if not comments or since is None:
         return False
     for comment in comments:
-        if str(comment.get("author_type") or "").strip().lower() == "agent":
+        if is_agent_comment(comment):
             continue
         said = _timestamp(comment.get("created_at"))
         if said is not None and said > since:
@@ -344,10 +353,14 @@ def ticket_label(item: Mapping[str, Any]) -> str:
     return f"work item {str(item.get('id') or '')[:8]}"
 
 
-def refused_detail(label: str, reason: str) -> str:
-    """A `repeated-without-progress` detail for a ticket refused sweep after sweep."""
+def refused_detail(reason: str) -> str:
+    """A `repeated-without-progress` detail for work refused sweep after sweep.
+
+    Fingerprinted on the reason alone: a refusal is Papaya's routing, and ten tickets
+    refused for one reason are one problem (one issue), each ticket in the evidence.
+    """
     return (
-        f"{label} was refused here on {REFUSALS_BEFORE_DEFICIENCY} sweeps running "
+        f"assigned work was refused here on {REFUSALS_BEFORE_DEFICIENCY} sweeps running "
         f"for the same reason ({reason})"
     )
 
@@ -866,11 +879,15 @@ def skip_reason(
     stale_after: float,
     running: set[str] | frozenset[str] = frozenset(),
     kept: dict[str, dict[str, Any]] | None = None,
+    elsewhere: bool = True,
 ) -> str | None:
-    """Why an assigned item is not offered, or ``None``: the sweep's shared first filter.
+    """Why an assigned item is not offered, from what needs no Papaya call, or ``None``.
 
-    `Sweeper._sweep` applies it before offering; a session's `ppy sweep` applies it to say
-    what is waiting. Work kept elsewhere is judged on evidence afterwards, by the sweep.
+    The synchronous half of :func:`gate`, which every path that offers or lists work
+    calls; nothing should call this directly, because it cannot read the comments a
+    parked ticket un-parks on. ``elsewhere=False`` leaves out the "in progress
+    elsewhere" guess, for the reclaim, whose items are known to have been this
+    runtime's. Work kept elsewhere is judged on evidence afterwards, by the sweep.
     """
     item_id = str(item["id"])
     if f"work_item:{item_id}" in running or item_id in live:
@@ -879,7 +896,8 @@ def skip_reason(
     # A parked ticket is this runtime's own: a recent touch is a change on it (QA's
     # answer), not somebody else working it, so it is not judged "elsewhere".
     if (
-        (kept or {}).get(item_id) is None
+        elsewhere
+        and (kept or {}).get(item_id) is None
         and not is_parked(remembered)
         and in_progress_elsewhere(item, now=now, stale_after=stale_after)
     ):
@@ -887,6 +905,70 @@ def skip_reason(
     if declined_earlier(item, remembered):
         return WAITING_ON_A_PERSON if is_parked(remembered) else "declined earlier, unchanged"
     return None
+
+
+async def gate(
+    item: dict[str, Any],
+    *,
+    now: datetime,
+    live: set[str],
+    declined: dict[str, dict[str, Any]],
+    stale_after: float,
+    comments: Callable[[str], Awaitable[list[dict[str, Any]] | None]],
+    running: set[str] | frozenset[str] = frozenset(),
+    kept: dict[str, dict[str, Any]] | None = None,
+    elsewhere: bool = True,
+) -> str | None:
+    """Why an assigned item is not offered or listed, or ``None``: the one gate.
+
+    Every path that offers or lists assigned work calls it: the sweep
+    (`Sweeper._sweep`), the reclaim on start and reconnect (`Sweeper._reclaim_earlier`)
+    and a session's list of waiting work (`supervision.assigned_unpicked`). It holds
+    the memories — live here, declined earlier and unchanged, parked on a person — and
+    the whole un-park rule: a parked ticket is offered again when its `updated_at`
+    moves past the stamp, or when somebody who is not an agent commented after the
+    stamp (``comments`` is read only for a parked ticket that has not otherwise moved).
+    """
+    reason = skip_reason(
+        item,
+        now=now,
+        live=live,
+        declined=declined,
+        stale_after=stale_after,
+        running=running,
+        kept=kept,
+        elsewhere=elsewhere,
+    )
+    if reason != WAITING_ON_A_PERSON:
+        return reason
+    item_id = str(item["id"])
+    stamp = (declined.get(item_id) or {}).get("updated_at")
+    try:
+        said = await comments(item_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - unreadable comments leave it parked
+        log.debug("[sweep] Could not read the comments on %s: %s", item_id, exc)
+        return reason
+    if person_spoke_since(said, stamp):
+        log.debug("[sweep] work_item:%s: a person spoke since it was parked", item_id)
+        return None
+    return reason
+
+
+def forget_parked_absent(open_ids: set[str]) -> list[str]:
+    """Drop parked tickets no longer open and assigned here, after a *successful* listing.
+
+    A parked ticket that was closed or reassigned is no longer waiting on anybody
+    here; left in place it would stay in `needs attention` for ever. Returns the ids
+    dropped. Never call it with the answer of a listing that failed.
+    """
+    with _declined_lock:
+        data = declined_items()
+        gone = [key for key, value in data.items() if is_parked(value) and key not in open_ids]
+        if gone:
+            _write_items(declined_path(), {k: v for k, v in data.items() if k not in gone})
+    return gone
 
 
 def envelope_for(item: dict[str, Any], *, agent_id: str = "", workspace_id: str = "") -> dict:
@@ -1122,13 +1204,21 @@ class Sweeper:
                 print(f"ppy serve: {line}", file=self._stderr, flush=True)
 
     async def _reclaim_earlier(
-        self, items: list[dict[str, Any]], live: set[str], now: datetime
+        self,
+        items: list[dict[str, Any]],
+        live: set[str],
+        now: datetime,
+        declined: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, tuple[str, dict[str, Any] | None]]:
         """Take back what an earlier connection of this runtime held. Returns each offer's answer.
 
         One line per item reclaimed or refused, then one summary line; nothing at all
         when no open item was held earlier. A refusal is returned so the sweep that
         follows counts it (and its blocker) without asking Papaya a second time.
+
+        Through the one :func:`gate` first: a ticket parked on a person (its newest task
+        ended `reported` then `released`, which is not given away) is not reclaimed on
+        every restart and reconnect, and one a person has since answered is.
         """
         self._reclaim_due = False
         earlier = await asyncio.to_thread(self._connection_ids)
@@ -1138,7 +1228,17 @@ class Sweeper:
         reclaimed = refused = 0
         for item in items:
             item_id = str(item["id"])
-            if f"work_item:{item_id}" in running or item_id in live:
+            if await gate(
+                item,
+                now=now,
+                live=live,
+                declined=declined or {},
+                stale_after=self._stale_after,
+                comments=self._reads.comments,
+                running=running,
+                # These were this runtime's: a recent touch is not somebody else's work.
+                elsewhere=False,
+            ):
                 continue
             ticket = tickets.get(item_id)
             why = held_earlier(item, ticket, earlier, now=now)
@@ -1192,10 +1292,10 @@ class Sweeper:
         reaching keeps its place in the blocker until a sweep reaches it.
 
         An item refused for the same reason on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps
-        running is a `repeated-without-progress` deficiency, fingerprinted on the item
-        and the reason and recorded once a day however long the refusals go on: one
-        line a person reads, not one occurrence per sweep (the 527-count row of
-        2026-09-17..19).
+        running is a `repeated-without-progress` occurrence: fingerprinted on the reason
+        (one row, one issue, however many tickets), the ticket in the evidence, and each
+        ticket recorded once a day however long its refusals go on. One line a person
+        reads, not one occurrence per sweep (the 527-count row of 2026-09-17..19).
         """
         from papaya_agent_runtime import blockers, deficiencies
 
@@ -1218,10 +1318,11 @@ class Sweeper:
                     functools.partial(
                         deficiencies.record_once,
                         deficiencies.REPEATED_WITHOUT_PROGRESS,
-                        refused_detail(label, reason),
+                        refused_detail(reason),
                         within=REPEAT_SAID_EVERY,
                         evidence={"ticket": label, "code": reason, "times": streak},
-                        scope=f"ticket:{label}",
+                        scope=f"refusal:{reason}",
+                        per="ticket",
                     )
                 )
         self._refused_idle = current
@@ -1250,6 +1351,8 @@ class Sweeper:
             return SweepResult(error=str(exc) or exc.__class__.__name__)
 
         items = sweep_order([item for item in _items(answer) if is_open(item)])
+        # The listing succeeded: a parked ticket not in it was closed or reassigned.
+        await asyncio.to_thread(forget_parked_absent, {str(item["id"]) for item in items})
         live = await asyncio.to_thread(self._live_items)
         declined = {} if include_declined else await asyncio.to_thread(declined_items)
         kept = {} if include_kept else await asyncio.to_thread(kept_items)
@@ -1257,7 +1360,7 @@ class Sweeper:
         now = datetime.fromtimestamp(clock_now, UTC)
         asked: dict[str, tuple[str, dict[str, Any] | None]] = {}
         if self._reclaim_due:
-            asked = await self._reclaim_earlier(items, live, now)
+            asked = await self._reclaim_earlier(items, live, now, declined)
 
         offered = skipped = earlier = elsewhere = waiting = parked = 0
         kept_by: dict[str, int] = {}
@@ -1275,25 +1378,19 @@ class Sweeper:
                 taken.append(item_id)
                 continue
             remembered = kept.get(item_id)
-            # The shared first filter (`skip_reason`), which a session's `ppy sweep` applies
-            # too. Work Papaya has refused here before is judged on evidence, not on how
-            # recently somebody touched it.
-            reason = skip_reason(
+            # The one gate (`gate`), which the reclaim and a session's list of waiting
+            # work call too. Work Papaya has refused here before is judged on evidence,
+            # not on how recently somebody touched it.
+            reason = await gate(
                 item,
                 now=now,
                 live=set() if item_id in asked else live,
                 declined=declined,
                 stale_after=self._stale_after,
+                comments=self._reads.comments,
                 running=frozenset() if item_id in asked else built.loop.running_subjects,
                 kept=kept,
             )
-            if reason == WAITING_ON_A_PERSON:
-                # `updated_at` does not move for a comment, and a person's answer on
-                # the thread (QA's result) is exactly what un-parks the ticket.
-                stamp = (declined.get(item_id) or {}).get("updated_at")
-                if person_spoke_since(await self._reads.comments(item_id), stamp):
-                    log.debug("[sweep] %s: a person spoke since it was parked", subject)
-                    reason = None
             if reason is not None:
                 log.debug("[sweep] %s not offered: %s", subject, reason)
                 skipped += 1
@@ -1438,6 +1535,9 @@ __all__ = [
     "holder_name",
     "in_progress_elsewhere",
     "interval_from_env",
+    "forget_parked_absent",
+    "gate",
+    "is_agent_comment",
     "is_open",
     "is_parked",
     "kept_elsewhere",

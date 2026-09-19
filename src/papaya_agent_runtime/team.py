@@ -608,12 +608,22 @@ def attention(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str
         if row["kind"] == deficiencies.REPEATED_WITHOUT_PROGRESS:
             if seconds is not None and seconds <= REPEATING_SHOWN_FOR:
                 try:
-                    evidence = (json.loads(row["evidence"] or "[]") or [{}])[-1]
+                    entries = [
+                        e for e in json.loads(row["evidence"] or "[]") if isinstance(e, dict)
+                    ]
                 except ValueError:
-                    evidence = {}
+                    entries = []
+                evidence = entries[-1] if entries else {}
+                recent = [
+                    str(e["ticket"])
+                    for e in entries
+                    if e.get("ticket") and (_ago(now, e.get("at")) or 0) <= REPEATING_SHOWN_FOR
+                ]
                 repeating.append(
                     {
                         "ticket": evidence.get("ticket"),
+                        # A refusal row gathers every ticket refused that way in the day.
+                        "tickets": list(dict.fromkeys(recent)),
                         "ending": evidence.get("code"),
                         "detail": str(row["detail"]),
                         "count": int(row["count"]),
@@ -663,19 +673,35 @@ def mark_looked(found: dict[str, Any]) -> None:
         pass
 
 
-def look(now: datetime | None = None) -> dict[str, Any]:
-    """`needs attention` for a person looking now: read it, then record the look."""
+def peek(now: datetime | None = None) -> dict[str, Any]:
+    """`needs attention` now, read only: nothing is recorded as looked at."""
     from papaya_agent_runtime.paths import db_path
 
     if not db_path().exists():
         return {"repeating": [], "parked": [], "grown": [], "counts": {}}
     conn = db.init_db()
     try:
-        found = attention(conn, now)
+        return attention(conn, now)
     finally:
         conn.close()
+
+
+def look(now: datetime | None = None) -> dict[str, Any]:
+    """`needs attention` for a person looking now: read it, then record the look."""
+    found = peek(now)
     mark_looked(found)
     return found
+
+
+def a_persons_look(stream: Any, *, as_json: bool = False, reprint: bool = False) -> bool:
+    """Whether printing to ``stream`` is a person looking, so the look may be recorded.
+
+    Only a first print, not as JSON, to a terminal. A `--follow` reprint is the same
+    look; JSON is for a script; and a stdout that is not a terminal is an agent turn
+    or a pipe (turns are told to run `ppy status --team`), which must not use up the
+    growth a person has not seen.
+    """
+    return not as_json and not reprint and is_tty(stream)
 
 
 def attention_lines(found: dict[str, Any] | None) -> list[str]:
@@ -685,10 +711,15 @@ def attention_lines(found: dict[str, Any] | None) -> list[str]:
     lines = []
     for r in found.get("repeating") or []:
         ending = str(r.get("ending") or "")
-        action = _REPEAT_ACTIONS.get(ending, _REFUSED_ACTION)
+        action = _REPEAT_ACTIONS.get(ending)
+        which = ""
+        if action is None:
+            # A refusal row is keyed on the reason; the tickets are in its evidence.
+            action = _REFUSED_ACTION
+            which = f": {', '.join(r.get('tickets') or [])}" if r.get("tickets") else ""
         lines.append(
-            f"repeating: {r['detail']} (last {_utc(r['last_seen'])}, {_age(r['seconds'])} ago)"
-            f" · {action}"
+            f"repeating: {r['detail']}{which} (last {_utc(r['last_seen'])}, "
+            f"{_age(r['seconds'])} ago) · {action}"
         )
     for p in found.get("parked") or []:
         lines.append(
@@ -836,9 +867,8 @@ def render(snap: dict[str, Any], paint: Paint | None = None) -> list[str]:
         ],
     )
     if "attention" in snap:
-        # Rendering is a person looking: the next look names only new growth.
+        # Recording the look is the command's, and only for a person (`a_persons_look`).
         section("needs attention", attention_lines(snap["attention"]))
-        mark_looked(snap["attention"])
     return lines
 
 
@@ -1281,12 +1311,12 @@ def render_workers(
 ) -> list[str]:
     """`ppy workers`: one block per worker, a blank line between blocks, then `needs attention`.
 
-    ``needs`` is :func:`attention`'s answer; left out, it is read now and the look
-    recorded (:func:`look`), which is what the command wants.
+    ``needs`` is :func:`attention`'s answer; left out, it is read now (:func:`peek`).
+    Rendering records nothing: the command records a person's look (`a_persons_look`).
     """
     paint = paint or Paint()
     lines = _worker_blocks(found, width, paint)
-    extra = attention_lines(look() if needs is None else needs)
+    extra = attention_lines(peek() if needs is None else needs)
     if extra:
         lines.append("")
         lines.append(paint(f"needs attention ({len(extra)}):", "bold"))
@@ -1341,22 +1371,32 @@ def _worker_blocks(found: list[dict[str, Any]], width: int, paint: Paint) -> lis
     return lines
 
 
-def workers_json(found: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps."""
+def workers_json(
+    found: list[dict[str, Any]], needs: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps.
+
+    `{"workers": [...], "attention": {repeating, parked, grown}}`: the workers, then the
+    `needs attention` section as data (read only; JSON is never a person's look).
+    """
 
     def iso(stamp: object) -> str | None:
         at = _parse(stamp)
         return at.isoformat() if at is not None else None
 
-    return [
-        {
-            **w,
-            "running_since": iso(w["running_since"]),
-            "note_at": iso(w["note_at"]),
-            "actions": [{**a, "at": iso(a["at"])} for a in w["actions"]],
-        }
-        for w in found
-    ]
+    needs = peek() if needs is None else needs
+    return {
+        "workers": [
+            {
+                **w,
+                "running_since": iso(w["running_since"]),
+                "note_at": iso(w["note_at"]),
+                "actions": [{**a, "at": iso(a["at"])} for a in w["actions"]],
+            }
+            for w in found
+        ],
+        "attention": {key: needs.get(key) or [] for key in ("repeating", "parked", "grown")},
+    }
 
 
 def _signature(conn: sqlite3.Connection) -> tuple[Any, ...]:
@@ -1411,8 +1451,10 @@ __all__ = [
     "render_workers",
     "attention",
     "attention_lines",
+    "a_persons_look",
     "look",
     "mark_looked",
+    "peek",
     "terminal_width",
     "work_item",
     "worker_actions",
