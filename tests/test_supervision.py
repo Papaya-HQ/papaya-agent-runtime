@@ -324,6 +324,31 @@ def _merged_entry(worker: int) -> dict:
     }
 
 
+def test_a_tracked_worker_with_no_ticket_moves_its_work_item_once(ppy_home) -> None:
+    """2026-09-18: PAP-247/248/249/251 stayed `todo` after merge; only tickets moved."""
+    from papaya_agent_runtime import tracker
+
+    conn = init_db()
+    worker = _delivered(conn)
+    tracker.link_task(conn, worker, record="PAP-251")
+    said: list = []
+
+    def post(target, body, status):
+        said.append((target.event().work_item_id, target.task_id, status, body))
+
+    lines = supervision.merged_step([_merged_entry(worker)], post=post)
+    supervision.merged_step([_merged_entry(worker)], post=post)
+
+    [(item, task_id, status, body)] = said
+    assert (item, task_id, status) == ("PAP-251", worker, "review")
+    assert "verified on staging" in body
+    assert any("PAP-251 moved to review" in line for line in lines)
+    # An untracked worker with no ticket is still nobody's to post to.
+    bare = _delivered(conn)
+    supervision.merged_step([_merged_entry(bare)], post=post)
+    assert len(said) == 1
+
+
 def test_a_merge_moves_the_item_to_review_until_staging_and_a_rule_wins(ppy_home) -> None:
     from papaya_agent_runtime.config import MMConfig, load_config, save_config
 
