@@ -615,6 +615,96 @@ def test_a_task_turn_that_misses_twice_hands_the_worker_to_a_person(home, tmp_pa
     assert lanes.owed_decisions(conn, now=NOW) == []
 
 
+PLAN_BRIEF = """\
+# Make it blue
+
+## Goals
+- Blue.
+
+## Plan-note gate
+
+blocking: stop after posting and wait for the manager's reply.
+"""
+
+
+def _plan_stopped_worker(conn) -> int:
+    """A worker with no ticket that ended its turn after posting `--phase plan`."""
+    from papaya_agent_runtime import preflight
+
+    run_id = store.create_run(conn, "ship it")
+    repo_id = store.add_repo(
+        conn,
+        name="app",
+        origin="git@example.com:app.git",
+        local_path="/tmp/app",
+        default_branch="main",
+        base_sha=None,
+    )
+    task_id = store.add_task(conn, run_id=run_id, title="build", repo_id=repo_id)
+    store.update_task_fields(conn, task_id, branch=f"ppy/task-{task_id}")
+    store.set_task_status(conn, task_id, "worker_stopped")
+    store.append_event(
+        conn,
+        kind="worker_progress",
+        payload={"task_id": task_id, "phase": "plan", "note": "H1..H4 read; here is the plan"},
+        run_id=run_id,
+        task_id=task_id,
+    )
+    preflight.archive_brief("app", task_id, PLAN_BRIEF)
+    return task_id
+
+
+def test_a_lane_worker_that_stopped_at_its_plan_gets_the_answer_turn_not_a_gate(
+    home, tmp_path
+) -> None:
+    conn = init_db()
+    task_id = _plan_stopped_worker(conn)
+    turns = FakeTurns(lambda _launch: "PLAN-REPLY: Approved as posted; build it.")
+    steered: list[tuple[int, str]] = []
+    runner = _runner(turns, tmp_path, steer=lambda t, m: steered.append((t, m)))
+
+    async def scenario() -> list[str]:
+        decisions = lanes.owed_decisions(conn, now=NOW)
+        lines = await runner.take_up(decisions)
+        await _drain(runner)
+        return lines
+
+    assert asyncio.run(scenario()) == [f"worker task {task_id}: running the answer turn"]
+    [prompt] = turns.prompts
+    assert prompt.startswith(prompts.load(prompts.ANSWER).splitlines()[0])
+    facts = prompt.split(prompts.FACTS_HEADING, 1)[1]
+    assert "- the worker stopped at its plan note:" in facts
+    assert "H1..H4 read; here is the plan" in facts
+    assert "blocking: the worker was told to wait for your reply" in facts
+    assert "ppy gate run" not in facts  # never a gate: there is nothing to run
+    # The turn wrote the reply; the runner only handed it over, verbatim and labelled.
+    assert steered == [(task_id, "Manager reply to your plan note: Approved as posted; build it.")]
+    assert lanes.last_turn(init_db(), task_id)["outcome"] == lanes.ACTED
+
+
+def test_a_plan_answer_turn_that_says_nothing_never_resumes_the_worker_with_a_guess(
+    home, tmp_path
+) -> None:
+    conn = init_db()
+    task_id = _plan_stopped_worker(conn)
+    turns = FakeTurns()  # no PLAN-REPLY: line
+    steered: list[tuple[int, str]] = []
+    runner = _runner(turns, tmp_path, steer=lambda t, m: steered.append((t, m)))
+
+    async def scenario() -> None:
+        for _ in range(2):
+            await runner.take_up(lanes.owed_decisions(init_db(), now=NOW))
+            await _drain(runner)
+
+    asyncio.run(scenario())
+
+    assert steered == []
+    conn = init_db()
+    assert lanes.last_turn(conn, task_id)["misses"] == 2
+    [todo] = board.waiting(conn)
+    assert "answering the worker's plan note" in todo["text"]
+
+
 def test_the_ledger_turn_carries_the_steps_that_sat_and_records_what_it_left(
     home, tmp_path
 ) -> None:

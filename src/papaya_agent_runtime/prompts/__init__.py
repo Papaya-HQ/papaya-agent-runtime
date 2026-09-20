@@ -164,6 +164,11 @@ CHECKIN_STEER = "steer"
 CHECKIN_STOP = "stop and resume with"
 CHECKIN_DECISIONS = (CHECKIN_CONTINUE, CHECKIN_STEER, CHECKIN_STOP)
 
+#: How an answer turn answering a worker that stopped at its plan note says the reply:
+#: its last line starts with this, and the rest of that line reaches the worker
+#: verbatim as what resumes it. The runner never writes such a reply itself.
+PLAN_REPLY_PREFIX = "PLAN-REPLY:"
+
 _HERE = Path(__file__).resolve().parent
 
 
@@ -217,6 +222,7 @@ __all__ = [
     "CHECKIN_PREFIX",
     "CHECKIN_STEER",
     "CHECKIN_STOP",
+    "PLAN_REPLY_PREFIX",
     "FACTS_HEADING",
     "GATE_TIERS_RULE",
     "LEDGER",

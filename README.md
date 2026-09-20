@@ -160,6 +160,17 @@ and exit code, and `ppy serve` decides on that record: a worker with a green gat
 its head is reviewed, a red one is steered with the summary, and one that stopped with
 none is steered to run `ppy gate run`.
 
+One stop is not that. A worker whose newest progress note is `plan` has written no
+verification and often no code, so telling it a "verification gate" did not finish is
+simply false — and where a brief made the plan gate blocking, that steer pushed it past
+the gate a person had asked for (PAP-278). Such a worker is instead answered about its
+plan: an answer turn reads the plan note against the brief, with the brief's own
+plan-note gate wording as a fact, and ends with one `PLAN-REPLY:` line. That line reaches
+the worker verbatim, prefixed `Manager reply to your plan note:`, and is what resumes it.
+Every stopped worker at its plan is answered, blocking or not; a worker still *running*
+after a non-blocking plan note is left to work. A turn that says no reply is a missed
+turn, retried and then handed back — the runtime never writes the reply itself.
+
 Heavy gates run one at a time per repository. A full suite (`--full`), or any gate whose
 learned duration in its repository (p90, or a budget override) is past
 `gate.parallel_ceiling_seconds` (300), takes one of the repository's
@@ -365,6 +376,7 @@ ppy repo discover                       # repos on the forge that aren't registe
 ppy repo add https://github.com/you/your-repo
 ppy repo onboard your-repo              # learn what it is, its build, tests, gate policy
 ppy gate run --task <task_id>           # a gate under the supervisor, past any tool timeout
+ppy evidence add <file> --task <id>     # keep one receipt: the task's own worktree or saved output
 ppy repo budgets your-repo              # how long things take there, and how long it waits
 ppy repo locate "hover card"            # which registered repos contain these strings
 ppy serve                               # the always-on manager: supervisor + Papaya loop
@@ -855,7 +867,10 @@ the signals, recorded where they already happen:
 - **A live worker stalls.** The client stalls a held ticket while its worker's session is
   still live: the liveness lines above did not reach it in time.
 - **A turn misses its job.** A ticket is handed back because a turn ended twice without
-  doing its job (a usage-limit ending never counts), or a worker's gate was backgrounded past the tool cap with no
+  doing its job (a usage-limit ending never counts — and the occurrences recorded before
+  that was true are re-read once from their transcripts and stop counting, so an issue
+  already open on them corrects itself with one comment and closes when nothing genuine
+  is left), or a worker's gate was backgrounded past the tool cap with no
   `ppy gate run` on record.
 - **A tool is refused.** Workers in one repository are denied the same plain command
   twice, and learning cannot fix it: the program is outside the safe family

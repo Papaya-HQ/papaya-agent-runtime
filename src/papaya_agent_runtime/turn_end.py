@@ -106,7 +106,13 @@ def _unpushed_reason(count: int) -> str:
     return f"the branch has {count} commit(s) no remote holds — the work was never pushed"
 
 
-def _latest_phase(conn, task_id: int) -> str | None:
+def latest_phase(conn, task_id: int) -> str | None:
+    """The phase of the newest `ppy progress` note on this task, or ``None`` if it has none.
+
+    The one reader of a worker's own account of where it is. A stop is classified by it
+    (:func:`why_stopped`), and so is what the stop needs: a worker whose newest note is
+    `plan` stopped at a gate somebody asked for, not part-way through a verification.
+    """
     row = store.latest_progress(conn, task_id)
     if row is None:
         return None
@@ -179,7 +185,7 @@ def why_stopped(conn, task_id: int) -> StopVerdict:
     expected = task["ends_at"] if "ends_at" in task.keys() else "done"  # noqa: SIM118
     verdict = StopVerdict(expected_phase=expected)
 
-    verdict.phase = _latest_phase(conn, task_id)
+    verdict.phase = latest_phase(conn, task_id)
     if verdict.phase != expected:
         verdict.stopped = True
         verdict.reasons.append(

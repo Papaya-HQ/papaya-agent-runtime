@@ -813,6 +813,157 @@ def test_a_ticket_scope_redaction_blanks_still_names_one_ticket(ppy_home) -> Non
     assert len(_reporter(gh, wall).flush()) == 1
 
 
+# ── a limit-killed turn was never a missed one ──────────────────────────────
+
+
+#: The two endings issue #128 records, verbatim from the transcripts it names.
+WEEKLY = "You've hit your weekly limit · resets Sep 22 at 7am (America/Los_Angeles)"
+SESSION_LIMIT = "You've hit your session limit · resets 12:30pm (America/Los_Angeles)"
+#: A genuine miss: the brief turn was fired on a ticket with nothing left to dispatch.
+GENUINE = "RUNTIME: the ticket was already in review, so there was nothing to dispatch"
+
+
+def _missed_turns(wall: Wall, gh: FakeGh, tmp_path, endings: list[str]) -> deficiencies.Deficiency:
+    """Issue #128 as the live ledger holds it: one row, a transcript per occurrence."""
+    url = f"https://github.com/{RUNTIME_REPO}/issues/128"
+    at = wall.now.isoformat(timespec="seconds")
+    evidence = []
+    for n, ending in enumerate(endings):
+        log = tmp_path / f"brief-{n}.log"
+        log.write_text(f"the turn ran\nand then\n{ending}\n", encoding="utf-8")
+        evidence.append(
+            {
+                "at": at,
+                "phase": "briefing",
+                "repo": "runtime",
+                "task_id": 20 + n,
+                "transcript": str(log),
+                "n": n + 1,
+            }
+        )
+    key = deficiencies.fingerprint(deficiencies.MISSED_TURN, "dispatching a worker")
+    conn = init_db()
+    conn.execute(
+        "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
+        "count, evidence, issue_url, status, opened_at, reported_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            key,
+            deficiencies.MISSED_TURN,
+            "A manager turn ended without doing its job: dispatching a worker",
+            "dispatching a worker",
+            at,
+            at,
+            len(endings),
+            json.dumps(evidence),
+            url,
+            deficiencies.REPORTED,
+            at,
+            len(endings),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    gh.issues[url] = {"title": "a missed turn", "body": "", "labels": [], "state": "OPEN"}
+    gh.issues[url]["comments"] = []
+    return _row(key)
+
+
+def test_a_mixed_row_stops_counting_the_usage_limits_and_corrects_its_issue_once(
+    ppy_home, tmp_path
+) -> None:
+    """Issue #128: 20 occurrences, two of them the provider's wall, the rest genuine."""
+    wall, gh = Wall(), FakeGh()
+    row = _missed_turns(wall, gh, tmp_path, [GENUINE, WEEKLY, GENUINE, SESSION_LIMIT])
+    url = str(row.issue_url)
+    reporter = _reporter(gh, wall)
+
+    done = reporter.flush()
+
+    assert done == [f"commented on {url}: 2 of 4 occurrences were the provider's usage limit"]
+    assert gh.issues[url]["state"] == "OPEN"  # the genuine two are still a real issue
+    (comment,) = gh.issues[url]["comments"]
+    assert comment.startswith("correcting the count: 2 of 4 occurrences here were the")
+    assert "The remaining 2 are genuine and this issue stands for them." in comment
+
+    corrected = _row(row.fingerprint)
+    assert corrected.count == 2
+    assert corrected.status == deficiencies.REPORTED and corrected.issue_url == url
+    # The evidence is kept, not deleted: each limit-killed occurrence says what ended it.
+    limits_said = [e.get("limit") for e in corrected.evidence if e.get("limit")]
+    assert limits_said == [WEEKLY, SESSION_LIMIT]
+
+    # One comment per row, ever, whatever later flushes do.
+    assert reporter.flush() == []
+    wall.advance(days=1)
+    assert reporter.flush() == []
+    assert len(gh.issues[url]["comments"]) == 1
+    assert _opened(gh) == []
+
+
+def test_a_row_that_was_only_usage_limits_closes_and_goes_back_to_watching(
+    ppy_home, tmp_path
+) -> None:
+    wall, gh = Wall(), FakeGh()
+    row = _missed_turns(wall, gh, tmp_path, [WEEKLY, SESSION_LIMIT])
+    url = str(row.issue_url)
+
+    done = _reporter(gh, wall).flush()
+
+    assert done == [f"closed {url}: every occurrence was the provider's usage limit"]
+    assert gh.issues[url]["state"] == "CLOSED"
+    (comment,) = gh.issues[url]["comments"]
+    assert comment.startswith("closing: every occurrence here was the provider's usage limit.")
+
+    corrected = _row(row.fingerprint)
+    assert (corrected.count, corrected.status, corrected.issue_url) == (
+        0,
+        deficiencies.WATCHING,
+        None,
+    )
+    # Not `reclassified`, which is terminal: a genuine miss later still opens a true issue.
+    assert _opened(gh) == []
+
+
+def test_a_transcript_that_is_gone_leaves_its_occurrence_counted(ppy_home, tmp_path) -> None:
+    """There is no evidence to re-judge it on, and dropping it would be untrue the other way."""
+    wall, gh = Wall(), FakeGh()
+    row = _missed_turns(wall, gh, tmp_path, [WEEKLY, GENUINE])
+    (tmp_path / "brief-1.log").unlink()  # the genuine one's transcript
+    (tmp_path / "brief-0.log").unlink()  # and the limit's
+    url = str(row.issue_url)
+
+    assert _reporter(gh, wall).flush() == []
+
+    assert gh.issues[url]["comments"] == [] and gh.issues[url]["state"] == "OPEN"
+    assert _row(row.fingerprint).count == 2
+
+
+def test_a_row_of_genuine_misses_is_left_entirely_alone(ppy_home, tmp_path) -> None:
+    wall, gh = Wall(), FakeGh()
+    row = _missed_turns(wall, gh, tmp_path, [GENUINE, GENUINE])
+    url = str(row.issue_url)
+
+    assert _reporter(gh, wall).flush() == []
+
+    assert gh.issues[url]["comments"] == [] and gh.issues[url]["state"] == "OPEN"
+    kept = _row(row.fingerprint)
+    assert kept.count == 2 and kept.limits_corrected_at  # read once, and never again
+    assert not any(e.get("limit") for e in kept.evidence)
+
+
+def test_a_transcript_path_is_stored_redacted_and_still_read(ppy_home, tmp_path, monkeypatch):
+    """Evidence keeps `~/...`, so anything reading one back must expand it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    log = tmp_path / "runs" / "110" / "turns" / "brief-2.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(f"ran\n{WEEKLY}\n", encoding="utf-8")
+
+    said = deficiencies.limit_of({"transcript": "~/runs/110/turns/brief-2.log", "at": START})
+
+    assert said == WEEKLY
+
+
 def _miscounted(wall: Wall, gh: FakeGh, tickets: int = 5) -> deficiencies.Deficiency:
     """Issue #84 as the live ledger holds it: N tickets, one blanked scope, one issue."""
     url = f"https://github.com/{RUNTIME_REPO}/issues/84"

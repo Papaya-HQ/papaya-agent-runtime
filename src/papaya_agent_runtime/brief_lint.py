@@ -91,6 +91,8 @@ _PRE_AUTHORISED = re.compile(r"pre[ -]?authori[sz]ed adjacent changes?", re.IGNO
 _PLAN_NOTE_HEADING = re.compile(r"\bplan[ -]note\b")
 #: "non-blocking" matches too: the word boundary sits at the hyphen.
 _BLOCKING = re.compile(r"\bblocking\b", re.IGNORECASE)
+#: Which is why anything reading the section for its answer must test this one first.
+_NON_BLOCKING = re.compile(r"\bnon[ -]?blocking\b", re.IGNORECASE)
 _RELEASE_TITLE = re.compile(r"\brelease\b|\bversion[ -]bump\b", re.IGNORECASE)
 _GIT_SHOW_STAT = re.compile(r"\bgit\s+show\s+--stat\b")
 #: A file named in a list: an optional path, a stem of two or more characters (so
@@ -472,6 +474,39 @@ def outcome_sections(text: str) -> dict[str, str]:
         if body.strip():
             out[name] = body
     return out
+
+
+#: What :func:`plan_note_gate` answers. `BLOCKING` means the brief told the worker to
+#: stop after posting its plan and wait; `NON_BLOCKING` means it was told to carry on;
+#: `UNSAID` is a brief written before the rule, or one `ppy brief lint` would flag.
+PLAN_GATE_BLOCKING = "blocking"
+PLAN_GATE_NON_BLOCKING = "non-blocking"
+PLAN_GATE_UNSAID = ""
+
+
+def plan_note_gate(text: str) -> str:
+    """Whether this brief's plan-note section told the worker to wait after posting it.
+
+    One of :data:`PLAN_GATE_BLOCKING`, :data:`PLAN_GATE_NON_BLOCKING` or
+    :data:`PLAN_GATE_UNSAID`. It is the same section :func:`_check_plan_note_blocking`
+    lints, read rather than judged, so a stop at the plan can be answered knowing
+    whether the worker was asked to wait for approval or may simply be told to proceed.
+
+    "non-blocking" is tested first on purpose: :data:`_BLOCKING` is ``\\bblocking\\b``,
+    whose word boundary sits at the hyphen, so it matches inside "non-blocking" too and
+    a brief that said the opposite would otherwise read as blocking.
+    """
+    lines = _classified_lines(text)
+    for line in lines:
+        heading = _own_heading(line)
+        if heading is None or not _PLAN_NOTE_HEADING.search(heading):
+            continue
+        for ln in (line, *_section_body(lines, line)):
+            if _NON_BLOCKING.search(ln.text):
+                return PLAN_GATE_NON_BLOCKING
+            if _BLOCKING.search(ln.text):
+                return PLAN_GATE_BLOCKING
+    return PLAN_GATE_UNSAID
 
 
 def standing_scope(text: str) -> str | None:

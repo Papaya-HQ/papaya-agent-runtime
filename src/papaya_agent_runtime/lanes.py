@@ -162,6 +162,11 @@ class OwedDecision:
     tail: str = ""
     #: For :data:`RESUME`: the limit ending being taken up (`limits.WorkerEnding`).
     ending: Any = None
+    #: The worker stopped after posting its plan note (`supervision.PLAN`), so its
+    #: answer turn is about the plan and its `PLAN-REPLY:` line is what resumes it.
+    plan_stop: bool = False
+    #: For :data:`plan_stop`: the brief's plan-note gate (`brief_lint.plan_note_gate`).
+    plan_gate: str = ""
 
     @property
     def failure(self) -> bool:
@@ -462,14 +467,35 @@ def owed_decisions(
         due, tail = _turn_due(conn, item.task_id, now)
         if not due:
             continue
-        turn = prompts.ANSWER if item.status == "blocked" else prompts.REVIEW
+        # A worker that stopped at its plan note is answered about the plan, never sent
+        # to a gate and never reviewed: there is nothing at its head to review. Its
+        # answer turn's `PLAN-REPLY:` line is what resumes it (`TurnRunner._plan_reply`).
+        plan_stop = followup is not None and followup.action == supervision.PLAN
+        turn = prompts.ANSWER if (plan_stop or item.status == "blocked") else prompts.REVIEW
         found.append(
             OwedDecision(
-                item.task_id, item.status, TURN, item.reason, turn=turn, repo=item.repo, tail=tail
+                item.task_id,
+                item.status,
+                TURN,
+                followup.line if plan_stop else item.reason,
+                turn=turn,
+                repo=item.repo,
+                tail=tail,
+                plan_stop=plan_stop,
+                message=followup.message if plan_stop else "",
+                plan_gate=_plan_gate(conn, item.task_id) if plan_stop else "",
             )
         )
     found += capability_decisions(conn, covered=skip, already={d.task_id for d in found})
     return found
+
+
+def _plan_gate(conn: sqlite3.Connection, task_id: int) -> str:
+    """The plan-note gate of the brief this worker was dispatched with, or ``""``."""
+    from papaya_agent_runtime import serve
+
+    task = store.get_task(conn, task_id)
+    return serve.brief_plan_gate(supervision.repo_name(conn, task), task_id)
 
 
 def capability_decisions(
@@ -1005,7 +1031,18 @@ def task_facts(task_id: int, decision: OwedDecision | None = None) -> dict[str, 
         "branch": task["branch"],
         "record a wait on a person against (`ppy todo add --task`)": task_id,
     }
-    if decision is not None and decision.turn == prompts.ANSWER:
+    if decision is not None and decision.plan_stop:
+        from papaya_agent_runtime import brief_lint, serve
+
+        facts["the worker stopped at its plan note"] = decision.message
+        facts["its plan note, verbatim"] = serve.latest_progress_note(task_id)[1]
+        facts["its brief's plan-note gate"] = {
+            brief_lint.PLAN_GATE_BLOCKING: "blocking: the worker was told to wait for your reply",
+            brief_lint.PLAN_GATE_NON_BLOCKING: (
+                "non-blocking: the worker was told to post it and proceed, and stopped anyway"
+            ),
+        }.get(decision.plan_gate, "the brief did not say; treat the plan as waiting on you")
+    elif decision is not None and decision.turn == prompts.ANSWER:
         facts["the worker's question"] = question or decision.line
     elif decision is not None:
         facts["what stopped the worker"] = decision.line if decision.failure else ""
@@ -1166,10 +1203,16 @@ class TurnRunner:
             end_mark = await asyncio.to_thread(serve._max_event_id)
             record = await asyncio.to_thread(last_turn_record, task_id)
             limit = await self._limited(result, f"{decision.turn} turn", task_id)
-            if await asyncio.to_thread(serve.delivered_since, task_id, mark):
+            if await self._plan_reply(decision, result):
+                outcome = ACTED
+            elif await asyncio.to_thread(serve.delivered_since, task_id, mark):
                 outcome = DELIVERED
             elif await asyncio.to_thread(serve.acted_since, task_id, mark) or (
                 decision.turn == prompts.ANSWER
+                # "no longer blocked" is how a question reads as answered. A plan stop
+                # is never `blocked`, so that test is always true of it and would make
+                # every silent turn look like an answer: its reply above is its proof.
+                and not decision.plan_stop
                 and limit is None
                 and await asyncio.to_thread(serve.worker_status, task_id) != "blocked"
             ):
@@ -1204,11 +1247,12 @@ class TurnRunner:
                 **limited,
             )
             if outcome == MISSED and misses >= TURN_ATTEMPTS:
-                job = (
-                    "reviewing and delivering, or steering"
-                    if decision.turn == prompts.REVIEW
-                    else "answering or steering"
-                )
+                if decision.plan_stop:
+                    job = "answering the worker's plan note"
+                elif decision.turn == prompts.REVIEW:
+                    job = "reviewing and delivering, or steering"
+                else:
+                    job = "answering or steering"
                 await asyncio.to_thread(
                     record_person_wait,
                     task_id,
@@ -1220,6 +1264,31 @@ class TurnRunner:
             log.exception("[lanes] The %s turn on task %d failed: %s", decision.turn, task_id, exc)
         finally:
             self.running.pop(task_id, None)
+
+    async def _plan_reply(self, decision: OwedDecision, result: Any) -> bool:
+        """Give a plan-stopped worker the turn's reply, verbatim. Returns whether it went.
+
+        The lane's half of `serve.TicketRunner._answer_plan`: the turn wrote the reply,
+        the runner only delivers it. No reply is a missed turn, counted like any other;
+        the runner never writes one itself.
+        """
+        from papaya_agent_runtime import serve
+
+        if not decision.plan_stop:
+            return False
+        reply = serve.plan_reply(result)
+        if not reply:
+            return False
+        try:
+            await asyncio.to_thread(self._steer, decision.task_id, serve.plan_resume_message(reply))
+        except Exception as exc:  # noqa: BLE001 - a refused resume is a miss, not a guess
+            log.warning(
+                "[lanes] Could not give worker task %d the reply to its plan: %s",
+                decision.task_id,
+                exc,
+            )
+            return False
+        return True
 
     async def _limited(self, result: Any, source: str, task_id: int | None) -> limits.Limit | None:
         """Classify a turn's ending; a limit is kept as the pause and said once."""

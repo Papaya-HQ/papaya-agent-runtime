@@ -2592,6 +2592,10 @@ def _cmd_followup(args: argparse.Namespace) -> int:
         args.task_id, stopped=task["status"] == "worker_stopped", detail=""
     )
     print(f"task {args.task_id}: {decision.action} — {decision.line}")
+    if decision.action == supervision.PLAN:
+        # Nothing to send: the reply to a plan is somebody's to write, never `--send`'s.
+        print(decision.message)
+        return 0
     if decision.action != supervision.STEER:
         return 0
     if not args.send:
@@ -2601,6 +2605,19 @@ def _cmd_followup(args: argparse.Namespace) -> int:
 
     SupervisorClient().steer_task(args.task_id, decision.message, by=store.BY_MANAGER)
     print(f"task {args.task_id}: sent back")
+    return 0
+
+
+def _cmd_evidence(args: argparse.Namespace) -> int:
+    """Keep one file the named task already owns as a receipt."""
+    from papaya_agent_runtime import evidence
+
+    try:
+        target = evidence.add(args.task, args.source, name=args.as_name, force=args.force)
+    except evidence.EvidenceError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    print(evidence.summary(args.task, target))
     return 0
 
 
@@ -4300,6 +4317,23 @@ def build_parser() -> argparse.ArgumentParser:
     cap_escalate.add_argument("request_id", type=int)
     cap_escalate.add_argument("--why", required=True, help="what only a person can decide here")
     capability.set_defaults(func=_cmd_capability)
+
+    evidence_cmd = sub.add_parser(
+        "evidence",
+        help="keep a receipt: copy one file the task already owns into its evidence directory",
+    )
+    evsub = evidence_cmd.add_subparsers(dest="evidence_cmd", required=True)
+    ev_add = evsub.add_parser(
+        "add",
+        help="copy ONE file into the task's evidence directory. The source must be inside "
+        "that task's own worktree, or the `tool-results` file of a Claude session recorded "
+        "for it (where a long command's full output is saved); anything else is refused",
+    )
+    ev_add.add_argument("source", help="the file to keep")
+    ev_add.add_argument("--task", type=int, required=True, help="whose evidence this is")
+    ev_add.add_argument("--as", dest="as_name", default=None, help="the receipt's filename")
+    ev_add.add_argument("--force", action="store_true", help="replace a receipt of that name")
+    evidence_cmd.set_defaults(func=_cmd_evidence)
 
     outreach_cmd = sub.add_parser(
         "outreach",

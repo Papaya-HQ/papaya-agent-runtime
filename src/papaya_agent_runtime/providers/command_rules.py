@@ -16,7 +16,9 @@ nothing.
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,7 +91,35 @@ REWRITES: tuple[tuple[str, str], ...] = (
     ("<command a>; <command b>", "two calls, one command each"),
     ('git commit -m "$(cat <file>)"', "`git commit -F <file>`"),
     ('ppy progress <id> --note "<long text>"', "`ppy progress <id> --note-file <path>`"),
+    (
+        "cp <your session's tool-results file> <evidence>",
+        "`ppy evidence add <that file> --task <task id> --as <name>.txt`",
+    ),
 )
+
+#: How a worker keeps the full output of a command it could only see a preview of.
+EVIDENCE_RULE = (
+    "**A long command's full output is already saved for you.** When a tool result is "
+    "too large to show, the harness writes it to a file under your session's own "
+    "`tool-results` directory and prints that path with the preview. To keep it as a "
+    "receipt, run `ppy evidence add <that path> --task <task id> --as <name>.txt`. "
+    "Do NOT `cp` it: `cp` takes any path, so it is refused, and no widening of your "
+    "tool profile will change that. `ppy evidence add` copies exactly one file, and "
+    "only from your own worktree or your own session's saved output."
+)
+
+#: The one sanctioned way to keep a long command's saved output as a receipt. A worker
+#: cannot see a big tool result in full — the harness saves it under the session's own
+#: `tool-results` directory and shows a preview — and `cp` from there is refused,
+#: correctly, because `cp` takes any path at all (issue #127, ten refusals, every one a
+#: worker copying its own output). `ppy evidence add` copies that one file and nothing
+#: else; `evidence.add` is the rule it is confined by.
+EVIDENCE_COMMAND = "ppy evidence add"
+
+#: A path under a Claude session's saved tool output, wherever it appears in a command.
+_TOOL_RESULTS_PATH = re.compile(r"(?P<path>(?:[^\s'\"]|\\ )*/tool-results/[^\s'\"]+)")
+#: The programs a worker reaches for to keep such a file. Only the copy matters here.
+_COPY_PROGRAMS = ("cp", "mv", "cat", "install", "rsync")
 
 
 def rewrite_table(rows: tuple[tuple[str, str], ...] = REWRITES) -> str:
@@ -127,7 +157,66 @@ class Rewrite:
         return f"- `{self.command}`\n  {arrow} {self.instead}"
 
 
-def rewrite_for(command: str, worktree: str | None = None) -> Rewrite | None:
+def saved_output_source(command: str) -> str | None:
+    """The `tool-results` file a command is trying to copy, or ``None``.
+
+    Only a command whose program is one a worker copies with: a `ppy evidence add` that
+    already names such a path is the answer, not the problem, and must never be rewritten
+    into itself.
+    """
+    text = command.strip()
+    if text.startswith(EVIDENCE_COMMAND):
+        return None
+    program = (text.split() or [""])[0]
+    if os.path.basename(program) not in _COPY_PROGRAMS:
+        return None
+    found = _TOOL_RESULTS_PATH.search(text)
+    return found.group("path").strip("'\"") if found is not None else None
+
+
+def _receipt_name(command: str, source: str) -> str:
+    """What to call the receipt: the name the worker was copying to, else the source's."""
+    for word in reversed(shlex.split(command, posix=True) if _splittable(command) else []):
+        if word.startswith("-") or word == source or "/tool-results/" in word:
+            continue
+        name = os.path.basename(word.rstrip("/"))
+        if name and _RECEIPT_NAME.match(name):
+            return name
+        break
+    return os.path.basename(source)
+
+
+def _splittable(command: str) -> bool:
+    try:
+        shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    return True
+
+
+#: What `evidence._NAME` will accept, so the rewrite never hands over a name it refuses.
+_RECEIPT_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def _rewrite_saved_output(
+    command: str, worktree: str | None, task_id: int | str = "<task id>"
+) -> Rewrite | None:
+    """`cp <session tool-results file> <anywhere>` -> the one command that may do it."""
+    source = saved_output_source(command)
+    if source is None:
+        return None
+    return Rewrite(
+        command,
+        REWRITES[13][0],
+        f"`{EVIDENCE_COMMAND} {source} --task {task_id} --as {_receipt_name(command, source)}` "
+        "— that file is your own session's saved output, and this is the one command that "
+        "may copy it into your evidence directory",
+    )
+
+
+def rewrite_for(
+    command: str, worktree: str | None = None, task_id: int | str = "<task id>"
+) -> Rewrite | None:
     """The one exact command to run instead of ``command``, or None if it is not a shape.
 
     Not a list of generic rows. A worker that has just been refused
@@ -139,6 +228,11 @@ def rewrite_for(command: str, worktree: str | None = None) -> Rewrite | None:
     rewrite depending on whether the directory IS the worktree, is inside it, or is
     somewhere the worker cannot reach at all.
     """
+    saved = _rewrite_saved_output(command.strip(), worktree, task_id)
+    if saved is not None:
+        # First: such a command usually carries an operator too (a `&&`, a second
+        # command), and "split it into two calls" is not the answer to either half.
+        return saved
     for rule in (
         _rewrite_cd,
         _rewrite_inline_env,
@@ -157,12 +251,14 @@ def rewrite_for(command: str, worktree: str | None = None) -> Rewrite | None:
     return None
 
 
-def rewrites_for(commands: list[str], worktree: str | None = None) -> list[Rewrite]:
+def rewrites_for(
+    commands: list[str], worktree: str | None = None, task_id: int | str = "<task id>"
+) -> list[Rewrite]:
     """One :class:`Rewrite` per command that is a known shape, in order, deduplicated."""
     found: list[Rewrite] = []
     seen: set[str] = set()
     for command in commands:
-        rewrite = rewrite_for(command, worktree)
+        rewrite = rewrite_for(command, worktree, task_id)
         if rewrite is not None and rewrite.command not in seen:
             seen.add(rewrite.command)
             found.append(rewrite)
@@ -430,6 +526,7 @@ These are not style preferences — anything else is denied before it runs.
   tool, not a shell redirect.
 - `cd` is its own call. Never prefix another command with it.
 - {note_file_rule}
+- {evidence_rule}
 - {gate_tiers_rule}
 - Run the scoped gate **in the foreground** —
   never as a background task. A backgrounded command is killed when your turn
@@ -514,6 +611,7 @@ def command_rules(
         push_milestone_rule=prompts.PUSH_MILESTONE_RULE,
         pr_follow_rule=prompts.PR_FOLLOW_RULE,
         note_file_rule=NOTE_FILE_RULE,
+        evidence_rule=EVIDENCE_RULE,
         rewrite_table=rewrite_table(),
         push_rule=(
             RUNTIME_PUSHES_RULE

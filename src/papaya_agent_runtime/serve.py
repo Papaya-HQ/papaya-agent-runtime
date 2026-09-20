@@ -146,6 +146,7 @@ from papaya_agent_runtime import (
     supervision,
     sweep,
     takeover,
+    turn_end,
     workitems,
 )
 from papaya_agent_runtime.paths import papaya_sessions_path, ppy_home
@@ -236,6 +237,13 @@ GATE_STEERS = 2
 WORKER_STOPPED = "worker_stopped"
 #: The triggers the runner checks against the worker's recorded gate before a review.
 GATE_TRIGGERS = (WORKER_STOPPED, "worker_done")
+
+#: What the answer turn's reply to a plan note is prefixed with when it reaches the
+#: worker, so the worker can tell it from any other steer: this is the manager
+#: answering the plan it stopped on, not a new instruction or a gate to run.
+PLAN_REPLY_TO_WORKER = "Manager reply to your plan note:"
+#: The trigger kind for a worker that stopped after posting `--phase plan`.
+PLAN_STOP = "plan_stop"
 
 #: Event kinds on a worker task that mean the manager has acted on it, so the
 #: trigger before them is spent. Used both to tell whether a turn did its job and
@@ -690,6 +698,10 @@ class Ticket:
     liveness_cursor: int = 0
     #: Where the last turn's transcript is, for the evidence of a self-report.
     last_transcript: str = ""
+    #: The plan note a stopped worker posted, and its brief's plan-note gate
+    #: (`brief_lint.plan_note_gate`), read when that stop is answered.
+    plan_note: str = ""
+    plan_gate: str = ""
     #: The living status line the work item carries now, as last written in place.
     status_line: str = ""
 
@@ -922,6 +934,100 @@ def gate_steer_message(
         f"{prompts.TEN_MINUTE_RULE} If it says the gate is still running, run it again. "
         "Then file your done note with the gate's summary line, and push your branch."
     )
+
+
+def latest_progress_note(task_id: int) -> tuple[str | None, str]:
+    """A worker's newest `ppy progress` note as ``(phase, note)``. Never raises.
+
+    ``(None, "")`` when it has filed none, or the record cannot be read: a worker with
+    no note of its own is not a worker that stopped at its plan.
+    """
+    try:
+        conn = db.init_db()
+        try:
+            phase = turn_end.latest_phase(conn, task_id)
+            row = store.latest_progress(conn, task_id)
+            note = str(json.loads(row["payload"]).get("note") or "") if row is not None else ""
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - an unreadable note decides nothing
+        return None, ""
+    return phase, note
+
+
+def brief_plan_gate(repo: str, task_id: int) -> str:
+    """The plan-note wording of the brief this task was dispatched with, or ``""``.
+
+    `brief_lint.PLAN_GATE_BLOCKING` / `PLAN_GATE_NON_BLOCKING`, read from the brief
+    archived at dispatch (`preflight.archived_brief_path`). ``""`` when the repository
+    is unknown, the brief is gone, or it said nothing about blocking. Never raises: a
+    brief that cannot be read must not be what stops a worker being answered.
+    """
+    from papaya_agent_runtime import brief_lint
+    from papaya_agent_runtime.preflight import archived_brief_path
+
+    if not repo:
+        return ""
+    try:
+        text = archived_brief_path(repo, task_id).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return brief_lint.plan_note_gate(text)
+
+
+def plan_answer_message(task_id: int | str = "<task id>", plan_gate: str = "") -> str:
+    """What the answer turn is asked when a worker stopped after posting its plan note.
+
+    Not a steer: nothing here reaches the worker. The turn reads the plan against the
+    brief and writes the reply itself, which the runner then hands over verbatim under
+    :data:`PLAN_REPLY_PREFIX`.
+    """
+    from papaya_agent_runtime import brief_lint
+
+    if plan_gate == brief_lint.PLAN_GATE_BLOCKING:
+        gate_line = (
+            "Its brief made the plan gate BLOCKING, so it was right to stop and it is "
+            "waiting on your approval: approve it as posted, or give the corrections it "
+            "must make before it builds."
+        )
+    elif plan_gate == brief_lint.PLAN_GATE_NON_BLOCKING:
+        gate_line = (
+            "Its brief made the plan gate non-blocking, so it did not have to wait; it "
+            "stopped anyway. If the plan is sound, simply tell it to proceed."
+        )
+    else:
+        gate_line = (
+            "Its brief did not say whether the plan gate blocks, so treat the plan as "
+            "waiting on you: approve it, correct it, or tell it to proceed."
+        )
+    return (
+        f"Worker task {task_id} ended its turn after posting a `--phase plan` note. It has "
+        f"written no verification and may have written no code, so there is no gate to run "
+        f"and nothing at its head to review. {gate_line} Read its plan note (`ppy progress "
+        f"{task_id}`) against the brief it was dispatched with, then end your turn with one "
+        f"`{prompts.PLAN_REPLY_PREFIX}` line holding the reply the worker should receive, in "
+        "your own words. That line is handed to the worker verbatim and is what resumes it."
+    )
+
+
+def plan_reply(result: object) -> str:
+    """The manager's reply to a plan note, from an answer turn's transcript tail.
+
+    The contract is `prompts/answer.md`: the last `PLAN-REPLY:` line. Empty when the
+    turn did not say one, which is a missed turn — the runner never writes a reply of
+    its own, because a guess is exactly what a plan gate exists to prevent.
+    """
+    text = result.tail() if hasattr(result, "tail") else str(result or "")
+    for line in reversed(text.splitlines()):
+        stripped = line.strip().lstrip("*_`> ").strip().rstrip("*_`").strip()
+        if stripped.startswith(prompts.PLAN_REPLY_PREFIX):
+            return stripped.removeprefix(prompts.PLAN_REPLY_PREFIX).strip().lstrip(":").strip()
+    return ""
+
+
+def plan_resume_message(reply: str) -> str:
+    """The manager's reply as the worker receives it, told apart from any other steer."""
+    return f"{PLAN_REPLY_TO_WORKER} {reply}"
 
 
 def uncommitted_files(worker_task_id: int) -> list[str] | None:
@@ -1658,8 +1764,12 @@ class TicketRunner:
                     if isinstance(step, HandBack):
                         return step
                     continue
-                if read.trigger.kind in GATE_TRIGGERS and await self._back_to_gate(ticket):
-                    continue
+                if read.trigger.kind in GATE_TRIGGERS:
+                    acted = await self._back_to_gate(ticket)
+                    if isinstance(acted, HandBack):
+                        return acted
+                    if acted:
+                        continue
                 trigger = ticket.trigger or read.trigger
                 if not trigger.failure:
                     ticket.gate_steers = 0
@@ -1702,7 +1812,10 @@ class TicketRunner:
             ticket.trigger = Trigger(
                 PHASE_REVIEWING, nudge.event_id, nudge.detail, failure=True, kind=WORKER_STOPPED
             )
-            if await self._back_to_gate(ticket):
+            acted = await self._back_to_gate(ticket)
+            if isinstance(acted, HandBack):
+                return acted
+            if acted:
                 return None
             return PHASE_REVIEWING
         return None
@@ -1793,8 +1906,8 @@ class TicketRunner:
             f"Checked in on worker task {worker_id} ({nudge.reason}): {said}.",
         )
 
-    async def _back_to_gate(self, ticket: Ticket) -> bool:
-        """Decide on a stopped or done worker by its recorded gate. Returns whether it was steered.
+    async def _back_to_gate(self, ticket: Ticket) -> HandBack | bool:
+        """Decide on a stopped or done worker by its recorded gate. Returns whether it acted.
 
         A long gate is the worker's to run, not the review turn's: a review turn
         that starts a suite the worker never finished outlasts itself (PAP-213).
@@ -1806,6 +1919,13 @@ class TicketRunner:
         - **red**: steered with the gate's summary, whether it stopped or said done.
         - **none**: a `worker_stopped` is steered to run `ppy gate run`; a
           `worker_done` goes to review as before, where the re-check happens.
+
+        One stop is none of those. A worker whose newest progress note is `plan` has
+        written no verification and often no code: the gate message would be false about
+        it, and where a brief made the plan gate blocking, sending it back defeated the
+        gate a person asked for (PAP-278, task 187). That worker is answered about its
+        plan instead (`_answer_plan`), and the answer turn's own reply is what resumes
+        it. A `HandBack` comes back when that turn missed its job twice.
 
         After `GATE_STEERS` in a row, or a refused steer, the review turn gets it.
 
@@ -1825,13 +1945,30 @@ class TicketRunner:
             recorded = gate.Verdict(gate.NONE)
         ticket.recorded_gate = recorded.result.line() if recorded.result is not None else ""
         ticket.repeated_red = ""
+        stopped = trigger.kind == WORKER_STOPPED
+        phase, note = await asyncio.to_thread(latest_progress_note, worker_id)
+        plan_gate = ""
+        if stopped and recorded.result is None and phase == supervision.PLAN_PHASE:
+            plan_gate = await asyncio.to_thread(
+                brief_plan_gate, (worker.repo or ticket.held.repo or ""), worker_id
+            )
+            ticket.plan_note = note
         # The decision is the one a session reads too (`supervision.decide_gate`).
         decision = supervision.decide_gate(
             recorded,
-            stopped=trigger.kind == WORKER_STOPPED,
+            stopped=stopped,
             detail=trigger.detail,
             worker_id=worker_id,
+            phase=phase,
+            plan_gate=plan_gate,
         )
+        if decision.action == supervision.PLAN:
+            ticket.plan_gate = plan_gate
+            ticket.trigger = Trigger(
+                PHASE_BLOCKED, trigger.event_id, decision.message, kind=PLAN_STOP
+            )
+            handed = await self._answer_plan(ticket, worker_id)
+            return handed if handed is not None else True
         if decision.action == supervision.PERSON:
             await self._stop_regating(ticket, worker_id, recorded.repeated)
             return False
@@ -1981,6 +2118,50 @@ class TicketRunner:
                 await self._enter(ticket, PHASE_DISPATCHED, unblocked, say=unblocked)
                 return None
             outcome = self._missed(ticket, misses, "answering or steering the worker", result)
+            if isinstance(outcome, HandBack):
+                return outcome
+            tail = outcome
+
+    async def _answer_plan(self, ticket: Ticket, worker_id: int) -> HandBack | None:
+        """Answer a worker that stopped after posting its plan note, and resume it with that.
+
+        The plan gate is somebody's deliberate stop, so the runner decides nothing about
+        the plan itself: one answer turn reads it against the brief and ends with a
+        `PLAN-REPLY:` line, and that line reaches the worker verbatim under
+        :data:`PLAN_REPLY_TO_WORKER`. A turn that says no reply is a miss like any other
+        — waited out when a usage limit ended it, retried, and handing the ticket back
+        after `TURN_ATTEMPTS` — and the worker is never resumed with a guess.
+        """
+        misses: list[str] = []
+        tail = ""
+        while True:
+            await self._wait_on_person(ticket)
+            asked = f"Worker task {worker_id} stopped after posting its plan note."
+            await self._enter(ticket, PHASE_BLOCKED, asked, say=f"Blocked: {asked}")
+            await self._listen(ticket)
+            comments = await self._take_pending(ticket)
+            status = await asyncio.to_thread(ticket_status_line, ticket.held.task_id)
+            result = await self._turn(
+                ticket, prompts.ANSWER, self._plan_facts(ticket, tail, comments, status)
+            )
+            reply = plan_reply(result)
+            if reply:
+                try:
+                    await asyncio.to_thread(self._steer, worker_id, plan_resume_message(reply))
+                except Exception as exc:  # noqa: BLE001 - a refused resume is a miss, not a guess
+                    log.warning(
+                        "[serve] Could not give worker task %d the reply to its plan: %s",
+                        worker_id,
+                        exc,
+                    )
+                else:
+                    ticket.trigger = None
+                    resumed = (
+                        f"Worker task {worker_id} resumed with the manager's reply to its plan."
+                    )
+                    await self._enter(ticket, PHASE_DISPATCHED, resumed, say=resumed)
+                    return None
+            outcome = self._missed(ticket, misses, "answering the worker's plan note", result)
             if isinstance(outcome, HandBack):
                 return outcome
             tail = outcome
@@ -2725,6 +2906,43 @@ class TicketRunner:
                 and (trigger.phase == PHASE_BLOCKED or trigger.kind == "capability")
                 else ""
             ),
+            "new comments on the work item, by someone other than you": _comments_fact(
+                comments or []
+            ),
+            "previous attempt's transcript (tail)": tail,
+        }
+
+    def _plan_facts(
+        self,
+        ticket: Ticket,
+        tail: str,
+        comments: list[dict[str, Any]] | None = None,
+        status: str | None = None,
+    ) -> dict[str, object]:
+        """The answer turn's facts when a worker stopped at its plan note.
+
+        The plan note is given verbatim, and the brief's plan-note gate as its own fact,
+        so the turn knows whether approval was required or it may simply say proceed.
+        """
+        from papaya_agent_runtime import brief_lint
+
+        worker = ticket.worker
+        trigger = ticket.trigger
+        wording = {
+            brief_lint.PLAN_GATE_BLOCKING: "blocking: the worker was told to wait for your reply",
+            brief_lint.PLAN_GATE_NON_BLOCKING: (
+                "non-blocking: the worker was told to post it and proceed, and stopped anyway"
+            ),
+        }.get(ticket.plan_gate, "the brief did not say; treat the plan as waiting on you")
+        return {
+            **_ticket_facts(ticket.held),
+            **_worker_facts(worker),
+            "the worker stopped at its plan note": (
+                trigger.detail if trigger is not None and trigger.kind == PLAN_STOP else ""
+            ),
+            "its plan note, verbatim": ticket.plan_note,
+            "its brief's plan-note gate": wording,
+            "this ticket's status, from the record (`ppy status --team`)": status,
             "new comments on the work item, by someone other than you": _comments_fact(
                 comments or []
             ),
@@ -5131,6 +5349,8 @@ __all__ = [
     "SENT_BACK_LINE",
     "WAIT_FIRST_SECONDS",
     "WAIT_MAX_SECONDS",
+    "PLAN_REPLY_TO_WORKER",
+    "PLAN_STOP",
     "WORKER_STOPPED",
     "WORKING_PHASES",
     "Declined",
@@ -5141,14 +5361,19 @@ __all__ = [
     "TicketRunner",
     "Worker",
     "brief_has_goals",
+    "brief_plan_gate",
     "default_worker_capacity",
     "dm_channel_id",
     "find_worker",
     "gate_line",
     "gate_steer_message",
+    "latest_progress_note",
     "parse_args",
     "phase_for_stop",
     "phase_history",
+    "plan_answer_message",
+    "plan_reply",
+    "plan_resume_message",
     "protocol_writer",
     "publish_status",
     "read_run",

@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from papaya_agent_runtime import board, gate, hooks, owed, rounds, supervision, watch
+from papaya_agent_runtime import board, gate, hooks, owed, rounds, serve, supervision, watch
 from papaya_agent_runtime.cli import main
 from papaya_agent_runtime.manager.launch import MANAGER_TURN_ENV
 from papaya_agent_runtime.state import init_db, store
@@ -66,6 +66,73 @@ def test_no_gate_after_a_stop_is_sent_to_run_it_and_after_done_is_reviewed() -> 
     assert done.action == supervision.REVIEW
 
 
+def test_a_stop_at_the_plan_note_is_answered_and_never_sent_to_a_gate() -> None:
+    none = gate.Verdict(gate.NONE, "abc123")
+
+    decision = supervision.decide_gate(
+        none,
+        stopped=True,
+        detail="worker stopped before done: the latest progress note is 'plan'",
+        worker_id=187,
+        phase="plan",
+        plan_gate="blocking",
+    )
+
+    # PAP-278: this is where task 187 was told to run a gate on code that did not exist.
+    assert decision.action == supervision.PLAN
+    assert "ppy gate run" not in decision.message
+    assert "verification gate finished" not in decision.message
+    assert "BLOCKING" in decision.message and "PLAN-REPLY:" in decision.message
+
+
+def test_a_plan_stop_is_answered_whether_or_not_the_brief_made_the_gate_blocking() -> None:
+    none = gate.Verdict(gate.NONE, "abc123")
+
+    for wording, expected in (
+        ("blocking", "waiting on your approval"),
+        ("non-blocking", "simply tell it to proceed"),
+        ("", "did not say whether the plan gate blocks"),
+    ):
+        decision = supervision.decide_gate(
+            none, stopped=True, detail="", worker_id=7, phase="plan", plan_gate=wording
+        )
+        # A stopped worker is waiting either way; the wording only changes what is asked.
+        assert decision.action == supervision.PLAN
+        assert expected in decision.message
+
+
+def test_a_stop_at_any_other_phase_still_gets_todays_gate_message() -> None:
+    none = gate.Verdict(gate.NONE, "abc123")
+
+    for phase in ("implement", "test", "review", None):
+        decision = supervision.decide_gate(
+            none, stopped=True, detail="turn ended", worker_id=7, phase=phase
+        )
+        assert decision.action == supervision.STEER
+        assert "ppy gate run --task 7" in decision.message
+
+
+def test_a_red_gate_at_a_plan_note_is_still_the_red_gate_message() -> None:
+    red = gate.Verdict(gate.RED, "abc123", _result(green=False))
+
+    decision = supervision.decide_gate(
+        red, stopped=True, detail="", worker_id=7, phase="plan", plan_gate="blocking"
+    )
+
+    # There IS something to run again: a recorded red is about work, not about a plan.
+    assert decision.action == supervision.STEER and "/tmp/gate.txt" in decision.message
+
+
+def test_a_worker_still_running_at_its_plan_is_left_alone() -> None:
+    none = gate.Verdict(gate.NONE, "abc123")
+
+    decision = supervision.decide_gate(
+        none, stopped=False, detail="", worker_id=7, phase="plan", plan_gate="blocking"
+    )
+
+    assert decision.action == supervision.REVIEW  # not stopped: nothing to answer
+
+
 def test_the_same_red_twice_is_a_persons_decision() -> None:
     red = _result(green=False)
     verdict = gate.Verdict(gate.RED, "abc123", red, repeated=(red, red))
@@ -80,6 +147,78 @@ def test_uncommitted_work_is_sent_back_before_any_gate_decision() -> None:
     decision = supervision.decide_commit(["src/a.py", "src/b.py"], "ppy/task-7")
     assert decision is not None and decision.action == supervision.STEER
     assert "git push origin HEAD:ppy/task-7" in decision.message
+
+
+BLOCKING_BRIEF = """\
+# Make the button blue
+
+## Goals
+- The button is blue.
+
+## Plan-note gate
+
+blocking: stop after posting and wait for the manager's reply.
+"""
+
+
+def _plan_stopped(conn, *, brief: str | None = BLOCKING_BRIEF, note: str = "H1..H4 read") -> int:
+    """A worker task that ended its turn right after posting `--phase plan`."""
+    from papaya_agent_runtime import preflight
+
+    run_id = store.create_run(conn, "ship it")
+    repo_id = store.add_repo(
+        conn,
+        name="app",
+        origin="git@example.com:app.git",
+        local_path="/tmp/app",
+        default_branch="main",
+        base_sha=None,
+    )
+    task_id = store.add_task(conn, run_id=run_id, title="build", repo_id=repo_id)
+    store.set_task_status(conn, task_id, "worker_stopped")
+    store.append_event(
+        conn,
+        kind="worker_progress",
+        payload={"task_id": task_id, "phase": "plan", "note": note},
+        run_id=run_id,
+        task_id=task_id,
+    )
+    if brief is not None:
+        preflight.archive_brief("app", task_id, brief)
+    return task_id
+
+
+def test_gate_followup_reads_the_phase_and_the_brief_off_the_record(ppy_home) -> None:
+    conn = init_db()
+    task_id = _plan_stopped(conn)
+
+    decision = supervision.gate_followup(task_id, stopped=True, detail="worker stopped")
+
+    assert decision.action == supervision.PLAN
+    assert "BLOCKING" in decision.message  # the archived brief's own wording reached it
+    assert "ppy gate run" not in decision.message
+
+
+def test_a_plan_stop_is_answered_even_when_its_worktree_is_dirty(ppy_home, monkeypatch) -> None:
+    conn = init_db()
+    task_id = _plan_stopped(conn)
+    monkeypatch.setattr(serve, "uncommitted_files", lambda _t: ["src/a.py"])
+
+    decision = supervision.gate_followup(task_id, stopped=True, detail="")
+
+    # A worker that has only planned may have written nothing; "commit it" is not
+    # an answer to a plan, and the commit check must not get in front of this.
+    assert decision.action == supervision.PLAN
+
+
+def test_a_brief_with_no_plan_gate_still_gets_the_plan_answered(ppy_home) -> None:
+    conn = init_db()
+    task_id = _plan_stopped(conn, brief=None)
+
+    decision = supervision.gate_followup(task_id, stopped=True, detail="")
+
+    assert decision.action == supervision.PLAN
+    assert "did not say whether the plan gate blocks" in decision.message
 
 
 def test_a_session_sees_the_follow_up_serve_would_send(ppy_home, monkeypatch) -> None:
