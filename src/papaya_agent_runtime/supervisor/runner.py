@@ -341,15 +341,13 @@ class RunnerGuardian:
         # thing only its own lease branch can be given, so the harness pushes it —
         # after the auto-commit, so the safety commit goes up with the rest — and
         # judges the turn again on what is true afterwards.
-        verdict, _pushed = turn_end.rescue_unpushed(conn, spec.task_id, verdict)
-
-        # Where the repository gates pushes, a worker that finished never pushed at
-        # all — its rules told it not to. The runtime pushes here, after the
-        # auto-commit and before anything reviews this head, so the review reads a
-        # pushed branch and delivery never depends on a manager turn happening to do
-        # it by hand (issue #83, fourteen times). Only with the runtime's own gate
-        # green at this exact head; never with `--no-verify`, never forced.
-        turn_end.deliver_finished_branch(conn, spec.task_id)
+        # ONE push decision for this ending, after the auto-commit so the safety
+        # commit goes up with the rest, and before anything reviews this head. Where
+        # the repository gates pushes the worker never pushed at all — its rules told
+        # it not to — and the runtime pushes only with its own gate green at this
+        # exact SHA (issue #83). Anywhere else this is the old rescue, unchanged.
+        # Never two pushes, and never a push the gate has not seen.
+        verdict, _pushed = turn_end.deliver_after_turn(conn, spec.task_id, verdict)
 
         task_status = _TERMINAL_STATUS.get(result.status, "failed")
         if verdict.stopped:

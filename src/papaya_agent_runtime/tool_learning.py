@@ -412,8 +412,14 @@ def _hook_said(refusal: dict | None) -> str:
             if text.lower().startswith(("bash hook error:", "hook error:")):
                 text = text.split(":", 1)[1].lstrip()
             break
+    # The LAST lines. A failing `make verify` opens with "make verify failed" and
+    # then prints forty lines of log; what actually broke is at the end of it.
     lines = [line for line in text.splitlines() if line.strip()]
-    return "\n".join(lines[:HOOK_SAID_LINES])
+    kept = lines[-HOOK_SAID_LINES:]
+    # Keep the opening line too when it was cut: it names the hook's own verdict.
+    if len(lines) > HOOK_SAID_LINES and lines[0] not in kept:
+        kept = [lines[0], "…", *kept[2:]]
+    return "\n".join(kept)
 
 
 def _command(denial: dict) -> str | None:
@@ -551,7 +557,7 @@ def learn(
         if not new:
             return []
         if task_id is not None:
-            _steer_about(task_id, run_id, new, branch)
+            _steer_about(task_id, run_id, new, branch, worktree)
             deficiencies.record_denials(
                 [_as_denial(p) for p in new],
                 task_id=task_id,
@@ -656,30 +662,40 @@ def steer_worker(task_id: int, message: str) -> None:
     threading.Thread(target=deliver, name=f"ppy-denial-steer-{task_id}", daemon=True).start()
 
 
-def shape_steer_message(commands: list[str], branch: str | None) -> str:
-    """The rewrite for what was actually refused, then the rules it broke.
+def shape_steer_message(
+    commands: list[str], branch: str | None, worktree: str | None = None
+) -> str:
+    """The exact command to run instead of each refused one, then the rules it broke.
 
     The rules alone were what this steer used to say, and workers kept writing the
     same shapes back (issue #121: 30 occurrences, 16 of them `cd <worktree> && …`).
-    A worker that has just been refused needs the command to run instead, so the
-    replacement for each shape it used comes first and the rules come after it.
+    A worker that has just been refused needs ONE command it can run, with its own
+    directory in it — not three rows about `cd` in general — so `rewrite_for` builds
+    it from the refused text and the worktree, and the rules come after.
     """
-    from papaya_agent_runtime.providers.command_rules import (
-        command_rules,
-        rewrite_table,
-        rewrites_for,
-    )
+    from papaya_agent_runtime.providers.command_rules import command_rules, rewrites_for
 
-    shown = "\n".join(f"- `{c}`" for c in commands)
-    return (
+    rewrites = rewrites_for(commands, worktree)
+    unmatched = [c for c in commands if all(r.command != c for r in rewrites)]
+    said = [
         "These shell commands were refused for their shape, not for the program they ran, "
-        "and the runtime will not add a tool for them:\n\n"
-        f"{shown}\n\n"
-        "Run these instead — your shell already starts in your worktree, so there is "
-        "nothing to `cd` into to reach your own files:\n\n"
-        f"{rewrite_table(rewrites_for(commands))}\n\n"
+        "and the runtime will not add a tool for them.",
+    ]
+    if rewrites:
+        said.append(
+            "Run this instead — your shell already starts in your worktree, so there is "
+            "nothing to `cd` into to reach your own files:\n\n"
+            + "\n".join(r.line() for r in rewrites)
+        )
+    if unmatched:
+        said.append(
+            "No single replacement fits these; split them into one plain command per "
+            "call:\n\n" + "\n".join(f"- `{c}`" for c in unmatched)
+        )
+    said.append(
         "Every command you run is held to these rules:\n\n" + command_rules("claude", branch)
     )
+    return "\n\n".join(said)
 
 
 def policy_rule(program: str) -> str:
@@ -752,7 +768,13 @@ def policy_steer_message(program: str, command: str) -> str:
     return f"`{command}` was refused. {policy_rule(program)}\n\n{FLAGGED_RULE}"
 
 
-def _steer_about(task_id: int, run_id: int | None, new: list[dict], branch: str | None) -> None:
+def _steer_about(
+    task_id: int,
+    run_id: int | None,
+    new: list[dict],
+    branch: str | None,
+    worktree: str | None = None,
+) -> None:
     """At most one rules steer per worker, and one per refused program."""
     from papaya_agent_runtime.state import init_db, store
 
@@ -785,7 +807,7 @@ def _steer_about(task_id: int, run_id: int | None, new: list[dict], branch: str 
                 run_id=run_id,
                 task_id=task_id,
             )
-            steers.append(shape_steer_message(shapes, branch))
+            steers.append(shape_steer_message(shapes, branch, worktree))
         for payload in new:
             # One steer per hook, not per refused command: a worker that keeps
             # meeting the same hook has already been told the one thing to do.
@@ -861,11 +883,13 @@ def shape_counts(days: int | None = None) -> dict[str, dict[str, int]]:
     def shape(payload: dict) -> str | None:
         if kind_of(payload) != COMMAND_SHAPE:
             return None
-        from papaya_agent_runtime.providers.command_rules import REWRITES, rewrites_for
+        from papaya_agent_runtime.providers.command_rules import rewrite_for
 
-        command = str(payload.get("command") or "")
-        matched = rewrites_for([command])
-        return matched[0][0] if matched is not REWRITES else "other"
+        # The row that MATCHED, so the tally and the steer name the same shape. It
+        # used to take the first of several generic rows, which counted a
+        # `cd <sub> && git …` as a plain `cd` and hid which rewrite was not landing.
+        found = rewrite_for(str(payload.get("command") or ""), payload.get("worktree"))
+        return found.shape if found is not None else "other"
 
     return _tally(days, shape)
 

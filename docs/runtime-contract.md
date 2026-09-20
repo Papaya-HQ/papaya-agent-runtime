@@ -1163,18 +1163,41 @@ told **not to push at all** — its command rules say so instead of naming a pus
 so the rules and the environment block no longer contradict each other.
 
 The runtime pushes instead, in the supervisor, when all of: the repository gates pushes,
-the worker's newest note says `done`, and the runtime's own gate is green at the
-worktree's **exact** head. It runs after the auto-commit and before anything reviews that
-head, so a review reads a pushed branch. It is a plain subprocess, not a Claude tool
-call, so the repository's Claude hook does not apply to it — and the suite that hook
-exists to run has already run, as the runtime's own gate at that same head. The
-repository's git hooks still run and are never bypassed: `--no-verify` and force pushes
-are forbidden here and nowhere used.
+the worker's newest note reached the task's own terminal phase (`done`, or `review` for a
+task that ends at review), and the runtime's own gate is green at the worktree's **exact**
+SHA. It runs after the auto-commit and before anything reviews that head, so a review
+reads a pushed branch. It is a plain subprocess, not a Claude tool call, so the
+repository's Claude hook does not apply to it — and the suite that hook exists to run has
+already run, as the runtime's own gate at that same head. The repository's git hooks still
+run and are never bypassed: `--no-verify` and force pushes are forbidden here and nowhere
+used.
 
-A branch the remote already holds at that head is not pushed again. A refused push is a
-blocker for a person (`push_refused`, carrying the remote's or the hook's own words) and
-is never retried — saying it again cannot change the answer. `ppy task push <id>` is the
-same push by hand once the reason is fixed.
+**There is exactly one push decision per ending** (`turn_end.deliver_after_turn`). A gated
+repository goes through the gate-checked path; every other repository keeps the older
+`rescue_unpushed`, which is the safety net for a worker that finished and did not push.
+Two paths running in sequence meant an ungated head could be pushed before the gate was
+ever consulted, and a refused push was followed at once by a second one — two full
+pre-push suites for one ending.
+
+What that push is given, and what it may start:
+
+- **the task's own environment**, the same one `ppy gate run` builds (`gate.gate_env`):
+  the private compose project, database port and URLs. A pre-push hook runs the
+  repository's suite, and a suite run against the shared stack passes or fails for
+  another task's reasons;
+- **its own process group**, torn down whole on timeout. Killing `git` alone would orphan
+  everything the hook started — the compiler, the test runner, Docker, the database —
+  while the runtime recorded that the push had been stopped;
+- **a bounded wait** from the repository's recorded full-suite budget, floored and capped;
+  an ungated push gets a plain network timeout.
+
+What it verifies before and after: the remote is asked what it holds (`git ls-remote`),
+never the local tracking ref, which a worker can move with `git update-ref`; and the
+**verified SHA** is what is pushed (`<sha>:refs/heads/<branch>`), not a `HEAD` that could
+move underneath the check. A branch the remote already holds at that head is not pushed
+again. A refused push is a blocker for a person (`push_refused`, carrying the remote's or
+the hook's own words) and is never retried — saying it again cannot change the answer.
+`ppy task push <id>` is the same push by hand once the reason is fixed.
 
 ### Long notes go in a file
 
@@ -1184,6 +1207,14 @@ refused as a *command* whatever the program is, since the harness will not stati
 analyse the argument (issue #115). The inline `--note` and `--why` still work for short
 plain text. `$(cat <file>)` is not the workaround: it is command substitution, and it is
 refused too.
+
+The path is **confined to the named task's own worktree or its evidence directory**, and
+checked on the fully resolved path — so `~`, `..` and a symlink inside the worktree
+pointing out of it are all refused, as is a task with no worktree. The roots come from the
+task id the command names, never from the process's working directory. A note reaches the
+event ledger and from there pull request bodies and comments; a flag that read any path
+would be a way to publish `~/.ssh/id_rsa` or the state database with one allowed `ppy`
+call, which a worker's own Read tool would refuse.
 
 ## Mode parity — you work the same in a session as under `ppy serve`
 

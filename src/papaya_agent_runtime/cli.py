@@ -2131,15 +2131,79 @@ class _TextFileError(Exception):
     """A `--note-file`/`--why-file` that could not become a note."""
 
 
-def _text_from_file(path: str, flag: str) -> str:
+def _task_readable_roots(task_id: int) -> list[Path]:
+    """The directories a task may read a note out of: its worktree and its evidence dir.
+
+    Resolved from the TASK, never from the process's working directory — the caller
+    naming the task is what decides which worktree is meant, and a worker's shell can
+    be anywhere. A task with no worktree has no roots, and so may not pass a file at
+    all.
+    """
+    from papaya_agent_runtime import environment
+    from papaya_agent_runtime.state import init_db, store
+
+    conn = init_db()
+    try:
+        task = store.get_task(conn, task_id)
+        if task is None or not task["worktree_path"]:
+            return []
+        repo_row = (
+            conn.execute("SELECT * FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+            if task["repo_id"]
+            else None
+        )
+        worktree = str(task["worktree_path"])
+        evidence = environment.evidence_path_for(repo_row, worktree)
+    finally:
+        conn.close()
+    roots = [Path(worktree)]
+    if evidence:
+        roots.append(Path(evidence))
+    found: list[Path] = []
+    for root in roots:
+        try:
+            found.append(root.resolve(strict=True))
+        except OSError:
+            continue
+    return found
+
+
+def _under(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _text_from_file(path: str, flag: str, task_id: int) -> str:
     """The text in ``path``, for a flag that exists because the shell refuses text.
 
     A note with a newline before a `#`, a backtick, `$(`, or a brace holding a quote
     is refused as a *command* whatever the program is — the harness will not analyse
     the argument (issue #115). Passing a path sidesteps that entirely, so nothing
     about the note has to be reshaped to be recorded.
+
+    The path is **confined to the task's own worktree or its evidence directory**, and
+    the check is on the fully resolved path, so `~`, `..` and a symlink inside the
+    worktree pointing out of it are all refused. A note reaches the event ledger and
+    from there a pull request body, so a flag that read any path would be a way to
+    publish `~/.ssh/id_rsa` or the state database with one allowed `ppy` call.
     """
-    found = Path(path).expanduser()
+    roots = _task_readable_roots(task_id)
+    if not roots:
+        raise _TextFileError(
+            f"{flag} {path}: task {task_id} has no worktree to read a note file from"
+        )
+    try:
+        # strict: the file must exist, and every symlink on the way is followed
+        # before the check, so an inside-the-worktree link to /etc/passwd is refused
+        # on what it points at, not on what it is called.
+        found = Path(path).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise _TextFileError(f"{flag} {path}: {exc.strerror or exc}") from exc
+    if not any(_under(found, root) for root in roots):
+        where = " or ".join(str(root) for root in roots)
+        raise _TextFileError(
+            f"{flag} {path}: a note file must be inside this task's worktree or its "
+            f"evidence directory ({where}); {found} is not"
+        )
     try:
         raw = found.read_bytes()
     except OSError as exc:
@@ -2165,7 +2229,7 @@ def _note_text(args: argparse.Namespace, inline: str, file_attr: str, flag: str)
     """
     path = getattr(args, file_attr, None)
     if path:
-        return _text_from_file(str(path), flag)
+        return _text_from_file(str(path), flag, int(args.task_id))
     return inline or ""
 
 

@@ -76,6 +76,13 @@ _HARNESS_WORDS = (
     "was blocked. For security, Claude Code",
     "requires approval",
     "haven't granted it yet",
+    # A configured deny rule, on a release that reports it only in the tool result.
+    # Without this a profile refusal on an older harness reads as a hook refusal,
+    # which is the same class of lie this change exists to stop, pointing the other
+    # way.
+    "has been denied",
+    "permission to use",
+    "Claude requested permissions",
 )
 
 
@@ -155,6 +162,11 @@ HOOK_SETTINGS_FILES = (
     ".claude/settings.json",
     ".claude/settings.local.json",
 )
+#: The most of a settings file that is read. Bigger than any real one, small enough
+#: that a dispatch cannot be slowed by a file somebody else's repository ships.
+MAX_SETTINGS_BYTES = 1024 * 1024
+#: The longest matcher treated as a regex. A pattern this size is not a tool name.
+MAX_MATCHER_CHARS = 200
 
 
 def registered_hooks(worktree: str | None, tool: str) -> list[dict[str, str]]:
@@ -170,12 +182,17 @@ def registered_hooks(worktree: str | None, tool: str) -> list[dict[str, str]]:
         return found
     for name in HOOK_SETTINGS_FILES:
         try:
-            raw = (Path(worktree) / name).read_text()
-        except OSError:
-            continue
-        try:
-            settings = json.loads(raw)
-        except ValueError:
+            with (Path(worktree) / name).open("rb") as handle:
+                # Bounded: this is called at every dispatch and every resume, and a
+                # settings file is a few kilobytes. A huge or binary one is not read.
+                blob = handle.read(MAX_SETTINGS_BYTES + 1)
+            if len(blob) > MAX_SETTINGS_BYTES:
+                continue
+            settings = json.loads(blob.decode("utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            # Every failure here is "this repository tells us nothing", never a
+            # crash: the callers are dispatch and resume, which must not die on a
+            # malformed file in somebody else's repository.
             continue
         hooks = settings.get("hooks") if isinstance(settings, dict) else None
         entries = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
@@ -192,12 +209,27 @@ def registered_hooks(worktree: str | None, tool: str) -> list[dict[str, str]]:
 
 
 def _matches(matcher: object, tool: str) -> bool:
-    """Claude Code's matcher: a tool name, a `|` list, `*`, or absent for every tool."""
+    """Claude Code's matcher: a tool name, a `|` list, `*`, a regex, or absent for all.
+
+    Claude Code treats a matcher as a regular expression, so `Bash.*` and
+    `Notebook.*` are both real and in use. A plain name and a `|` list are handled
+    first because they are the common case and cannot misfire; anything else is
+    full-matched as a regex, with the pattern length capped and `re.error` caught, so
+    a repository cannot make dispatch hang or crash on a matcher it wrote.
+    """
     if matcher is None or matcher == "" or matcher == "*":
         return True
     if not isinstance(matcher, str):
         return False
-    return any(part.strip() == tool for part in matcher.split("|"))
+    parts = [part.strip() for part in matcher.split("|")]
+    if any(part == tool for part in parts):
+        return True
+    if len(matcher) > MAX_MATCHER_CHARS:
+        return False
+    try:
+        return re.fullmatch(matcher, tool) is not None
+    except re.error:
+        return False
 
 
 def _script(command: str) -> str:

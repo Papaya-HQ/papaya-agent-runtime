@@ -829,6 +829,13 @@ def push_is_gated(repo_row, worktree: str | None = None) -> bool:
     branch itself after its own gate. Telling the worker to push anyway is telling it
     to be refused — the command rules and the environment block used to say opposite
     things, and the worker followed the rules.
+
+    **This is the only answer to that question.** Dispatch (what the worker is told),
+    `turn_end.deliver_after_turn` (who pushes) and `turn_end.push_wait_seconds` (how
+    long to wait) all come here. They used to disagree: dispatch asked about the
+    registered hook and the push asked about the column, so a repository matching one
+    and not the other told its worker not to push and then had nothing gate-aware to
+    push for it.
     """
     if repo_row is not None and for_repo(repo_row).push_hook_runs_full_suite:
         return True

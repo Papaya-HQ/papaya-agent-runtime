@@ -38,8 +38,8 @@ def repo(ppy_home) -> int:
     return task_id
 
 
-def _denial(task_id: int, command: str, *, days_ago: float = 0.0) -> None:
-    verdict = tool_learning.classify("Bash", command, WT)
+def _denial(task_id: int, command: str, *, days_ago: float = 0.0, worktree: str = WT) -> None:
+    verdict = tool_learning.classify("Bash", command, worktree)
     conn = init_db()
     store.append_event(
         conn,
@@ -52,7 +52,7 @@ def _denial(task_id: int, command: str, *, days_ago: float = 0.0) -> None:
             "pattern": verdict.pattern,
             "in_family": verdict.in_family,
             "reason": verdict.reason,
-            "worktree": WT,
+            "worktree": worktree,
         },
         task_id=task_id,
     )
@@ -80,20 +80,26 @@ def test_denials_are_counted_by_kind_within_a_window(repo) -> None:
     assert tool_learning.counts()["api"][tool_learning.PROFILE_GAP] == 2
 
 
-def test_command_shape_denials_are_counted_by_the_shape_they_used(repo) -> None:
-    _denial(repo, f"cd {WT} && git status --short")
-    _denial(repo, f"cd {WT} && git add -A")
-    _denial(repo, "cat notes.md | head -200")
-    _denial(repo, "terraform plan")  # not a shape denial at all
+def test_command_shape_denials_are_counted_by_the_shape_they_used(tmp_path, repo) -> None:
+    """Bucketed by the rewrite that MATCHED, which is the one the worker was sent.
+
+    It used to take the first of several generic rows, so a `cd <subdir> && git …`
+    counted as a plain `cd` and hid which rewrite was not landing.
+    """
+    (tmp_path / "backend").mkdir()
+    wt = str(tmp_path)
+    _denial(repo, f"cd {wt} && git status --short", worktree=wt)
+    _denial(repo, f"cd {wt} && ruff check .", worktree=wt)
+    _denial(repo, f"cd {wt}/backend && git add -A", worktree=wt)
+    _denial(repo, "cat notes.md | head -200", worktree=wt)
+    _denial(repo, "terraform plan", worktree=wt)  # not a shape denial at all
 
     shapes = tool_learning.shape_counts(7)["api"]
 
-    # Bucketed by the FIRST row that matches, which for anything starting `cd` is the
-    # general one. That is the number worth watching: 16 of 28 shape denials on record
-    # are a `cd`, and the rewrite for all of them is the same sentence.
     assert shapes["cd <your worktree> && <command>"] == 2
+    assert shapes["cd <worktree>/<subdir> && git <args>"] == 1
     assert shapes["<command> | head -<n>, | tail -<n>, | less"] == 1
-    assert sum(shapes.values()) == 3
+    assert sum(shapes.values()) == 4
 
 
 def test_an_old_shape_denial_is_outside_the_window(repo) -> None:
@@ -152,3 +158,27 @@ def test_counting_never_raises_on_an_unreadable_ledger(monkeypatch, repo) -> Non
     monkeypatch.setattr("papaya_agent_runtime.state.init_db", lambda *a, **kw: 1 / 0, raising=False)
     assert isinstance(tool_learning.counts(7), dict)
     assert isinstance(tool_learning.shape_counts(7), dict)
+
+
+def test_the_denial_tally_is_served_by_an_index_not_a_full_scan(repo) -> None:
+    """`ppy workers` runs this on every paint, and under `--follow` on every tick.
+
+    Two full scans of a table that only grows is a cost that shows up exactly when
+    somebody is watching workers most closely.
+    """
+    _denial(repo, "terraform plan")
+
+    conn = init_db()
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT e.payload, r.name FROM events e "
+            "LEFT JOIN tasks t ON t.id = e.task_id LEFT JOIN repos r ON r.id = t.repo_id "
+            "WHERE e.kind = ? AND e.created_at >= ?",
+            (tool_learning.PERMISSION_DENIED, "2026-01-01"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    said = " ".join(str(row[-1]) for row in plan)
+    assert "idx_events_kind_created" in said, said
+    assert "SCAN e" not in said, said
