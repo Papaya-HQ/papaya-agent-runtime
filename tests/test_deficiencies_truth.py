@@ -12,6 +12,7 @@ set rather than a wall-clock accident.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -722,3 +723,237 @@ def test_nothing_private_is_in_a_closing_comment(ppy_home, privacy_leaks) -> Non
 
     for args, stdin in gh.calls:
         assert not leaked(" ".join(args) + (stdin or ""))
+
+
+# ── a count of two is two in one place ──────────────────────────────────────
+#
+# Issue #84 said "A check-in steered twice for the same reason: midpoint" and its
+# evidence was five different tickets, each steered once at its midpoint; the midpoint
+# check-in fires at most once per worker, so no worker had been steered twice at all.
+# The threshold is documented as occurrences "within one scope", and it was counted
+# that way — but the scope went through `redact` before it was stored, and a Papaya
+# work item id is a UUID, which redaction reads as an opaque key. Every ticket reached
+# the ledger as the one scope `ticket:[redacted]`, so two tickets were one.
+
+#: Every kind that claims something happened more than once in one place. The tests
+#: below iterate this, so a kind given a threshold later is held to the same rule
+#: without anybody editing them.
+THRESHOLD_KINDS = sorted(k for k, spec in deficiencies.KINDS.items() if spec.threshold > 1)
+
+
+def _occurrence(kind: str, scope: str, task_id: int, wall: Wall) -> None:
+    """One occurrence of ``kind`` in ``scope``, distinguishable from every other."""
+    deficiencies.record(
+        kind,
+        "a plain detail the normaliser leaves alone",
+        scope=scope,
+        evidence={"task_id": task_id, "ticket": f"PAP-{task_id}"},
+        clock=wall,
+    )
+
+
+@pytest.mark.parametrize("kind", THRESHOLD_KINDS)
+def test_occurrences_in_different_scopes_never_reach_a_threshold(kind, ppy_home) -> None:
+    wall = Wall()
+    gh = FakeGh()
+    spec = deficiencies.KINDS[kind]
+
+    # One more occurrence than the threshold, each of them in a scope of its own.
+    for n in range(spec.threshold + 1):
+        _occurrence(kind, f"repo:r{n}", n, wall)
+
+    assert _reporter(gh, wall).flush() == []
+    assert gh.created() == []
+    assert {d.status for d in deficiencies.ledger(include_all=True)} == {deficiencies.WATCHING}
+
+
+@pytest.mark.parametrize("kind", THRESHOLD_KINDS)
+def test_a_threshold_reached_in_one_scope_opens_one_issue_about_that_scope(kind, ppy_home) -> None:
+    wall = Wall()
+    gh = FakeGh()
+    spec = deficiencies.KINDS[kind]
+    if spec.superseded_by:  # pragma: no cover - no retired kind has a threshold today
+        pytest.skip(f"{kind} is retired, and a retired kind opens nothing")
+
+    _occurrence(kind, "repo:before", 99, wall)
+    for n in range(1, spec.threshold + 1):
+        _occurrence(kind, "repo:here", n, wall)
+    _occurrence(kind, "repo:after", 98, wall)
+
+    assert len(_reporter(gh, wall).flush()) == 1
+    (issue,) = gh.created()
+    assert issue["title"].startswith(spec.title)
+    # The evidence of an issue about one scope is that scope's occurrences and no
+    # others: another ticket's is not evidence that this one repeated.
+    for n in range(1, spec.threshold + 1):
+        assert f"task `{n}`" in issue["body"]
+    assert "task `99`" not in issue["body"] and "task `98`" not in issue["body"]
+    assert f"seen {spec.threshold} time(s)" in issue["body"]
+
+
+def test_a_ticket_scope_redaction_blanks_still_names_one_ticket(ppy_home) -> None:
+    """The defect behind #84: two work item ids, two scopes, and neither one stored."""
+    wall = Wall()
+    gh = FakeGh()
+    one = "e80cc802-8294-4f7a-837c-69150a385171"
+    two = "d0b537fc-99a3-477f-8433-05a069144ee1"
+
+    for item in (one, two):
+        _occurrence(deficiencies.REPEATED_STEER, f"ticket:{item}", 1, wall)
+
+    (row,) = deficiencies.ledger(include_all=True)
+    assert row.status == deficiencies.WATCHING
+    assert len({e["scope"] for e in row.evidence}) == 2
+    assert one not in str(row.evidence) and two not in str(row.evidence)
+    assert _reporter(gh, wall).flush() == []
+
+    # The same ticket a second time is what the title claims, and it opens.
+    _occurrence(deficiencies.REPEATED_STEER, f"ticket:{one}", 2, wall)
+    assert _row(row.fingerprint).status == deficiencies.PENDING
+    assert len(_reporter(gh, wall).flush()) == 1
+
+
+def _miscounted(wall: Wall, gh: FakeGh, tickets: int = 5) -> deficiencies.Deficiency:
+    """Issue #84 as the live ledger holds it: N tickets, one blanked scope, one issue."""
+    url = f"https://github.com/{RUNTIME_REPO}/issues/84"
+    at = wall.now.isoformat(timespec="seconds")
+    evidence = [
+        {
+            "at": at,
+            "trigger": "midpoint",
+            "ticket": deficiencies.REDACTED,
+            "task_id": 17 + n,
+            "scope": f"ticket:{deficiencies.REDACTED}",
+            "n": n + 1,
+        }
+        for n in range(tickets)
+    ]
+    key = deficiencies.fingerprint(deficiencies.REPEATED_STEER, "midpoint")
+    conn = init_db()
+    conn.execute(
+        "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
+        "count, evidence, issue_url, status, opened_at, reported_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            key,
+            deficiencies.REPEATED_STEER,
+            "A check-in steered twice for the same reason: midpoint",
+            "midpoint",
+            at,
+            at,
+            tickets,
+            json.dumps(evidence),
+            url,
+            deficiencies.REPORTED,
+            at,
+            tickets,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    gh.issues[url] = {"title": "steered twice", "body": "", "labels": [], "state": "OPEN"}
+    gh.issues[url]["comments"] = []
+    return _row(key)
+
+
+def test_an_issue_opened_on_a_miscount_corrects_itself_and_closes_once(ppy_home) -> None:
+    wall = Wall()
+    gh = FakeGh()
+    row = _miscounted(wall, gh)
+    url = str(row.issue_url)
+    reporter = _reporter(gh, wall)
+
+    done = reporter.flush()
+
+    assert done == [f"closed {url}: it never happened in one place"]
+    assert gh.issues[url]["state"] == "CLOSED"
+    (comment,) = gh.issues[url]["comments"]
+    assert comment.startswith("closing: this never happened 2 times in one place.")
+    assert "5 occurrence(s) across 5 scope(s)" in comment
+
+    # The row keeps its fingerprint — the rule changed how occurrences are counted, not
+    # what a deficiency is called, so no alias is needed and none is written.
+    corrected = _row(row.fingerprint)
+    assert corrected.status == deficiencies.WATCHING
+    assert corrected.issue_url is None
+    assert corrected.count == 5  # the ledger is re-read, never re-written
+
+    # Said once: neither this flush nor a later one says it again or opens anything.
+    assert reporter.flush() == []
+    wall.advance(days=1)
+    assert reporter.flush() == []
+    assert len(gh.issues[url]["comments"]) == 1
+    assert _opened(gh) == []
+
+
+def test_a_corrected_row_still_reports_when_it_does_happen_twice_in_one_place(ppy_home) -> None:
+    wall = Wall()
+    gh = FakeGh()
+    row = _miscounted(wall, gh)
+    reporter = _reporter(gh, wall)
+    assert reporter.flush()  # the miscounted issue closes
+
+    for _ in range(2):
+        deficiencies.record(
+            deficiencies.REPEATED_STEER,
+            "midpoint",
+            scope="ticket:PAP-231",
+            evidence={"ticket": "PAP-231", "task_id": 300},
+            clock=wall,
+        )
+
+    assert len(reporter.flush()) == 1
+    assert _row(row.fingerprint).status == deficiencies.REPORTED
+    body = gh.created()[-1]["body"]
+    assert "ticket `PAP-231`" in body
+    assert "seen 2 time(s)" in body
+    assert deficiencies.REDACTED not in body  # not one of the five blanked occurrences
+
+
+def test_a_pending_row_left_by_an_older_build_opens_nothing(ppy_home) -> None:
+    """Between the miscounting build and this one, a row can be `pending` already."""
+    wall = Wall()
+    gh = FakeGh()
+    row = _miscounted(wall, gh)
+    conn = init_db()
+    conn.execute(
+        "UPDATE deficiencies SET status = ?, issue_url = NULL, reported_count = 0 "
+        "WHERE fingerprint = ?",
+        (deficiencies.PENDING, row.fingerprint),
+    )
+    conn.commit()
+    conn.close()
+
+    assert _reporter(gh, wall).flush() == []
+    assert _opened(gh) == []
+    assert _row(row.fingerprint).status == deficiencies.WATCHING
+
+
+def test_a_forge_that_refuses_the_correcting_close_is_tried_again_later(ppy_home) -> None:
+    wall = Wall()
+    gh = FakeGh()
+    refused = [True]
+
+    def refuse(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+        if args[:2] == ["issue", "close"] and refused[0]:
+            return 1, "", "HTTP 502"
+        return gh(args, stdin)
+
+    row = _miscounted(wall, gh)
+    url = str(row.issue_url)
+    broken = deficiencies.Reporter(
+        forge=deficiencies.GhForge(run=refuse),
+        clock=wall,
+        build=lambda: BUILD,
+        config=deficiencies.Settings(repo=RUNTIME_REPO),
+    )
+
+    assert broken.flush() == []
+    assert _row(row.fingerprint).status == deficiencies.REPORTED  # still reported, still true
+    for _ in range(3):
+        assert broken.flush() == []  # inside the back-off the forge is left alone
+
+    wall.advance(seconds=deficiencies.CLOSE_RETRY_AFTER_SECONDS + 1)
+    refused[0] = False
+    assert broken.flush() == [f"closed {url}: it never happened in one place"]
+    assert _row(row.fingerprint).status == deficiencies.WATCHING

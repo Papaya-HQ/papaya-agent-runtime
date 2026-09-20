@@ -23,7 +23,7 @@ comment rather than duplicated. At most ``self_report.max_per_day`` new issues o
 a day and the rest wait in the ledger. ``self_report.enabled = false`` keeps the
 ledger and opens nothing.
 
-The channel is only worth reading if its open issues are true, so three rules bound
+The channel is only worth reading if its open issues are true, so four rules bound
 what it may say. **Nothing stale opens**: a row whose newest evidence predates the
 running build, or is older than :data:`STALE_AFTER_SECONDS`, stopped happening
 before this version existed and waits in the ledger as :data:`STALE` until it
@@ -34,7 +34,11 @@ turn out to be one cause are folded together with the rest of their fingerprints
 kept as aliases. **An issue that is over closes itself**: quiet for
 :data:`QUIET_BEFORE_CLOSE_SECONDS` across a newer build, or belonging to a kind
 another kind has replaced (:attr:`Kind.superseded_by`), it gets one comment and
-closes; a recurrence reopens it.
+closes; a recurrence reopens it. **A count of two is two in one place**: a kind whose
+title says something happened twice on one ticket or in one repository opens only
+when one scope holds that many occurrences (:func:`met_threshold`), the issue shows
+that scope's occurrences and no others (:func:`reported_entries`), and an issue
+opened on a miscount corrects itself and closes.
 
 Nothing private leaves the machine. An issue body is built only from the evidence
 fields named in :data:`EVIDENCE_FIELDS` — ticket keys and repository names, never
@@ -146,6 +150,8 @@ class Kind:
     #: A proposed remedy, when the signal implies one.
     remedy: str = ""
     #: Occurrences within one scope (a repository, a ticket) before an issue opens.
+    #: Counted by :func:`met_threshold`, and never across scopes: a title that says
+    #: one ticket or one repository must be true of the occurrences behind it.
     threshold: int = 1
     #: When set, the threshold counts distinct values of this evidence field instead.
     distinct: str = ""
@@ -517,6 +523,93 @@ def redact(text: object, scrub: Iterable[str] = ()) -> str:
     out = _BEARER.sub(f"Bearer {REDACTED}", out)
     out = _OPAQUE.sub(_opaque, out)
     return _EMAIL.sub(REDACTED, out)
+
+
+def scope_key(scope: object, scrub: Iterable[str] = ()) -> str:
+    """``scope`` with nothing private in it, and still one scope per ticket.
+
+    A scope is not prose. It is an identity — ``ticket:<key>``, ``repo:<name>`` — and
+    two occurrences count towards one threshold only when theirs is the same string.
+    So it cannot simply go through :func:`redact` and be stored: a work item id is a
+    36-character UUID, which redaction reads as an opaque key, and every ticket
+    reached the ledger as the one scope ``ticket:[redacted]``. That is issue #84 —
+    five tickets whose check-in steered each of them once, reported as one ticket
+    steered five times, because the five scopes were one string.
+
+    What redaction blanks is therefore replaced by a stable digest of the scope as it
+    was given, so the scope leaves nothing private behind and stays its own.
+    """
+    clean = redact(scope, scrub)
+    if REDACTED not in clean:
+        return clean
+    digest = hashlib.sha256(str(scope).encode()).hexdigest()[:8]
+    return clean.replace(REDACTED, f"#{digest}")
+
+
+def _grouped(entries: Iterable[Mapping[str, Any]]) -> list[list[tuple[int, Mapping[str, Any]]]]:
+    """The occurrences grouped by the scope each happened in, keeping their order.
+
+    An entry whose scope was blanked by an older build (``ticket:[redacted]``, before
+    :func:`scope_key`) names no scope at all, so it is a group of its own: occurrences
+    whose scope is unknown can never add up to "twice in one place". That is what
+    re-evaluates the rows such a build left behind, without editing any of them.
+    """
+    groups: dict[object, list[tuple[int, Mapping[str, Any]]]] = {}
+    for n, entry in enumerate(entries):
+        scope = entry.get("scope")
+        key: object = (n, scope) if scope is not None and REDACTED in str(scope) else scope
+        groups.setdefault(key, []).append((n, entry))
+    return list(groups.values())
+
+
+def scope_groups(entries: Iterable[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
+    """The occurrences grouped by the scope each happened in. See :func:`_grouped`."""
+    return [[entry for _, entry in group] for group in _grouped(entries)]
+
+
+def _reached_at(spec: Kind, group: list[tuple[int, Mapping[str, Any]]]) -> int | None:
+    """Where in the evidence this scope reached the threshold, or ``None`` if it never did."""
+    seen: set[Any] = set()
+    for at, (n, entry) in enumerate(group, start=1):
+        count = len(seen | {entry.get(spec.distinct)}) if spec.distinct else at
+        seen.add(entry.get(spec.distinct))
+        if count >= spec.threshold:
+            return n
+    return None
+
+
+def met_threshold(spec: Kind, entries: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether one scope holds ``spec.threshold`` of these occurrences.
+
+    The threshold is documented as occurrences "within one scope", and the titles of
+    the kinds that carry one say so out loud ("twice for the same reason" on one
+    ticket, "in one repository"). Counting across scopes makes those titles false, so
+    it is counted here, once, for every kind.
+    """
+    rows = list(entries)
+    if spec.threshold <= 1:
+        return bool(rows)
+    return any(_reached_at(spec, group) is not None for group in _grouped(rows))
+
+
+def reported_entries(spec: Kind, entries: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The occurrences an issue about these is entitled to show.
+
+    For a kind that opens on one scope reaching a threshold, that is the scope which
+    reached it — the first one to, when more than one has — and nothing else: an issue
+    that says one ticket was steered twice must not list another ticket's occurrence as
+    evidence for it.
+    """
+    rows = [dict(e) for e in entries]
+    if spec.threshold <= 1:
+        return rows
+    reached = [
+        (at, group) for group in _grouped(rows) if (at := _reached_at(spec, group)) is not None
+    ]
+    if not reached:
+        return rows
+    _, first = min(reached, key=lambda pair: pair[0])
+    return [dict(entry) for _, entry in first]
 
 
 def _one_line(text: str) -> str:
@@ -963,7 +1056,7 @@ def _record(
     at = _stamp(clock)
     entry = {"at": at, **_clean_evidence(evidence, scrub)}
     if scope:
-        entry["scope"] = redact(scope, scrub)
+        entry["scope"] = scope_key(scope, scrub)
     conn = init_db()
     try:
         key = canonical_fingerprint(conn, fingerprint(kind, clean))
@@ -990,11 +1083,8 @@ def _record(
             # It is happening again on this build: a row put aside as stale is due an
             # issue after all, and the next flush opens it.
             status = PENDING if current.status == STALE else current.status
-        if status == WATCHING:
-            within = [e for e in entries if e.get("scope") == entry.get("scope")]
-            seen = len({e.get(spec.distinct) for e in within}) if spec.distinct else len(within)
-            if seen >= spec.threshold:
-                status = PENDING
+        if status == WATCHING and met_threshold(spec, entries):
+            status = PENDING
         conn.execute(
             "UPDATE deficiencies SET last_seen = ?, count = ?, evidence = ?, status = ? "
             "WHERE fingerprint = ?",
@@ -1324,9 +1414,33 @@ def superseded_body(kind: str, issue: str | None) -> str:
     )
 
 
+def miscounted_body(deficiency: Deficiency) -> str:
+    """The one comment an issue opened on a cross-scope miscount gets as it closes."""
+    spec = _spec(deficiency.kind)
+    scopes = len(scope_groups(deficiency.evidence))
+    return _body_text(
+        f"closing: this never happened {spec.threshold} times in one place.\n\n"
+        f"`{deficiency.kind}` is worth an issue only when one scope — one ticket, one "
+        f"repository — holds {spec.threshold} occurrences, which is what this issue's "
+        f"title claims. It was opened by a build that counted across scopes: the scope "
+        "each occurrence carried was redacted before it was stored, and a work item id "
+        "redacts to the same string for every ticket, so occurrences on different "
+        f"tickets were counted as one ticket's. The evidence above is "
+        f"{deficiency.count} occurrence(s) across {scopes} scope(s).\n\n"
+        "Nothing here needs a person. The runtime counts per scope again, and opens a "
+        "true issue if this ever does happen in one place."
+    )
+
+
 def issue_body(deficiency: Deficiency) -> str:
-    """The first report of a deficiency: what, evidence, what instead, a remedy."""
+    """The first report of a deficiency: what, evidence, what instead, a remedy.
+
+    The evidence is the occurrences this issue is entitled to show — for a kind that
+    opens on one scope, that scope's and no others (:func:`reported_entries`) — and
+    the footer counts what is shown, not what the ledger holds.
+    """
     spec = KINDS.get(deficiency.kind) or KINDS[UNHANDLED_EXCEPTION]
+    shown = reported_entries(spec, deficiency.evidence)
     lines = [
         "## What happened",
         "",
@@ -1334,7 +1448,7 @@ def issue_body(deficiency: Deficiency) -> str:
         "",
         "## Evidence",
         "",
-        *_evidence_lines(deficiency.evidence),
+        *_evidence_lines(shown),
         "",
         "## What the runtime did instead",
         "",
@@ -1342,20 +1456,31 @@ def issue_body(deficiency: Deficiency) -> str:
     ]
     if spec.remedy:
         lines += ["", "## Proposed remedy", "", spec.remedy]
+    since = str(shown[0].get("at") or deficiency.first_seen) if shown else deficiency.first_seen
     lines += [
         "",
         "---",
         f"Self-reported by `ppy serve`: kind `{deficiency.kind}`, fingerprint "
-        f"`{deficiency.fingerprint}`, seen {deficiency.count} time(s) since "
-        f"{deficiency.first_seen}. `ppy deficiency list` shows the ledger.",
+        f"`{deficiency.fingerprint}`, seen {len(shown) or deficiency.count} time(s) since "
+        f"{since}. `ppy deficiency list` shows the ledger.",
     ]
     return _body_text("\n".join(lines))
 
 
 def comment_body(deficiency: Deficiency, entries: list[dict[str, Any]]) -> str:
-    """One comment for a recurrence: the new evidence and the count."""
+    """One comment for a recurrence: the new evidence and the count.
+
+    The count is of what this issue is about: the whole row for an ordinary kind, and
+    the one scope it reports for a kind that opens on a scope reaching a threshold.
+    """
+    spec = _spec(deficiency.kind)
+    total, last = deficiency.count, deficiency.last_seen
+    if spec.threshold > 1:
+        kept = reported_entries(spec, deficiency.evidence)
+        total = len(kept)
+        last = str(kept[-1].get("at") or last) if kept else last
     lines = [
-        f"Seen again: {deficiency.count} time(s) in all, last at {deficiency.last_seen}.",
+        f"Seen again: {total} time(s) in all, last at {last}.",
         "",
         *_evidence_lines(entries),
     ]
@@ -1512,7 +1637,12 @@ class Reporter:
             rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
             opened_today = sum(1 for d in rows if (d.opened_at or "").startswith(today))
             closed_today = sum(1 for d in rows if (d.closed_at or "").startswith(today))
-            # Retiring a kind comes first: a row of one must get its closing comment, not
+            # A miscount comes first: an issue that should never have been opened must
+            # be corrected before this flush comments any more evidence onto it.
+            corrected, closed_today = self._correct_miscounts(conn, rows, config, now, closed_today)
+            done += corrected
+            rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
+            # Retiring a kind comes next: a row of one must get its closing comment, not
             # a recurrence comment this flush and a closing one on the next.
             done += self._close_what_is_over(conn, rows, config, now, closed_today)
             rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
@@ -1520,6 +1650,15 @@ class Reporter:
             for deficiency in pending:
                 if _spec(deficiency.kind).superseded_by:
                     continue  # a retired kind opens nothing; the pass below closes its issue
+                if not met_threshold(_spec(deficiency.kind), deficiency.evidence):
+                    # Made pending by a build that counted across scopes: it goes back
+                    # to watching and opens nothing until one scope holds enough.
+                    conn.execute(
+                        "UPDATE deficiencies SET status = ? WHERE fingerprint = ?",
+                        (WATCHING, deficiency.fingerprint),
+                    )
+                    conn.commit()
+                    continue
                 if _stale(deficiency, born, now):
                     conn.execute(
                         "UPDATE deficiencies SET status = ? WHERE fingerprint = ?",
@@ -1559,11 +1698,21 @@ class Reporter:
                     continue
                 if deficiency.count <= deficiency.reported_count:
                     continue
+                spec = _spec(deficiency.kind)
                 new = [
                     e
-                    for e in deficiency.evidence
+                    for e in reported_entries(spec, deficiency.evidence)
                     if int(e.get("n") or 0) > deficiency.reported_count
                 ]
+                if not new:
+                    # The row grew, but in another scope: this issue is about one scope
+                    # and has nothing new to say. Catch its count up without commenting.
+                    conn.execute(
+                        "UPDATE deficiencies SET reported_count = ? WHERE fingerprint = ?",
+                        (deficiency.count, deficiency.fingerprint),
+                    )
+                    conn.commit()
+                    continue
                 body = comment_body(deficiency, new)
                 closed = (self._forge.state(deficiency.issue_url) or "") == "CLOSED"
                 if closed:
@@ -1584,6 +1733,57 @@ class Reporter:
         for line in done:
             log.info("[deficiencies] %s", line)
         return done
+
+    def _correct_miscounts(
+        self,
+        conn: Any,
+        rows: list[Deficiency],
+        config: Settings,
+        now: datetime,
+        closed_today: int,
+    ) -> tuple[list[str], int]:
+        """Close, once, every issue opened because occurrences in two scopes were counted as one.
+
+        A build before :func:`scope_key` stored a redacted scope, so every ticket was
+        the one scope ``ticket:[redacted]`` and two tickets steered once each reached a
+        threshold of two (issue #84). Such a row is recounted here — its blanked scopes
+        each count as their own (:func:`scope_groups`) — and when one scope no longer
+        holds enough, its issue gets one comment saying so and closes, and the row goes
+        back to `watching` with no issue of its own. No evidence is edited: the recount
+        reads the rows as they are.
+
+        A row whose count is still reachable in one scope is left entirely alone, and so
+        is a row whose issue a person or an earlier pass already closed. Like every other
+        close, an attempt costs one of the day's :attr:`Settings.max_per_day` and a
+        refusal waits :data:`CLOSE_RETRY_AFTER_SECONDS` before it is tried again.
+        """
+        done: list[str] = []
+        for deficiency in rows:
+            spec = _spec(deficiency.kind)
+            if spec.threshold <= 1 or deficiency.status in (RECLASSIFIED, SUPERSEDED):
+                continue
+            if met_threshold(spec, deficiency.evidence):
+                continue
+            if deficiency.status != REPORTED or not deficiency.issue_url:
+                continue  # the pending pass demotes it; nothing was ever said about it
+            if _tried_recently(deficiency, now) or closed_today >= config.max_per_day:
+                continue
+            closed_today += 1
+            conn.execute(
+                "UPDATE deficiencies SET close_tried_at = ? WHERE fingerprint = ?",
+                (_stamp(self._clock), deficiency.fingerprint),
+            )
+            conn.commit()
+            if not self._end_issue(str(deficiency.issue_url), miscounted_body(deficiency)):
+                continue
+            conn.execute(
+                "UPDATE deficiencies SET status = ?, issue_url = NULL, opened_at = NULL, "
+                "reported_count = 0, closed_at = NULL WHERE fingerprint = ?",
+                (WATCHING, deficiency.fingerprint),
+            )
+            conn.commit()
+            done.append(f"closed {deficiency.issue_url}: it never happened in one place")
+        return done, closed_today
 
     def _close_what_is_over(
         self,
@@ -2083,7 +2283,8 @@ def _counted(kind: str, detail: str, scope: str, task_id: int) -> bool:
         entries = json.loads(row["evidence"] or "[]")
     except (TypeError, ValueError):
         return False
-    return any(e.get("scope") == scope and e.get("task_id") == task_id for e in entries)
+    key = scope_key(scope)
+    return any(e.get("scope") == key and e.get("task_id") == task_id for e in entries)
 
 
 def denial_kinds(conn: Any, deficiency: Deficiency) -> set[str]:

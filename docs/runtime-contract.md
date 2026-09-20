@@ -1093,9 +1093,10 @@ recorded 527 times, both unseen).
 The self-report channel (`ppy deficiency list`, and the `self-reported` issues on this
 runtime's repository) is how the runtime tells its maintainers what is wrong with it.
 A channel whose open issues are mostly stale or duplicated is one nobody reads — on
-2026-09-20 nine of the nineteen open issues were one crash fixed three days earlier, and
-a 28-comment storm went unread among them. Three rules keep it true; they are in
-`deficiencies.py`, and nothing here needs doing by hand.
+2026-09-20 nine of the nineteen open issues were one crash fixed three days earlier, a
+28-comment storm went unread among them, and one issue said a check-in had steered the
+same ticket five times when it had steered five different tickets once each. Four rules
+keep it true; they are in `deficiencies.py`, and nothing here needs doing by hand.
 
 - **Nothing stale opens.** A row is buried (`stale`, no issue) when **both** of these
   are true, and never when only one is: it has not happened for 48 hours, *and* it last
@@ -1119,6 +1120,21 @@ a 28-comment storm went unread among them. Three rules keep it true; they are in
   or belonging to a kind another kind replaced, it gets one comment and closes; a
   recurrence reopens it. Closes are bounded by `self_report.max_per_day` like opens, and
   `self_report.enabled = false` opens, comments and closes nothing.
+- **A count of two is two in one place.** Some kinds are only worth an issue when they
+  repeat — a worker denial, a check-in steering for the same reason, a ticket coming
+  back with nothing to show — and their titles say where the repetition was: on one
+  ticket, in one repository. So the threshold is counted inside one **scope**
+  (`ticket:<key>`, `repo:<name>`, `repo:<name>:<hook>`, `refusal:<reason>`), never
+  across the ledger, and the issue lists that scope's occurrences and no others. A scope
+  cannot simply be redacted on the way into the ledger, or it stops telling two tickets
+  apart: a work item id is a UUID, which redaction reads as an opaque key, and issue #84
+  ("A check-in steered twice for the same reason: midpoint") was five tickets steered
+  once each, all recorded under the one scope `ticket:[redacted]`. What redaction blanks
+  is now replaced by a stable digest of the scope, so a scope stays private and stays
+  its own. Rows an older build left behind are re-read, not rewritten: an occurrence
+  whose scope was blanked names no scope at all and counts only for itself, so an issue
+  opened on such a miscount gets one comment saying so and closes, and its row goes back
+  to `watching` — where a genuine second occurrence in one place opens a true issue.
 
 **Going back to an older build.** The ledger these rules use is schema 25: two columns
 on `deficiencies` (`closed_at`, `close_tried_at`) and two tables (`deficiency_aliases`,
