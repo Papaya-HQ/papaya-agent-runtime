@@ -25,6 +25,20 @@ requests at the start of a development session. There is no checked-in task log.
 > connected as (`src/papaya_agent_runtime/papaya.py`), so never hard-code a name,
 > handle or character into this codebase.
 
+## A `ppy` command a prompt names has to exist
+
+`manager/launch.py` told every manager turn to run `ppy papaya link`, which has never
+been a command: each turn discovered that by being refused, worked around it, and filed
+it (issue #114). `tests/test_named_commands_exist.py` now reads every `ppy` invocation
+written in the turn prompts, the worker command rules and environment block, the manager
+launch prompt, `docs/runtime-contract.md` and the README, and hands each one to the real
+`cli.build_parser()`. A dead subcommand, or a flag named on the wrong subcommand, fails
+with the file and the line. Rename a command and the text that names it fails with it.
+
+Two named exceptions, both tested: `LAUNCHER_ONLY` for a command `bin/ppy` answers
+itself (`ppy env sync`), and `NON_EXAMPLES` for a sentence that names a command
+*because it does not exist* — an entry there must give the file and the reason.
+
 ## Authority is enforced in code, not prompts
 
 The `ppy` control plane owns model ceilings, lifecycle transitions, the exact-HEAD

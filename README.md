@@ -805,9 +805,13 @@ runtime's own repository. Each deficiency is one row in the `deficiencies` ledge
 fingerprinted by its kind and its detail with the numbers and ids taken out. These are
 the signals, recorded where they already happen:
 
-- **A turn reports it.** Any turn (brief, answer, review, check-in) ends with a line
-  `RUNTIME: <what got in the way>`. Every turn prompt invites that line when a tool was
-  refused, a fact could not be found, or a contract was wrong. Two turns seldom word one
+- **A turn reports it.** A turn (brief, answer, review, check-in) that was stopped or
+  degraded by the runtime ends with a line `RUNTIME: <what got in the way>`. Every turn
+  prompt invites that line when a tool was refused, a fact could not be found, or a
+  contract was wrong — and only then: a turn with nothing in its way writes no such
+  line, and the prompt gives it both an example that belongs and one that does not,
+  because a turn once reported the Papaya tools loading on demand, which is the runtime
+  working (issue #120). Two turns seldom word one
   problem the same way, so this line is fingerprinted by its cause, not its sentence:
   the first tool or API it names, then the first exception class in it or else the noun
   phrase after its first refusal verb, then the repository if it names one. A line that
