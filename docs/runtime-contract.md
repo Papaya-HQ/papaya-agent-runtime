@@ -1097,21 +1097,38 @@ A channel whose open issues are mostly stale or duplicated is one nobody reads �
 a 28-comment storm went unread among them. Three rules keep it true; they are in
 `deficiencies.py`, and nothing here needs doing by hand.
 
-- **Nothing stale opens.** A deficiency whose newest evidence predates the running
-  build (the first moment this machine ran this version) or is older than 48 hours is
-  marked `stale` and opens no issue. It opens if it happens again. A backlog inherited
-  across an upgrade therefore drains without opening issues about fixed things, and
-  nobody edits the ledger to make that happen.
+- **Nothing stale opens.** A row is buried (`stale`, no issue) when **both** of these
+  are true, and never when only one is: it has not happened for 48 hours, *and* it last
+  happened before this released version first ran on this machine. So a row still being
+  recorded under this version opens however old its first occurrence is; a row recorded
+  minutes before an upgrade stays pending, because crossing an upgrade says nothing
+  about whether the new version fixed it; and what an upgrade does bury is the backlog —
+  rows nobody has seen for two days, last seen under a version this machine has since
+  replaced. A buried row opens the moment it happens again. "Version" is the released
+  version (`0.1.22`), never the commit or the dirty flag: a restart on a new commit is
+  not a new version, and is neither a reason to bury a row nor evidence that anything
+  was fixed.
 - **One cause is one issue.** A turn's `RUNTIME:` line is fingerprinted by the
-  strongest thing it names — a pull request or issue number; else an exception class
-  together with where it came from; else the tool and the refusal — never by its
-  wording. Rows that are one cause are folded at `serve` start, the later issues closed
-  as duplicates, and every other fingerprint kept as an alias so no rule change opens a
+  strongest thing it names — an exception class together with where it came from; else
+  a pull request it names, with the repository; else the class and its whole message;
+  else the tool and the refusal — never by its wording. Rows that are one cause are
+  folded at `serve` start *and on a session's heartbeat*, the later issues closed as
+  duplicates, and every other fingerprint kept as an alias so no rule change opens a
   second issue for a cause that already has one.
 - **An issue that is over closes itself.** Quiet for seven days across a newer build,
   or belonging to a kind another kind replaced, it gets one comment and closes; a
   recurrence reopens it. Closes are bounded by `self_report.max_per_day` like opens, and
   `self_report.enabled = false` opens, comments and closes nothing.
+
+**Going back to an older build.** The ledger these rules use is schema 25: two columns
+on `deficiencies` (`closed_at`, `close_tried_at`) and two tables (`deficiency_aliases`,
+`runtime_builds`). An older build reading that database ignores all four — it opens and
+comments as it always did, and the worst it does is open an issue this version would
+have held back, or comment on one this version had closed (which is a recurrence
+comment, so the issue reopens rather than duplicating). It never drops the columns, and
+coming forward again picks up where it left off: `ppy` migrates by adding what is
+missing and never rewrites a row. So a downgrade is safe and a little noisier, which is
+the right way round.
 
 If you find a self-reported issue that is none of those and is still wrong, that is a
 runtime defect worth a task: the rule that should have caught it is the deliverable, not

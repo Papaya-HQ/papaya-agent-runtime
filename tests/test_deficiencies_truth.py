@@ -78,28 +78,15 @@ def _seen_build(build: str, first_seen: datetime) -> None:
 # ── nothing stale opens ─────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("seconds_before_start", "opens"),
-    [(1, False), (-1, True)],
-    ids=["a second before this build started", "a second after it"],
-)
-def test_the_running_builds_start_of_life_is_the_boundary(
-    ppy_home, seconds_before_start: int, opens: bool
-) -> None:
-    wall = Wall()
-    gh = FakeGh()
-    reporter = _reporter(gh, wall)  # born now: this build's first moment on this machine
-    row = deficiencies.record(
-        deficiencies.TURN_REPORT,
-        "`ppy gate run` had no gate record",
-        clock=_at(wall, seconds=-seconds_before_start),
-    )
+def _flush_after(gh: FakeGh, wall: Wall, detail: str, *, ago: dict, build: str = BUILD) -> bool:
+    """Record ``detail`` ``ago`` before now, flush on ``build``, and say whether it opened."""
+    row = deficiencies.record(deficiencies.TURN_REPORT, detail, clock=_at(wall, **ago))
     assert row is not None
-
-    reporter.flush()
-
-    assert bool(_opened(gh)) is opens
-    assert _row(row.fingerprint).status == (deficiencies.REPORTED if opens else deficiencies.STALE)
+    _reporter(gh, wall, build=build).flush()
+    opened = bool(_opened(gh))
+    status = _row(row.fingerprint).status
+    assert status == (deficiencies.REPORTED if opened else deficiencies.STALE)
+    return opened
 
 
 @pytest.mark.parametrize(
@@ -107,24 +94,86 @@ def test_the_running_builds_start_of_life_is_the_boundary(
     [(49, False), (47, True)],
     ids=["older than 48 hours", "younger than 48 hours"],
 )
-def test_old_news_does_not_open_however_long_this_build_has_been_running(
+def test_the_staleness_age_is_one_half_of_the_boundary(
     ppy_home, hours_ago: int, opens: bool
 ) -> None:
-    """The same build all along: age alone is still enough to hold an issue back."""
-    _seen_build(BUILD, START - timedelta(days=30))
+    """Both halves must hold: this row was last seen under the version before this one."""
+    _seen_build("0.1.20", START - timedelta(days=30))
+    wall = Wall()
+
+    assert (
+        _flush_after(FakeGh(), wall, "`ppy gate run` had no gate record", ago={"hours": -hours_ago})
+        is opens
+    )
+
+
+@pytest.mark.parametrize(
+    ("hours_ago", "opens"),
+    [(61, False), (59, True)],
+    ids=["last seen under the older version", "last seen under this one"],
+)
+def test_the_running_versions_start_of_life_is_the_other_half(
+    ppy_home, hours_ago: int, opens: bool
+) -> None:
+    """Both rows are old enough; only the one from before this version started is buried."""
+    _seen_build("0.1.20", START - timedelta(days=30))
+    _seen_build(BUILD, START - timedelta(hours=60))
+    wall = Wall()
+
+    assert (
+        _flush_after(
+            FakeGh(), wall, "`ppy review show` diffed the wrong base", ago={"hours": -hours_ago}
+        )
+        is opens
+    )
+
+
+def test_an_upgrade_never_buries_what_was_happening_minutes_before_it(ppy_home) -> None:
+    """The upgrade says nothing about whether the new version fixed it."""
+    _seen_build("0.1.20", START - timedelta(days=30))
     wall = Wall()
     gh = FakeGh()
     row = deficiencies.record(
         deficiencies.TURN_REPORT,
-        "`ppy review show` diffed the wrong base",
-        clock=_at(wall, hours=-hours_ago),
+        "the turn could not read the gate record",
+        clock=_at(wall, minutes=-5),
     )
     assert row is not None
 
-    _reporter(gh, wall).flush()
+    # The upgrade: a new version, first seen now.
+    _reporter(gh, wall, build="0.1.30").flush()
 
-    assert bool(_opened(gh)) is opens
-    assert _row(row.fingerprint).status == (deficiencies.REPORTED if opens else deficiencies.STALE)
+    assert len(_opened(gh)) == 1
+    assert _row(row.fingerprint).status == deficiencies.REPORTED
+
+
+def test_a_restart_on_the_same_release_buries_nothing(ppy_home) -> None:
+    """Restarting, or an uncommitted edit, is not a new version and not a fix."""
+    _seen_build(BUILD, START - timedelta(days=30))
+    wall = Wall()
+    gh = FakeGh()
+
+    # Three days old, and this release has been running all along: still this release's.
+    assert _flush_after(gh, wall, "`ppy gate run` had no gate record", ago={"days": -3}) is True
+
+
+@pytest.mark.parametrize(
+    ("described", "released"),
+    [
+        ("0.1.22", "0.1.22"),
+        ("v0.1.22", "0.1.22"),
+        ("0.1.22-3-gabc1234", "0.1.22"),
+        ("0.1.22-3-gabc1234.dirty", "0.1.22"),
+        ("0.1.22.post1+g9f8e7d6", "0.1.22"),
+        ("0.0.0+g1234abc", "0.0.0"),
+        ("", "unknown"),
+    ],
+)
+def test_the_version_is_the_release_not_the_commit_or_the_dirty_flag(
+    described: str, released: str
+) -> None:
+    """`git describe` moves at every commit; a ledger keyed on that buries everything."""
+    assert deficiencies.released_version(described) == released
 
 
 def test_a_stale_row_that_happens_again_opens_then(ppy_home) -> None:
@@ -239,7 +288,22 @@ OTHER_CAUSES = {
     1002: "a turn crashed with AttributeError in `serve.waiting_reason` after every check-in.",
     # Two reports about different pull requests are two reports.
     1003: "the fix for this is in PR #94, which is still open, so the ticket can't move.",
+    # Two messages of one class with nowhere named: the message is the cause, whole.
+    1004: "the turn ended on AttributeError: 'NoneType' object has no attribute 'get'",
+    1005: (
+        "the turn ended on AttributeError: 'NoneType' object has no attribute 'phase' when "
+        "parking the ticket"
+    ),
+    1006: "the check-in raised AttributeError: 'Settings' object has no attribute 'max_per_day'",
+    1007: "the check-in raised AttributeError: 'Settings' object has no attribute 'repo'",
+    # Numbers that are counted, not named: none of these is a report.
+    1008: "issue 3 of 5 checks failed on the delivered branch and the lane gave up",
+    1009: "the gate ran 12 issues 4 times before the worker was sent back",
+    1010: "PAP-219 #3 came back with nothing to show after the brief turn",
 }
+
+#: The same repository's PR #58 and another repository's: one number, two things.
+OTHER_REPO_PR = "the fix is in PR #58 in repo `papaya-backend-monorepo`, which is still open."
 
 
 def _key(detail: str) -> str:
@@ -257,7 +321,7 @@ def test_the_nine_issues_one_crash_opened_would_be_three_and_none_of_them_is_ano
     """
     crash = {number: _key(detail) for number, detail in ONE_CRASH.items()}
     assert crash[105] == crash[106] == crash[107] == crash[117] == crash[118] == crash[119]
-    assert deficiencies.reduce_turn_report(ONE_CRASH[119]) == "pr|58"
+    assert deficiencies.reduce_turn_report(ONE_CRASH[119]) == "pr|58|"
     assert len(set(crash.values())) == 3
     assert crash[103] != crash[104]
 
@@ -266,6 +330,17 @@ def test_the_nine_issues_one_crash_opened_would_be_three_and_none_of_them_is_ano
     assert not set(others.values()) & set(crash.values())
     # Named explicitly, because each is a way a looser rule would go wrong.
     assert others[1001] != others[1002], "two AttributeErrors in different functions"
+    assert others[1004] != others[1005], "two messages of one class, differing at the end"
+    assert others[1006] != others[1007], "two 'Settings' object messages"
+    for enumeration in (1008, 1009, 1010):
+        reduced = deficiencies.reduce_turn_report(OTHER_CAUSES[enumeration])
+        assert not reduced.startswith("pr|"), f"{enumeration} names no report: {reduced}"
+    # One pull request number in two repositories is two causes.
+    assert _key(OTHER_REPO_PR) != crash[105]
+    assert deficiencies.reduce_turn_report(OTHER_REPO_PR) == "pr|58|papaya-backend-monorepo"
+    # A passing mention never takes over from the exception and the place it came from.
+    passing = "the worker died on AttributeError in `claude.live_denial`; the fix is PR #58."
+    assert _key(passing) == crash[104] != crash[105]
     assert others[1003] != crash[105], "two different pull requests"
     assert others[1001] != crash[117], "a report naming PR #58 and one that merely crashed"
 
@@ -368,6 +443,80 @@ def test_an_issue_nobody_has_seen_for_a_week_closes_itself_once_a_newer_build_ha
     assert len(gh.issues[url]["comments"]) == 1
 
 
+def test_a_forge_that_comments_and_then_refuses_the_close_says_nothing_twice(ppy_home) -> None:
+    """`gh issue close --comment` is two things, and the first can land without the second."""
+    wall = Wall()
+    gh = FakeGh()
+    refused: list[bool] = [True]
+
+    def half_open(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+        if args[:2] == ["issue", "close"] and refused[0]:
+            if "--comment" in args:  # the comment lands, the close does not
+                gh.issues[args[2]]["comments"].append(args[args.index("--comment") + 1])
+            return 1, "", "HTTP 502"
+        return gh(args, stdin)
+
+    _reported(wall, gh)
+    (row,) = deficiencies.ledger(include_all=True)
+    url = row.issue_url
+    wall.advance(days=8)
+    broken = deficiencies.Reporter(
+        forge=deficiencies.GhForge(run=half_open),
+        clock=wall,
+        build=lambda: "0.1.30",
+        config=deficiencies.Settings(repo=RUNTIME_REPO),
+    )
+
+    assert broken.flush() == []  # the close failed
+    assert gh.issues[url]["state"] == "OPEN"
+    assert len(gh.issues[url]["comments"]) == 1
+
+    # Inside the backoff nothing is tried again at all, however often it flushes.
+    for _ in range(3):
+        assert broken.flush() == []
+    assert len(gh.issues[url]["comments"]) == 1
+
+    # After the backoff it is tried again, and the comment it already said is not said twice.
+    wall.advance(seconds=deficiencies.CLOSE_RETRY_AFTER_SECONDS + 1)
+    refused[0] = False
+    assert len(broken.flush()) == 1
+    assert gh.issues[url]["state"] == "CLOSED"
+    assert len(gh.issues[url]["comments"]) == 1
+
+
+def test_a_refused_close_costs_one_of_the_days_closes(ppy_home) -> None:
+    """A forge that refuses must cost no more than a forge that agrees."""
+    wall = Wall()
+    gh = FakeGh()
+    tries: list[list[str]] = []
+
+    def refuse(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+        if args[:2] == ["issue", "close"]:
+            tries.append(list(args))
+            return 1, "", "HTTP 502"
+        return gh(args, stdin)
+
+    reporter = _reporter(gh, wall, max_per_day=2)
+    for n in range(4):
+        deficiencies.record(deficiencies.TURN_REPORT, _old_news(n), clock=wall)
+    reporter.flush()
+    wall.advance(days=1)
+    reporter.flush()
+    assert len(_opened(gh)) == 4
+
+    wall.advance(days=9)
+    broken = deficiencies.Reporter(
+        forge=deficiencies.GhForge(run=refuse),
+        clock=wall,
+        build=lambda: "0.1.30",
+        config=deficiencies.Settings(repo=RUNTIME_REPO, max_per_day=2),
+    )
+    assert broken.flush() == []
+
+    assert len(tries) == 2  # not four: a failed attempt is still one of the day's two
+    assert [row.closed_at for row in deficiencies.ledger(include_all=True)] == [None] * 4
+
+
 def test_a_recurrence_reopens_what_closed_itself(ppy_home) -> None:
     wall = Wall()
     gh = FakeGh()
@@ -462,6 +611,66 @@ def test_a_retired_kind_never_opens_an_issue_in_the_first_place(ppy_home) -> Non
 
     assert _opened(gh) == []
     assert _row(row.fingerprint).status == deficiencies.SUPERSEDED
+
+
+# ── a database written by another build ─────────────────────────────────────
+
+
+def test_a_schema_24_ledger_migrates_with_its_rows_and_keeps_reporting(ppy_home) -> None:
+    """An upgrade meets a database with rows in it, and must add columns, not lose them."""
+    from papaya_agent_runtime.paths import db_path
+    from papaya_agent_runtime.state.db import SCHEMA_VERSION, schema_version
+
+    conn = init_db()
+    # The `deficiencies` table as schema 24 wrote it, with the rows a live ledger has.
+    conn.execute("DROP TABLE deficiencies")
+    conn.execute(
+        "CREATE TABLE deficiencies (fingerprint TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+        "title TEXT NOT NULL, detail TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, "
+        "count INTEGER NOT NULL DEFAULT 1, evidence TEXT NOT NULL DEFAULT '[]', issue_url TEXT, "
+        "status TEXT NOT NULL DEFAULT 'watching', opened_at TEXT, "
+        "reported_count INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
+        "count, evidence, issue_url, status, opened_at, reported_count) "
+        "VALUES ('old1', ?, 'A turn said', 'the turn could not read the gate record', ?, ?, "
+        "2, '[]', ?, ?, ?, 2)",
+        (
+            deficiencies.TURN_REPORT,
+            START.isoformat(),
+            START.isoformat(),
+            f"https://github.com/{RUNTIME_REPO}/issues/9",
+            deficiencies.REPORTED,
+            START.isoformat(),
+        ),
+    )
+    conn.execute("DROP TABLE deficiency_aliases")
+    conn.execute("DROP TABLE runtime_builds")
+    conn.execute("PRAGMA user_version = 24")
+    conn.commit()
+    conn.close()
+
+    migrated = init_db(db_path())
+    assert schema_version(migrated) == SCHEMA_VERSION
+    migrated.close()
+
+    (row,) = deficiencies.ledger(include_all=True)
+    assert (row.count, row.status, row.closed_at) == (2, deficiencies.REPORTED, None)
+    # And it goes on working: the row is quiet, and an upgrade closes it.
+    wall = Wall(START + timedelta(days=8))
+    gh = FakeGh()
+    gh.issues[str(row.issue_url)] = {
+        "title": "",
+        "body": "",
+        "labels": [],
+        "state": "OPEN",
+        "comments": [],
+    }
+
+    assert _reporter(gh, wall, build="0.1.30").flush() == [
+        f"closed {row.issue_url}: not seen since {row.last_seen}"
+    ]
 
 
 # ── the bounds and the privacy are the same as they were ────────────────────

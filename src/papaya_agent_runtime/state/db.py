@@ -331,7 +331,10 @@ CREATE TABLE IF NOT EXISTS deficiencies (
     reported_count INTEGER NOT NULL DEFAULT 0,
     -- When the runtime closed the issue itself (quiet for long enough, or the kind
     -- was superseded). Cleared when a recurrence reopens it.
-    closed_at TEXT
+    closed_at TEXT,
+    -- When the runtime last tried to close it. A forge that refuses is tried again
+    -- later, not on every flush.
+    close_tried_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_deficiencies_status ON deficiencies(status, first_seen);
 
@@ -518,10 +521,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for col in ("observation", "likely_cause", "measurement"):
             if col not in action_cols:
                 conn.execute(f"ALTER TABLE improvement_actions ADD COLUMN {col} TEXT")
-    if "closed_at" not in _column_names(conn, "deficiencies"):
-        # When the runtime closed the issue itself. Unset on every existing row, which
-        # is right: nothing closed one before this column existed.
-        conn.execute("ALTER TABLE deficiencies ADD COLUMN closed_at TEXT")
+    deficiency_cols = _column_names(conn, "deficiencies")
+    for col in ("closed_at", "close_tried_at"):
+        # When the runtime closed the issue itself, and when it last tried. Unset on
+        # every existing row, which is right: nothing closed one before these existed.
+        if col not in deficiency_cols:
+            conn.execute(f"ALTER TABLE deficiencies ADD COLUMN {col} TEXT")
     if "said_fingerprint" not in _column_names(conn, "outreach"):
         # What an ask said when it was last said: unchanged, it is never said again.
         conn.execute("ALTER TABLE outreach ADD COLUMN said_fingerprint TEXT")

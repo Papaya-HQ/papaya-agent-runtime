@@ -861,11 +861,18 @@ def deficiency_step(reporter: Any = None) -> list[str]:
     `ppy serve` flushes when a record lands; a record that waited on the daily cap, or
     landed while nothing was running, otherwise waited for the next one. Both modes call
     this on their clock: serve's rounds and the session heartbeat's upkeep.
+
+    Grouping runs first, exactly as it does at `serve` start. It is what folds the rows
+    that are one cause and writes the aliases the ledger reads before it looks a
+    fingerprint up, so a session that never starts a serve must not skip it: without it
+    a session would open a second issue for a cause that already has one. Both calls are
+    cheap and idempotent when there is nothing to fold.
     """
     from papaya_agent_runtime import deficiencies
 
+    one = reporter or deficiencies.Reporter()
     try:
-        return list((reporter or deficiencies.Reporter()).flush())
+        return list(one.merge_duplicates()) + list(one.flush())
     except Exception as exc:  # noqa: BLE001 - reporting never ends a round or a tick
         return [f"could not open deficiencies as issues: {exc}"]
 

@@ -353,20 +353,17 @@ def ticket_label(item: Mapping[str, Any]) -> str:
     return f"work item {str(item.get('id') or '')[:8]}"
 
 
-def refused_detail(reason: str, claim: str | None = None) -> str:
+def refused_detail(reason: str) -> str:
     """A `repeated-without-progress` detail for work refused sweep after sweep.
 
-    Fingerprinted on the reason alone: a refusal is Papaya's routing, and ten tickets
-    refused for one reason are one problem (one issue), each ticket in the evidence.
-    ``claim`` says the work was this runtime's, which is what makes the refusal a
-    deficiency rather than routing working as it should. What the claim actually was
-    goes in the evidence, not here: ten tickets held here and refused the same way are
-    still one problem, and a task id in the detail would give each its own row.
+    Fingerprinted on the reason alone, and nothing else belongs in it: a refusal is
+    Papaya's routing, ten tickets refused for one reason are one problem (one issue),
+    and every word added here — which ticket, what claim this runtime had on it — would
+    split that one issue into one per ticket. Those go in the evidence.
     """
-    about = " on work this machine holds" if claim else ""
     return (
         f"assigned work was refused here on {REFUSALS_BEFORE_DEFICIENCY} sweeps running "
-        f"for the same reason ({reason}){about}"
+        f"for the same reason ({reason})"
     )
 
 
@@ -1385,7 +1382,7 @@ class Sweeper:
                 functools.partial(
                     deficiencies.record_once,
                     deficiencies.REPEATED_WITHOUT_PROGRESS,
-                    refused_detail(reason, refusal.claim),
+                    refused_detail(reason),
                     within=REPEAT_SAID_EVERY,
                     evidence=evidence,
                     scope=f"refusal:{reason}",

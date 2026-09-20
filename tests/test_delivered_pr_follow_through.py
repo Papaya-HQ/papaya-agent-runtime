@@ -301,7 +301,7 @@ PAP_222_REPORTS = {
 REDUCED = {
     "74fccc066045a150": "af2aa9532fde4fce",
     "ecfb07ec73b22d9a": "7ba58c5a7c72a5b0",
-    "73e968fea9ac0d8e": "fe2394214d1d4c07",
+    "73e968fea9ac0d8e": "400aea7b2154f11e",
 }
 
 BEFORE_THE_FIX = lambda: datetime(2026, 9, 17, 1, 49, 12, tzinfo=UTC)  # noqa: E731

@@ -821,15 +821,18 @@ the signals, recorded where they already happen:
   problem the same way, so this line is fingerprinted by the strongest thing it *names*,
   not by its sentence, in this order:
 
-  1. a pull request or issue number (`PR #58`, `pull request 710`, `#94`) — a turn that
-     says which change its trouble is about has said what the trouble is;
-  2. an exception class *together with* where it came from: the identifier the line
-     names (`claude.live_denial`), or the exception's own message when it names none.
-     The class alone is never enough — two `AttributeError`s in different functions are
-     two deficiencies;
-  3. the first tool or API it names, with the noun phrase after its first refusal verb
+  1. an exception class *together with* the function, module or command it names
+     (`AttributeError` in `claude.live_denial`) — the most specific thing a turn can
+     say, which a pull request mentioned in passing does not take over;
+  2. a pull request it names (`PR #58`, `pull request 710`, `#94`), with the repository
+     when it names one, since two repositories' PR #58 are two things. A number nothing
+     marks as a report ("issue 3 of 5 checks failed", "PAP-219 #3") is not one;
+  3. an exception class with nowhere named, keyed on its whole message — never a word of
+     it, or "'NoneType' object has no attribute 'get'" and "…no attribute 'phase'" would
+     be one deficiency;
+  4. the first tool or API it names, with the noun phrase after its first refusal verb
      and the repository if it names one;
-  4. otherwise its first eight stemmed content words.
+  5. otherwise its first eight stemmed content words.
 
   So "`propose_memory` refused an agent-scoped proposal" and "`propose_memory` rejected
   an agent-scoped proposal" are one deficiency, one issue and a comment; and the six
@@ -879,20 +882,26 @@ body has four parts: what happened, the evidence, what the runtime did instead, 
 proposed remedy. A deficiency that happens again adds one comment and bumps the count.
 If its issue was closed, that comment reopens it instead of opening a duplicate.
 
-**Nothing stale opens.** A deficiency whose newest evidence predates the running build
-— the first moment this machine ran this version — or is older than 48 hours, stopped
-happening before this version existed. It is marked `stale` in the ledger and opens
-nothing; the next occurrence makes it `pending` again and it opens then. This is what
-stops a backlog opening issues for weeks about something already fixed: on 2026-09-20
-the live ledger held 137 waiting turn reports at five issues a day, and four issues
-about a crash fixed on the 17th were opened on the 20th.
+**Nothing stale opens.** A deficiency is held back (`stale`, no issue) when both of
+these are true: it has not happened for 48 hours, and it last happened before this
+released version first ran on this machine. Either alone leaves it pending — something
+still happening under this version is this version's problem, and an upgrade never
+buries evidence from the hours before it. The next occurrence makes it `pending` again
+and it opens then. This is what stops a backlog opening issues for weeks about something
+already fixed: on 2026-09-20 the live ledger held 137 waiting turn reports at five
+issues a day, and four issues about a crash fixed on the 17th were opened on the 20th.
+The version is the released one (`0.1.22`), not `git describe`: a restart on a new
+commit, or an uncommitted edit, is neither a new version nor a fix.
 
 **An issue that is over closes itself.** A reported deficiency nobody has seen for
-seven days, across at least one build this machine had not run when it was last seen,
-is closed with one comment saying so; if it happens again, the recurrence reopens it
-with its new evidence. A kind that another kind has replaced (`idle-work-refused` →
-`repeated-without-progress`) opens nothing, and its open issue gets one comment
-pointing at the successor's issue and is closed.
+seven days, across at least one released version this machine had not run when it was
+last seen, is closed with one comment saying so; if it happens again, the recurrence
+reopens it with its new evidence. A kind that another kind has replaced
+(`idle-work-refused` → `repeated-without-progress`) opens nothing, and its open issue
+gets one comment pointing at the successor's issue and is closed — before any recurrence
+comment, so a retired kind's issue ends with one comment rather than two. Closing is two
+things to GitHub, so a close the forge refuses is retried later rather than on every
+flush, and a retry that finds its comment already there only closes.
 
 **Where issues go, and how many.** The repository is the origin of the running
 checkout, or `self_report.repo` in the config. At most `self_report.max_per_day` new

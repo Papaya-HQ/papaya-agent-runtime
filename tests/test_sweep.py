@@ -638,7 +638,7 @@ def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_o
     # ticket task here for each: one row for the reason, both tickets in its evidence.
     # Two tickets refused the same way is past the kind's threshold: an issue, not two.
     [found] = refused_deficiencies()
-    assert found.detail == sweep.refused_detail("handled_in_papaya", "ticket task 7 here")
+    assert found.detail == sweep.refused_detail("handled_in_papaya")
     assert sorted((e["ticket"], e["times"], e["trigger"]) for e in found.evidence) == [
         ("PAP-219", 3, "ticket task 7 here"),
         ("PAP-221", 3, "ticket task 8 here"),
@@ -689,7 +689,7 @@ def test_a_refusal_streak_counts_only_sweeps_refused_for_the_same_reason(
     assert recorded() == []
     asyncio.run(sweeps(1))
     [row] = recorded()
-    assert row.detail == sweep.refused_detail("not_routed_here", "ticket task 7 here")
+    assert row.detail == sweep.refused_detail("not_routed_here")
     assert row.evidence[0]["ticket"] == "PAP-219"
     # One stuck ticket is a `needs attention` line, not an issue on first sight.
     assert row.status == deficiencies.WATCHING
@@ -751,7 +751,7 @@ def test_the_same_refusal_on_work_this_machine_holds_is_a_deficiency(ppy_home, a
     _refused_three_times(assigned, tickets=_held_here)
 
     [row] = _refused_rows()
-    assert row.detail == sweep.refused_detail("not_routed_here", "ticket task 7 here")
+    assert row.detail == sweep.refused_detail("not_routed_here")
     assert row.evidence[0]["trigger"] == "ticket task 7 here"
 
 

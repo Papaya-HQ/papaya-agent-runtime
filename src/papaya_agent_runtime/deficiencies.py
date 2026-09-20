@@ -126,6 +126,9 @@ SUPERSEDED = "superseded"
 STALE_AFTER_SECONDS = 48 * 3600
 #: How long a reported deficiency must go unseen before the runtime closes its issue.
 QUIET_BEFORE_CLOSE_SECONDS = 7 * 24 * 3600
+#: How long a refused close waits before it is tried again. A forge that is down, or an
+#: issue somebody has locked, must not cost a `gh` call on every flush for ever.
+CLOSE_RETRY_AFTER_SECONDS = 6 * 3600
 
 
 @dataclass(frozen=True)
@@ -504,7 +507,9 @@ def normalise(detail: str) -> str:
 
 #: A tool or API a turn names: `propose_memory`, `Job.report_progress`, `ppy gate`.
 _TOOL = re.compile(r"\bppy\s+[a-z][a-z-]*|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
-_ERROR_CLASS = re.compile(r"\b[A-Z][A-Za-z]*(?:Error|Exception)\b")
+#: An exception class, however a turn capitalised it (`AttributeError`, `attributeerror`).
+#: At least one letter before `Error`/`Exception`, so the bare words do not match.
+_ERROR_CLASS = re.compile(r"(?i)\b[a-z]+(?:error|exception)\b")
 _REPO = re.compile(r"\b(?:repo|repository)\s+`?([A-Za-z0-9][\w.\-/]*[A-Za-z0-9])`?")
 _WORD = re.compile(r"[a-z][a-z0-9_\-]*|[^\sa-z]")
 _REFUSALS = ("refus", "reject", "denie", "deny", "forbid", "forbade", "disallow", "block")
@@ -526,14 +531,21 @@ _STOPWORDS = _DETERMINERS | frozenset(
 )
 #: How many stemmed content words stand for a line that names no tool.
 CONTENT_WORDS = 8
-#: A pull request or issue the line names: `PR #58`, `pull request 710`, `issue #94`, `#58`.
-_PR_OR_ISSUE = re.compile(
-    r"(?i)\b(?:prs?|pull requests?|issues?)\s*#?\s*(\d{1,6})\b|(?:^|[\s(\[])#(\d{1,6})\b"
-)
+#: A pull request the line names: `PR #58`, `PR 58`, `pull request 710`. A number is only
+#: a report when `#` or the word for one stands in front of it — "issue 3 of 5 checks" and
+#: "ran 12 issues 4 times" name no report.
+_NAMED_PR = re.compile(r"(?i)\b(?:prs?|pull\s+requests?)\s*#?\s*(\d{1,6})\b")
+#: `#58`, anywhere. Guarded by :data:`_ENUMERATED`, which is what a bare number after a
+#: ticket id or another number is ("PAP-219 #3").
+_HASH_NUMBER = re.compile(r"#(\d{1,6})\b")
+_ENUMERATED = re.compile(r"[\w\-]*\d+\s*$")
 #: Where an exception came from: `claude.live_denial`, `serve.take`, `state/db.py`, `ppy gate`.
 _WHERE_IDENT = re.compile(r"\bppy\s+[a-z][a-z-]*|\b[a-z][a-z0-9]*(?:[._][a-z0-9_]+)+\b")
-#: An exception's own message, as a turn writes it: bracketed or quoted after the class.
-_EXC_MESSAGE = re.compile(r"""\(\s*["']?(.+?)["']?\s*\)|["'“](.+?)["'”]""")
+#: An exception's own message: what it brackets, or what follows the class to the end of
+#: the sentence. Whole, never a token of it — "'NoneType' object has no attribute 'get'"
+#: and "'NoneType' object has no attribute 'phase'" are two causes.
+_BRACKETED = re.compile(r"^\s*[:\-]?\s*\((.+?)\)")
+_SENTENCE_END = re.compile(r"[.;](?:\s|$)")
 #: How much of the text after an exception class its message may come from.
 MESSAGE_CHARS = 200
 
@@ -569,29 +581,48 @@ def _refusal_noun(tokens: list[str]) -> str:
 
 
 def _named_number(text: str) -> str:
-    """The first pull request or issue number the line names, or ``""``.
+    """The pull request or issue number the line names, or ``""``.
 
-    ``PR #58``, ``pull request 710``, ``issue #94`` and a bare ``#58`` all count: a turn
-    that names the change or the report its trouble is about has named the trouble.
+    ``PR #58``, ``PR 58`` and ``pull request 710`` name one; so does a bare ``#94``,
+    unless it is an enumeration rather than a report — a ``#3`` right after a ticket id
+    or another number ("PAP-219 #3", "task 25 #2") is counted by something, not named.
     """
-    match = _PR_OR_ISSUE.search(text)
-    return next((g for g in match.groups() if g), "") if match else ""
+    named = _NAMED_PR.search(text)
+    if named is not None:
+        return named.group(1)
+    for match in _HASH_NUMBER.finditer(text):
+        if not _ENUMERATED.search(text[: match.start()]):
+            return match.group(1)
+    return ""
 
 
-def _broke_in(text: str, after: str) -> str:
-    """Where an exception came from: the identifier the line names, else its message.
+def _broke_in(text: str) -> str:
+    """The function, module or command the line names, or ``""``.
 
-    The identifier is the first function, module or command name anywhere in the line
-    (``claude.live_denial``, ``serve.take``, ``ppy gate``), because a turn writes it as
-    often before the class as after it. With none, the exception's own message stands in
-    it: what the line quotes or brackets right after the class, reduced to content words.
+    Anywhere in the line (``claude.live_denial``, ``serve.take``, ``ppy gate``), because
+    a turn writes it as often before the exception class as after it.
     """
     ident = _WHERE_IDENT.search(normalise(text).replace("`", " "))
-    if ident is not None:
-        return " ".join(ident.group(0).split())
-    message = _EXC_MESSAGE.search(after[:MESSAGE_CHARS])
-    said = next((g for g in message.groups() if g), "") if message else after[:MESSAGE_CHARS]
-    return " ".join(_content_words(_WORD.findall(normalise(said)), 6))
+    return " ".join(ident.group(0).split()) if ident is not None else ""
+
+
+def _exception_message(after: str) -> str:
+    """An exception's message, whole: what it brackets, else the rest of the sentence.
+
+    Whole, and never a token of it. "'NoneType' object has no attribute 'get'" and
+    "'NoneType' object has no attribute 'phase' when parking" are two deficiencies, and
+    a key built from the first quoted word would make them one — a bare class linking
+    two unrelated rows, which is the thing this fingerprint exists to prevent.
+    """
+    said = after[:MESSAGE_CHARS]
+    bracketed = _BRACKETED.match(said)
+    if bracketed is not None:
+        said = bracketed.group(1)
+    else:
+        end = _SENTENCE_END.search(said)
+        said = said[: end.start()] if end is not None else said
+    # Quotes and backticks are how a turn marks the message, not part of it.
+    return " ".join(normalise(said).replace("`", " ").replace("'", " ").replace('"', " ").split())
 
 
 def reduce_turn_report(detail: str) -> str:
@@ -601,15 +632,18 @@ def reduce_turn_report(detail: str) -> str:
     must never share one. So the key is the strongest thing the line names, by
     precedence, and two lines are the same cause only when they produce the same key:
 
-    1. ``pr|<number>``: a pull request or issue number the line names. A turn that says
-       which change or report its trouble is about has said what the trouble is.
-    2. ``<ExceptionClass>|<where>|<repo>``: an exception class *together with* where it
-       came from — the identifier the line names, or the exception's own message when it
-       names none. The class alone is never enough: two `AttributeError`s in different
-       functions are two deficiencies.
-    3. ``<tool>|<refusal or first words after it>|<repo>``: the first tool or API the
+    1. ``<exceptionclass>|<where>|<repo>``: an exception class *together with* the
+       function, module or command the line names. This is first because it is the most
+       specific thing a turn can say, and a pull request it mentions in passing must not
+       take it over.
+    2. ``pr|<number>|<repo>``: a pull request the line names, with the repository when it
+       names one — two repositories' PR #58 are two things. A turn that says which change
+       its trouble is about, and nowhere it came from, has said what the trouble is.
+    3. ``<exceptionclass>|<message>|<repo>``: an exception class with nowhere named, keyed
+       on its whole message.
+    4. ``<tool>|<refusal or first words after it>|<repo>``: the first tool or API the
        line names, with the noun phrase after its first refusal verb.
-    4. ``words|<first eight stemmed content words>``: a line that names none of those.
+    5. ``words|<first eight stemmed content words>``: a line that names none of those.
 
     This under-merges on purpose. Of the nine issues one crash produced in September,
     six name PR #58 and collapse; the two that name neither that pull request nor a
@@ -617,14 +651,17 @@ def reduce_turn_report(detail: str) -> str:
     `claude.live_denial`) stay apart, which is the right side to err on.
     """
     text = _one_line(detail)
-    number = _named_number(text)
-    if number:
-        return f"pr|{number}"
     repo = _REPO.search(text)
     where = repo.group(1).lower() if repo else ""
     error = _ERROR_CLASS.search(text)
+    broke_in = _broke_in(text) if error is not None else ""
+    if error is not None and broke_in:
+        return f"{error.group(0).lower()}|{broke_in}|{where}"
+    number = _named_number(text)
+    if number:
+        return f"pr|{number}|{where}"
     if error is not None:
-        return f"{error.group(0)}|{_broke_in(text, text[error.end() :])}|{where}"
+        return f"{error.group(0).lower()}|{_exception_message(text[error.end() :])}|{where}"
     lowered = normalise(text)
     tokens = _WORD.findall(lowered)
     tool = _TOOL.search(lowered.replace("`", " "))
@@ -680,6 +717,8 @@ class Deficiency:
     reported_count: int
     #: When the runtime closed the issue itself; cleared when a recurrence reopens it.
     closed_at: str | None = None
+    #: When the runtime last tried to close it, whether or not the forge let it.
+    close_tried_at: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Deficiency:
@@ -701,6 +740,7 @@ class Deficiency:
             opened_at=row["opened_at"] or None,
             reported_count=int(row["reported_count"] or 0),
             closed_at=_column(row, "closed_at"),
+            close_tried_at=_column(row, "close_tried_at"),
         )
 
 
@@ -1106,11 +1146,33 @@ class GhForge:
             log.warning("[deficiencies] gh could not reopen %s: %s", url, err.strip())
         return code == 0
 
-    def close(self, url: str, body: str) -> bool:
-        code, _out, err = self._gh(["issue", "close", url, "--comment", body])
+    def close(self, url: str, body: str = "") -> bool:
+        """Close the issue, with ``body`` as its one closing comment when given.
+
+        `gh issue close --comment` is two things to the forge, and the first can succeed
+        while the second fails. So a retry passes no body once :meth:`said` shows the
+        comment is already there, and the issue is only closed.
+        """
+        args = ["issue", "close", url] + (["--comment", body] if body else [])
+        code, _out, err = self._gh(args)
         if code != 0:
             log.warning("[deficiencies] gh could not close %s: %s", url, err.strip())
         return code == 0
+
+    def said(self, url: str, marker: str) -> bool | None:
+        """Whether a comment on ``url`` already carries ``marker``; ``None`` if unreadable.
+
+        Unreadable is answered as "said" by every caller: a comment missed is better
+        than one posted twice on every flush.
+        """
+        code, out, _err = self._gh(["issue", "view", url, "--json", "comments"])
+        if code != 0:
+            return None
+        try:
+            comments = json.loads(out).get("comments") or []
+            return any(marker in str(c.get("body") or "") for c in comments)
+        except (ValueError, AttributeError):
+            return None
 
 
 # ── what an issue says ──────────────────────────────────────────────────────
@@ -1162,19 +1224,39 @@ def _spec(kind: str) -> Kind:
 def _stale(deficiency: Deficiency, born: datetime, now: datetime) -> bool:
     """Whether this row's newest evidence is too old to open an issue about.
 
-    Too old is either of two things: it predates the running build, so whatever it
-    describes stopped happening before this version existed; or it is older than
-    :data:`STALE_AFTER_SECONDS` however many builds have run, so it is old news.
+    Both things must be true, and a row is buried only when they are:
+
+    - it has not happened for :data:`STALE_AFTER_SECONDS`, and
+    - it last happened before this *version* first ran on this machine, so it was last
+      seen under an older one.
+
+    Either alone is not enough, and that is deliberate on both sides. A row still being
+    recorded under this version is this version's problem however old the first
+    occurrence is. A row recorded minutes before an upgrade is still news — the upgrade
+    it crossed says nothing about whether the new version fixed it — so an upgrade never
+    buries recent evidence. What it buries is the backlog: rows nobody has seen for two
+    days, last seen under a version this machine has since replaced.
     """
     last = _moment(deficiency.last_seen)
     if last is None:
         return False
-    return last < born or (now - last).total_seconds() > STALE_AFTER_SECONDS
+    return (now - last).total_seconds() > STALE_AFTER_SECONDS and last < born
 
 
 def _quiet(deficiency: Deficiency, now: datetime) -> bool:
     last = _moment(deficiency.last_seen)
     return last is not None and (now - last).total_seconds() > QUIET_BEFORE_CLOSE_SECONDS
+
+
+def _tried_recently(deficiency: Deficiency, now: datetime) -> bool:
+    """Whether closing this issue was already tried within the backoff."""
+    tried = _moment(deficiency.close_tried_at)
+    return tried is not None and (now - tried).total_seconds() < CLOSE_RETRY_AFTER_SECONDS
+
+
+def closing_marker(body: str) -> str:
+    """The first line of a closing comment: what tells a retry that it was already said."""
+    return body.splitlines()[0].strip() if body.strip() else ""
 
 
 def issue_for_kind(conn: Any, kind: str) -> str | None:
@@ -1252,12 +1334,30 @@ def comment_body(deficiency: Deficiency, entries: list[dict[str, Any]]) -> str:
 # ── which build was running, and for how long ───────────────────────────────
 
 
+#: The released part of a version: `0.1.22` out of `0.1.22-3-gabc1234.dirty`.
+_RELEASED = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def released_version(described: str) -> str:
+    """The released part of a `git describe`: ``0.1.22`` out of ``0.1.22-3-gabc1234.dirty``.
+
+    `papaya_agent_runtime.__version__` is `git describe`, so it carries the commits since
+    the tag and a dirty flag, and a ledger keyed on that would call every commit and
+    every uncommitted edit a new version — burying every waiting deficiency at each
+    restart, and reading as "a newer version has run" when nothing was released. A
+    version with no release in it at all is ``unknown``: one version for ever, which
+    buries nothing and closes nothing.
+    """
+    found = _RELEASED.search(str(described or ""))
+    return found.group(0) if found is not None else "unknown"
+
+
 def build_id() -> str:
-    """Which version of the runtime is running, as the ledger tells builds apart."""
+    """Which released version of the runtime is running, as the ledger tells them apart."""
     try:
         from papaya_agent_runtime import __version__
 
-        return str(__version__) or "unknown"
+        return released_version(str(__version__))
     except Exception:  # noqa: BLE001 - a version that cannot be read is one build
         return "unknown"
 
@@ -1315,10 +1415,8 @@ class Reporter:
     ``self_report.*`` when absent), ``origin`` (the checkout's origin URL) and
     ``build`` (which version of the runtime is running).
 
-    A reporter's own start is the running build's start of life when the ledger has
-    never seen that build before: what stopped happening before this process started,
-    on a build this machine had not run, is not this version's problem and opens no
-    issue (:data:`STALE`).
+    A reporter's own start is the running version's start of life when the ledger has
+    never seen that version before, which is what :func:`_stale` reads.
     """
 
     def __init__(
@@ -1383,6 +1481,10 @@ class Reporter:
             rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
             opened_today = sum(1 for d in rows if (d.opened_at or "").startswith(today))
             closed_today = sum(1 for d in rows if (d.closed_at or "").startswith(today))
+            # Retiring a kind comes first: a row of one must get its closing comment, not
+            # a recurrence comment this flush and a closing one on the next.
+            done += self._close_what_is_over(conn, rows, config, now, closed_today)
+            rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
             pending = sorted((d for d in rows if d.status == PENDING), key=lambda d: d.first_seen)
             for deficiency in pending:
                 if _spec(deficiency.kind).superseded_by:
@@ -1440,13 +1542,12 @@ class Reporter:
                 if not ok:
                     continue
                 conn.execute(
-                    "UPDATE deficiencies SET reported_count = ?, status = ?, closed_at = NULL "
-                    "WHERE fingerprint = ?",
+                    "UPDATE deficiencies SET reported_count = ?, status = ?, closed_at = NULL, "
+                    "close_tried_at = NULL WHERE fingerprint = ?",
                     (deficiency.count, REPORTED, deficiency.fingerprint),
                 )
                 conn.commit()
                 done.append(("reopened " if closed else "commented on ") + deficiency.issue_url)
-            done += self._close_what_is_over(conn, rows, config, now, closed_today)
         finally:
             conn.close()
         for line in done:
@@ -1466,10 +1567,16 @@ class Reporter:
         Two ways an open issue ends without a person. A row of a kind another kind has
         replaced gets one comment naming the successor (and its issue, when it has one).
         A row nobody has seen for :data:`QUIET_BEFORE_CLOSE_SECONDS`, across at least one
-        build this machine had not run when it was last seen, gets one comment saying so.
-        Both are bounded by the same ``max_per_day`` as opening, and both are said once:
-        the row carries ``closed_at`` afterwards, and a recurrence clears it and reopens
-        the issue through the recurrence path above.
+        version this machine had not run when it was last seen, gets one comment saying
+        so. Both are said once: the row carries ``closed_at`` afterwards, and a
+        recurrence clears it and reopens the issue through the recurrence path.
+
+        A forge that refuses must cost no more than a forge that agrees, so every
+        *attempt* counts against the same ``max_per_day`` as opening, and a row that was
+        tried within :data:`CLOSE_RETRY_AFTER_SECONDS` is left alone. Closing is two
+        things to GitHub — a comment and a close — and the first can succeed while the
+        second fails; so before commenting again a retry asks whether the comment is
+        already there and, if it is (or cannot be read), only closes.
         """
         done: list[str] = []
         for deficiency in rows:
@@ -1496,12 +1603,16 @@ class Reporter:
                 said += str(deficiency.last_seen)
             else:
                 continue
-            if closed_today >= config.max_per_day:
-                break
-            url = str(deficiency.issue_url)
-            if (self._forge.state(url) or "") != "CLOSED" and not self._forge.close(url, body):
+            if _tried_recently(deficiency, now) or closed_today >= config.max_per_day:
                 continue
             closed_today += 1
+            conn.execute(
+                "UPDATE deficiencies SET close_tried_at = ? WHERE fingerprint = ?",
+                (_stamp(self._clock), deficiency.fingerprint),
+            )
+            conn.commit()
+            if not self._end_issue(str(deficiency.issue_url), body):
+                continue
             conn.execute(
                 "UPDATE deficiencies SET status = ?, closed_at = ? WHERE fingerprint = ?",
                 (status, _stamp(self._clock), deficiency.fingerprint),
@@ -1509,6 +1620,20 @@ class Reporter:
             conn.commit()
             done.append(said)
         return done
+
+    def _end_issue(self, url: str, body: str) -> bool:
+        """Close ``url`` with ``body`` as its one closing comment. Safe to call again.
+
+        An issue already closed needs nothing. An issue whose state cannot be read is
+        left for the next attempt rather than guessed at.
+        """
+        state = self._forge.state(url) or ""
+        if state == "CLOSED":
+            return True
+        if not state:
+            return False
+        said = self._forge.said(url, closing_marker(body))
+        return bool(self._forge.close(url, "" if said is not False else body))
 
     def reclassify(self) -> list[str]:
         """Close what a later classifier or fix says is no longer the runtime's. Never raises.
@@ -1627,6 +1752,8 @@ class Reporter:
             for key, group in groups.items():
                 group.sort(key=_merge_order)
                 kept, rest = group[0], group[1:]
+                if not rest and canonical_fingerprint(conn, key) == kept.fingerprint:
+                    continue  # nothing to fold and the alias is already right
                 # Before anything the forge can refuse: what this cause is called today
                 # points at the row that already has the issue for it.
                 remember_alias(conn, key, kept.fingerprint, at)
@@ -1729,8 +1856,8 @@ def _fold(conn: Any, kept: Deficiency, merged: list[Deficiency], at: str) -> Non
         remember_alias(conn, duplicate.fingerprint, kept.fingerprint, at)
     conn.execute(
         "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
-        "count, evidence, issue_url, status, opened_at, reported_count, closed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "count, evidence, issue_url, status, opened_at, reported_count, closed_at, "
+        "close_tried_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             kept.fingerprint,
             kept.kind,
@@ -1745,6 +1872,7 @@ def _fold(conn: Any, kept: Deficiency, merged: list[Deficiency], at: str) -> Non
             kept.opened_at,
             reported,
             kept.closed_at,
+            kept.close_tried_at,
         ),
     )
 
@@ -2031,9 +2159,10 @@ FIXED_TURN_REPORTS: tuple[ReportFix, ...] = (
     ),
     ReportFix(
         # "`ppy deliver 21` reported "PR creation failed" with no reason"
-        # Three keys: as written before reduced fingerprints, as task 285 reduced it, and
-        # as task 321 reads it (the line names pull request #710, which now leads).
-        fingerprints=frozenset({"73e968fea9ac0d8e", "c4b7a8dab0a58df5", "fe2394214d1d4c07"}),
+        # Every key this row can be under: as written before reduced fingerprints, as
+        # task 285 reduced it, and as task 321 reads it (the line names pull request
+        # #710, which leads unless the line also names where it broke).
+        fingerprints=frozenset({"73e968fea9ac0d8e", "c4b7a8dab0a58df5", "400aea7b2154f11e"}),
         before=_PAP_222_FIXED_AT,
         note=(
             "`ppy deliver` always tried to create a pull request and cut `gh`'s refusal "
@@ -2117,6 +2246,7 @@ __all__ = [
     "UNHANDLED_EXCEPTION",
     "WATCHING",
     "WORKER_DENIAL",
+    "CLOSE_RETRY_AFTER_SECONDS",
     "CheckinFix",
     "Deficiency",
     "GhForge",
@@ -2126,6 +2256,7 @@ __all__ = [
     "build_id",
     "build_started",
     "canonical_fingerprint",
+    "closing_marker",
     "comment_body",
     "denial_kinds",
     "duplicate_body",
@@ -2146,6 +2277,7 @@ __all__ = [
     "record_gate_past_tool_cap",
     "record_once",
     "reclassified_body",
+    "released_version",
     "redact",
     "reduce_turn_report",
     "remember_alias",
