@@ -80,8 +80,12 @@ DEVICE_RETRY = timedelta(minutes=30)
 #: The sweep's blocker: Papaya refuses this machine work nobody is doing.
 IDLE_WORK_KEPT = "papaya_keeps_idle_work"
 
+#: A finished worker's branch the remote or a hook refused. A person's decision: the
+#: runtime never retries a push, because saying it again cannot change the answer.
+PUSH_REFUSED = "push_refused"
+
 #: Blocker codes a readiness verdict never carries, so observing one never clears them.
-OBSERVED_ELSEWHERE = frozenset({IDLE_WORK_KEPT})
+OBSERVED_ELSEWHERE = frozenset({IDLE_WORK_KEPT, PUSH_REFUSED})
 
 #: Blocker codes the outreach procedure says to the owner itself (`outreach.py`): they
 #: stay in the ledger for the desktop app's card, and out of this module's DM, so a
@@ -447,6 +451,69 @@ def set_idle_work_kept(names: list[str], *, now: datetime | None = None) -> Chan
     if changes.appeared or changes.cleared:
         _record_change(changes)
     return changes
+
+
+def set_push_refused(
+    task_id: int, repo: str, branch: str, reason: str, *, now: datetime | None = None
+) -> Changes:
+    """A finished worker's branch could not be pushed. One blocker per task branch.
+
+    Recorded once and left alone: a remote or a hook that refused a push refuses it
+    again, so this waits for a person rather than looping. It clears when the push
+    succeeds (`clear_push_refused`), which is what the next attempt by hand does.
+    """
+    stamp = _iso(now or datetime.now(UTC))
+    fp = hashlib.sha256(f"{PUSH_REFUSED}:{task_id}:{branch}".encode()).hexdigest()[:16]
+    title = f"task {task_id}'s finished branch `{branch}` could not be pushed to {repo}"
+    steps = [
+        f"Read why: `ppy task show {task_id}` — the refusal is recorded in the "
+        "remote's or the hook's own words",
+        f"Fix what it asks for in the worktree, then `ppy task push {task_id}`",
+        "Never `--no-verify` and never force: the hook is the repository's, not the "
+        "runtime's, and the work stays committed until it passes",
+    ]
+    changes = Changes()
+    with _lock:
+        ledger = Ledger.load()
+        existing = ledger.open.get(fp)
+        if existing is None:
+            blocker = Blocker(
+                fp, PUSH_REFUSED, title, [*steps, *_reason_lines(reason)], stamp, stamp
+            )
+            ledger.open[fp] = blocker
+            ledger.cleared.pop(fp, None)
+            changes.appeared.append(blocker)
+        else:
+            existing.last_seen = stamp
+        ledger.save()
+    if changes.appeared:
+        _record_change(changes)
+    return changes
+
+
+def clear_push_refused(task_id: int, branch: str, *, now: datetime | None = None) -> Changes:
+    """The branch went up after all, so the blocker is over."""
+    stamp = _iso(now or datetime.now(UTC))
+    fp = hashlib.sha256(f"{PUSH_REFUSED}:{task_id}:{branch}".encode()).hexdigest()[:16]
+    changes = Changes()
+    with _lock:
+        ledger = Ledger.load()
+        if fp not in ledger.open:
+            return changes
+        blocker = ledger.open.pop(fp)
+        blocker.cleared_at = stamp
+        if blocker.reported_at is not None:
+            ledger.cleared[fp] = blocker
+        changes.cleared.append(blocker)
+        ledger.save()
+    _record_change(changes)
+    return changes
+
+
+def _reason_lines(reason: str, count: int = 6) -> list[str]:
+    """The refusal's own last lines, as steps, so the card says what it wants."""
+    lines = [line.strip() for line in (reason or "").splitlines() if line.strip()]
+    return [f"It said: {line}" for line in lines[-count:]]
 
 
 def _record_change(changes: Changes) -> None:

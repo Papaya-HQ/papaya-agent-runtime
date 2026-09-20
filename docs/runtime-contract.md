@@ -1134,6 +1134,88 @@ If you find a self-reported issue that is none of those and is still wrong, that
 runtime defect worth a task: the rule that should have caught it is the deliverable, not
 a hand-closed issue.
 
+### A refused command's recorded reason is the true one
+
+A worker's denial is recorded as one of five kinds, and the kind decides what a person
+is asked to fix. Getting it wrong sends them at the wrong thing: issue #83 recorded
+fourteen hook refusals as `profile_gap`, reason "git is not in the safe family", which
+pointed at widening the worker profile — a change that would have altered nothing.
+
+| Kind | What refused it | What closes it |
+| --- | --- | --- |
+| `hook_refusal` | The **target repository's own** `PreToolUse` hook. The harness allowed the call | Give the hook what it asks for. Never edit, skip or disable it |
+| `profile_gap` | The worker's tool profile | Learn the pattern (safe family), or a person decides |
+| `command_shape` | The command rules: operators, pipes, redirection, inline environment | The rewrite in the steer; the worker runs the replacement |
+| `outside_worktree` | The harness's working-directory boundary | `ppy reference grant` for a registered repository |
+| `policy_refusal` | The NEVER list or the environment block | Nothing — the worker is told the rule |
+
+The two are told apart from the transcript, not guessed: a harness refusal carries its
+own `permission_denied` line with the harness's words; a hook refusal has no such line
+anywhere in the turn and an error tool result holding the hook's stderr. When the hook
+itself cannot be read from the repository, the recorded reason and the issue both say
+the diagnosis is **inferred**.
+
+### Finished work reaches the remote even where a repository gates pushes
+
+A repository may gate pushes with its own hook (`repos.push_hook_runs_full_suite`; both
+Papaya monorepos do, through `.claude/hooks/verify-before-push.sh`). A worker there is
+told **not to push at all** — its command rules say so instead of naming a push command,
+so the rules and the environment block no longer contradict each other.
+
+The runtime pushes instead, in the supervisor, when all of: the repository gates pushes,
+the worker's newest note reached the task's own terminal phase (`done`, or `review` for a
+task that ends at review), and the runtime's own gate is green at the worktree's **exact**
+SHA. It runs after the auto-commit and before anything reviews that head, so a review
+reads a pushed branch. It is a plain subprocess, not a Claude tool call, so the
+repository's Claude hook does not apply to it — and the suite that hook exists to run has
+already run, as the runtime's own gate at that same head. The repository's git hooks still
+run and are never bypassed: `--no-verify` and force pushes are forbidden here and nowhere
+used.
+
+**There is exactly one push decision per ending** (`turn_end.deliver_after_turn`). A gated
+repository goes through the gate-checked path; every other repository keeps the older
+`rescue_unpushed`, which is the safety net for a worker that finished and did not push.
+Two paths running in sequence meant an ungated head could be pushed before the gate was
+ever consulted, and a refused push was followed at once by a second one — two full
+pre-push suites for one ending.
+
+What that push is given, and what it may start:
+
+- **the task's own environment**, the same one `ppy gate run` builds (`gate.gate_env`):
+  the private compose project, database port and URLs. A pre-push hook runs the
+  repository's suite, and a suite run against the shared stack passes or fails for
+  another task's reasons;
+- **its own process group**, torn down whole on timeout. Killing `git` alone would orphan
+  everything the hook started — the compiler, the test runner, Docker, the database —
+  while the runtime recorded that the push had been stopped;
+- **a bounded wait** from the repository's recorded full-suite budget, floored and capped;
+  an ungated push gets a plain network timeout.
+
+What it verifies before and after: the remote is asked what it holds (`git ls-remote`),
+never the local tracking ref, which a worker can move with `git update-ref`; and the
+**verified SHA** is what is pushed (`<sha>:refs/heads/<branch>`), not a `HEAD` that could
+move underneath the check. A branch the remote already holds at that head is not pushed
+again. A refused push is a blocker for a person (`push_refused`, carrying the remote's or
+the hook's own words) and is never retried — saying it again cannot change the answer.
+`ppy task push <id>` is the same push by hand once the reason is fixed.
+
+### Long notes go in a file
+
+`ppy progress --note-file <path>` and `ppy need --why-file <path>` exist because a note
+of more than one line — or holding a backtick, `$`, `#`, or a brace with a quote — is
+refused as a *command* whatever the program is, since the harness will not statically
+analyse the argument (issue #115). The inline `--note` and `--why` still work for short
+plain text. `$(cat <file>)` is not the workaround: it is command substitution, and it is
+refused too.
+
+The path is **confined to the named task's own worktree or its evidence directory**, and
+checked on the fully resolved path — so `~`, `..` and a symlink inside the worktree
+pointing out of it are all refused, as is a task with no worktree. The roots come from the
+task id the command names, never from the process's working directory. A note reaches the
+event ledger and from there pull request bodies and comments; a flag that read any path
+would be a way to publish `~/.ssh/id_rsa` or the state database with one allowed `ppy`
+call, which a worker's own Read tool would refuse.
+
 ## Mode parity — you work the same in a session as under `ppy serve`
 
 Nothing that supervises workers belongs to one mode. Whether this runtime is `ppy serve`
@@ -1201,7 +1283,7 @@ readable at a glance by someone who just wants to know if it's done.
 | Steer / resume | `ppy steer <task_id> --message ... [--replace]` applies provider-capability-aware steering; `ppy stop <task_id> --message ...` is the replacing steer (stop the current turn, resume with this message alone). From a session these record `by: person`, from a `ppy serve` turn `by: manager`. `ppy resume <task_id> [--message] [--ends-at review\|done]` defaults to the task's stored terminal phase; an explicit value replaces and persists it. Resume reapplies the task process environment, rebuilds a missing pristine worktree into a fresh lease on the same branch/base, verifies that newly minted or retained lease owns the task path, synchronizes a cascaded branch before launch, and never reuses a released lease identity or a path now owned by another task. On a `worker_stopped` task, a bare resume sends the worker back with what was cut short; see [`task-lifecycle.md`](task-lifecycle.md). A resume, and a steer or stop that starts a session, then waits up to `--verify-seconds` (default 20; 0 skips) and prints `task <id>: worker alive (pid N)`, or an `INCIDENT:` line and exit 1 when no worker process ever appeared — check `ppy health` and the supervisor log before resuming again. `ppy status` prints an `INCIDENT:` line for any in-flight worker whose runner has no live process. |
 | Review | `ppy review show <task_id>` (worker report, the capture/receipt paths it named with sizes and openable image lines, the standing approval note, a migration-collision flag when this diff's added migration shares a `down_revision` with another unmerged task's, the layer's place in its stack and the merge order when a stack parent is recorded, then the diffstat), `ppy review approve <task_id> [--note "what you checked"] [--findings ...]`, `ppy review request-changes <task_id> --findings ...`, `ppy review status <task_id>` (also prints the approval note) |
 | Deliver | `ppy deliver <task_id> [--no-pr] [--base ...] [--remote ...] [--title "..."] [--body-file FILE]` — pushes to the repo's registered forge and opens the pull request there (`--remote` overrides); composes the pull request body from the archived brief, reports, approval note, and stack order. It refuses a diff containing commits owned by another open task (a cherry-picked copy counts; a commit on a child's stack parent is the parent's, not the child's) and names both tasks: keep the native layer PRs and use `ppy stack merge`, never a composition PR. Existing stack-base refusals still apply. `--body-file` and `--title` override generated text. `ppy deliver <task_id> --merged <sha>` idempotently records an externally merged commit, pushes nothing, and takes the task's compose stack down. |
-| Close out / repair | `ppy task close <id> --reason "..."` (terminal `closed`, frees the slot and takes the task's compose stack down), `ppy task set-status <id> <status> --note "..."`, `ppy task push <id>` (push a lease worktree onto its own branch by hand — the manual form of what the harness does for a done-but-unpushed worker; prints the SHA it pushed or the refusal it got), `ppy lease release <task_id> [--reason ...]` |
+| Close out / repair | `ppy task close <id> --reason "..."` (terminal `closed`, frees the slot and takes the task's compose stack down), `ppy task set-status <id> <status> --note "..."`, `ppy task push <id>` (push a lease worktree onto its own branch by hand — the manual form of what the runtime does for a done-but-unpushed worker, and for a finished worker in a repository that gates pushes; never forces, never `--no-verify`, and does nothing when the remote already holds that head; prints the SHA it pushed or the refusal it got), `ppy lease release <task_id> [--reason ...]` |
 | Per-task compose stacks | For a repo with `--compose-stack` set, dispatch records `compose_project=task_<id>` (and `db_port`) itself, source `dispatch`. Otherwise `ppy task env set <id> compose_project=<name>` records the stack a task brought up, and is taken as given because you typed it. A worker naming `COMPOSE_PROJECT_NAME=...` in a `ppy progress` note is picked up automatically **only when it is that task's own stack** (`task_<id>` or `<prefix>_task_<id>`) — teardown destroys volumes, and a note mentioning a shared stack must never arm one; anything else is dropped with a `compose_project_ignored` event naming it. `ppy task env show <id> [--json]` lists what's recorded. `ppy deliver --merged`, `ppy task close`, and `ppy worktree prune` then run `docker compose -p <name> down -v --remove-orphans` for it and print what went. No docker, or a stack already gone, is never an error. `ppy health` lists stacks named `task_<n>`/`*_task_<n>` whose task is already over as prunable — that's the Docker network ceiling filling up |
 | Stacks | `ppy stack <task_id|run_id>` — the stack bottom-up with each PR's state and next action. `ppy stack merge <task_id> [--all]` uses the forge's ordinary merge commit strategy, lowest unmerged layer first; after each confirmed merge it records the forge merge SHA and retargets direct child PRs to the default branch. `--all` repeats upward and stops before touching a layer whose required check is red, naming the check. Merge authority must be enabled. `ppy stack rebuild <task_id>` applies the existing cascade-safe remote sync and never force-pushes a diverged branch. |
 | Lavish (rich) | `lavish-review new <file> --title …` to scaffold (shipped Atlassian-style default); `lavish-axi <file>` to open; `lavish-axi poll <file>` **backgrounded or short-timeout only** — never a foreground long-poll |

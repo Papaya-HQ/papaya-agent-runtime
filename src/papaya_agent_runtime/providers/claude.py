@@ -45,6 +45,206 @@ def _transcript_path(worktree: str, session_id: str) -> Path:
     return Path.home() / ".claude" / "projects" / slug / f"{session_id}.jsonl"
 
 
+# ── who refused a tool call ─────────────────────────────────────────────────
+#
+# Claude Code refuses a Bash call in two shapes, and the runtime used to see only
+# one of them. Read off the live state database on 2026-09-20, every recorded
+# denial since 2026-09-18 (107) fell into exactly these two:
+#
+# 1. The HARNESS refused — profile, safety check, command shape, working
+#    directory. A `{"type":"system","subtype":"permission_denied"}` line names the
+#    `tool_use_id` and carries the harness's own words in `message`, often with a
+#    `decision_reason_type` (`other`, `subcommandResults`, `safetyCheck`,
+#    `asyncAgent`) and a `decision_reason`.
+#
+# 2. A repository's own **PreToolUse hook** refused. There is NO such line
+#    anywhere in the turn. The call appears only in the result's
+#    `permission_denials` and in a `user`/`tool_result` with `is_error: true` and
+#    `tool_result_meta[].non_execution_kind == "permission-rule"`, whose content is
+#    the hook's stderr. All six such denials on record are the prescribed
+#    `git push origin HEAD:ppy/task-<n>-<id>`, refused by
+#    `.claude/hooks/verify-before-push.sh` in the two monorepos (issues #83, #116).
+#
+# The `PreToolUse:Bash hook error:` prefix some of those carry is NOT the test —
+# two of the six (tasks 58 and 129, older Claude Code) carry the hook's stderr
+# with no prefix at all. The absence of the harness's own line is the test.
+
+#: What the harness says when it blocked a path rather than a program. A hook never
+#: says this, so it keeps a working-directory refusal from reading as a hook block
+#: if the harness ever stops emitting its own line for one.
+_HARNESS_WORDS = (
+    "was blocked. For security, Claude Code",
+    "requires approval",
+    "haven't granted it yet",
+    # A configured deny rule, on a release that reports it only in the tool result.
+    # Without this a profile refusal on an older harness reads as a hook refusal,
+    # which is the same class of lie this change exists to stop, pointing the other
+    # way.
+    "has been denied",
+    "permission to use",
+    "Claude requested permissions",
+)
+
+
+def _tool_result_error(tool_use_id: str, events: list[ProviderEvent]) -> str:
+    """The error text the call came back with, or "" — for a hook, its own stderr."""
+    for ev in events:
+        if ev.raw.get("type") != "user":
+            continue
+        meta = ev.raw.get("tool_result_meta")
+        if isinstance(meta, list) and not any(
+            isinstance(m, dict) and m.get("id") == tool_use_id for m in meta
+        ):
+            continue
+        message = ev.raw.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and block.get("tool_use_id") == tool_use_id
+                and block.get("is_error")
+            ):
+                text = block.get("content")
+                return text if isinstance(text, str) else ""
+    return ""
+
+
+def refusal_evidence(tool_use_id: str, events: list[ProviderEvent]) -> dict:
+    """What this turn's transcript proves about who refused ``tool_use_id``.
+
+    Shaped by :data:`papaya_agent_runtime.providers.base.REFUSAL_FIELDS`. Without a
+    tool call id nothing can be attributed, and ``harness_line`` is left True so the
+    judgement falls back to the command alone rather than inventing a hook.
+    """
+    if not tool_use_id:
+        return {
+            "harness_line": True,
+            "decision_reason_type": "",
+            "decision_reason": "",
+            "message": "",
+            "tool_result": "",
+        }
+    for ev in events:
+        raw = ev.raw
+        if (
+            raw.get("type") == "system"
+            and raw.get("subtype") == "permission_denied"
+            and raw.get("tool_use_id") == tool_use_id
+        ):
+            return {
+                "harness_line": True,
+                "decision_reason_type": raw.get("decision_reason_type") or "",
+                "decision_reason": raw.get("decision_reason") or "",
+                "message": raw.get("message") if isinstance(raw.get("message"), str) else "",
+                "tool_result": "",
+            }
+    result = _tool_result_error(tool_use_id, events)
+    # No line AND no error result is not evidence of a hook — it is no evidence at
+    # all, which is the ordinary case for a denial read back from a `result` event
+    # with none of the turn's stream beside it. Claiming a hook there would put a
+    # false diagnosis on every one of them, which is the defect this whole change
+    # exists to stop. Only the hook's own words make it a hook.
+    hook_said = bool(result) and not any(word in result for word in _HARNESS_WORDS)
+    return {
+        "harness_line": not hook_said,
+        "decision_reason_type": "",
+        "decision_reason": "",
+        "message": "",
+        "tool_result": result,
+    }
+
+
+#: Where a repository registers hooks for Claude Code, most specific last.
+HOOK_SETTINGS_FILES = (
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+)
+#: The most of a settings file that is read. Bigger than any real one, small enough
+#: that a dispatch cannot be slowed by a file somebody else's repository ships.
+MAX_SETTINGS_BYTES = 1024 * 1024
+#: The longest matcher treated as a regex. A pattern this size is not a tool name.
+MAX_MATCHER_CHARS = 200
+
+
+def registered_hooks(worktree: str | None, tool: str) -> list[dict[str, str]]:
+    """The repository's own ``PreToolUse`` hooks that match ``tool``. Never raises.
+
+    Each is ``{"settings": <repo-relative settings file>, "command": <as written>,
+    "script": <repo-relative script, when the command names one>}``. An empty list
+    means the repository registers none, or that none could be read — which is why
+    a diagnosis resting on this alone is recorded as inferred.
+    """
+    found: list[dict[str, str]] = []
+    if not worktree:
+        return found
+    for name in HOOK_SETTINGS_FILES:
+        try:
+            with (Path(worktree) / name).open("rb") as handle:
+                # Bounded: this is called at every dispatch and every resume, and a
+                # settings file is a few kilobytes. A huge or binary one is not read.
+                blob = handle.read(MAX_SETTINGS_BYTES + 1)
+            if len(blob) > MAX_SETTINGS_BYTES:
+                continue
+            settings = json.loads(blob.decode("utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            # Every failure here is "this repository tells us nothing", never a
+            # crash: the callers are dispatch and resume, which must not die on a
+            # malformed file in somebody else's repository.
+            continue
+        hooks = settings.get("hooks") if isinstance(settings, dict) else None
+        entries = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or not _matches(entry.get("matcher"), tool):
+                continue
+            for hook in entry.get("hooks") if isinstance(entry.get("hooks"), list) else []:
+                if not isinstance(hook, dict):
+                    continue
+                command = str(hook.get("command") or "").strip()
+                if command:
+                    found.append({"settings": name, "command": command, "script": _script(command)})
+    return found
+
+
+def _matches(matcher: object, tool: str) -> bool:
+    """Claude Code's matcher: a tool name, a `|` list, `*`, a regex, or absent for all.
+
+    Claude Code treats a matcher as a regular expression, so `Bash.*` and
+    `Notebook.*` are both real and in use. A plain name and a `|` list are handled
+    first because they are the common case and cannot misfire; anything else is
+    full-matched as a regex, with the pattern length capped and `re.error` caught, so
+    a repository cannot make dispatch hang or crash on a matcher it wrote.
+    """
+    if matcher is None or matcher == "" or matcher == "*":
+        return True
+    if not isinstance(matcher, str):
+        return False
+    parts = [part.strip() for part in matcher.split("|")]
+    if any(part == tool for part in parts):
+        return True
+    if len(matcher) > MAX_MATCHER_CHARS:
+        return False
+    try:
+        return re.fullmatch(matcher, tool) is not None
+    except re.error:
+        return False
+
+
+def _script(command: str) -> str:
+    """The repo-relative script a hook command runs, or "" when it is not one.
+
+    Claude Code writes the project root as ``${CLAUDE_PROJECT_DIR}``, so a hook of
+    this repository is exactly the one named relative to it.
+    """
+    first = command.split()[0] if command.split() else ""
+    for prefix in ("${CLAUDE_PROJECT_DIR}/", "$CLAUDE_PROJECT_DIR/", "./"):
+        if first.startswith(prefix):
+            return first[len(prefix) :]
+    return "" if first.startswith("/") else first
+
+
 def _ends_on_an_assistant_turn(spec: TaskSpec) -> bool:
     """Does this session's transcript end mid-answer, with nothing to reply to?
 
@@ -145,7 +345,12 @@ class ClaudeAdapter(ProviderAdapter):
         rules, not the task's, so the runtime states them — once, identically,
         every time.
         """
-        rules = command_rules(self.name, spec.branch, environment=spec.environment)
+        rules = command_rules(
+            self.name,
+            spec.branch,
+            environment=spec.environment,
+            runtime_pushes=spec.runtime_pushes,
+        )
         return f"{rules}\n---\n\n{super().worker_prompt(spec)}"
 
     def _common(self, argv: list[str], spec: TaskSpec) -> list[str]:
@@ -242,12 +447,19 @@ class ClaudeAdapter(ProviderAdapter):
         )
 
     def permission_denials(self, events: list[ProviderEvent]) -> list[dict]:
-        """The tool calls Claude Code refused, from the turn's ``result`` event."""
+        """The tool calls Claude Code refused, from the turn's ``result`` event.
+
+        Each one is given the ``refusal`` block the rest of the transcript proves
+        about it, which is the only place a hook block and a permission refusal
+        differ (:func:`refusal_evidence`).
+        """
         denials: list[dict] = []
         for ev in events:
             if ev.raw.get("type") == "result":
                 found = ev.raw.get("permission_denials") or []
-                denials.extend(d for d in found if isinstance(d, dict))
+                denials.extend(dict(d) for d in found if isinstance(d, dict))
+        for denial in denials:
+            denial["refusal"] = refusal_evidence(str(denial.get("tool_use_id") or ""), events)
         return denials
 
     def live_denial(self, event: ProviderEvent, events: list[ProviderEvent]) -> dict | None:
@@ -283,6 +495,15 @@ class ClaudeAdapter(ProviderAdapter):
             "tool_name": raw.get("tool_name"),
             "tool_use_id": tool_use_id,
             "tool_input": tool_input,
+            # This line IS the harness announcing the refusal, so it settles the
+            # question the end-of-turn path has to go looking for.
+            "refusal": {
+                "harness_line": True,
+                "decision_reason_type": raw.get("decision_reason_type") or "",
+                "decision_reason": raw.get("decision_reason") or "",
+                "message": raw.get("message") if isinstance(raw.get("message"), str) else "",
+                "tool_result": "",
+            },
         }
 
     def parse_usage(self, events: list[ProviderEvent]) -> UsageInfo | None:

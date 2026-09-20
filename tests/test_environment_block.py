@@ -295,20 +295,36 @@ def test_terminal_instruction_matches_task_with_and_without_push_hook(
         assert "--phase done" in combined
 
 
-def test_the_push_hook_line_routes_the_push_through_the_harness() -> None:
+def test_the_push_hook_line_routes_the_push_through_the_runtime() -> None:
     text = environment.render(
         _env(push_hook_runs_full_suite=True),
         task_id=12,
         evidence_path="/wt/12/.ppy-evidence",
         branch="ppy/task-12-abc",
     )
-    assert "pre-push hook runs the full suite, so do not push" in text
-    assert "replaces the push line in the command rules above" in text
+    assert "gates pushes with its own hook, which runs the full suite, so do not push" in text
     assert "Stop at the code-level gates" in text
     assert '`ppy progress 12 --phase done --note "..."`' in text
     assert "`git rev-parse HEAD`" in text
-    assert "pushes `ppy/task-12-abc` on your behalf" in text
+    assert "runtime then pushes `ppy/task-12-abc` itself" in text
+    assert "once its own gate is green at your exact head" in text
     assert "`ppy task push 12`" in text
+
+
+def test_the_push_hook_line_says_the_hook_is_not_skipped_for_the_worker() -> None:
+    """The runtime pushes outside the harness, where a Claude hook does not apply.
+
+    A worker told "do not push, the runtime does it" could reasonably read that as
+    the runtime going round the repository's safety check. It is not: the hook fires
+    inside a Claude Code session and the runtime's push is a plain subprocess, and
+    the suite the hook exists to run has already run as the runtime's own gate.
+    """
+    text = environment.render(
+        _env(push_hook_runs_full_suite=True), task_id=12, evidence_path="/wt/12/.ppy-evidence"
+    )
+
+    assert "outside the harness, where that hook does not apply" in text
+    assert "nothing about it is skipped or weakened for you" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -524,7 +540,13 @@ def test_a_dispatched_claude_brief_carries_the_block_for_this_task(
     assert f"COMPOSE_PROJECT_NAME=task_{task_id} PAPAYA_DB_PORT={54000 + task_id}" in prompt
     assert f"{spec.worktree_path}/.ppy-evidence/" in prompt
     assert "Scoped gate: `make test-backend` (person)" in prompt
-    assert f"pushes `{spec.branch}` on your behalf" in prompt
+    assert f"runtime then pushes `{spec.branch}` itself" in prompt
+    # And with the repository gating pushes, the command rules no longer tell the
+    # worker to run the push that the hook would refuse: the two used to contradict
+    # each other, and the worker followed the rules (issue #83, fourteen times).
+    assert spec.runtime_pushes is True
+    assert f"git push origin HEAD:{spec.branch}" not in prompt
+    assert "Do not push in this repository; the runtime pushes for you." in prompt
     polluted = {
         "PATH": "/usr/bin",
         "KEEP": "yes",

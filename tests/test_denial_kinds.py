@@ -33,8 +33,26 @@ WORKTREE = "/tmp/ppy-worktrees/task-7"
 BRANCH = "ppy/task-7-abc"
 
 
-def _denial(command: str, use: str) -> dict[str, Any]:
-    return {"tool_name": "Bash", "tool_use_id": use, "tool_input": {"command": command}}
+def _denial(command: str, use: str, **refusal: Any) -> dict[str, Any]:
+    """A denial as the adapter hands it over, with the refusal evidence it carries.
+
+    The default is the harness's own refusal line, which is what a live
+    `permission_denied` always is: that line IS the harness saying it refused.
+    """
+    said = {
+        "harness_line": True,
+        "decision_reason_type": "",
+        "decision_reason": "",
+        "message": "",
+        "tool_result": "",
+    }
+    said.update(refusal)
+    return {
+        "tool_name": "Bash",
+        "tool_use_id": use,
+        "tool_input": {"command": command},
+        "refusal": said,
+    }
 
 
 @pytest.fixture
@@ -186,7 +204,12 @@ def test_a_live_denial_whose_line_carries_a_refusal_message_string_is_read() -> 
         ),
     ]
     adapter = ClaudeAdapter()
-    assert adapter.live_denial(events[2], events) == _denial(command, "toolu_7")
+    assert adapter.live_denial(events[2], events) == _denial(
+        command,
+        "toolu_7",
+        decision_reason_type="subcommandResults",
+        message="This Bash command contains multiple operations.",
+    )
 
 
 # ── steering the worker ─────────────────────────────────────────────────────

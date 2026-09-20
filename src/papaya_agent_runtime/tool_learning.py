@@ -42,11 +42,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from papaya_agent_runtime.config import PPY_LAUNCHER_PATTERN
 
@@ -66,7 +67,11 @@ PROFILE_GAP = "profile_gap"
 #: A command the worker is allowed to run, refused for WHERE it pointed: outside the
 #: session's own worktree. Nothing about the profile would change that.
 OUTSIDE_WORKTREE = "outside_worktree"
-KINDS = (COMMAND_SHAPE, POLICY_REFUSAL, PROFILE_GAP, OUTSIDE_WORKTREE)
+#: The harness allowed the call and the TARGET REPOSITORY's own tool hook refused it.
+#: Nothing about the profile, the shape or the policy would change that, and the only
+#: thing that makes the command run is whatever the hook wants (issues #83, #116).
+HOOK_REFUSAL = "hook_refusal"
+KINDS = (COMMAND_SHAPE, POLICY_REFUSAL, PROFILE_GAP, OUTSIDE_WORKTREE, HOOK_REFUSAL)
 
 #: Command-shape denials on one worker before it is steered with the rules.
 SHAPE_STEER_AFTER = 2
@@ -182,6 +187,14 @@ class Verdict:
     kind: str = PROFILE_GAP
     #: The program the command runs, when it could be read.
     program: str = ""
+    #: For :data:`HOOK_REFUSAL`: the repository's hook script, when it could be read.
+    hook: str = ""
+    #: For :data:`HOOK_REFUSAL`: the settings file registering that hook.
+    hook_settings: str = ""
+    #: The diagnosis rests on the absence of the harness's own refusal line rather
+    #: than on a hook the runtime could actually read. Said in the recorded reason
+    #: and in the issue, because it is the one part that is deduced, not observed.
+    inferred: bool = False
 
 
 def _unquoted(command: str) -> str | None:
@@ -238,15 +251,77 @@ _SHAPE_REASON = (
 )
 
 
-def classify(tool: str, command: str | None, worktree: str | None) -> Verdict:
+def _program_of(command: str) -> str:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return ""
+    return words[0] if words else ""
+
+
+def _hook_verdict(tool: str, command: str, worktree: str | None) -> Verdict:
+    """The target repository's own hook refused a call the harness allowed.
+
+    The profile, the shape, the policy and the location are all beside the point:
+    the call got past every one of them. What the hook wants is the only thing that
+    would let the command run, and the hook's own words are in the evidence.
+    """
+    from papaya_agent_runtime.providers.claude import registered_hooks
+
+    program = _program_of(command)
+    hooks = registered_hooks(worktree, tool)
+    hook = hooks[0] if hooks else {}
+    script = str(hook.get("script") or hook.get("command") or "")
+    settings = str(hook.get("settings") or "")
+    if script:
+        reason = (
+            f"the repository's own `{script}` hook, registered as a {tool} `PreToolUse` "
+            f"hook in `{settings}`, refused it; the harness allowed it. Nothing about the "
+            "worker's tool profile would change this"
+        )
+    else:
+        reason = (
+            f"the harness never refused it — no `permission_denied` line names this call — "
+            f"so something the repository runs between permission and execution did. This "
+            f"repository registers no readable {tool} `PreToolUse` hook, so the diagnosis is "
+            "inferred from the absence of the harness's own refusal"
+        )
+    return Verdict(
+        _suggest(program) if program else "",
+        False,
+        reason,
+        HOOK_REFUSAL,
+        program,
+        hook=script,
+        hook_settings=settings,
+        inferred=not script,
+    )
+
+
+def classify(
+    tool: str,
+    command: str | None,
+    worktree: str | None,
+    *,
+    refusal: dict | None = None,
+) -> Verdict:
     """Which kind of denial this is, and which pattern would have allowed it.
 
-    The shape is judged before the program: `cd x && grep y` names `cd`, which the
-    profile has, and was refused for the `&&`.
+    ``refusal`` is the provider's evidence about WHO refused the call
+    (`providers.base.REFUSAL_FIELDS`). It is judged first and settles the question
+    outright: a call the harness never refused got past the profile, the shape rules
+    and the policy, so only the repository's own hook is left. Without it — an older
+    record, a provider that reports no such thing — the command alone is judged,
+    exactly as before.
+
+    Then the shape is judged before the program: `cd x && grep y` names `cd`, which
+    the profile has, and was refused for the `&&`.
     """
     if tool != "Bash":
         return Verdict(tool, False, f"{tool} is not a shell command; only Bash is learned")
     command = (command or "").strip()
+    if refusal is not None and not refusal.get("harness_line", True):
+        return _hook_verdict(tool, command, worktree)
     bare = _unquoted(command)
     if not command or bare is None:
         return Verdict("", False, "the command could not be read", COMMAND_SHAPE)
@@ -318,6 +393,33 @@ def classify(tool: str, command: str | None, worktree: str | None) -> Verdict:
     if refusal:
         return Verdict(suggestion, False, refusal, program=program)
     return Verdict(suggestion, True, f"{program} is in the safe family ({family})", program=program)
+
+
+#: How much of a hook's own output is kept as evidence and shown to a person.
+HOOK_SAID_LINES = 20
+
+
+def _hook_said(refusal: dict | None) -> str:
+    """The hook's own last lines, which are what a person needs to act on."""
+    text = str((refusal or {}).get("tool_result") or "").strip()
+    if not text:
+        return ""
+    # Claude Code prefixes the hook's stderr on newer releases and not on older
+    # ones; strip it when it is there so the evidence reads the same either way.
+    for prefix in ("Error: PreToolUse:", "PreToolUse:", "Error: "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :].lstrip()
+            if text.lower().startswith(("bash hook error:", "hook error:")):
+                text = text.split(":", 1)[1].lstrip()
+            break
+    # The LAST lines. A failing `make verify` opens with "make verify failed" and
+    # then prints forty lines of log; what actually broke is at the end of it.
+    lines = [line for line in text.splitlines() if line.strip()]
+    kept = lines[-HOOK_SAID_LINES:]
+    # Keep the opening line too when it was cut: it names the hook's own verdict.
+    if len(lines) > HOOK_SAID_LINES and lines[0] not in kept:
+        kept = [lines[0], "…", *kept[2:]]
+    return "\n".join(kept)
 
 
 def _command(denial: dict) -> str | None:
@@ -400,9 +502,12 @@ def record(
             tool_use_id = str(denial.get("tool_use_id") or "")
             if _is_duplicate(conn, task_id, tool_use_id, command):
                 continue
-            verdict = _full_suite_verdict(conn, task_id, tool, command) or classify(
-                tool, command, worktree
-            )
+            refusal = denial.get("refusal") if isinstance(denial.get("refusal"), dict) else None
+            # A hook block is judged before the full-suite rule: the repository
+            # refused this call, whatever the command happened to be.
+            verdict = classify(tool, command, worktree, refusal=refusal)
+            if verdict.kind != HOOK_REFUSAL:
+                verdict = _full_suite_verdict(conn, task_id, tool, command) or verdict
             payload = {
                 "tool": tool,
                 "tool_use_id": tool_use_id or None,
@@ -414,6 +519,11 @@ def record(
                 "reason": verdict.reason,
                 "worktree": worktree,
             }
+            if verdict.kind == HOOK_REFUSAL:
+                payload["hook"] = verdict.hook
+                payload["hook_settings"] = verdict.hook_settings
+                payload["inferred"] = verdict.inferred
+                payload["hook_said"] = _hook_said(refusal)
             store.append_event(
                 conn, kind=PERMISSION_DENIED, payload=payload, run_id=run_id, task_id=task_id
             )
@@ -447,7 +557,7 @@ def learn(
         if not new:
             return []
         if task_id is not None:
-            _steer_about(task_id, run_id, new, branch)
+            _steer_about(task_id, run_id, new, branch, worktree)
             deficiencies.record_denials(
                 [_as_denial(p) for p in new],
                 task_id=task_id,
@@ -493,10 +603,27 @@ def _request_capabilities(task_id: int, new: list[dict]) -> None:
 
 
 def _as_denial(payload: dict) -> dict:
+    """The recorded denial, shaped back for the ledger, carrying the decided kind.
+
+    The ledger used to re-run `classify` on the command alone, which is now short of
+    what decided the kind: the refusal evidence is gone by then. Handing the verdict
+    over keeps the two from ever disagreeing about which denial is which.
+    """
     return {
         "tool_name": payload.get("tool"),
         "tool_use_id": payload.get("tool_use_id"),
         "tool_input": {"command": payload.get("command")},
+        "verdict": {
+            "kind": payload.get("kind"),
+            "pattern": payload.get("pattern"),
+            "in_family": payload.get("in_family"),
+            "program": payload.get("program"),
+            "reason": payload.get("reason"),
+            "hook": payload.get("hook", ""),
+            "hook_settings": payload.get("hook_settings", ""),
+            "hook_said": payload.get("hook_said", ""),
+            "inferred": payload.get("inferred", False),
+        },
     }
 
 
@@ -535,17 +662,40 @@ def steer_worker(task_id: int, message: str) -> None:
     threading.Thread(target=deliver, name=f"ppy-denial-steer-{task_id}", daemon=True).start()
 
 
-def shape_steer_message(commands: list[str], branch: str | None) -> str:
-    """The command rules, verbatim, after the commands that broke them."""
-    from papaya_agent_runtime.providers.command_rules import command_rules
+def shape_steer_message(
+    commands: list[str], branch: str | None, worktree: str | None = None
+) -> str:
+    """The exact command to run instead of each refused one, then the rules it broke.
 
-    shown = "\n".join(f"- `{c}`" for c in commands)
-    return (
+    The rules alone were what this steer used to say, and workers kept writing the
+    same shapes back (issue #121: 30 occurrences, 16 of them `cd <worktree> && …`).
+    A worker that has just been refused needs ONE command it can run, with its own
+    directory in it — not three rows about `cd` in general — so `rewrite_for` builds
+    it from the refused text and the worktree, and the rules come after.
+    """
+    from papaya_agent_runtime.providers.command_rules import command_rules, rewrites_for
+
+    rewrites = rewrites_for(commands, worktree)
+    unmatched = [c for c in commands if all(r.command != c for r in rewrites)]
+    said = [
         "These shell commands were refused for their shape, not for the program they ran, "
-        "and the runtime will not add a tool for them:\n\n"
-        f"{shown}\n\n"
+        "and the runtime will not add a tool for them.",
+    ]
+    if rewrites:
+        said.append(
+            "Run this instead — your shell already starts in your worktree, so there is "
+            "nothing to `cd` into to reach your own files:\n\n"
+            + "\n".join(r.line() for r in rewrites)
+        )
+    if unmatched:
+        said.append(
+            "No single replacement fits these; split them into one plain command per "
+            "call:\n\n" + "\n".join(f"- `{c}`" for c in unmatched)
+        )
+    said.append(
         "Every command you run is held to these rules:\n\n" + command_rules("claude", branch)
     )
+    return "\n\n".join(said)
 
 
 def policy_rule(program: str) -> str:
@@ -572,6 +722,45 @@ def policy_rule(program: str) -> str:
     return f"`{program}` is never available to a worker, and the runtime will not add it."
 
 
+def hook_steer_message(payload: dict) -> str:
+    """What the repository's hook refused, in its own words, and what to do now.
+
+    A push is the case that matters: the worker finished, ran exactly the command
+    its rules prescribe, and the repository stopped it. Retrying is pointless and
+    weakening the hook is forbidden, so the worker is told the one true thing —
+    commit, report, and let the runtime push after its own gate.
+    """
+    from papaya_agent_runtime.providers.command_rules import (
+        FLAGGED_RULE,
+        RUNTIME_PUSHES_RULE,
+    )
+
+    command = str(payload.get("command") or "")
+    hook = str(payload.get("hook") or "")
+    said = str(payload.get("hook_said") or "")
+    named = f"the repository's own `{hook}` hook" if hook else "a hook this repository runs"
+    lines = [
+        f"`{command}` was refused by {named}, not by your tool profile and not for "
+        "its shape. The harness allowed the call; the repository stopped it.",
+    ]
+    if said:
+        lines.append(f"What the hook said:\n\n```\n{said}\n```")
+    if _is_push(command):
+        lines.append(RUNTIME_PUSHES_RULE)
+    else:
+        lines.append(
+            "Do not retry it and do not work around the hook — never with `--no-verify`, "
+            "never by editing or disabling it. Either do what the hook asks, or record it "
+            "below and carry on."
+        )
+    return "\n\n".join([*lines, FLAGGED_RULE])
+
+
+def _is_push(command: str) -> bool:
+    """A `git push`, however it was written. Matches the hook's own whole-word test."""
+    return bool(re.search(r"(?:^|[^A-Za-z0-9_-])git\s+push(?:[^A-Za-z0-9_-]|$)", command))
+
+
 def policy_steer_message(program: str, command: str) -> str:
     """The rule it broke, then what to do with the refused command."""
     from papaya_agent_runtime.providers.command_rules import FLAGGED_RULE
@@ -579,7 +768,13 @@ def policy_steer_message(program: str, command: str) -> str:
     return f"`{command}` was refused. {policy_rule(program)}\n\n{FLAGGED_RULE}"
 
 
-def _steer_about(task_id: int, run_id: int | None, new: list[dict], branch: str | None) -> None:
+def _steer_about(
+    task_id: int,
+    run_id: int | None,
+    new: list[dict],
+    branch: str | None,
+    worktree: str | None = None,
+) -> None:
     """At most one rules steer per worker, and one per refused program."""
     from papaya_agent_runtime.state import init_db, store
 
@@ -612,8 +807,26 @@ def _steer_about(task_id: int, run_id: int | None, new: list[dict], branch: str 
                 run_id=run_id,
                 task_id=task_id,
             )
-            steers.append(shape_steer_message(shapes, branch))
+            steers.append(shape_steer_message(shapes, branch, worktree))
         for payload in new:
+            # One steer per hook, not per refused command: a worker that keeps
+            # meeting the same hook has already been told the one thing to do.
+            hook = str(payload.get("hook") or "")
+            if payload["kind"] == HOOK_REFUSAL and (HOOK_REFUSAL, hook) not in steered:
+                steered.add((HOOK_REFUSAL, hook))
+                store.append_event(
+                    conn,
+                    kind=DENIAL_STEER,
+                    payload={
+                        "kind": HOOK_REFUSAL,
+                        "program": hook,
+                        "commands": [payload.get("command")],
+                    },
+                    run_id=run_id,
+                    task_id=task_id,
+                )
+                steers.append(hook_steer_message(payload))
+                continue
             program = str(payload.get("program") or "")
             if payload["kind"] != POLICY_REFUSAL or (POLICY_REFUSAL, program) in steered:
                 continue
@@ -649,8 +862,39 @@ def kind_of(payload: dict) -> str:
     ).kind
 
 
-def counts() -> dict[str, dict[str, int]]:
-    """Recorded denials by repository and kind: ``{repo: {kind: n}}``. Never raises."""
+def counts(days: int | None = None) -> dict[str, dict[str, int]]:
+    """Recorded denials by repository and kind: ``{repo: {kind: n}}``. Never raises.
+
+    ``days`` counts only the last N days, which is what makes a change checkable:
+    "did the rewrite table cut `command_shape`?" is a question about this week, not
+    about every denial the ledger has ever held.
+    """
+    return _tally(days, lambda payload: kind_of(payload))
+
+
+def shape_counts(days: int | None = None) -> dict[str, dict[str, int]]:
+    """`command_shape` denials by repository and SHAPE: ``{repo: {shape: n}}``.
+
+    The shape is the rewrite row the command matches, so the tally lines up one for
+    one with what the steer tells a worker to run instead — a shape that keeps its
+    count after the rewrite text landed is a rewrite that is not landing.
+    """
+
+    def shape(payload: dict) -> str | None:
+        if kind_of(payload) != COMMAND_SHAPE:
+            return None
+        from papaya_agent_runtime.providers.command_rules import rewrite_for
+
+        # The row that MATCHED, so the tally and the steer name the same shape. It
+        # used to take the first of several generic rows, which counted a
+        # `cd <sub> && git …` as a plain `cd` and hid which rewrite was not landing.
+        found = rewrite_for(str(payload.get("command") or ""), payload.get("worktree"))
+        return found.shape if found is not None else "other"
+
+    return _tally(days, shape)
+
+
+def _tally(days: int | None, key: Callable[[dict], str | None]) -> dict[str, dict[str, int]]:
     from papaya_agent_runtime.paths import db_path
     from papaya_agent_runtime.state import init_db
 
@@ -658,19 +902,26 @@ def counts() -> dict[str, dict[str, int]]:
     try:
         if not db_path().exists():
             return found
+        sql = (
+            "SELECT e.payload, r.name FROM events e LEFT JOIN tasks t ON t.id = e.task_id "
+            "LEFT JOIN repos r ON r.id = t.repo_id WHERE e.kind = ?"
+        )
+        args: list[object] = [PERMISSION_DENIED]
+        if days is not None:
+            since = datetime.now(UTC) - timedelta(days=days)
+            sql += " AND e.created_at >= ?"
+            args.append(since.isoformat())
         conn = init_db()
         try:
-            rows = conn.execute(
-                "SELECT e.payload, r.name FROM events e LEFT JOIN tasks t ON t.id = e.task_id "
-                "LEFT JOIN repos r ON r.id = t.repo_id WHERE e.kind = ?",
-                (PERMISSION_DENIED,),
-            ).fetchall()
+            rows = conn.execute(sql, args).fetchall()
         finally:
             conn.close()
         for row in rows:
-            kind = kind_of(json.loads(row["payload"]))
+            bucket = key(json.loads(row["payload"]))
+            if bucket is None:
+                continue
             per_repo = found.setdefault(str(row["name"] or "?"), {})
-            per_repo[kind] = per_repo.get(kind, 0) + 1
+            per_repo[bucket] = per_repo.get(bucket, 0) + 1
     except Exception:  # noqa: BLE001 - diagnostics must not crash
         return {}
     return found
@@ -722,6 +973,7 @@ __all__ = [
     "COMMAND_SHAPE",
     "DENIAL_STEER",
     "ENVIRONMENT_FORBIDS",
+    "HOOK_REFUSAL",
     "KINDS",
     "NEVER",
     "PERMISSION_DENIED",
@@ -733,6 +985,7 @@ __all__ = [
     "Verdict",
     "classify",
     "counts",
+    "hook_steer_message",
     "kind_of",
     "learn",
     "learnable",

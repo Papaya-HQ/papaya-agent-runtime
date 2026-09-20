@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -152,6 +152,10 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_run_seq ON events(run_id, seq);
+-- `ppy workers` tallies denials by kind over a window on every paint, and under
+-- `--follow` that is every tick. Without this each one is a full scan of a table
+-- that only grows. `created_at` is in the index so the window is served from it.
+CREATE INDEX IF NOT EXISTS idx_events_kind_created ON events(kind, created_at);
 
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

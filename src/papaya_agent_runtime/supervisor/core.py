@@ -896,6 +896,7 @@ class Supervisor:
             denied_tools=environment.denied_tools(repo_row),
             granted_tools=_granted_tools(task_id),
             read_only_dirs=_reference_dirs(task_id),
+            runtime_pushes=environment.push_is_gated(repo_row, lease.worktree_path),
         )
         adapter = _adapter_for(provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))
@@ -1253,6 +1254,7 @@ class Supervisor:
                 denied_tools=environment.denied_tools(repo_row),
                 granted_tools=_granted_tools(task_id),
                 read_only_dirs=_reference_dirs(task_id),
+                runtime_pushes=environment.push_is_gated(repo_row, task["worktree_path"]),
             )
             session_id = None
         else:
@@ -1273,6 +1275,7 @@ class Supervisor:
                 denied_tools=environment.denied_tools(repo_row),
                 granted_tools=_granted_tools(task_id),
                 read_only_dirs=_reference_dirs(task_id),
+                runtime_pushes=environment.push_is_gated(repo_row, task["worktree_path"]),
             )
         adapter = _adapter_for(spec.provider)
         runner = RunnerGuardian(adapter, on_exit=lambda: self._release(execution))

@@ -1384,6 +1384,11 @@ def render_workers(
     """
     paint = paint or Paint()
     lines = _worker_blocks(found, width, paint)
+    denials = denial_lines()
+    if denials:
+        lines.append("")
+        lines.append(paint(f"denials, last {DENIAL_WINDOW_DAYS} days:", "bold"))
+        lines.extend(f"  {line}" for line in denials)
     extra = attention_lines(peek() if needs is None else needs)
     if extra:
         lines.append("")
@@ -1391,6 +1396,45 @@ def render_workers(
         # Not clipped to the width: the end of each line is what to do about it.
         lines.extend(f"  {line}" for line in extra)
     return lines
+
+
+#: The window `ppy workers` tallies denials over. A week, so the effect of a change
+#: to the rules or the steer text is checkable against the week before it.
+DENIAL_WINDOW_DAYS = 7
+
+
+def denial_counts(days: int = DENIAL_WINDOW_DAYS) -> dict[str, Any]:
+    """Denials by kind, and command-shape denials by shape, over the window.
+
+    The whole point of a count here is that somebody can ask next week whether a
+    change worked. `{"days": n, "kinds": {repo: {kind: n}}, "shapes": {repo: {shape: n}}}`.
+    """
+    from papaya_agent_runtime import tool_learning
+
+    return {
+        "days": days,
+        "kinds": tool_learning.counts(days),
+        "shapes": tool_learning.shape_counts(days),
+    }
+
+
+def denial_lines(found: dict[str, Any] | None = None) -> list[str]:
+    """One line per repository with denials, then the shapes behind them."""
+    found = denial_counts() if found is None else found
+    lines: list[str] = []
+    for repo in sorted(found.get("kinds") or {}):
+        kinds = found["kinds"][repo]
+        total = sum(kinds.values())
+        by_kind = ", ".join(f"{kind} {n}" for kind, n in sorted(kinds.items(), key=_by_count))
+        lines.append(f"{repo}: {total} ({by_kind})")
+        shapes = (found.get("shapes") or {}).get(repo) or {}
+        for shape, n in sorted(shapes.items(), key=_by_count):
+            lines.append(f"  shape x{n}: {shape}")
+    return lines
+
+
+def _by_count(item: tuple[str, int]) -> tuple[int, str]:
+    return (-item[1], item[0])
 
 
 def _worker_blocks(found: list[dict[str, Any]], width: int, paint: Paint) -> list[str]:
@@ -1444,9 +1488,10 @@ def workers_json(
 ) -> dict[str, Any]:
     """The same facts, machine-readable: ages in seconds beside absolute ISO timestamps.
 
-    `{"workers": [...], "attention": {paused, gave_up, repeating, parked, grown}}`: the
-    workers, then the
-    `needs attention` section as data (read only; JSON is never a person's look).
+    `{"workers": [...], "attention": {paused, gave_up, repeating, parked, grown},
+    "denials": {days, kinds, shapes}}`: the workers, the `needs attention` section as
+    data (read only; JSON is never a person's look), and the denial tally over the
+    window, which is how a change to the rules or the steer text is checked a week on.
     """
 
     def iso(stamp: object) -> str | None:
@@ -1468,6 +1513,7 @@ def workers_json(
             key: needs.get(key) or []
             for key in ("paused", "gave_up", "repeating", "parked", "grown")
         },
+        "denials": denial_counts(),
     }
 
 

@@ -64,7 +64,7 @@ def test_a_pre_push_hook_that_runs_the_suite_sets_the_hook_flag(tmp_path, ppy_ho
     assert "pre-push hook runs the full suite: yes" in notes.read_text(encoding="utf-8")
     # And the environment block a worker is handed now says so.
     block = environment.render(stored, task_id=4, evidence_path="/wt/.ppy-evidence")
-    assert "pre-push hook runs the full suite, so do not push" in block
+    assert "gates pushes with its own hook, which runs the full suite, so do not push" in block
 
 
 def test_a_hook_that_only_lints_is_not_a_full_suite(tmp_path, ppy_home) -> None:

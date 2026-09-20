@@ -5,6 +5,25 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 
+#: What a denial's ``refusal`` block may say about who refused the call. A harness
+#: that never reports them leaves it absent, and every judgement falls back to the
+#: command alone.
+#:
+#: - ``harness_line``: the harness itself announced the refusal. False means the
+#:   call got past the permission layer and something after it — a repository's own
+#:   tool hook — stopped it.
+#: - ``decision_reason_type`` / ``decision_reason`` / ``message``: the harness's own
+#:   words, when it announced one.
+#: - ``tool_result``: the error the tool call came back with, which for a hook block
+#:   is the hook's stderr.
+REFUSAL_FIELDS = (
+    "harness_line",
+    "decision_reason_type",
+    "decision_reason",
+    "message",
+    "tool_result",
+)
+
 
 @dataclass
 class TaskSpec:
@@ -39,6 +58,10 @@ class TaskSpec:
     # Tool patterns granted to this task alone by a person (`capability_requests`),
     # added to the allowlist at every launch of this task and no other.
     granted_tools: list[str] = field(default_factory=list)
+    # This repository gates pushes with its own hook, so the runtime pushes the lease
+    # branch after its gate and the worker is told not to push at all. Set by the
+    # supervisor at dispatch from what the repository records and registers.
+    runtime_pushes: bool = False
     # Base clones of other registered repositories this task may READ: a brief that
     # names another repo as a reference is unreadable without them, because a worker
     # sees only its own worktree. Granted at dispatch (`--reference-repo`) or after
@@ -131,6 +154,11 @@ class ProviderAdapter(abc.ABC):
 
         Only a harness that reports them structurally overrides this; the runtime
         learns tools from them (`tool_learning`).
+
+        A denial may also carry ``refusal``: what the transcript says about *who*
+        refused it (:data:`REFUSAL_FIELDS`). Without one the runtime judges the
+        command alone, which is what every provider did before hook blocks were
+        told apart from profile gaps.
         """
         return []
 
