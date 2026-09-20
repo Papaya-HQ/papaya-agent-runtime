@@ -353,16 +353,45 @@ def ticket_label(item: Mapping[str, Any]) -> str:
     return f"work item {str(item.get('id') or '')[:8]}"
 
 
-def refused_detail(reason: str) -> str:
+def refused_detail(reason: str, claim: str | None = None) -> str:
     """A `repeated-without-progress` detail for work refused sweep after sweep.
 
     Fingerprinted on the reason alone: a refusal is Papaya's routing, and ten tickets
     refused for one reason are one problem (one issue), each ticket in the evidence.
+    ``claim`` says the work was this runtime's, which is what makes the refusal a
+    deficiency rather than routing working as it should. What the claim actually was
+    goes in the evidence, not here: ten tickets held here and refused the same way are
+    still one problem, and a task id in the detail would give each its own row.
     """
+    about = " on work this machine holds" if claim else ""
     return (
         f"assigned work was refused here on {REFUSALS_BEFORE_DEFICIENCY} sweeps running "
-        f"for the same reason ({reason})"
+        f"for the same reason ({reason}){about}"
     )
+
+
+#: The refusal reasons Papaya gives for work it deliberately keeps somewhere else: not
+#: routed to this machine, held by another machine, taken over by the agent in Papaya.
+#: These are Papaya doing its job, so they are not deficiencies on their own — the
+#: sweep keeps asking, the blocker names them, and `ppy workers` shows them as kept
+#: elsewhere. They become a deficiency only on work this runtime has a claim on
+#: (:func:`held_earlier`), which is the shape of the September storm: twelve items this
+#: machine held, refused as `not_routed_here` for two days.
+EXPECTED_REFUSALS = frozenset({"not_routed_here", "handled_in_papaya", "held_elsewhere"})
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """One idle item Papaya refused this sweep, as the blocker and the ledger read it."""
+
+    #: The holder's name, as the blocker lists it.
+    name: str
+    #: Papaya's own word for why (`not_routed_here`), or `refused` when it gave none.
+    reason: str
+    #: How a deficiency names the ticket: its short id, else `work item <id8>`.
+    label: str
+    #: Why this runtime had a claim on the item, when it had one (:func:`held_earlier`).
+    claim: str | None = None
 
 
 # ── the tickets Papaya keeps somewhere else ─────────────────────────────────
@@ -1281,21 +1310,45 @@ class Sweeper:
             )
         return asked
 
+    async def _claim_here(
+        self, item: Mapping[str, Any], now: datetime, cache: dict[str, Any]
+    ) -> str | None:
+        """Why this runtime has a claim on ``item``, or ``None``.
+
+        The same reading the reclaim uses (:func:`held_earlier`): a ticket task here
+        that was not given away, a live lease held by one of this runtime's connections,
+        or a `run on this Mac` naming one. ``cache`` holds the two reads for the sweep,
+        so they happen once and only when something was refused.
+        """
+        if not cache:
+            cache["earlier"] = await asyncio.to_thread(self._connection_ids)
+            cache["tickets"] = await asyncio.to_thread(self._tickets)
+        ticket = cache["tickets"].get(str(item.get("id") or ""))
+        return held_earlier(item, ticket, cache["earlier"], now=now)
+
     async def _record_refusals(
-        self, refused_now: dict[str, tuple[str, str, str]], reached: set[str], found: set[str]
+        self, refused_now: dict[str, Refusal], reached: set[str], found: set[str]
     ) -> None:
         """Bring the idle-work blocker and the refusal streaks in line with this sweep.
 
-        ``refused_now`` is `{work item id: (name, refusal reason, label)}` for the idle
-        items Papaya refused this sweep; ``reached`` the items this sweep got as far as
-        asking about; ``found`` every open item. An item a full pool kept this sweep from
-        reaching keeps its place in the blocker until a sweep reaches it.
+        ``refused_now`` is the idle items Papaya refused this sweep, by work item id;
+        ``reached`` the items this sweep got as far as asking about; ``found`` every open
+        item. An item a full pool kept this sweep from reaching keeps its place in the
+        blocker until a sweep reaches it.
 
         An item refused for the same reason on :data:`REFUSALS_BEFORE_DEFICIENCY` sweeps
         running is a `repeated-without-progress` occurrence: fingerprinted on the reason
         (one row, one issue, however many tickets), the ticket in the evidence, and each
         ticket recorded once a day however long its refusals go on. One line a person
         reads, not one occurrence per sweep (the 527-count row of 2026-09-17..19).
+
+        Unless Papaya is only doing its job. A refusal whose reason is one of
+        :data:`EXPECTED_REFUSALS` on work this runtime has no claim on is the routing
+        working: it stays in the blocker and in `ppy workers` as kept elsewhere, and
+        nothing is recorded. With a claim — a ticket task here that was not given away,
+        a lease or a `run on this Mac` naming one of this runtime's connections — the
+        same refusal is a deficiency, because the work was sent here and this machine
+        cannot have it. A reason the runtime cannot explain is always a deficiency.
         """
         from papaya_agent_runtime import blockers, deficiencies
 
@@ -1305,26 +1358,40 @@ class Sweeper:
             for item_id, name in (previous or {}).items()
             if item_id not in reached and item_id in found
         }
-        current = {**kept_over, **{item_id: name for item_id, (name, _, _) in refused_now.items()}}
+        current = {**kept_over, **{item_id: r.name for item_id, r in refused_now.items()}}
         for item_id in list(self._refusal_streak):
             if (item_id in reached and item_id not in refused_now) or item_id not in found:
                 del self._refusal_streak[item_id]
-        for item_id, (_name, reason, label) in refused_now.items():
+        for item_id, refusal in refused_now.items():
+            reason = refusal.reason
             last_reason, last_streak = self._refusal_streak.get(item_id, (reason, 0))
             streak = last_streak + 1 if last_reason == reason else 1
             self._refusal_streak[item_id] = (reason, streak)
-            if streak >= REFUSALS_BEFORE_DEFICIENCY:
-                await asyncio.to_thread(
-                    functools.partial(
-                        deficiencies.record_once,
-                        deficiencies.REPEATED_WITHOUT_PROGRESS,
-                        refused_detail(reason),
-                        within=REPEAT_SAID_EVERY,
-                        evidence={"ticket": label, "code": reason, "times": streak},
-                        scope=f"refusal:{reason}",
-                        per="ticket",
-                    )
+            if streak < REFUSALS_BEFORE_DEFICIENCY:
+                continue
+            if reason in EXPECTED_REFUSALS and refusal.claim is None:
+                log.debug(
+                    "[sweep] %s has been refused (%s) %d times running, and this runtime has "
+                    "no claim on it: Papaya keeps it elsewhere, which is not a deficiency",
+                    item_id,
+                    reason,
+                    streak,
                 )
+                continue
+            evidence = {"ticket": refusal.label, "code": reason, "times": streak}
+            if refusal.claim:
+                evidence["trigger"] = refusal.claim
+            await asyncio.to_thread(
+                functools.partial(
+                    deficiencies.record_once,
+                    deficiencies.REPEATED_WITHOUT_PROGRESS,
+                    refused_detail(reason, refusal.claim),
+                    within=REPEAT_SAID_EVERY,
+                    evidence=evidence,
+                    scope=f"refusal:{reason}",
+                    per="ticket",
+                )
+            )
         self._refused_idle = current
         if previous is not None and set(previous.values()) == set(current.values()):
             return
@@ -1366,7 +1433,9 @@ class Sweeper:
         kept_by: dict[str, int] = {}
         idle_by: dict[str, list[int | None]] = {}
         newly_kept: dict[str, dict[str, Any]] = {}
-        refused_idle: dict[str, tuple[str, str, str]] = {}
+        refused_idle: dict[str, Refusal] = {}
+        # What a claim is read from, read once per sweep and only if something is refused.
+        claims: dict[str, Any] = {}
         reached: set[str] = set()
         taken: list[str] = []
         for index, item in enumerate(items):
@@ -1455,7 +1524,12 @@ class Sweeper:
                 reason = refusal_skip_reason(refused) or "refused"
                 log.debug("[sweep] %s is kept by %s and idle; Papaya refused it", subject, name)
                 idle_by.setdefault(name, []).append(evidence.idle_minutes(now))
-                refused_idle[item_id] = (_short(item), reason, ticket_label(item))
+                refused_idle[item_id] = Refusal(
+                    name=_short(item),
+                    reason=reason,
+                    label=ticket_label(item),
+                    claim=await self._claim_here(item, now, claims),
+                )
             else:
                 # Held by another session, taken over in Papaya, or not this
                 # playbook's to act on. Not ours this round.
@@ -1513,6 +1587,7 @@ __all__ = [
     "DEFAULT_STALE_AFTER",
     "DEFAULT_SWEEP_INTERVAL",
     "ENDED_PHASES",
+    "EXPECTED_REFUSALS",
     "KEPT_RECHECK_EVERY",
     "OPEN_STATUSES",
     "PARKED",
@@ -1524,6 +1599,7 @@ __all__ = [
     "SWEEP_INTERVAL_ENV",
     "SWEEP_STALE_AFTER_ENV",
     "UNCHANGED_SUMMARY_EVERY",
+    "Refusal",
     "SweepResult",
     "Sweeper",
     "declined_earlier",

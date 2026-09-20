@@ -508,8 +508,10 @@ def test_two_wordings_of_one_refusal_fingerprint_the_same_and_other_causes_do_no
     assert len(others) == 2 and first not in others
     # The cause is the tool, the refusal and the repository, not the sentence around them.
     assert deficiencies.reduce_turn_report(ISSUE_49) == "propose_memory|agent-scop proposal|"
+    # Naming an exception is stronger than naming a tool: the class and where it came
+    # from lead, and the repository still tells two of them apart.
     in_api = deficiencies.reduce_turn_report("`ppy gate` raised TimeoutError in repo `api`")
-    assert in_api == "ppy gate|TimeoutError|api"
+    assert in_api == "TimeoutError|ppy gate|api"
     assert deficiencies.fingerprint(
         deficiencies.TURN_REPORT, "propose_memory refused an agent-scoped proposal in repo api"
     ) != deficiencies.fingerprint(
@@ -584,7 +586,13 @@ def test_start_closes_a_later_duplicate_turn_report_with_a_comment_and_keeps_the
     rows = {row.issue_url: row for row in deficiencies.ledger(include_all=True)}
     assert set(rows) == {first, other}
     kept = rows[first]
-    assert kept.fingerprint == deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_49)
+    # The kept row keeps the fingerprint its issue was opened under; the duplicate's and
+    # the one today's rule computes are aliases to it, so neither opens a second issue.
+    assert kept.fingerprint == "f19d7924154a6890"
+    conn = init_db()
+    for alias in ("6aafd5304c096dfb", deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_49)):
+        assert deficiencies.canonical_fingerprint(conn, alias) == kept.fingerprint
+    conn.close()
     assert (kept.count, kept.reported_count, kept.status) == (2, 2, deficiencies.REPORTED)
     assert [e["n"] for e in kept.evidence] == [1, 2]
 

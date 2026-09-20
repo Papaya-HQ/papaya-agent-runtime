@@ -295,11 +295,13 @@ PAP_222_REPORTS = {
     ),
 }
 
-#: The reduced turn-report fingerprint (task 285) each row is rekeyed to at `serve` start.
+#: The reduced turn-report fingerprint each row is rekeyed to at `serve` start. The
+#: third report names pull request #710, which task 321 made the strongest thing a
+#: `RUNTIME:` line can name, so it moved again; its task-285 key is still in the fix.
 REDUCED = {
     "74fccc066045a150": "af2aa9532fde4fce",
     "ecfb07ec73b22d9a": "7ba58c5a7c72a5b0",
-    "73e968fea9ac0d8e": "c4b7a8dab0a58df5",
+    "73e968fea9ac0d8e": "fe2394214d1d4c07",
 }
 
 BEFORE_THE_FIX = lambda: datetime(2026, 9, 17, 1, 49, 12, tzinfo=UTC)  # noqa: E731
@@ -366,9 +368,9 @@ def test_a_reported_pap_222_issue_is_closed_with_what_the_fix_changed(ppy_home) 
 
 
 def test_every_fixed_report_names_its_reduced_fingerprint_too() -> None:
-    """Rows are rekeyed to the reduced turn-report fingerprint (task 285); both close."""
+    """A fix names every key its rows can be under, so all of them close."""
     for legacy, detail in PAP_222_REPORTS.items():
         reduced = deficiencies.fingerprint(deficiencies.TURN_REPORT, detail)
-        assert reduced == REDUCED[legacy]  # what task 285 computes today, not a copied value
+        assert reduced == REDUCED[legacy]  # what the rule computes today, not a copied value
         [fix] = [f for f in deficiencies.FIXED_TURN_REPORTS if legacy in f.fingerprints]
-        assert fix.fingerprints == {legacy, reduced}
+        assert {legacy, reduced} <= fix.fingerprints

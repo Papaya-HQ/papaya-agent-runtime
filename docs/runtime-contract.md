@@ -1065,8 +1065,17 @@ recorded 527 times, both unseen).
   the reason alone, one row for every ticket refused that way, each ticket in the
   evidence once a day. The kind's issue threshold is two: one stuck ticket is a
   `needs attention` line, and a second episode (another day, or another ticket refused
-  the same way) opens the issue. `idle-work-refused` is no longer recorded; its old rows
-  stay as history.
+  the same way) opens the issue. `idle-work-refused` is no longer recorded; its rows are
+  superseded by this kind, and its issue is closed pointing at this one.
+- **Papaya refusing other people's work is not a deficiency.** Papaya routes an item to
+  one person's machines and keeps the rest; refusing the others is the routing working.
+  A refusal whose reason is `not_routed_here`, `handled_in_papaya` or `held_elsewhere`
+  on work this runtime has no claim on records nothing — it stays in the blocker, in the
+  sweep summary and in `ppy workers` as kept elsewhere. It *is* a deficiency when this
+  runtime has a claim on the item (a ticket task here that was not given away, a lease
+  or a Run on this Mac hold naming one of this runtime's connections, past or present),
+  because then the work was sent here and this machine cannot have it; and a refusal
+  reason the runtime cannot explain is a deficiency whatever the claim.
 - **`needs attention`** closes `ppy workers` and `ppy status --team`, one line each:
   `repeating:` tickets from that deficiency (seen in the last day) with what to do,
   `parked:` tickets with their reason and stamp and what un-parks them, and
@@ -1078,6 +1087,35 @@ recorded 527 times, both unseen).
   `.ppy/attention-seen.json`, and a first look counts every row from one. `ppy workers
   --json` is `{"workers": [...], "attention": {"repeating", "parked", "grown"}}`. Say
   these lines to the person; do not let one sit.
+
+### The issues the runtime opens on itself are true when opened, and close themselves
+
+The self-report channel (`ppy deficiency list`, and the `self-reported` issues on this
+runtime's repository) is how the runtime tells its maintainers what is wrong with it.
+A channel whose open issues are mostly stale or duplicated is one nobody reads — on
+2026-09-20 nine of the nineteen open issues were one crash fixed three days earlier, and
+a 28-comment storm went unread among them. Three rules keep it true; they are in
+`deficiencies.py`, and nothing here needs doing by hand.
+
+- **Nothing stale opens.** A deficiency whose newest evidence predates the running
+  build (the first moment this machine ran this version) or is older than 48 hours is
+  marked `stale` and opens no issue. It opens if it happens again. A backlog inherited
+  across an upgrade therefore drains without opening issues about fixed things, and
+  nobody edits the ledger to make that happen.
+- **One cause is one issue.** A turn's `RUNTIME:` line is fingerprinted by the
+  strongest thing it names — a pull request or issue number; else an exception class
+  together with where it came from; else the tool and the refusal — never by its
+  wording. Rows that are one cause are folded at `serve` start, the later issues closed
+  as duplicates, and every other fingerprint kept as an alias so no rule change opens a
+  second issue for a cause that already has one.
+- **An issue that is over closes itself.** Quiet for seven days across a newer build,
+  or belonging to a kind another kind replaced, it gets one comment and closes; a
+  recurrence reopens it. Closes are bounded by `self_report.max_per_day` like opens, and
+  `self_report.enabled = false` opens, comments and closes nothing.
+
+If you find a self-reported issue that is none of those and is still wrong, that is a
+runtime defect worth a task: the rule that should have caught it is the deliverable, not
+a hand-closed issue.
 
 ## Mode parity — you work the same in a session as under `ppy serve`
 

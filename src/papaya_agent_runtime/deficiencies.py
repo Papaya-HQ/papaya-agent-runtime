@@ -23,6 +23,19 @@ comment rather than duplicated. At most ``self_report.max_per_day`` new issues o
 a day and the rest wait in the ledger. ``self_report.enabled = false`` keeps the
 ledger and opens nothing.
 
+The channel is only worth reading if its open issues are true, so three rules bound
+what it may say. **Nothing stale opens**: a row whose newest evidence predates the
+running build, or is older than :data:`STALE_AFTER_SECONDS`, stopped happening
+before this version existed and waits in the ledger as :data:`STALE` until it
+happens again — which is what stops a backlog of old rows opening issues for weeks
+after the fix. **One cause is one issue**: a turn's `RUNTIME:` line is fingerprinted
+by what it names, not how it words it (:func:`reduce_turn_report`), and rows that
+turn out to be one cause are folded together with the rest of their fingerprints
+kept as aliases. **An issue that is over closes itself**: quiet for
+:data:`QUIET_BEFORE_CLOSE_SECONDS` across a newer build, or belonging to a kind
+another kind has replaced (:attr:`Kind.superseded_by`), it gets one comment and
+closes; a recurrence reopens it.
+
 Nothing private leaves the machine. An issue body is built only from the evidence
 fields named in :data:`EVIDENCE_FIELDS` — ticket keys and repository names, never
 titles, descriptions, comments or people — and every string in it goes through
@@ -102,6 +115,17 @@ REPORTED = "reported"
 #: A `worker-denial` row whose denials a later classifier says were never profile gaps,
 #: or a `turn-report` row about a check-in a later fix made impossible.
 RECLASSIFIED = "reclassified"
+#: Due an issue, but its newest evidence is older than the running build or than
+#: :data:`STALE_AFTER_SECONDS`: it stopped happening before this version existed, so
+#: it stays in the ledger and opens nothing. One more occurrence makes it `pending`.
+STALE = "stale"
+#: A row of a kind another kind has replaced: its issue points at the successor's and closes.
+SUPERSEDED = "superseded"
+
+#: How old a row's newest evidence may be and still open an issue.
+STALE_AFTER_SECONDS = 48 * 3600
+#: How long a reported deficiency must go unseen before the runtime closes its issue.
+QUIET_BEFORE_CLOSE_SECONDS = 7 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -119,6 +143,9 @@ class Kind:
     threshold: int = 1
     #: When set, the threshold counts distinct values of this evidence field instead.
     distinct: str = ""
+    #: The kind that replaced this one. A row of a retired kind opens nothing, and its
+    #: open issue gets one comment pointing at the successor's and is closed.
+    superseded_by: str = ""
 
 
 KINDS: dict[str, Kind] = {
@@ -281,6 +308,7 @@ KINDS: dict[str, Kind] = {
             "Let a connection reclaim work its earlier connection held, and end a guard window "
             "that no hosted run is using."
         ),
+        superseded_by=REPEATED_WITHOUT_PROGRESS,
     ),
     PROMPT_DEFECT: Kind(
         title="A turn did what its prompt tells it not to",
@@ -498,6 +526,16 @@ _STOPWORDS = _DETERMINERS | frozenset(
 )
 #: How many stemmed content words stand for a line that names no tool.
 CONTENT_WORDS = 8
+#: A pull request or issue the line names: `PR #58`, `pull request 710`, `issue #94`, `#58`.
+_PR_OR_ISSUE = re.compile(
+    r"(?i)\b(?:prs?|pull requests?|issues?)\s*#?\s*(\d{1,6})\b|(?:^|[\s(\[])#(\d{1,6})\b"
+)
+#: Where an exception came from: `claude.live_denial`, `serve.take`, `state/db.py`, `ppy gate`.
+_WHERE_IDENT = re.compile(r"\bppy\s+[a-z][a-z-]*|\b[a-z][a-z0-9]*(?:[._][a-z0-9_]+)+\b")
+#: An exception's own message, as a turn writes it: bracketed or quoted after the class.
+_EXC_MESSAGE = re.compile(r"""\(\s*["']?(.+?)["']?\s*\)|["'“](.+?)["'”]""")
+#: How much of the text after an exception class its message may come from.
+MESSAGE_CHARS = 200
 
 
 def _stem(word: str) -> str:
@@ -530,29 +568,70 @@ def _refusal_noun(tokens: list[str]) -> str:
     return ""
 
 
+def _named_number(text: str) -> str:
+    """The first pull request or issue number the line names, or ``""``.
+
+    ``PR #58``, ``pull request 710``, ``issue #94`` and a bare ``#58`` all count: a turn
+    that names the change or the report its trouble is about has named the trouble.
+    """
+    match = _PR_OR_ISSUE.search(text)
+    return next((g for g in match.groups() if g), "") if match else ""
+
+
+def _broke_in(text: str, after: str) -> str:
+    """Where an exception came from: the identifier the line names, else its message.
+
+    The identifier is the first function, module or command name anywhere in the line
+    (``claude.live_denial``, ``serve.take``, ``ppy gate``), because a turn writes it as
+    often before the class as after it. With none, the exception's own message stands in
+    it: what the line quotes or brackets right after the class, reduced to content words.
+    """
+    ident = _WHERE_IDENT.search(normalise(text).replace("`", " "))
+    if ident is not None:
+        return " ".join(ident.group(0).split())
+    message = _EXC_MESSAGE.search(after[:MESSAGE_CHARS])
+    said = next((g for g in message.groups() if g), "") if message else after[:MESSAGE_CHARS]
+    return " ".join(_content_words(_WORD.findall(normalise(said)), 6))
+
+
 def reduce_turn_report(detail: str) -> str:
     """What a `RUNTIME:` line is about, not how the turn happened to word it.
 
-    ``tool | error class or refusal noun phrase | repo``: the first tool or API the
-    line names, the first exception class in it or else the noun phrase after its first
-    refusal verb, and the repository when it names one. Two turns that hit the same
-    refusal and say so in different sentences reduce to the same thing. A line that
-    names no tool is its first eight stemmed content words, which still ignores what
-    varies (ids, numbers, paths) and small rewordings around them.
+    One cause must reduce to one key however many ways turns word it, and two causes
+    must never share one. So the key is the strongest thing the line names, by
+    precedence, and two lines are the same cause only when they produce the same key:
+
+    1. ``pr|<number>``: a pull request or issue number the line names. A turn that says
+       which change or report its trouble is about has said what the trouble is.
+    2. ``<ExceptionClass>|<where>|<repo>``: an exception class *together with* where it
+       came from — the identifier the line names, or the exception's own message when it
+       names none. The class alone is never enough: two `AttributeError`s in different
+       functions are two deficiencies.
+    3. ``<tool>|<refusal or first words after it>|<repo>``: the first tool or API the
+       line names, with the noun phrase after its first refusal verb.
+    4. ``words|<first eight stemmed content words>``: a line that names none of those.
+
+    This under-merges on purpose. Of the nine issues one crash produced in September,
+    six name PR #58 and collapse; the two that name neither that pull request nor a
+    shared location (#103, which quotes only the message, and #104, which names
+    `claude.live_denial`) stay apart, which is the right side to err on.
     """
     text = _one_line(detail)
-    error = _ERROR_CLASS.search(text)
+    number = _named_number(text)
+    if number:
+        return f"pr|{number}"
     repo = _REPO.search(text)
+    where = repo.group(1).lower() if repo else ""
+    error = _ERROR_CLASS.search(text)
+    if error is not None:
+        return f"{error.group(0)}|{_broke_in(text, text[error.end() :])}|{where}"
     lowered = normalise(text)
     tokens = _WORD.findall(lowered)
     tool = _TOOL.search(lowered.replace("`", " "))
     if tool is None:
         return "words|" + " ".join(_content_words(tokens))
     tokens = _WORD.findall(lowered[tool.end() :].replace("`", " "))
-    cause = error.group(0) if error else _refusal_noun(tokens)
-    if not cause:
-        cause = " ".join(_content_words(tokens, 4))
-    where = repo.group(1).lower() if repo else ""
+    cause = _refusal_noun(tokens) or " ".join(_content_words(tokens, 4))
     return f"{' '.join(tool.group(0).split())}|{cause}|{where}"
 
 
@@ -575,6 +654,14 @@ def fingerprint(kind: str, detail: str) -> str:
 # ── the ledger ──────────────────────────────────────────────────────────────
 
 
+def _column(row: Any, name: str) -> str | None:
+    """``row[name]``, or ``None`` when the row was read before that column existed."""
+    try:
+        return row[name] or None
+    except (IndexError, KeyError):
+        return None
+
+
 @dataclass(frozen=True)
 class Deficiency:
     """One ledger row."""
@@ -591,6 +678,8 @@ class Deficiency:
     status: str
     opened_at: str | None
     reported_count: int
+    #: When the runtime closed the issue itself; cleared when a recurrence reopens it.
+    closed_at: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Deficiency:
@@ -611,6 +700,7 @@ class Deficiency:
             status=str(row["status"]),
             opened_at=row["opened_at"] or None,
             reported_count=int(row["reported_count"] or 0),
+            closed_at=_column(row, "closed_at"),
         )
 
 
@@ -729,7 +819,8 @@ def _seen_at(key: str, per: str, wanted: object) -> list[datetime]:
     conn = init_db()
     try:
         row = conn.execute(
-            "SELECT last_seen, evidence FROM deficiencies WHERE fingerprint = ?", (key,)
+            "SELECT last_seen, evidence FROM deficiencies WHERE fingerprint = ?",
+            (canonical_fingerprint(conn, key),),
         ).fetchone()
     finally:
         conn.close()
@@ -757,6 +848,35 @@ def _clean_detail(detail: str, scrub: list[str]) -> str:
     return _one_line(redact(detail, scrub))[:300] or "(no detail)"
 
 
+def canonical_fingerprint(conn: Any, key: str) -> str:
+    """The row ``key`` belongs to: itself, or the one an alias points it at.
+
+    A rule change moves a wording from one fingerprint to another. The ledger keeps a
+    row under the fingerprint its issue was opened with, and every other fingerprint
+    that means the same deficiency is an alias to it, so the wording that used to open
+    its own issue comments the existing one instead.
+    """
+    row = conn.execute(
+        "SELECT canonical FROM deficiency_aliases WHERE fingerprint = ?", (key,)
+    ).fetchone()
+    return str(row["canonical"]) if row is not None and row["canonical"] else key
+
+
+def remember_alias(conn: Any, key: str, canonical: str, at: str) -> None:
+    """Point ``key`` at ``canonical``, and move any alias that pointed at ``key``."""
+    if not key or key == canonical:
+        return
+    conn.execute("DELETE FROM deficiency_aliases WHERE fingerprint = ?", (canonical,))
+    conn.execute(
+        "UPDATE deficiency_aliases SET canonical = ?, at = ? WHERE canonical = ?",
+        (canonical, at, key),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO deficiency_aliases (fingerprint, canonical, at) VALUES (?, ?, ?)",
+        (key, canonical, at),
+    )
+
+
 def _record(
     kind: str,
     detail: str,
@@ -769,13 +889,13 @@ def _record(
 
     spec = KINDS[kind]
     clean = _clean_detail(detail, scrub)
-    key = fingerprint(kind, clean)
     at = _stamp(clock)
     entry = {"at": at, **_clean_evidence(evidence, scrub)}
     if scope:
         entry["scope"] = redact(scope, scrub)
     conn = init_db()
     try:
+        key = canonical_fingerprint(conn, fingerprint(kind, clean))
         row = conn.execute("SELECT * FROM deficiencies WHERE fingerprint = ?", (key,)).fetchone()
         if row is None:
             entry["n"] = 1
@@ -796,7 +916,9 @@ def _record(
             count = current.count + 1
             entry["n"] = count
             entries = (current.evidence + [entry])[-EVIDENCE_KEPT:]
-            status = current.status
+            # It is happening again on this build: a row put aside as stale is due an
+            # issue after all, and the next flush opens it.
+            status = PENDING if current.status == STALE else current.status
         if status == WATCHING:
             within = [e for e in entries if e.get("scope") == entry.get("scope")]
             seen = len({e.get(spec.distinct) for e in within}) if spec.distinct else len(within)
@@ -824,7 +946,10 @@ def ledger(*, include_all: bool = False) -> list[Deficiency]:
     finally:
         conn.close()
     found = [Deficiency.from_row(row) for row in rows]
-    return found if include_all else [d for d in found if d.status not in (WATCHING, RECLASSIFIED)]
+    if include_all:
+        return found
+    hidden = (WATCHING, RECLASSIFIED, SUPERSEDED)
+    return [d for d in found if d.status not in hidden]
 
 
 def summary() -> dict[str, int]:
@@ -1030,6 +1155,62 @@ def _body_text(value: str, scrub: Iterable[str] = ()) -> str:
     return redact(value, scrub)
 
 
+def _spec(kind: str) -> Kind:
+    return KINDS.get(kind) or KINDS[UNHANDLED_EXCEPTION]
+
+
+def _stale(deficiency: Deficiency, born: datetime, now: datetime) -> bool:
+    """Whether this row's newest evidence is too old to open an issue about.
+
+    Too old is either of two things: it predates the running build, so whatever it
+    describes stopped happening before this version existed; or it is older than
+    :data:`STALE_AFTER_SECONDS` however many builds have run, so it is old news.
+    """
+    last = _moment(deficiency.last_seen)
+    if last is None:
+        return False
+    return last < born or (now - last).total_seconds() > STALE_AFTER_SECONDS
+
+
+def _quiet(deficiency: Deficiency, now: datetime) -> bool:
+    last = _moment(deficiency.last_seen)
+    return last is not None and (now - last).total_seconds() > QUIET_BEFORE_CLOSE_SECONDS
+
+
+def issue_for_kind(conn: Any, kind: str) -> str | None:
+    """The issue the runtime opened about ``kind``, if it has opened one."""
+    row = conn.execute(
+        "SELECT issue_url FROM deficiencies WHERE kind = ? AND issue_url IS NOT NULL "
+        "AND status = ? ORDER BY opened_at LIMIT 1",
+        (kind, REPORTED),
+    ).fetchone()
+    return str(row["issue_url"]) if row is not None and row["issue_url"] else None
+
+
+def quiet_body(deficiency: Deficiency) -> str:
+    """The one comment an issue gets as the runtime closes it for having stopped."""
+    days = int(QUIET_BEFORE_CLOSE_SECONDS // 86400)
+    return _body_text(
+        f"closing: not seen since {deficiency.last_seen}.\n\n"
+        f"The runtime has recorded no occurrence of this for {days} days, across at least "
+        "one build it had not run when this was last seen, so whatever caused it is gone. "
+        "It reopens itself with the new evidence if it happens again; nothing here needs "
+        "a person."
+    )
+
+
+def superseded_body(kind: str, issue: str | None) -> str:
+    """The one comment an issue of a retired kind gets as it is closed."""
+    spec = KINDS.get(kind)
+    where = f" Its report is {issue}." if issue else " It has not been reported yet."
+    return _body_text(
+        f"superseded by `{kind}`; closing.\n\n"
+        f"The runtime no longer records this kind. {spec.title if spec else kind} is what it "
+        f"records instead, which counts one episode per subject rather than one per "
+        f"repetition.{where}"
+    )
+
+
 def issue_body(deficiency: Deficiency) -> str:
     """The first report of a deficiency: what, evidence, what instead, a remedy."""
     spec = KINDS.get(deficiency.kind) or KINDS[UNHANDLED_EXCEPTION]
@@ -1068,6 +1249,60 @@ def comment_body(deficiency: Deficiency, entries: list[dict[str, Any]]) -> str:
     return _body_text("\n".join(lines))
 
 
+# ── which build was running, and for how long ───────────────────────────────
+
+
+def build_id() -> str:
+    """Which version of the runtime is running, as the ledger tells builds apart."""
+    try:
+        from papaya_agent_runtime import __version__
+
+        return str(__version__) or "unknown"
+    except Exception:  # noqa: BLE001 - a version that cannot be read is one build
+        return "unknown"
+
+
+def _moment(stamp: str | None) -> datetime | None:
+    """An ISO stamp from the ledger as an aware ``datetime``, or ``None``."""
+    try:
+        at = datetime.fromisoformat(str(stamp or ""))
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def build_started(conn: Any, build: str, born: datetime) -> datetime:
+    """When this machine first ran ``build``, recording ``born`` the first time.
+
+    Not the moment this is called: a deficiency recorded seconds before the first
+    flush of a new build belongs to it, so the build's life starts when the process
+    that reports it did. The first reporter on a build wins, so a deficiency recorded
+    on this build by an earlier process that never flushed is held back until its next
+    occurrence — which errs the way the rest of this module does, towards saying less.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO runtime_builds (build_id, first_seen) VALUES (?, ?)",
+        (build, born.isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT first_seen FROM runtime_builds WHERE build_id = ?", (build,)
+    ).fetchone()
+    return (_moment(row["first_seen"]) if row is not None else None) or born
+
+
+def newer_build_since(conn: Any, stamp: str | None) -> bool:
+    """Whether a build of this runtime was first seen after ``stamp``."""
+    at = _moment(stamp)
+    if at is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM runtime_builds WHERE first_seen > ? LIMIT 1",
+        (at.isoformat(timespec="seconds"),),
+    ).fetchone()
+    return row is not None
+
+
 # ── opening issues ──────────────────────────────────────────────────────────
 
 
@@ -1077,7 +1312,13 @@ class Reporter:
     Every collaborator with an outside world is a seam: ``forge`` (GitHub, a
     :class:`GhForge` by default), ``clock`` (an aware ``datetime``; the daily cap is
     counted on its UTC date), ``config`` (a :class:`Settings`, read from
-    ``self_report.*`` when absent) and ``origin`` (the checkout's origin URL).
+    ``self_report.*`` when absent), ``origin`` (the checkout's origin URL) and
+    ``build`` (which version of the runtime is running).
+
+    A reporter's own start is the running build's start of life when the ledger has
+    never seen that build before: what stopped happening before this process started,
+    on a build this machine had not run, is not this version's problem and opens no
+    issue (:data:`STALE`).
     """
 
     def __init__(
@@ -1087,11 +1328,14 @@ class Reporter:
         clock: Callable[[], datetime] | None = None,
         config: Settings | Callable[[], Settings] | None = None,
         origin: Callable[[], str | None] | None = None,
+        build: Callable[[], str] | None = None,
     ) -> None:
         self._forge = forge or GhForge()
         self._clock = clock or _now
         self._config = config
         self._origin = origin
+        self._build = build or build_id
+        self._born = self._clock()
         self._lock = threading.Lock()
         self._state = threading.Lock()
         self._dirty = False
@@ -1131,15 +1375,33 @@ class Reporter:
         from papaya_agent_runtime.state import init_db
 
         done: list[str] = []
-        today = self._clock().astimezone(UTC).date().isoformat()
+        now = self._clock().astimezone(UTC)
+        today = now.date().isoformat()
         conn = init_db()
         try:
+            born = build_started(conn, self._build(), self._born)
             rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
             opened_today = sum(1 for d in rows if (d.opened_at or "").startswith(today))
+            closed_today = sum(1 for d in rows if (d.closed_at or "").startswith(today))
             pending = sorted((d for d in rows if d.status == PENDING), key=lambda d: d.first_seen)
             for deficiency in pending:
+                if _spec(deficiency.kind).superseded_by:
+                    continue  # a retired kind opens nothing; the pass below closes its issue
+                if _stale(deficiency, born, now):
+                    conn.execute(
+                        "UPDATE deficiencies SET status = ? WHERE fingerprint = ?",
+                        (STALE, deficiency.fingerprint),
+                    )
+                    conn.commit()
+                    log.info(
+                        "[deficiencies] %s last happened at %s, before this build: not opening "
+                        "an issue unless it happens again",
+                        deficiency.fingerprint,
+                        deficiency.last_seen,
+                    )
+                    continue
                 if opened_today >= config.max_per_day:
-                    break
+                    continue
                 url = self._forge.create_issue(
                     repo, deficiency.title, issue_body(deficiency), [LABEL, deficiency.kind]
                 )
@@ -1178,15 +1440,74 @@ class Reporter:
                 if not ok:
                     continue
                 conn.execute(
-                    "UPDATE deficiencies SET reported_count = ?, status = ? WHERE fingerprint = ?",
+                    "UPDATE deficiencies SET reported_count = ?, status = ?, closed_at = NULL "
+                    "WHERE fingerprint = ?",
                     (deficiency.count, REPORTED, deficiency.fingerprint),
                 )
                 conn.commit()
                 done.append(("reopened " if closed else "commented on ") + deficiency.issue_url)
+            done += self._close_what_is_over(conn, rows, config, now, closed_today)
         finally:
             conn.close()
         for line in done:
             log.info("[deficiencies] %s", line)
+        return done
+
+    def _close_what_is_over(
+        self,
+        conn: Any,
+        rows: list[Deficiency],
+        config: Settings,
+        now: datetime,
+        closed_today: int,
+    ) -> list[str]:
+        """Close the issues whose deficiency is over, and retire the kinds that are.
+
+        Two ways an open issue ends without a person. A row of a kind another kind has
+        replaced gets one comment naming the successor (and its issue, when it has one).
+        A row nobody has seen for :data:`QUIET_BEFORE_CLOSE_SECONDS`, across at least one
+        build this machine had not run when it was last seen, gets one comment saying so.
+        Both are bounded by the same ``max_per_day`` as opening, and both are said once:
+        the row carries ``closed_at`` afterwards, and a recurrence clears it and reopens
+        the issue through the recurrence path above.
+        """
+        done: list[str] = []
+        for deficiency in rows:
+            if deficiency.status in (WATCHING, RECLASSIFIED, SUPERSEDED) or deficiency.closed_at:
+                continue
+            successor = _spec(deficiency.kind).superseded_by
+            reported = deficiency.status == REPORTED and bool(deficiency.issue_url)
+            if successor and not reported:
+                # Retired, and never worth an issue: it leaves the ledger quietly.
+                conn.execute(
+                    "UPDATE deficiencies SET status = ? WHERE fingerprint = ?",
+                    (SUPERSEDED, deficiency.fingerprint),
+                )
+                conn.commit()
+                continue
+            if not reported or deficiency.count > deficiency.reported_count:
+                continue  # never opened, or its recurrence was just commented: not over
+            if successor:
+                body = superseded_body(successor, issue_for_kind(conn, successor))
+                status, said = SUPERSEDED, f"closed {deficiency.issue_url} as superseded"
+            elif _quiet(deficiency, now) and newer_build_since(conn, deficiency.last_seen):
+                body = quiet_body(deficiency)
+                status, said = REPORTED, f"closed {deficiency.issue_url}: not seen since "
+                said += str(deficiency.last_seen)
+            else:
+                continue
+            if closed_today >= config.max_per_day:
+                break
+            url = str(deficiency.issue_url)
+            if (self._forge.state(url) or "") != "CLOSED" and not self._forge.close(url, body):
+                continue
+            closed_today += 1
+            conn.execute(
+                "UPDATE deficiencies SET status = ?, closed_at = ? WHERE fingerprint = ?",
+                (status, _stamp(self._clock), deficiency.fingerprint),
+            )
+            conn.commit()
+            done.append(said)
         return done
 
     def reclassify(self) -> list[str]:
@@ -1259,13 +1580,19 @@ class Reporter:
     def merge_duplicates(self) -> list[str]:
         """Fold turn-report rows that reduce to one cause into one. Never raises.
 
-        `serve` runs this at start. A turn report recorded before fingerprints were
-        reduced (:func:`reduce_turn_report`) sits under the fingerprint of its whole
-        sentence, so two wordings of one cause are two rows and two issues. Each group
-        that now shares a fingerprint keeps the row with the earliest issue; every
-        other open issue in the group gets one comment, "duplicate of #N", and is
-        closed, and its occurrences join the kept row. A duplicate whose issue cannot
-        be closed now stays as it is and is tried again at the next start.
+        `serve` runs this at start, and it is how a change to :func:`reduce_turn_report`
+        reaches rows that were written under the rule before it: two wordings of one
+        cause that used to be two rows and two issues become one. Each group that
+        reduces to one cause today keeps the row with the earliest issue; every other
+        open issue in the group gets one comment, "duplicate of #N", and is closed, and
+        its occurrences join the kept row. A duplicate whose issue cannot be closed now
+        stays as it is and is tried again at the next start.
+
+        A kept row keeps the fingerprint its issue was opened under, whatever today's
+        rule would give it, and every other fingerprint in the group — including the one
+        today's rule computes — becomes an alias to it. So the same line said again
+        comments that issue instead of opening a second one, even while a duplicate's
+        own issue is still waiting to be closed.
         """
         with self._lock:
             try:
@@ -1296,11 +1623,14 @@ class Reporter:
                 groups.setdefault(fingerprint(TURN_REPORT, deficiency.detail), []).append(
                     deficiency
                 )
+            at = _stamp(self._clock)
             for key, group in groups.items():
-                if len(group) == 1 and group[0].fingerprint == key:
-                    continue
                 group.sort(key=_merge_order)
                 kept, rest = group[0], group[1:]
+                # Before anything the forge can refuse: what this cause is called today
+                # points at the row that already has the issue for it.
+                remember_alias(conn, key, kept.fingerprint, at)
+                conn.commit()
                 merged: list[Deficiency] = []
                 for duplicate in rest:
                     url = duplicate.issue_url
@@ -1315,10 +1645,9 @@ class Reporter:
                                 continue
                             done.append(f"closed {url} as a duplicate of {kept.issue_url}")
                     merged.append(duplicate)
-                if any(d.fingerprint == key for d in rest if d not in merged):
-                    continue  # the new key is taken by a duplicate still open; next start
-                _fold(conn, key, kept, merged)
-                conn.commit()
+                if merged:
+                    _fold(conn, kept, merged, at)
+                    conn.commit()
         finally:
             conn.close()
         for line in done:
@@ -1371,14 +1700,15 @@ def duplicate_body(kept: Deficiency) -> str:
     target = f"#{number}" if number is not None else (kept.issue_url or "the kept report")
     return (
         f"duplicate of {target}\n\n"
-        "The runtime now fingerprints a turn's `RUNTIME:` line by its cause (the tool it "
-        "names, the error or refusal, the repository) rather than its wording, and this "
-        "report has the same cause as that one. Its occurrences are counted there."
+        "The runtime now fingerprints a turn's `RUNTIME:` line by its cause (the pull "
+        "request or issue it names; else the exception and where it came from; else the "
+        "tool and the refusal) rather than its wording, and this report has the same "
+        "cause as that one. Its occurrences are counted there."
     )
 
 
-def _fold(conn: Any, key: str, kept: Deficiency, merged: list[Deficiency]) -> None:
-    """Make ``kept`` the row for ``key``, with ``merged``'s occurrences, and drop the rest."""
+def _fold(conn: Any, kept: Deficiency, merged: list[Deficiency], at: str) -> None:
+    """Give ``kept`` ``merged``'s occurrences, drop their rows, and alias their keys to it."""
     group = (kept, *merged)
     count = sum(d.count for d in group)
     entries = sorted((e for d in group for e in d.evidence), key=lambda e: str(e.get("at") or ""))[
@@ -1395,12 +1725,14 @@ def _fold(conn: Any, key: str, kept: Deficiency, merged: list[Deficiency]) -> No
         reported = 0
     for gone in {d.fingerprint for d in group}:
         conn.execute("DELETE FROM deficiencies WHERE fingerprint = ?", (gone,))
+    for duplicate in merged:
+        remember_alias(conn, duplicate.fingerprint, kept.fingerprint, at)
     conn.execute(
         "INSERT INTO deficiencies (fingerprint, kind, title, detail, first_seen, last_seen, "
-        "count, evidence, issue_url, status, opened_at, reported_count) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "count, evidence, issue_url, status, opened_at, reported_count, closed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            key,
+            kept.fingerprint,
             kept.kind,
             kept.title,
             kept.detail,
@@ -1412,6 +1744,7 @@ def _fold(conn: Any, key: str, kept: Deficiency, merged: list[Deficiency]) -> No
             status,
             kept.opened_at,
             reported,
+            kept.closed_at,
         ),
     )
 
@@ -1526,7 +1859,8 @@ def _counted(kind: str, detail: str, scope: str, task_id: int) -> bool:
     conn = init_db()
     try:
         row = conn.execute(
-            "SELECT evidence FROM deficiencies WHERE fingerprint = ?", (fingerprint(kind, detail),)
+            "SELECT evidence FROM deficiencies WHERE fingerprint = ?",
+            (canonical_fingerprint(conn, fingerprint(kind, detail)),),
         ).fetchone()
     finally:
         conn.close()
@@ -1697,7 +2031,9 @@ FIXED_TURN_REPORTS: tuple[ReportFix, ...] = (
     ),
     ReportFix(
         # "`ppy deliver 21` reported "PR creation failed" with no reason"
-        fingerprints=frozenset({"73e968fea9ac0d8e", "c4b7a8dab0a58df5"}),
+        # Three keys: as written before reduced fingerprints, as task 285 reduced it, and
+        # as task 321 reads it (the line names pull request #710, which now leads).
+        fingerprints=frozenset({"73e968fea9ac0d8e", "c4b7a8dab0a58df5", "fe2394214d1d4c07"}),
         before=_PAP_222_FIXED_AT,
         note=(
             "`ppy deliver` always tried to create a pull request and cut `gh`'s refusal "
@@ -1766,13 +2102,17 @@ __all__ = [
     "PENDING",
     "PROMPT_CLARITY",
     "PROMPT_DEFECT",
+    "QUIET_BEFORE_CLOSE_SECONDS",
     "READINESS_UNREMEDIED",
     "RECLASSIFIED",
     "REPEATED_STEER",
     "REPEATED_WITHOUT_PROGRESS",
     "REPORTED",
     "RUNTIME_CI_RED",
+    "STALE",
+    "STALE_AFTER_SECONDS",
     "STALL_WHILE_LIVE",
+    "SUPERSEDED",
     "TURN_REPORT",
     "UNHANDLED_EXCEPTION",
     "WATCHING",
@@ -1783,17 +2123,23 @@ __all__ = [
     "Reporter",
     "Settings",
     "add_listener",
+    "build_id",
+    "build_started",
+    "canonical_fingerprint",
     "comment_body",
     "denial_kinds",
     "duplicate_body",
     "fingerprint",
+    "issue_for_kind",
     "fixed_checkin",
     "github_slug",
     "issue_body",
     "issue_number",
     "ledger",
+    "newer_build_since",
     "normalise",
     "notify",
+    "quiet_body",
     "record",
     "record_denials",
     "record_exception",
@@ -1802,8 +2148,10 @@ __all__ = [
     "reclassified_body",
     "redact",
     "reduce_turn_report",
+    "remember_alias",
     "remove_listener",
     "runtime_repo",
     "settings",
     "summary",
+    "superseded_body",
 ]
