@@ -110,13 +110,22 @@ GATE_TIERS_RULE = (
 #: deficiency (`deficiencies.py`) and `ppy serve` opens an issue about it.
 RUNTIME_PREFIX = "RUNTIME:"
 
-#: The rule every turn prompt carries verbatim, and a test holds them to.
+#: The rule every turn prompt carries verbatim, and a test holds them to. The two
+#: examples are load-bearing: a turn wrote `RUNTIME: the Papaya tools were loaded on
+#: demand this turn, so the work item could be read` — the runtime working, filed as a
+#: deficiency (issue #120) — because the rule never said the line is for an obstacle
+#: and nothing else.
 RUNTIME_RULE = (
-    "If the runtime itself got in the way of this turn (not the repository and not the "
-    "work, but a tool you were refused, a fact you could not obtain, or a contract such as "
-    "these instructions or a `ppy` command's output that was not true), say so in one line "
-    "of its own: `RUNTIME: <what got in the way>`. Name ids, never people, and quote no code "
-    "or ticket text. Leave it out when nothing did."
+    "If the runtime itself got in the way of this turn, say so in one line of its own: "
+    "`RUNTIME: <what got in the way>`. ONLY for something that stopped or degraded the job "
+    "this turn was sent to do — a tool you were refused, a fact you could not obtain, or a "
+    "contract such as these instructions or a `ppy` command's output that was not true — "
+    "and never for the repository, the work itself, or anything that went fine. One that "
+    "belongs: `RUNTIME: the instructions named a command that does not exist, so task 412 "
+    "was never linked to its work item`. One that does not: `RUNTIME: the Papaya tools were "
+    "loaded on demand this turn, so the work item could be read` — that is the runtime "
+    "working, reported as though it were an obstacle. A turn with nothing in its way writes "
+    "no `RUNTIME:` line at all. Name ids, never people, and quote no code or ticket text."
 )
 
 #: The rule every turn prompt carries verbatim about where a durable fact goes. On a
