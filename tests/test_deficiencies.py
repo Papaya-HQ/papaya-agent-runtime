@@ -69,7 +69,11 @@ class FakeGh:
             }
             return 0, url + "\n", ""
         if args[:2] == ["issue", "view"]:
-            return 0, json.dumps({"state": self.issues[args[2]]["state"]}), ""
+            issue = self.issues[args[2]]
+            wanted = args[args.index("--json") + 1].split(",")
+            said = [{"body": body} for body in issue["comments"]]
+            answer = {"state": issue["state"], "comments": said}
+            return 0, json.dumps({k: v for k, v in answer.items() if k in wanted}), ""
         if args[:2] == ["issue", "comment"]:
             self.issues[args[2]]["comments"].append(stdin)
             return 0, "", ""
@@ -81,7 +85,8 @@ class FakeGh:
         if args[:2] == ["issue", "close"]:
             issue = self.issues[args[2]]
             issue["state"] = "CLOSED"
-            issue["comments"].append(args[args.index("--comment") + 1])
+            if "--comment" in args:
+                issue["comments"].append(args[args.index("--comment") + 1])
             return 0, "", ""
         return 1, "", f"unexpected gh call {args}"
 
@@ -508,8 +513,14 @@ def test_two_wordings_of_one_refusal_fingerprint_the_same_and_other_causes_do_no
     assert len(others) == 2 and first not in others
     # The cause is the tool, the refusal and the repository, not the sentence around them.
     assert deficiencies.reduce_turn_report(ISSUE_49) == "propose_memory|agent-scop proposal|"
+    # Naming an exception AND where it came from is the strongest thing a line can say:
+    # the class (however it was capitalised) and the place lead, and the repository
+    # still tells two of them apart.
     in_api = deficiencies.reduce_turn_report("`ppy gate` raised TimeoutError in repo `api`")
-    assert in_api == "ppy gate|TimeoutError|api"
+    assert in_api == "timeouterror|ppy gate|api"
+    assert deficiencies.reduce_turn_report("`ppy gate` raised a timeouterror in repo `api`") == (
+        in_api
+    )
     assert deficiencies.fingerprint(
         deficiencies.TURN_REPORT, "propose_memory refused an agent-scoped proposal in repo api"
     ) != deficiencies.fingerprint(
@@ -584,7 +595,13 @@ def test_start_closes_a_later_duplicate_turn_report_with_a_comment_and_keeps_the
     rows = {row.issue_url: row for row in deficiencies.ledger(include_all=True)}
     assert set(rows) == {first, other}
     kept = rows[first]
-    assert kept.fingerprint == deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_49)
+    # The kept row keeps the fingerprint its issue was opened under; the duplicate's and
+    # the one today's rule computes are aliases to it, so neither opens a second issue.
+    assert kept.fingerprint == "f19d7924154a6890"
+    conn = init_db()
+    for alias in ("6aafd5304c096dfb", deficiencies.fingerprint(deficiencies.TURN_REPORT, ISSUE_49)):
+        assert deficiencies.canonical_fingerprint(conn, alias) == kept.fingerprint
+    conn.close()
     assert (kept.count, kept.reported_count, kept.status) == (2, 2, deficiencies.REPORTED)
     assert [e["n"] for e in kept.evidence] == [1, 2]
 

@@ -665,6 +665,16 @@ sweeps running with no evidence of work is also recorded as a
 evidence once a day, and an issue only from the second ticket or day. It shows under
 `needs attention` in `ppy workers` and `ppy status --team`.
 
+**Unless Papaya is doing its job.** Papaya routes an item to one person's machines and
+keeps the rest, and refusing the others is correct, not a defect: a refusal whose reason
+is `not_routed_here`, `handled_in_papaya` or `held_elsewhere` on work this runtime has
+no claim on is never a deficiency. It stays visible — the blocker names it, the sweep
+keeps asking, `ppy workers` shows it as kept elsewhere — and nothing is opened about it.
+The same refusal *on work this machine holds* is a deficiency, because the work was sent
+here and this machine cannot have it: a ticket task here that was not given away, a
+lease or a Run on this Mac hold naming one of this runtime's connections. So is a
+refusal the runtime cannot explain, whatever the claim.
+
 A ticket whose brief turn found nothing to build (waiting on a person, such as a QA
 recheck) is **parked**: the sweep, the reclaim on start and a session's list of waiting
 work all leave it alone until its `updated_at` moves past the park stamp, or somebody
@@ -812,14 +822,31 @@ the signals, recorded where they already happen:
   line, and the prompt gives it both an example that belongs and one that does not,
   because a turn once reported the Papaya tools loading on demand, which is the runtime
   working (issue #120). Two turns seldom word one
-  problem the same way, so this line is fingerprinted by its cause, not its sentence:
-  the first tool or API it names, then the first exception class in it or else the noun
-  phrase after its first refusal verb, then the repository if it names one. A line that
-  names no tool uses its first eight stemmed content words. "`propose_memory` refused
-  an agent-scoped proposal" and "`propose_memory` rejected an agent-scoped proposal"
-  are one deficiency, one issue, and a comment. At start, `serve` merges older turn
-  reports that now share a fingerprint: the issue opened first is kept, and each later
-  one gets the comment "duplicate of #N" and is closed.
+  problem the same way, so this line is fingerprinted by the strongest thing it *names*,
+  not by its sentence, in this order:
+
+  1. an exception class *together with* the function, module or command it names
+     (`AttributeError` in `claude.live_denial`) — the most specific thing a turn can
+     say, which a pull request mentioned in passing does not take over;
+  2. a pull request it names (`PR #58`, `pull request 710`, `#94`), with the repository
+     when it names one, since two repositories' PR #58 are two things. A number nothing
+     marks as a report ("issue 3 of 5 checks failed", "PAP-219 #3") is not one;
+  3. an exception class with nowhere named, keyed on its whole message — never a word of
+     it, or "'NoneType' object has no attribute 'get'" and "…no attribute 'phase'" would
+     be one deficiency;
+  4. the first tool or API it names, with the noun phrase after its first refusal verb
+     and the repository if it names one;
+  5. otherwise its first eight stemmed content words.
+
+  So "`propose_memory` refused an agent-scoped proposal" and "`propose_memory` rejected
+  an agent-scoped proposal" are one deficiency, one issue and a comment; and the six
+  ways turns worded "the Claude worker crashes and the fix is PR #58" in September are
+  one issue rather than six. The rule under-merges on purpose: two reports are one only
+  when they name the same thing. At start, `serve` folds older turn reports that are one
+  cause today — the issue opened first is kept, each later one gets the comment
+  "duplicate of #N" and is closed, and every other fingerprint in the group becomes an
+  alias to the kept row, so a change to this rule never opens a second issue for a cause
+  that already has one.
 - **A turn ignores its prompt.** A turn on a shared agent reports `propose_memory` refused
   after its facts and prompt told it to use repository notes. That is one
   `prompt-defect`, recorded once, not a turn report.
@@ -859,11 +886,33 @@ body has four parts: what happened, the evidence, what the runtime did instead, 
 proposed remedy. A deficiency that happens again adds one comment and bumps the count.
 If its issue was closed, that comment reopens it instead of opening a duplicate.
 
+**Nothing stale opens.** A deficiency is held back (`stale`, no issue) when both of
+these are true: it has not happened for 48 hours, and it last happened before this
+released version first ran on this machine. Either alone leaves it pending — something
+still happening under this version is this version's problem, and an upgrade never
+buries evidence from the hours before it. The next occurrence makes it `pending` again
+and it opens then. This is what stops a backlog opening issues for weeks about something
+already fixed: on 2026-09-20 the live ledger held 137 waiting turn reports at five
+issues a day, and four issues about a crash fixed on the 17th were opened on the 20th.
+The version is the released one (`0.1.22`), not `git describe`: a restart on a new
+commit, or an uncommitted edit, is neither a new version nor a fix.
+
+**An issue that is over closes itself.** A reported deficiency nobody has seen for
+seven days, across at least one released version this machine had not run when it was
+last seen, is closed with one comment saying so; if it happens again, the recurrence
+reopens it with its new evidence. A kind that another kind has replaced
+(`idle-work-refused` → `repeated-without-progress`) opens nothing, and its open issue
+gets one comment pointing at the successor's issue and is closed — before any recurrence
+comment, so a retired kind's issue ends with one comment rather than two. Closing is two
+things to GitHub, so a close the forge refuses is retried later rather than on every
+flush, and a retry that finds its comment already there only closes.
+
 **Where issues go, and how many.** The repository is the origin of the running
 checkout, or `self_report.repo` in the config. At most `self_report.max_per_day` new
-issues open a day (5 by default); the rest wait in the ledger for a later day.
-`self_report.enabled = false` keeps the ledger and opens nothing. An origin that is not
-GitHub keeps the ledger and logs one warning.
+issues open a day (5 by default) and at most that many close; the rest wait in the
+ledger for a later day. `self_report.enabled = false` keeps the ledger and opens,
+comments and closes nothing. An origin that is not GitHub keeps the ledger and logs one
+warning.
 
 **Nothing private leaves the machine.** An issue names ticket keys and repository names
 only. It never includes source, diffs, ticket titles or descriptions, comment text, or

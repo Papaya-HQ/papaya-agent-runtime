@@ -349,20 +349,33 @@ def test_a_ledger_turn_that_leaves_a_step_twice_hands_it_to_a_person(home) -> No
 # ── the deficiency lane ─────────────────────────────────────────────────────
 
 
-def test_the_deficiency_lane_flushes_the_reporter_and_never_raises(home) -> None:
+def test_the_deficiency_lane_groups_then_flushes_and_never_raises(home) -> None:
+    """Grouping runs on this path too, or a session opens a second issue for one cause."""
+
     class Reporter:
         def __init__(self) -> None:
             self.flushed = 0
+            self.merged = 0
+
+        def merge_duplicates(self) -> list[str]:
+            self.merged += 1
+            return ["closed https://github.com/o/r/issues/8 as a duplicate of #7"]
 
         def flush(self) -> list[str]:
             self.flushed += 1
             return ["opened https://github.com/o/r/issues/9"]
 
     reporter = Reporter()
-    assert lanes.deficiency_step(reporter) == ["opened https://github.com/o/r/issues/9"]
-    assert reporter.flushed == 1
+    assert lanes.deficiency_step(reporter) == [
+        "closed https://github.com/o/r/issues/8 as a duplicate of #7",
+        "opened https://github.com/o/r/issues/9",
+    ]
+    assert (reporter.merged, reporter.flushed) == (1, 1)
 
     class Broken:
+        def merge_duplicates(self) -> list[str]:
+            return []
+
         def flush(self) -> list[str]:
             raise RuntimeError("gh is signed out")
 
@@ -643,6 +656,9 @@ def test_a_round_runs_the_three_lanes_after_its_held_tickets(home, tmp_path, mon
 
     class Reporter:
         flushed = 0
+
+        def merge_duplicates(self) -> list[str]:
+            return []
 
         def flush(self) -> list[str]:
             Reporter.flushed += 1

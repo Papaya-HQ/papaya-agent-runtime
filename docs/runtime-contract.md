@@ -1065,8 +1065,17 @@ recorded 527 times, both unseen).
   the reason alone, one row for every ticket refused that way, each ticket in the
   evidence once a day. The kind's issue threshold is two: one stuck ticket is a
   `needs attention` line, and a second episode (another day, or another ticket refused
-  the same way) opens the issue. `idle-work-refused` is no longer recorded; its old rows
-  stay as history.
+  the same way) opens the issue. `idle-work-refused` is no longer recorded; its rows are
+  superseded by this kind, and its issue is closed pointing at this one.
+- **Papaya refusing other people's work is not a deficiency.** Papaya routes an item to
+  one person's machines and keeps the rest; refusing the others is the routing working.
+  A refusal whose reason is `not_routed_here`, `handled_in_papaya` or `held_elsewhere`
+  on work this runtime has no claim on records nothing — it stays in the blocker, in the
+  sweep summary and in `ppy workers` as kept elsewhere. It *is* a deficiency when this
+  runtime has a claim on the item (a ticket task here that was not given away, a lease
+  or a Run on this Mac hold naming one of this runtime's connections, past or present),
+  because then the work was sent here and this machine cannot have it; and a refusal
+  reason the runtime cannot explain is a deficiency whatever the claim.
 - **`needs attention`** closes `ppy workers` and `ppy status --team`, one line each:
   `repeating:` tickets from that deficiency (seen in the last day) with what to do,
   `parked:` tickets with their reason and stamp and what un-parks them, and
@@ -1078,6 +1087,52 @@ recorded 527 times, both unseen).
   `.ppy/attention-seen.json`, and a first look counts every row from one. `ppy workers
   --json` is `{"workers": [...], "attention": {"repeating", "parked", "grown"}}`. Say
   these lines to the person; do not let one sit.
+
+### The issues the runtime opens on itself are true when opened, and close themselves
+
+The self-report channel (`ppy deficiency list`, and the `self-reported` issues on this
+runtime's repository) is how the runtime tells its maintainers what is wrong with it.
+A channel whose open issues are mostly stale or duplicated is one nobody reads — on
+2026-09-20 nine of the nineteen open issues were one crash fixed three days earlier, and
+a 28-comment storm went unread among them. Three rules keep it true; they are in
+`deficiencies.py`, and nothing here needs doing by hand.
+
+- **Nothing stale opens.** A row is buried (`stale`, no issue) when **both** of these
+  are true, and never when only one is: it has not happened for 48 hours, *and* it last
+  happened before this released version first ran on this machine. So a row still being
+  recorded under this version opens however old its first occurrence is; a row recorded
+  minutes before an upgrade stays pending, because crossing an upgrade says nothing
+  about whether the new version fixed it; and what an upgrade does bury is the backlog —
+  rows nobody has seen for two days, last seen under a version this machine has since
+  replaced. A buried row opens the moment it happens again. "Version" is the released
+  version (`0.1.22`), never the commit or the dirty flag: a restart on a new commit is
+  not a new version, and is neither a reason to bury a row nor evidence that anything
+  was fixed.
+- **One cause is one issue.** A turn's `RUNTIME:` line is fingerprinted by the
+  strongest thing it names — an exception class together with where it came from; else
+  a pull request it names, with the repository; else the class and its whole message;
+  else the tool and the refusal — never by its wording. Rows that are one cause are
+  folded at `serve` start *and on a session's heartbeat*, the later issues closed as
+  duplicates, and every other fingerprint kept as an alias so no rule change opens a
+  second issue for a cause that already has one.
+- **An issue that is over closes itself.** Quiet for seven days across a newer build,
+  or belonging to a kind another kind replaced, it gets one comment and closes; a
+  recurrence reopens it. Closes are bounded by `self_report.max_per_day` like opens, and
+  `self_report.enabled = false` opens, comments and closes nothing.
+
+**Going back to an older build.** The ledger these rules use is schema 25: two columns
+on `deficiencies` (`closed_at`, `close_tried_at`) and two tables (`deficiency_aliases`,
+`runtime_builds`). An older build reading that database ignores all four — it opens and
+comments as it always did, and the worst it does is open an issue this version would
+have held back, or comment on one this version had closed (which is a recurrence
+comment, so the issue reopens rather than duplicating). It never drops the columns, and
+coming forward again picks up where it left off: `ppy` migrates by adding what is
+missing and never rewrites a row. So a downgrade is safe and a little noisier, which is
+the right way round.
+
+If you find a self-reported issue that is none of those and is still wrong, that is a
+runtime defect worth a task: the rule that should have caught it is the deliverable, not
+a hand-closed issue.
 
 ## Mode parity — you work the same in a session as under `ppy serve`
 

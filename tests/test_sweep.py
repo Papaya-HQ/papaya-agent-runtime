@@ -7,6 +7,7 @@ import io
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -133,9 +134,7 @@ def _sweeper(
         live_items=set,
         clock=clock,
         reads=reads if reads is not None else Reads(),
-        connection_ids=set,
-        tickets=dict,
-        **kwargs,
+        **{"connection_ids": set, "tickets": dict, **kwargs},
     )
 
 
@@ -568,6 +567,14 @@ def test_kept_work_with_no_evidence_of_work_is_offered_again_on_the_next_sweep(
     assert later.idle_total == 2
 
 
+def _held_here() -> dict[str, Any]:
+    """Two of the three items have a ticket task here that was never given away."""
+    return {
+        "PAP-219": SimpleNamespace(task_id=7, phase="dispatched"),
+        "PAP-221": SimpleNamespace(task_id=8, phase="dispatched"),
+    }
+
+
 def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_on_the_third(
     ppy_home, assigned, monkeypatch
 ) -> None:
@@ -581,7 +588,7 @@ def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_o
     built.loop._events.holder = dict(FALLBACK_HOLDER)
     published: list[bool] = []
     clock = Clock()
-    sweeper = _sweeper(built, clock, publish=lambda: published.append(True))
+    sweeper = _sweeper(built, clock, publish=lambda: published.append(True), tickets=_held_here)
 
     def idle_blockers() -> list[blockers.Blocker]:
         ledger = blockers.Ledger.load()
@@ -627,14 +634,14 @@ def test_a_refused_idle_item_is_one_blocker_updated_on_change_and_a_deficiency_o
     assert changed.title.startswith("Papaya keeps 2 idle items from this Mac: PAP-219, PAP-221;")
     assert changed.first_seen == first_seen
     assert published == [True, True]
-    # The third refusal running of PAP-219 and PAP-221, with no evidence of work: one
-    # row for the reason, both tickets in its evidence. Two tickets refused the same
-    # way is past the kind's threshold: an issue, not two.
+    # The third refusal running of PAP-219 and PAP-221, with no evidence of work and a
+    # ticket task here for each: one row for the reason, both tickets in its evidence.
+    # Two tickets refused the same way is past the kind's threshold: an issue, not two.
     [found] = refused_deficiencies()
     assert found.detail == sweep.refused_detail("handled_in_papaya")
-    assert sorted((e["ticket"], e["times"]) for e in found.evidence) == [
-        ("PAP-219", 3),
-        ("PAP-221", 3),
+    assert sorted((e["ticket"], e["times"], e["trigger"]) for e in found.evidence) == [
+        ("PAP-219", 3, "ticket task 7 here"),
+        ("PAP-221", 3, "ticket task 8 here"),
     ]
     assert found.status == deficiencies.PENDING
     assert not any(d.kind == deficiencies.IDLE_WORK_REFUSED for d in deficiencies.ledger())
@@ -661,7 +668,7 @@ def test_a_refusal_streak_counts_only_sweeps_refused_for_the_same_reason(
     built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
     built.loop._events.holder = dict(FALLBACK_HOLDER)
     clock = Clock()
-    sweeper = _sweeper(built, clock)
+    sweeper = _sweeper(built, clock, tickets=_held_here)
 
     def recorded() -> list[deficiencies.Deficiency]:
         return [
@@ -686,6 +693,94 @@ def test_a_refusal_streak_counts_only_sweeps_refused_for_the_same_reason(
     assert row.evidence[0]["ticket"] == "PAP-219"
     # One stuck ticket is a `needs attention` line, not an issue on first sight.
     assert row.status == deficiencies.WATCHING
+
+
+# ── whose refusal is a deficiency ───────────────────────────────────────────
+#
+# Papaya refusing work it never sent here is Papaya doing its job. Papaya refusing
+# work this machine holds is the September storm (#86, one row at count 527): the
+# reason was the same `not_routed_here` both times, so the reason alone cannot tell
+# them apart. The claim can.
+
+
+def _refused_rows() -> list[Any]:
+    from papaya_agent_runtime import deficiencies
+
+    return [
+        d
+        for d in deficiencies.ledger(include_all=True)
+        if d.kind == deficiencies.REPEATED_WITHOUT_PROGRESS
+    ]
+
+
+def _refused_three_times(
+    assigned: list[dict[str, Any]], *, tickets: Any = dict
+) -> list[sweep.SweepResult]:
+    """Three sweeps of one idle item Papaya refuses every time."""
+    assigned.append({**_item("PAP-219", hours=2), "short_id": "PAP-219"})
+    built = FakeBuilt(loop=RoutingLoop(), agent_config={"agent_id": "agent-1"})
+    clock = Clock()
+    sweeper = _sweeper(built, clock, tickets=tickets)
+
+    async def sweeps() -> list[sweep.SweepResult]:
+        results = []
+        for _ in range(sweep.REFUSALS_BEFORE_DEFICIENCY):
+            clock.advance(minutes=5)
+            results.append(await sweeper.sweep_once())
+        return results
+
+    return asyncio.run(sweeps())
+
+
+def test_work_papaya_never_sent_here_is_not_a_deficiency_however_often_it_is_refused(
+    ppy_home, assigned
+) -> None:
+    """`not_routed_here` on work with no claim here: routing, not a defect."""
+    from papaya_agent_runtime import blockers
+
+    results = _refused_three_times(assigned)
+
+    assert _refused_rows() == []
+    # Still visible: the sweep counts it as kept, and the blocker names it.
+    assert results[-1].idle_total == 1
+    ledger = blockers.Ledger.load()
+    assert [b.code for b in ledger.open.values() if b.code == blockers.IDLE_WORK_KEPT]
+
+
+def test_the_same_refusal_on_work_this_machine_holds_is_a_deficiency(ppy_home, assigned) -> None:
+    _refused_three_times(assigned, tickets=_held_here)
+
+    [row] = _refused_rows()
+    assert row.detail == sweep.refused_detail("not_routed_here")
+    assert row.evidence[0]["trigger"] == "ticket task 7 here"
+
+
+def test_a_refusal_the_runtime_cannot_explain_is_a_deficiency_with_no_claim_at_all(
+    ppy_home, assigned, monkeypatch
+) -> None:
+    """A reason this build does not know is never assumed to be Papaya doing its job."""
+    from papaya_agent_client import listener
+
+    monkeypatch.setattr(listener, "refusal_skip_reason", lambda _holder: "some_new_reason")
+
+    _refused_three_times(assigned)
+
+    [row] = _refused_rows()
+    assert row.detail == sweep.refused_detail("some_new_reason")
+    assert "some_new_reason" not in sweep.EXPECTED_REFUSALS
+
+
+def test_held_elsewhere_is_expected_too_before_the_client_that_says_it_is_pinned(
+    ppy_home, assigned, monkeypatch
+) -> None:
+    """The 0.17 reason for "another machine keeps it" is expected the moment it arrives."""
+    from papaya_agent_client import listener
+
+    monkeypatch.setattr(listener, "refusal_skip_reason", lambda _holder: "held_elsewhere")
+
+    _refused_three_times(assigned)
+
+    assert _refused_rows() == []
 
 
 def test_the_summary_says_which_kept_work_is_being_worked_and_which_is_idle(

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -328,9 +328,35 @@ CREATE TABLE IF NOT EXISTS deficiencies (
     status TEXT NOT NULL DEFAULT 'watching',
     opened_at TEXT,
     -- How many occurrences the issue and its comments already carry.
-    reported_count INTEGER NOT NULL DEFAULT 0
+    reported_count INTEGER NOT NULL DEFAULT 0,
+    -- When the runtime closed the issue itself (quiet for long enough, or the kind
+    -- was superseded). Cleared when a recurrence reopens it.
+    closed_at TEXT,
+    -- When the runtime last tried to close it. A forge that refuses is tried again
+    -- later, not on every flush.
+    close_tried_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_deficiencies_status ON deficiencies(status, first_seen);
+
+-- Fingerprints that mean the same deficiency as another row's: a wording that used to
+-- have a row of its own and was folded into one, and the key a row would be given by
+-- today's rule when its issue was opened under an older one. `deficiencies.record`
+-- resolves through this before it looks a fingerprint up, so a rule change never opens
+-- a second issue for a cause that already has one.
+CREATE TABLE IF NOT EXISTS deficiency_aliases (
+    fingerprint TEXT PRIMARY KEY,
+    canonical TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+
+-- When each build of this runtime was first seen on this machine. A deficiency whose
+-- newest evidence predates the running build's first moment stopped happening before
+-- this version existed, so no issue is opened about it; and a reported one that has
+-- been quiet across a newer build is closed.
+CREATE TABLE IF NOT EXISTS runtime_builds (
+    build_id TEXT PRIMARY KEY,
+    first_seen TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS assessment_cycles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -495,6 +521,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for col in ("observation", "likely_cause", "measurement"):
             if col not in action_cols:
                 conn.execute(f"ALTER TABLE improvement_actions ADD COLUMN {col} TEXT")
+    deficiency_cols = _column_names(conn, "deficiencies")
+    for col in ("closed_at", "close_tried_at"):
+        # When the runtime closed the issue itself, and when it last tried. Unset on
+        # every existing row, which is right: nothing closed one before these existed.
+        if col not in deficiency_cols:
+            conn.execute(f"ALTER TABLE deficiencies ADD COLUMN {col} TEXT")
     if "said_fingerprint" not in _column_names(conn, "outreach"):
         # What an ask said when it was last said: unchanged, it is never said again.
         conn.execute("ALTER TABLE outreach ADD COLUMN said_fingerprint TEXT")
