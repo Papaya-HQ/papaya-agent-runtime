@@ -343,6 +343,14 @@ class RunnerGuardian:
         # judges the turn again on what is true afterwards.
         verdict, _pushed = turn_end.rescue_unpushed(conn, spec.task_id, verdict)
 
+        # Where the repository gates pushes, a worker that finished never pushed at
+        # all — its rules told it not to. The runtime pushes here, after the
+        # auto-commit and before anything reviews this head, so the review reads a
+        # pushed branch and delivery never depends on a manager turn happening to do
+        # it by hand (issue #83, fourteen times). Only with the runtime's own gate
+        # green at this exact head; never with `--no-verify`, never forced.
+        turn_end.deliver_finished_branch(conn, spec.task_id)
+
         task_status = _TERMINAL_STATUS.get(result.status, "failed")
         if verdict.stopped:
             task_status = turn_end.WORKER_STOPPED

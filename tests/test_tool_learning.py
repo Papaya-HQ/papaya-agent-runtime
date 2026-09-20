@@ -241,7 +241,16 @@ def test_a_claude_result_event_carries_its_denials() -> None:
         "permission_denials": [_denial("python3 -c 'print(1)'")],
     }
     events = [ProviderEvent(kind="result", raw=raw)]
-    assert ClaudeAdapter().permission_denials(events) == raw["permission_denials"]
+
+    (found,) = ClaudeAdapter().permission_denials(events)
+
+    assert {k: found[k] for k in ("tool_name", "tool_use_id", "tool_input")} == raw[
+        "permission_denials"
+    ][0]
+    # Nothing else in the turn says who refused it, so the denial claims nothing:
+    # `harness_line` stays true and the command alone is judged, as it always was.
+    assert found["refusal"]["harness_line"] is True
+    assert found["refusal"]["tool_result"] == ""
 
 
 def test_serve_start_says_each_change_once(without_python3) -> None:

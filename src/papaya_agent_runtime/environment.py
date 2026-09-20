@@ -793,12 +793,15 @@ def render(
         delivery = (
             f"The manager reviews and delivers from {target}."
             if ends_at == "review"
-            else f"The harness then pushes {target} on your behalf and records it; "
-            f"`ppy task push {task_id}` is the same push by hand."
+            else f"The runtime then pushes {target} itself, once its own gate is green at "
+            f"your exact head, and records it; `ppy task push {task_id}` is the same push "
+            "by hand."
         )
         lines.append(
-            "- **Push hook: this repository's pre-push hook runs the full suite, so do not "
-            f"push.** This replaces the push line in the command rules above. {ending} {delivery}"
+            "- **Push hook: this repository gates pushes with its own hook, which runs the "
+            "full suite, so do not push.** The runtime pushes outside the harness, where "
+            "that hook does not apply, so nothing about it is skipped or weakened for you. "
+            f"{ending} {delivery}"
         )
     elif ends_at == "review":
         lines.append(
@@ -812,6 +815,26 @@ def denied_tools(repo_row) -> list[str]:
     from papaya_agent_runtime.providers.command_rules import denied_tools as patterns
 
     return patterns(for_repo(repo_row).full_suite_command) if repo_row is not None else []
+
+
+def push_is_gated(repo_row, worktree: str | None = None) -> bool:
+    """Does this repository stop a worker's own `git push`?
+
+    Two sources, and either is enough. The recorded one
+    (``repos.push_hook_runs_full_suite``) is what onboarding read from the
+    repository; the observed one is a ``PreToolUse`` hook on ``Bash`` registered in
+    the worktree, which is what actually refused every push in issues #83 and #116.
+
+    When it is true the worker is told not to push and the runtime pushes the lease
+    branch itself after its own gate. Telling the worker to push anyway is telling it
+    to be refused — the command rules and the environment block used to say opposite
+    things, and the worker followed the rules.
+    """
+    if repo_row is not None and for_repo(repo_row).push_hook_runs_full_suite:
+        return True
+    from papaya_agent_runtime.providers.claude import registered_hooks
+
+    return bool(registered_hooks(worktree, "Bash"))
 
 
 def command_rules_full_suite_refusal() -> str:

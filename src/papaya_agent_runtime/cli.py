@@ -12,6 +12,7 @@ import dataclasses
 import json
 import os
 import sys
+from pathlib import Path
 
 from papaya_agent_runtime.lifecycle import TASK_STATUSES
 
@@ -2121,6 +2122,53 @@ def _cmd_board(args: argparse.Namespace) -> int:
     return 0
 
 
+#: How big a note read from a file may be. Large enough for any report a worker has
+#: ever filed, small enough that a wrong path cannot put a binary in the ledger.
+MAX_NOTE_BYTES = 256 * 1024
+
+
+class _TextFileError(Exception):
+    """A `--note-file`/`--why-file` that could not become a note."""
+
+
+def _text_from_file(path: str, flag: str) -> str:
+    """The text in ``path``, for a flag that exists because the shell refuses text.
+
+    A note with a newline before a `#`, a backtick, `$(`, or a brace holding a quote
+    is refused as a *command* whatever the program is — the harness will not analyse
+    the argument (issue #115). Passing a path sidesteps that entirely, so nothing
+    about the note has to be reshaped to be recorded.
+    """
+    found = Path(path).expanduser()
+    try:
+        raw = found.read_bytes()
+    except OSError as exc:
+        raise _TextFileError(f"{flag} {path}: {exc.strerror or exc}") from exc
+    if len(raw) > MAX_NOTE_BYTES:
+        raise _TextFileError(
+            f"{flag} {path}: {len(raw)} bytes is more than the {MAX_NOTE_BYTES} a note may be"
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _TextFileError(f"{flag} {path}: not UTF-8 text") from exc
+    if not text.strip():
+        raise _TextFileError(f"{flag} {path}: the file is empty")
+    return text.strip()
+
+
+def _note_text(args: argparse.Namespace, inline: str, file_attr: str, flag: str) -> str:
+    """The note from its file when one was given, else the inline one.
+
+    Both is not an error worth refusing over: the file is the one that exists
+    because the inline flag could not carry the text, so the file wins.
+    """
+    path = getattr(args, file_attr, None)
+    if path:
+        return _text_from_file(str(path), flag)
+    return inline or ""
+
+
 def _cmd_progress(args: argparse.Namespace) -> int:
     """A worker's structured progress report (also usable by the manager to inspect)."""
     from papaya_agent_runtime import progress
@@ -2143,7 +2191,12 @@ def _cmd_progress(args: argparse.Namespace) -> int:
         print(f"task {args.task_id}: {progress.describe(latest)}")
         return 0
     try:
-        event_id = progress.record(args.task_id, phase=args.phase, note=args.note or "")
+        note = _note_text(args, args.note, "note_file", "--note-file")
+    except _TextFileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
+        event_id = progress.record(args.task_id, phase=args.phase, note=note)
     except progress.ProgressError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -2230,7 +2283,12 @@ def _cmd_need(args: argparse.Namespace) -> int:
         )
         return 1
     try:
-        found = capability_requests.request(args.task_id, args.capability, why=args.why or "")
+        why = _note_text(args, args.why, "why_file", "--why-file")
+    except _TextFileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
+        found = capability_requests.request(args.task_id, args.capability, why=why)
     except capability_requests.CapabilityError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -3980,6 +4038,15 @@ def build_parser() -> argparse.ArgumentParser:
     prog.add_argument("task_id", type=int)
     prog.add_argument("--phase", choices=["plan", "implement", "test", "review", "blocked", "done"])
     prog.add_argument("--note", default="")
+    prog.add_argument(
+        "--note-file",
+        dest="note_file",
+        default=None,
+        help=(
+            "read the note from this file — for a note of more than one line, or one "
+            "holding backticks, $, # or braces, which the shell refuses as a command"
+        ),
+    )
     prog.add_argument("--history", action="store_true", help="show every report, oldest last")
     prog.add_argument("--json", action="store_true")
     prog.set_defaults(func=_cmd_progress)
@@ -4099,6 +4166,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     need.add_argument("--why", default="", help="what the task needs it for, in one line")
+    need.add_argument(
+        "--why-file",
+        dest="why_file",
+        default=None,
+        help=(
+            "read the reason from this file — for a reason of more than one line, or one "
+            "holding backticks, $, # or braces, which the shell refuses as a command"
+        ),
+    )
     need.add_argument("--json", action="store_true")
     need.set_defaults(func=_cmd_need)
 

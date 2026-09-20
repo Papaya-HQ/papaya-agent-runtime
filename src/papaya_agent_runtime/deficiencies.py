@@ -80,6 +80,9 @@ MISSED_TURN = "missed-turn"
 GATE_PAST_TOOL_CAP = "gate-past-tool-cap"
 #: A worker was denied a plain command its profile could not be taught to allow.
 WORKER_DENIAL = "worker-denial"
+#: A target repository's own tool hook refused a worker's command. Nothing about the
+#: worker profile would change it, so it is a different thing to fix and says so.
+WORKER_DENIAL_HOOK = "worker-denial-hook"
 #: Workers in one repository kept breaking the command rules: the rules text is unclear.
 PROMPT_CLARITY = "prompt-clarity"
 #: An exception escaped `serve`, a turn, a round, the sweep or the supervisor.
@@ -242,6 +245,27 @@ KINDS: dict[str, Kind] = {
         remedy=(
             "Decide whether the pattern belongs in the worker profile, or whether the briefs "
             "for that repository should route around it."
+        ),
+        threshold=2,
+    ),
+    WORKER_DENIAL_HOOK: Kind(
+        title="A repository's own hook refuses workers a command",
+        happened=(
+            "Workers in one repository ran {detail} and the REPOSITORY'S OWN hook refused "
+            "it. The harness allowed the call: the tool profile, the command rules and the "
+            "policy all let it through, and a hook this repository registers stopped it. "
+            "What the hook wants is in the evidence, in its own words."
+        ),
+        instead=(
+            "Recorded it as a hook refusal, not a profile gap, and steered the worker once "
+            "with what the hook said. Nothing was added to any tool profile, and no hook "
+            "was edited, skipped or disabled. Where the command was a push, the runtime "
+            "pushes the lease branch itself after its own gate is green at that head."
+        ),
+        remedy=(
+            "Give the hook what it asks for, or decide that this command is not a worker's "
+            "to run here and say so in the repository's brief. Never weaken the hook: it is "
+            "the repository's, not the runtime's."
         ),
         threshold=2,
     ),
@@ -412,6 +436,13 @@ EVIDENCE_FIELDS = (
     "transcript",
     "error",
     "times",
+    # A hook refusal: which hook, where it is registered, what it said, and whether
+    # the diagnosis was read off the repository or deduced from the harness's silence.
+    "hook",
+    "hook_settings",
+    "hook_said",
+    "inferred",
+    "reason",
 )
 
 #: How many occurrences a ledger row keeps in full.
@@ -1935,9 +1966,17 @@ def record_denials(
     - ``profile_gap``: a `worker-denial` when learning cannot close it, that is when
       the program is outside the safe family, or ``profile`` (the tools the worker
       was dispatched with, when known) already allowed the pattern.
+    - ``hook_refusal``: a `worker-denial-hook`, scoped to the repository AND the hook,
+      so a repository with two hooks raises two and one hook raises one however many
+      commands it refuses. The profile is beside the point and is not mentioned.
     - ``command_shape``: one `prompt-clarity` occurrence per worker, scoped to its
       repository and the day, with the command as evidence.
     - ``policy_refusal``: nothing; `tool_learning` counts it and steers the worker.
+
+    A denial carrying a ``verdict`` (every one `tool_learning.learn` passes) is taken
+    at that verdict. Re-deriving it here is not possible any more: the evidence that
+    tells a hook block from a profile gap lives in the turn's stream, which is gone
+    by the time the ledger sees it.
     """
     try:
         denials = [d for d in denials if isinstance(d, dict)]
@@ -1956,8 +1995,12 @@ def record_denials(
             tool = str(denial.get("tool_name") or denial.get("tool") or "")
             tool_input = denial.get("tool_input") or {}
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            verdict = tool_learning.classify(tool, command, worktree)
+            decided = denial.get("verdict") if isinstance(denial.get("verdict"), dict) else None
+            verdict = _decided(decided) or tool_learning.classify(tool, command, worktree)
             evidence = {"repo": repo, "task_id": task_id, "run_id": run_id, "command": command}
+            if verdict.kind == tool_learning.HOOK_REFUSAL:
+                _record_hook_denial(verdict, decided or {}, evidence, repo)
+                continue
             if verdict.kind == tool_learning.COMMAND_SHAPE:
                 scope = f"repo:{repo or '?'}:{day}"
                 if not _counted(PROMPT_CLARITY, COMMAND_RULES_DETAIL, scope, task_id):
@@ -1978,6 +2021,48 @@ def record_denials(
             )
     except Exception as exc:  # noqa: BLE001 - a worker's turn must end whatever this does
         log.warning("[deficiencies] Could not read task %s's denials: %s", task_id, exc)
+
+
+def _decided(verdict: dict | None) -> tool_learning.Verdict | None:
+    """The kind `tool_learning` already settled, rebuilt for this module."""
+    if not verdict or not verdict.get("kind"):
+        return None
+    return tool_learning.Verdict(
+        pattern=str(verdict.get("pattern") or ""),
+        in_family=bool(verdict.get("in_family")),
+        reason=str(verdict.get("reason") or ""),
+        kind=str(verdict["kind"]),
+        program=str(verdict.get("program") or ""),
+        hook=str(verdict.get("hook") or ""),
+        hook_settings=str(verdict.get("hook_settings") or ""),
+        inferred=bool(verdict.get("inferred")),
+    )
+
+
+def _record_hook_denial(
+    verdict: tool_learning.Verdict, decided: dict, evidence: dict, repo: str | None
+) -> None:
+    """One row per repository and hook, carrying what the hook itself said.
+
+    The detail names the hook rather than the command, because a hook that refuses
+    a push refuses every push: one issue per hook is the thing a person can act on,
+    where one per command would be fourteen issues saying the same thing (#83).
+    """
+    hook = verdict.hook or "an unnamed hook"
+    detail = f"`{hook}`" + (" (inferred)" if verdict.inferred else "")
+    record(
+        WORKER_DENIAL_HOOK,
+        detail,
+        evidence={
+            **evidence,
+            "hook": verdict.hook,
+            "hook_settings": verdict.hook_settings,
+            "hook_said": str(decided.get("hook_said") or ""),
+            "inferred": verdict.inferred,
+            "reason": verdict.reason,
+        },
+        scope=f"repo:{repo or '?'}:{hook}",
+    )
 
 
 def _counted(kind: str, detail: str, scope: str, task_id: int) -> bool:
@@ -2246,6 +2331,7 @@ __all__ = [
     "UNHANDLED_EXCEPTION",
     "WATCHING",
     "WORKER_DENIAL",
+    "WORKER_DENIAL_HOOK",
     "CLOSE_RETRY_AFTER_SECONDS",
     "CheckinFix",
     "Deficiency",
