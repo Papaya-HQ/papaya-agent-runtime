@@ -165,8 +165,8 @@ def record_review(
     ``note`` is the reviewer's own words about *this* approval — what they checked,
     which captures they opened, what they accepted a caveat on. It rides the review
     row, so it is bound to the same SHA as the verdict and cannot be mistaken for a
-    note about some later commit; ``ppy review status``/``show`` print it back, and
-    delivery quotes it in the pull request's verification section.
+    note about some later commit; ``ppy review status``/``show`` print it back. The
+    pull request's text is the separate description (:mod:`papaya_agent_runtime.pr_body`).
     """
     if verdict not in ("approved", "changes_requested"):
         raise ReviewError("verdict must be 'approved' or 'changes_requested'")

@@ -11,7 +11,8 @@ import subprocess
 
 import pytest
 
-from papaya_agent_runtime import repos
+from conftest import PR_DESCRIPTION
+from papaya_agent_runtime import pr_body, repos
 
 
 @pytest.fixture
@@ -507,6 +508,8 @@ def test_delivery_pushes_and_opens_the_pr_on_the_registered_forge(
 
     monkeypatch.setattr(delivery, "_run", fake_run)
     monkeypatch.setattr(delivery, "is_approved_at_head", lambda tid: (True, ""))
+    # Faked with the approval it rides on: this test is about delivery, not the text.
+    monkeypatch.setattr(pr_body, "description_for", lambda *_a: PR_DESCRIPTION)
     monkeypatch.setattr(delivery, "head_sha", lambda wt: "f" * 40)
     monkeypatch.setattr(delivery, "_pr_tool", lambda: "gh")
 

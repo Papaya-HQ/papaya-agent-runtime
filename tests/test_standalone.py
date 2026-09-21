@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import wait_until
+from conftest import approve_with_description, wait_until
 from papaya_agent_runtime import (
     cli,
     delivery,
@@ -29,7 +29,6 @@ from papaya_agent_runtime import (
     sweep,
 )
 from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling, save_config
-from papaya_agent_runtime.review import record_review
 from papaya_agent_runtime.setup import discovery, doctor
 from papaya_agent_runtime.state import init_db
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -166,7 +165,7 @@ def test_a_local_task_goes_brief_to_delivery_with_no_papaya_call(
             what="the worker to finish",
             interval=0.1,
         )
-        record_review(task_id, "approved", "looks good")
+        approve_with_description(task_id, "looks good")
         result = delivery.deliver(task_id, push=False, open_pr=True)
     finally:
         server.stop()

@@ -18,9 +18,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from conftest import wait_until
+from conftest import approve_with_description, wait_until
 from papaya_agent_runtime import delivery, repos, stacks
-from papaya_agent_runtime.review import record_review
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import SupervisorServer
@@ -128,7 +127,7 @@ def _stack_on(client, repo_name: str, parent_id: int, title: str) -> int:
 
 
 def _deliver(task_id: int, **kwargs):
-    record_review(task_id, "approved")
+    approve_with_description(task_id)
     return delivery.deliver(task_id, push=False, open_pr=False, **kwargs)
 
 
@@ -190,7 +189,7 @@ def test_a_parent_delivers_after_its_child_rebased_onto_its_pushed_head(
 
     monkeypatch.setattr(delivery, "_pr_tool", lambda: "gh")
     monkeypatch.setattr(delivery, "_run", forge)
-    record_review(child_id, "approved")
+    approve_with_description(child_id)
     result = delivery.deliver(child_id, push=False)
     assert result.pr_url == "https://example/pull/2"
     create = next(argv for argv in opened if argv[1:3] == ["pr", "create"])

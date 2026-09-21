@@ -92,11 +92,42 @@ worker's choice matches the source, the checkpoint was wrong — say so in the l
 
 ## 5. Approve, deliver, and say what shipped
 
-`ppy review approve <id>` at the exact head, then `ppy deliver <id>` — it opens the
-pull request against the task's recorded stack parent (dispatched with `--base`),
-or against `main` for a bottom layer; pass `--base` only to override. Then tell the
-user in plain terms what landed, what was flagged and not done, and what needs them,
-naming the stack and the layer rather than each PR as separate work.
+Write the pull request description first (below), to
+`<runtime>/.ppy/pr-descriptions/<id>.md`. Then `ppy review approve <id> --note "<what
+you checked>" --pr-description <that file>` at the exact head, then `ppy deliver <id>` —
+it opens the pull request against the task's recorded stack parent (dispatched with
+`--base`), or against `main` for a bottom layer; pass `--base` only to override. Then
+tell the user in plain terms what landed, what was flagged and not done, and what needs
+them, naming the stack and the layer rather than each PR as separate work.
+
+### The pull request description
+
+You have just read the whole diff; nobody else who opens the pull request has. The
+description is its body, exactly as you write it, and it is how the engineer reviewing
+it, the person who asked for it and whoever merges it find out what it does. `ppy review
+approve` refuses one that is missing a section, says too little in one, or cites files
+that never leave this machine; `ppy deliver` refuses a head with no description. Five
+`##` sections, in this order:
+
+- `## Summary` — what changed, in two to four plain sentences. The behaviour, not the
+  files.
+- `## Why` — the problem it solves and who had it. Link the work item.
+- `## Product impact` — what people using the product will see or do differently,
+  anything that changes for existing data or users, and anything needed to roll it out
+  (a flag, a migration, a client release, an order it has to merge in). If nothing
+  user-facing changes, say what does.
+- `## How to test` — numbered steps a person can follow to see it working: where to go,
+  what to do, what they should see. Include the edge case that matters.
+- `## Risks and what was not verified` — what could go wrong, and anything you did not
+  check yourself, plainly.
+
+Write it in the product's language, not the run's. The worker's progress notes, commit
+SHAs, round numbers, gate logs and `.ppy-evidence/` paths are for you, not the reader:
+say what the evidence showed rather than where it sits on this machine, and use a
+screenshot only if it is attached to the pull request. The runtime adds the stack and
+the attribution itself. PAP-279's PR #811 (2026-09-21) is what this replaces: a body
+quoted from the worker's last progress note and the reviewer's shorthand, which told a
+reader nothing about the product or how to check it.
 
 After any conflict resolution that overwrote a file with the base's copy and spliced
 the branch's change back in, diff `merge-base..branch` for that file — not just the last

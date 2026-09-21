@@ -15,10 +15,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from conftest import wait_until
-from papaya_agent_runtime import delivery, repos, stacks
+from conftest import PR_DESCRIPTION, approve_with_description, wait_until
+from papaya_agent_runtime import delivery, pr_body, repos, stacks
 from papaya_agent_runtime.config import MMConfig, save_config
-from papaya_agent_runtime.review import record_review
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import SupervisorServer
@@ -361,7 +360,7 @@ def test_deliver_refuses_composed_open_task_commits_but_not_a_merged_sibling(
         stack_on=bottom_resp["task_id"],
     )
     _wait_terminal(client, top_resp["task_id"])
-    record_review(top_resp["task_id"], "approved")
+    approve_with_description(top_resp["task_id"])
 
     with pytest.raises(delivery.DeliveryError) as refused:
         delivery.deliver(top_resp["task_id"], push=False, open_pr=False, base="main")
@@ -457,13 +456,12 @@ def test_a_diverged_worktree_is_refused_with_both_commits_named(server, source_r
 
 
 def test_resume_and_deliver_refuse_a_diverged_worktree(server, source_repo) -> None:
-    from papaya_agent_runtime.review import record_review
 
     srv, client = server
     task = _task_on_a_pushed_branch(client, source_repo)
     _cascade_remote_branch(source_repo, task["branch"])
     _commit(task["worktree_path"], "local.txt", "work the remote never saw")
-    record_review(task["id"], "approved")
+    approve_with_description(task["id"])
 
     resp = client.resume_task(task["id"], "carry on")
     assert not resp.get("ok")
@@ -478,12 +476,11 @@ def test_deliver_cascades_a_stale_worktree_and_then_wants_the_new_head_reviewed(
     server, source_repo
 ) -> None:
     """The cascade lands first; the exact-HEAD gate then does its job on the new commit."""
-    from papaya_agent_runtime.review import record_review
 
     srv, client = server
     task = _task_on_a_pushed_branch(client, source_repo)
     stale_head = _git(task["worktree_path"], "rev-parse", "HEAD")
-    record_review(task["id"], "approved")
+    approve_with_description(task["id"])
     rewritten = _cascade_remote_branch(source_repo, task["branch"])
     assert rewritten != stale_head
 
@@ -493,7 +490,7 @@ def test_deliver_cascades_a_stale_worktree_and_then_wants_the_new_head_reviewed(
     # The worktree moved onto the cascade before the gate spoke.
     assert _git(task["worktree_path"], "rev-parse", "HEAD") == rewritten
 
-    record_review(task["id"], "approved")
+    approve_with_description(task["id"])
     result = delivery.deliver(task["id"], open_pr=False)
     assert result.head_sha == rewritten
     assert _git(source_repo, "rev-parse", task["branch"]) == rewritten
@@ -526,6 +523,8 @@ def test_deliver_targets_main_when_the_layer_below_merged(ppy_home, monkeypatch)
         ),
     )
     monkeypatch.setattr(delivery, "is_approved_at_head", lambda tid: (True, ""))
+    # Faked with the approval it rides on: this test is about delivery, not the text.
+    monkeypatch.setattr(pr_body, "description_for", lambda *_a: PR_DESCRIPTION)
     monkeypatch.setattr(delivery, "head_sha", lambda wt: "f" * 40)
     monkeypatch.setattr(delivery, "_pr_tool", lambda: "gh")
 
@@ -579,6 +578,8 @@ def _deliverable(monkeypatch, calls: list[list[str]]) -> None:
         ),
     )
     monkeypatch.setattr(delivery, "is_approved_at_head", lambda tid: (True, ""))
+    # Faked with the approval it rides on: this test is about delivery, not the text.
+    monkeypatch.setattr(pr_body, "description_for", lambda *_a: PR_DESCRIPTION)
     monkeypatch.setattr(delivery, "head_sha", lambda wt: "f" * 40)
     monkeypatch.setattr(delivery, "_pr_tool", lambda: "gh")
 
