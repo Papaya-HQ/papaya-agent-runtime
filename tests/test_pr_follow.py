@@ -28,6 +28,7 @@ from papaya_agent_runtime import (
     repos,
     rounds,
     serve,
+    stacks,
 )
 from papaya_agent_runtime.config import WorkerCeiling
 from papaya_agent_runtime.providers.command_rules import command_rules
@@ -598,3 +599,59 @@ def test_two_failed_attempts_at_one_head_mark_needs_a_person_once_and_stop(ppy_h
     world.forge = [pr(worker, ci="fail", failing=["unit"], head="d" * 40)]
     world.round()
     assert len(attention(worker)) == 3
+
+
+def test_a_merge_made_on_the_forge_outside_ppy_is_adopted_and_frees_the_lane(
+    ppy_home, monkeypatch
+) -> None:
+    """A person pressing Merge on GitHub sets nothing on the row: the lane must still end.
+
+    The merge leaves no `merged_sha` and takes the branch out of `watch.pr_states` at
+    the same moment, so before this the attempt could never be judged over and held its
+    slot forever — task 142 held one for 46h with eight attempts queued behind it.
+    """
+    _ticket, worker = delivered()
+    world = World()
+    world.forge = [pr(worker, ci="fail", failing=["unit"])]
+    world.round()
+    assert len(reconcile.open_lane()) == 1
+
+    # Merged on the forge, by hand. Nothing local knows, and the forge stops listing it.
+    world.forge = []
+    monkeypatch.setattr(
+        stacks,
+        "pull_request_for",
+        lambda *_a, **_k: {"merged": True, "merge_commit": "d" * 40},
+    )
+
+    world.round()
+
+    assert reconcile.open_lane() == []
+    assert reconcile.lane_status() == "idle"
+    (finished,) = events_of(worker, reconcile.FINISHED)
+    assert finished["outcome"] == reconcile.OUTCOME_MERGED
+    # Adopted, not merely closed: the bookkeeping is written down, so every other
+    # reader of the row (the stack, the worktree sweep, the work item) agrees.
+    conn = init_db()
+    try:
+        assert (store.get_task(conn, worker)["merged_sha"] or "").lower() == "d" * 40
+    finally:
+        conn.close()
+
+
+def test_an_open_pull_request_is_never_adopted_as_merged(ppy_home, monkeypatch) -> None:
+    """Adoption records a merge that happened; it must never invent one."""
+    _ticket, worker = delivered()
+    world = World()
+    world.forge = [pr(worker, ci="fail", failing=["unit"])]
+    world.round()
+
+    monkeypatch.setattr(stacks, "pull_request_for", lambda *_a, **_k: {"merged": False})
+
+    assert reconcile.adopt_forge_merge(worker) is None
+    assert len(reconcile.open_lane()) == 1
+    conn = init_db()
+    try:
+        assert not (store.get_task(conn, worker)["merged_sha"] or "")
+    finally:
+        conn.close()
