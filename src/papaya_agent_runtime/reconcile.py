@@ -355,6 +355,12 @@ def attempt_over(entry: LaneEntry) -> str | None:
     either the merge is on the worker's row, or the worker delivered again since it
     started, or the ticket reached a phase after which nothing more happens on its own
     (reported, released, handed back, …).
+
+    A merge made on the forge outside ``ppy`` leaves nothing on the row to find, so
+    the last resort is to ask the forge and write the merge down
+    (:func:`adopt_forge_merge`). Without that the attempt can never end: the branch is
+    gone from :func:`watch.pr_states`, so no round can judge it either, and the lane
+    holds its slot forever (PAP: task 142 held one for 46h behind eight queued).
     """
     conn = db.init_db()
     try:
@@ -381,9 +387,81 @@ def attempt_over(entry: LaneEntry) -> str | None:
             "SELECT 1 FROM events WHERE task_id = ? AND kind = 'delivered' AND id > ? LIMIT 1",
             (entry.worker_task_id, entry.started_event_id),
         ).fetchone()
-        return "ended" if delivered is not None else None
+        if delivered is not None:
+            return "ended"
     finally:
         conn.close()
+    # Nothing local says this attempt is over. The connection is closed first: adopting
+    # a merge takes a write transaction of its own.
+    return OUTCOME_MERGED if adopt_forge_merge(entry.worker_task_id) else None
+
+
+def adopt_forge_merge(worker_task_id: int) -> str | None:
+    """Write down a merge that happened on the forge outside ``ppy``. The SHA, or ``None``.
+
+    The runtime only ever learned a merge from its own hand: ``ppy deliver`` or
+    ``ppy stack merge`` set ``merged_sha``, and everything downstream — the lane, the
+    stack's next action, the worktree sweep, the work item — keys off that column. A
+    person pressing *Merge* on GitHub sets nothing, and the pull request leaves the
+    forge query at the same moment, so the task is stranded: delivered, shipped, and
+    permanently unfinished as far as this runtime can tell.
+
+    So the fact is fetched from the forge and recorded. This is pure bookkeeping, the
+    same as ``ppy deliver --merged``: the commit shipped, there is nothing to push and
+    no review gate left to satisfy. It never merges anything — a pull request that is
+    still open is left exactly alone, which is what keeps this apart from merge
+    authority (``ppy config authority --allow-merge``) and out of reach of it.
+
+    Best effort, and never raises: a forge that cannot be reached is simply not an
+    answer yet, and the caller tries again next round.
+    """
+    from papaya_agent_runtime import repos, stacks
+    from papaya_agent_runtime.delivery import DeliveryError, record_merged
+
+    conn = db.init_db()
+    try:
+        task = store.get_task(conn, worker_task_id)
+        if task is None:
+            return None
+        recorded = (task["merged_sha"] or "").strip().lower()
+        if recorded:
+            return recorded
+        branch = task["branch"] or ""
+        cwd = task["worktree_path"]
+        row = conn.execute(
+            "SELECT forge_url FROM repos WHERE id = ?", (task["repo_id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not branch:
+        return None
+    slug = repos.forge_slug(row["forge_url"]) if row is not None else None
+    try:
+        merged_sha = stacks._merge_sha(stacks.pull_request_for(branch, cwd=cwd, slug=slug))
+    except Exception:  # noqa: BLE001 - an unreachable forge is not an answer
+        return None
+    if not merged_sha:
+        return None
+    try:
+        record_merged(
+            worker_task_id,
+            merged_sha,
+            note=f"merged on the forge outside ppy; adopted from pull request head {branch}",
+        )
+    except DeliveryError:
+        return None
+    return merged_sha
+
+
+def attempt_is_open(started_event_id: int, conn: sqlite3.Connection | None = None) -> bool:
+    """Is this attempt still open? Asked again before closing one a round already judged.
+
+    Judging an attempt can itself close it — :func:`adopt_forge_merge` records the merge,
+    and recording a merge frees the lane — and a hand-run ``ppy deliver --merged`` can
+    land in the same gap. Without this the attempt is finished twice, which is one
+    ``reconcile_finished`` too many for every reader that counts them.
+    """
+    return any(entry.started_event_id == started_event_id for entry in open_lane(conn))
 
 
 def close_open_attempts(
@@ -732,6 +810,8 @@ __all__ = [
     "OUTCOME_FAILED",
     "OUTCOME_FIXED",
     "OUTCOME_MERGED",
+    "adopt_forge_merge",
+    "attempt_is_open",
     "attempt_over",
     "close_open_attempts",
     "fingerprint",

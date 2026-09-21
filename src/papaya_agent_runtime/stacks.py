@@ -670,9 +670,19 @@ def merge_stack(
     sleep=time.sleep,
     confirm_attempts: int = 10,
 ) -> StackMergeResult:
-    """Merge the lowest unmerged layer natively; optionally repeat upward."""
-    _require_merge_authority()
+    """Merge the lowest unmerged layer natively; optionally repeat upward.
+
+    A layer whose pull request already merged on the forge is *adopted* rather than
+    refused: the merge is written down and the stack moves up to the next layer. That
+    costs no merge authority, because it merges nothing — without it a stack sat
+    behind a shipped pull request with no command able to clear it, since
+    ``ppy stack merge`` was both the advice ``stack_layers`` gave and the thing that
+    refused (PAP: task 142).
+    """
+    from papaya_agent_runtime import reconcile
+
     result = StackMergeResult(identifier)
+    authorized = False
     while True:
         layers = stack_layers(identifier)
         layer = next((item for item in layers if not item.recorded_merged), None)
@@ -681,12 +691,31 @@ def merge_stack(
         if layer.pr_number is None:
             result.stopped = f"task {layer.task_id} has no pull request; deliver that layer first"
             return result
-        if str(layer.pr_state or "").upper() != "OPEN":
+        state = str(layer.pr_state or "").upper()
+        if state == "MERGED":
+            adopted = reconcile.adopt_forge_merge(layer.task_id)
+            if not adopted:
+                result.stopped = (
+                    f"task {layer.task_id} PR #{layer.pr_number} is merged, but the forge did "
+                    "not return the commit it landed as; record it with `ppy deliver --merged`"
+                )
+                return result
+            result.merged.append(
+                {"task_id": layer.task_id, "pr": layer.pr_number, "merge_commit": adopted}
+            )
+            if not all_layers:
+                return result
+            continue
+        if state != "OPEN":
             result.stopped = (
                 f"task {layer.task_id} PR #{layer.pr_number} is {layer.pr_state or 'unknown'}, "
                 "not open"
             )
             return result
+        # Only a real merge needs the standing grant, and only once per run.
+        if not authorized:
+            _require_merge_authority()
+            authorized = True
         conn = init_db()
         task = store.get_task(conn, layer.task_id)
         if task is None:

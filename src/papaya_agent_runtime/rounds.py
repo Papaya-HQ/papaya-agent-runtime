@@ -1988,6 +1988,10 @@ class Rounds:
                 outcome = reconcile.OUTCOME_FIXED
             else:
                 outcome = reconcile.OUTCOME_FAILED
+            # Judging it may have closed it (an adopted merge frees the lane as it is
+            # written down), and a hand-run `ppy deliver --merged` can land in the gap.
+            if not await asyncio.to_thread(reconcile.attempt_is_open, attempt.started_event_id):
+                continue
             await asyncio.to_thread(
                 reconcile.record,
                 attempt.worker_task_id,
