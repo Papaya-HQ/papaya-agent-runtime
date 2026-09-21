@@ -14,10 +14,9 @@ import time
 
 import pytest
 
-from conftest import scale
+from conftest import approve_with_description, scale
 from papaya_agent_runtime import delivery, repos
 from papaya_agent_runtime.delivery import deliver, extract_pr_url
-from papaya_agent_runtime.review import record_review
 from papaya_agent_runtime.state import init_db
 from papaya_agent_runtime.supervisor.client import SupervisorClient
 from papaya_agent_runtime.supervisor.server import SupervisorServer
@@ -60,7 +59,7 @@ def approved_task(server, source_repo) -> int:
     while client.task_status(resp["task_id"])["task"]["status"] != "worker_done":
         assert time.monotonic() < deadline
         time.sleep(0.1)
-    record_review(resp["task_id"], "approved")
+    approve_with_description(resp["task_id"])
     return resp["task_id"]
 
 
@@ -212,7 +211,7 @@ def test_a_second_deliver_on_the_same_task_updates_the_open_pr_and_says_so(
     first = deliver(approved_task, push=True, open_pr=True)
     assert first.note == "pushed; PR opened"
 
-    record_review(approved_task, "approved")
+    approve_with_description(approved_task)
     second = deliver(approved_task, push=True, open_pr=True)
     assert second.note == "pushed; PR #72 updated"
     assert second.pr_url == PR and second.pr_exists is True
@@ -261,7 +260,7 @@ def test_a_tool_that_fails_with_nothing_on_stderr_still_gives_a_reason(
     assert result.note == "pushed; PR creation failed: error: already exists"
 
     _stub_tool(monkeypatch, "/x/gh-axi", {"create": (4, "", "")})
-    record_review(approved_task, "approved")
+    approve_with_description(approved_task)
     result = deliver(approved_task, push=True, open_pr=True)
     assert result.note == "pushed; PR creation failed: exit status 4 with no output"
 

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import wait_until
-from papaya_agent_runtime import delivery, repos
+from conftest import PR_DESCRIPTION, wait_until
+from papaya_agent_runtime import delivery, pr_body, repos
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.state.db import _column_names
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -174,6 +174,8 @@ def test_deliver_defaults_the_pr_base_to_the_recorded_stack(ppy_home, monkeypatc
 
     monkeypatch.setattr(delivery, "_run", fake_run)
     monkeypatch.setattr(delivery, "is_approved_at_head", lambda tid: (True, ""))
+    # Faked with the approval it rides on: this test is about delivery, not the text.
+    monkeypatch.setattr(pr_body, "description_for", lambda *_a: PR_DESCRIPTION)
     monkeypatch.setattr(delivery, "head_sha", lambda wt: "f" * 40)
     monkeypatch.setattr(delivery, "_pr_tool", lambda: "gh")
 

@@ -538,3 +538,48 @@ def _write_dump(what: str, report: str) -> Path | None:
     except OSError:
         return None
     return path
+
+
+# --------------------------------------------------------------------------- #
+# Pull request descriptions: delivery refuses a head nobody described
+# --------------------------------------------------------------------------- #
+
+#: A description that passes `pr_body.validate_description`, for tests about
+#: something else in delivery (URLs, stacks, forges) that still has to deliver.
+PR_DESCRIPTION = """## Summary
+
+A test change that does one visible thing, described the way a reviewer would.
+
+## Why
+
+Delivery refuses a head nobody described, so a test that delivers describes it.
+
+## Product impact
+
+Nothing reaches a user; this stands in for a real change's effect on people.
+
+## How to test
+
+1. Deliver the task in the test. 2. The pull request opens with this body.
+
+## Risks and what was not verified
+
+None beyond what the test itself asserts; this text is a fixture, not a claim.
+"""
+
+
+def describe(task_id: int, head: str) -> None:
+    """Record :data:`PR_DESCRIPTION` for ``task_id`` at ``head``, as approval does."""
+    from papaya_agent_runtime import pr_body
+    from papaya_agent_runtime.state import init_db
+
+    pr_body.record_description(task_id, head, PR_DESCRIPTION, conn=init_db())
+
+
+def approve_with_description(task_id: int, findings: str = "", **kwargs) -> dict:
+    """What `ppy review approve --pr-description` does: approve, then describe that head."""
+    from papaya_agent_runtime import review
+
+    result = review.record_review(task_id, "approved", findings, **kwargs)
+    describe(task_id, result["head_sha"])
+    return result

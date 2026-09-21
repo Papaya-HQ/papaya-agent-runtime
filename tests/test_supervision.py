@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from conftest import PR_DESCRIPTION
 from papaya_agent_runtime import board, gate, hooks, owed, rounds, supervision, watch
 from papaya_agent_runtime.cli import main
 from papaya_agent_runtime.manager.launch import MANAGER_TURN_ENV
@@ -512,7 +513,9 @@ def test_the_heartbeat_upkeep_runs_hygiene_hourly_and_blockers_every_quarter_hou
 # ── full suite before review, assigned work, turn obligations ───────────────
 
 
-def test_an_approval_waits_for_the_supervisors_full_suite_at_head(ppy_home, monkeypatch) -> None:
+def test_an_approval_waits_for_the_supervisors_full_suite_at_head(
+    ppy_home, monkeypatch, tmp_path
+) -> None:
     from papaya_agent_runtime import environment
 
     monkeypatch.setattr(
@@ -531,7 +534,9 @@ def test_an_approval_waits_for_the_supervisors_full_suite_at_head(ppy_home, monk
 
     missing = supervision.full_suite_missing(task_id)
     assert missing and f"ppy gate run --task {task_id} --full" in missing
-    assert main(["review", "approve", str(task_id)]) == 1
+    described = tmp_path / "pr.md"
+    described.write_text(PR_DESCRIPTION)
+    assert main(["review", "approve", str(task_id), "--pr-description", str(described)]) == 1
 
     monkeypatch.setattr(
         gate, "verdict", lambda tid, full=None: gate.Verdict(gate.RED, "abc", _result(green=False))

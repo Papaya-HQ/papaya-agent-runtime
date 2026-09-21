@@ -810,29 +810,33 @@ When the user gives you an objective:
 ## Reviewing and delivering
 
 - Review the exact diff before delivery: `ppy review show <task_id>`, then
-  `ppy review approve <task_id> --note "..."` or `ppy review request-changes
-  <task_id> --findings ...`.
+  `ppy review approve <task_id> --note "..." --pr-description <file>` or
+  `ppy review request-changes <task_id> --findings ...`.
 - `ppy review show` lists the receipts the worker named in its reports — every
   capture directory with its files and sizes, every image on a line of its own so
   you can open it, and any path that has gone marked "(not found)" rather than
   failing the command. **Open the images before approving anything visual.**
 - The `--note` on an approval is your own account of what you checked and
-  accepted. It is stored against the exact commit you approved, printed back by
-  `ppy review status` and `ppy review show`, and quoted in the pull request body
-  `ppy deliver` composes — so the reviewer's reasoning ships with the work instead
-  of dying in the terminal.
+  accepted, for the record. It is stored against the exact commit you approved and
+  printed back by `ppy review status` and `ppy review show`.
+- The `--pr-description` on an approval is the pull request's body, written by you
+  for the people who will read and merge it. Five `##` sections: Summary, Why,
+  Product impact, How to test, Risks and what was not verified. `ppy review approve`
+  refuses one that is missing a section, says too little in one, or cites paths that
+  exist only on this machine (`.ppy-evidence/`, a worktree, `/private/tmp`), and
+  records it against the approved commit. How to write it is in the
+  `review-a-worker` skill.
 - Deliver with `ppy deliver <task_id>`. It **refuses unless an approved review is
   bound to the current head SHA** — never try to work around this. If the head
   moved after approval, re-review.
-- Delivery writes the pull request body itself, from what the run already holds:
-  **Why** from the first section of the archived brief, **What** from the worker's
-  closing report (plus anything it filed under "Outside scope, required to build"
-  or "Flagged, not done"), **Verification** from its last test report and your
-  approval note, and **Stack** from the branch the work was dispatched from. Don't
-  rewrite it by hand afterwards — if you want a different body, pass
+- Delivery opens the pull request with that description, then adds what the
+  runtime knows best: **Stack**, from the branch the work was dispatched from. It
+  refuses — before pushing anything — a head that has no description. Don't rewrite
+  the body by hand afterwards; if you want a different one, pass
   `ppy deliver <task_id> --body-file <file>`, which is used verbatim, or
-  `--title "..."` for the title alone. Every composed body ends with an
-  attribution that says Papaya Agent Runtime drove the work (briefed, reviewed at the
+  `--title "..."` for the title alone. (Bodies used to be quoted from the brief, the
+  worker's last report and the approval note; nobody outside the run could read
+  them.) Every delivered body ends with an attribution that says Papaya Agent Runtime drove the work (briefed, reviewed at the
   commit, delivered) and names the worker that implemented it; set
   `PPY_SESSION_URL` so the session link rides along. Never append a generic
   harness footer instead.
@@ -1297,8 +1301,8 @@ readable at a glance by someone who just wants to know if it's done.
 | Await (blocking primitive) | `ppy wait <run_id> [--timeout]` — scripts/tests only; **not** in a live turn (use `--timeout 0` to drain) |
 | Answer a worker | `ppy answer <task_id> --answer ... [--scope]` |
 | Steer / resume | `ppy steer <task_id> --message ... [--replace]` applies provider-capability-aware steering; `ppy stop <task_id> --message ...` is the replacing steer (stop the current turn, resume with this message alone). From a session these record `by: person`, from a `ppy serve` turn `by: manager`. `ppy resume <task_id> [--message] [--ends-at review\|done]` defaults to the task's stored terminal phase; an explicit value replaces and persists it. Resume reapplies the task process environment, rebuilds a missing pristine worktree into a fresh lease on the same branch/base, verifies that newly minted or retained lease owns the task path, synchronizes a cascaded branch before launch, and never reuses a released lease identity or a path now owned by another task. On a `worker_stopped` task, a bare resume sends the worker back with what was cut short; see [`task-lifecycle.md`](task-lifecycle.md). A resume, and a steer or stop that starts a session, then waits up to `--verify-seconds` (default 20; 0 skips) and prints `task <id>: worker alive (pid N)`, or an `INCIDENT:` line and exit 1 when no worker process ever appeared — check `ppy health` and the supervisor log before resuming again. `ppy status` prints an `INCIDENT:` line for any in-flight worker whose runner has no live process. |
-| Review | `ppy review show <task_id>` (worker report, the capture/receipt paths it named with sizes and openable image lines, the standing approval note, a migration-collision flag when this diff's added migration shares a `down_revision` with another unmerged task's, the layer's place in its stack and the merge order when a stack parent is recorded, then the diffstat), `ppy review approve <task_id> [--note "what you checked"] [--findings ...]`, `ppy review request-changes <task_id> --findings ...`, `ppy review status <task_id>` (also prints the approval note) |
-| Deliver | `ppy deliver <task_id> [--no-pr] [--base ...] [--remote ...] [--title "..."] [--body-file FILE]` — pushes to the repo's registered forge and opens the pull request there (`--remote` overrides); composes the pull request body from the archived brief, reports, approval note, and stack order. It refuses a diff containing commits owned by another open task (a cherry-picked copy counts; a commit on a child's stack parent is the parent's, not the child's) and names both tasks: keep the native layer PRs and use `ppy stack merge`, never a composition PR. Existing stack-base refusals still apply. `--body-file` and `--title` override generated text. `ppy deliver <task_id> --merged <sha>` idempotently records an externally merged commit, pushes nothing, and takes the task's compose stack down. |
+| Review | `ppy review show <task_id>` (worker report, the capture/receipt paths it named with sizes and openable image lines, the standing approval note, a migration-collision flag when this diff's added migration shares a `down_revision` with another unmerged task's, the layer's place in its stack and the merge order when a stack parent is recorded, then the diffstat), `ppy review approve <task_id> --pr-description FILE [--note "what you checked"] [--findings ...]`, `ppy review request-changes <task_id> --findings ...`, `ppy review status <task_id>` (also prints the approval note) |
+| Deliver | `ppy deliver <task_id> [--no-pr] [--base ...] [--remote ...] [--title "..."] [--body-file FILE]` — pushes to the repo's registered forge and opens the pull request there (`--remote` overrides); opens it with the reviewer's `--pr-description` for that head plus the stack order, and refuses before pushing when there is none. It refuses a diff containing commits owned by another open task (a cherry-picked copy counts; a commit on a child's stack parent is the parent's, not the child's) and names both tasks: keep the native layer PRs and use `ppy stack merge`, never a composition PR. Existing stack-base refusals still apply. `--body-file` and `--title` override generated text. `ppy deliver <task_id> --merged <sha>` idempotently records an externally merged commit, pushes nothing, and takes the task's compose stack down. |
 | Close out / repair | `ppy task close <id> --reason "..."` (terminal `closed`, frees the slot and takes the task's compose stack down), `ppy task set-status <id> <status> --note "..."`, `ppy task push <id>` (push a lease worktree onto its own branch by hand — the manual form of what the runtime does for a done-but-unpushed worker, and for a finished worker in a repository that gates pushes; never forces, never `--no-verify`, and does nothing when the remote already holds that head; prints the SHA it pushed or the refusal it got), `ppy lease release <task_id> [--reason ...]` |
 | Per-task compose stacks | For a repo with `--compose-stack` set, dispatch records `compose_project=task_<id>` (and `db_port`) itself, source `dispatch`. Otherwise `ppy task env set <id> compose_project=<name>` records the stack a task brought up, and is taken as given because you typed it. A worker naming `COMPOSE_PROJECT_NAME=...` in a `ppy progress` note is picked up automatically **only when it is that task's own stack** (`task_<id>` or `<prefix>_task_<id>`) — teardown destroys volumes, and a note mentioning a shared stack must never arm one; anything else is dropped with a `compose_project_ignored` event naming it. `ppy task env show <id> [--json]` lists what's recorded. `ppy deliver --merged`, `ppy task close`, and `ppy worktree prune` then run `docker compose -p <name> down -v --remove-orphans` for it and print what went. No docker, or a stack already gone, is never an error. `ppy health` lists stacks named `task_<n>`/`*_task_<n>` whose task is already over as prunable — that's the Docker network ceiling filling up |
 | Stacks | `ppy stack <task_id|run_id>` — the stack bottom-up with each PR's state and next action. `ppy stack merge <task_id> [--all]` uses the forge's ordinary merge commit strategy, lowest unmerged layer first; after each confirmed merge it records the forge merge SHA and retargets direct child PRs to the default branch. `--all` repeats upward and stops before touching a layer whose required check is red, naming the check. Merge authority must be enabled. `ppy stack rebuild <task_id>` applies the existing cascade-safe remote sync and never force-pushes a diverged branch. |

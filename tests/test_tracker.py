@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import describe
 from papaya_agent_runtime import tracker
 from papaya_agent_runtime.state import init_db, store
 
@@ -97,6 +98,7 @@ def test_the_pull_request_footer_names_whatever_tracker_was_recorded(ppy_home) -
     task_id = _task(conn)
     store.update_task_fields(conn, task_id, branch="ppy/task-1-abc")
     tracker.link_task(conn, task_id, record="ENG-1183", provider="linear", title="Health endpoint")
+    describe(task_id, "c" * 40)
     body = pr_body.compose(task_id, head_sha="c" * 40, conn=conn)
     assert "Tracked in Linear" in body
     assert "Papaya work item" not in body

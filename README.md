@@ -372,7 +372,8 @@ ppy sweep                               # ask the running serve to look for assi
 ppy supervisor start                    # per-task runners, durable state; detached, outlives the session
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
-ppy review show <task_id> && ppy review approve <task_id>   # diffs from HEAD's merge-base with the PR's base
+ppy review show <task_id>               # diffs from HEAD's merge-base with the PR's base
+ppy review approve <task_id> --pr-description pr.md   # the PR body, written for people; bound to this head
 ppy deliver <task_id>                   # refused unless approved at current head; again updates the open PR
 ppy track <task_id> --record ENG-1183 --provider linear --url ... --title "..."
 ppy answer <task_id> --answer "use /v2/health" --scope run   # recorded + reused

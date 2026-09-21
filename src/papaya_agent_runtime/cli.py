@@ -1770,10 +1770,30 @@ def _cmd_review(args: argparse.Namespace) -> int:
             if missing:
                 print(f"not approved: {missing}", file=sys.stderr)
                 return 1
+            from papaya_agent_runtime import pr_body
+            from papaya_agent_runtime.state import init_db
+
+            # Checked before the approval is recorded: an approval whose description
+            # would be refused leaves a head that is approved and cannot be delivered.
+            try:
+                description = Path(args.pr_description).expanduser().read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"not approved: cannot read --pr-description: {exc}", file=sys.stderr)
+                return 1
+            problems = pr_body.validate_description(description)
+            if problems:
+                print(
+                    "not approved: the pull request description would not help the person "
+                    "reading it —\n  - " + "\n  - ".join(problems),
+                    file=sys.stderr,
+                )
+                return 1
             res = record_review(args.task_id, "approved", args.findings or "", note=args.note or "")
+            pr_body.record_description(args.task_id, res["head_sha"], description, conn=init_db())
             print(f"approved task {args.task_id} at {res['head_sha'][:8]}")
             if res["note"]:
                 print(f"note recorded with the approval: {res['note']}")
+            print("pull request description recorded for that commit")
             return 0
         if args.review_cmd == "request-changes":
             res = record_review(args.task_id, "changes_requested", args.findings or "")
@@ -3985,6 +4005,8 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--rationale", default=None, help="why this answer was chosen")
     answer.set_defaults(func=_cmd_answer)
 
+    from papaya_agent_runtime.pr_body import DESCRIPTION_SECTIONS as DESCRIPTION_SECTIONS_FOR_HELP
+
     review = sub.add_parser("review", help="review a task's work (exact-HEAD gate)")
     rvsub = review.add_subparsers(dest="review_cmd", required=True)
     for name in ("show", "approve", "request-changes", "status"):
@@ -3997,9 +4019,21 @@ def build_parser() -> argparse.ArgumentParser:
                 "--note",
                 default=None,
                 help=(
-                    "what you checked and accepted, in your own words; stored against the "
-                    "commit you approved, printed by `ppy review status|show`, and quoted "
-                    "in the pull request `ppy deliver` opens"
+                    "what you checked and accepted, in your own words, for the record: "
+                    "stored against the commit you approved and printed by "
+                    "`ppy review status|show`. The pull request's text is --pr-description"
+                ),
+            )
+            p.add_argument(
+                "--pr-description",
+                required=True,
+                metavar="FILE",
+                help=(
+                    "the pull request description, written for the people who will read "
+                    "and merge it: Markdown with the sections "
+                    + ", ".join(f'"## {t}"' for t in DESCRIPTION_SECTIONS_FOR_HELP)
+                    + ". Recorded against the commit you approve; `ppy deliver` opens the "
+                    "pull request with it and refuses without one"
                 ),
             )
     review.set_defaults(func=_cmd_review)
