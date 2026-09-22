@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,8 +41,23 @@ from typing import Any
 #: The command `papaya-agent connect` installs onto the PATH.
 CLI = "papaya-agent"
 #: How to reach the client when it is not installed yet. The npm package is a shim
-#: that finds or downloads `uv` and then installs the Python client for good.
+#: that finds or downloads `uv`, runs the Python client, and after a successful
+#: `connect` installs it for good (`uv tool install`), so `papaya-agent` is on the
+#: PATH for the Claude Code plugin's hooks and the `papaya` MCP server.
 BOOTSTRAP = ("npx", "--yes", "papaya-agent")
+#: The Python package the shim runs. Reached directly through `uv` when this machine
+#: has no Node: the runtime always has `uv`, and the shim is only a wrapper around it.
+CLIENT_PACKAGE = "papaya-agent-client"
+UV_BOOTSTRAP = ("uv", "tool", "run", "--from", CLIENT_PACKAGE, CLI)
+#: What the shim does after a successful connect, done by hand on the `uv` path.
+UV_INSTALL = ("uv", "tool", "install", CLIENT_PACKAGE)
+#: The client's answer when a choice is needed and nobody is at a terminal to make it:
+#: `Multiple Papaya agents found. Re-run with `--agent <agent>`. Available: a; b`.
+_CHOICE = re.compile(
+    r"Multiple Papaya (?P<kind>workspace|agent)s found\. Re-run with `(?P<flag>--\w+) "
+    r"<\w+>`\. Available: (?P<choices>.+)$"
+)
+_LINK = re.compile(r"https?://\S+")
 #: Overridable for tests, and the last word when set.
 HOME_ENV = "PPY_PAPAYA_HOME"
 #: The Papaya client's own override. The desktop app sets this for the process it
@@ -223,8 +239,22 @@ def known_agent_kind(agent_id: str | None) -> AgentKind | None:
 
 
 def installed() -> str | None:
-    """The path to `papaya-agent`, or None when it is not on the PATH yet."""
-    return shutil.which(CLI)
+    """The person's own `papaya-agent` on the PATH, or None when they have none yet.
+
+    The runtime's virtualenv bundles the client (``ppy serve`` embeds it), and ``uv
+    run`` puts that environment's ``bin`` first on the PATH, so a plain lookup always
+    found the bundled copy: every machine looked installed, ``absent`` never happened,
+    and nothing ever set the client up for real. The bundled copy is also invisible to
+    the Claude Code plugin's hooks and the ``papaya`` MCP server, which run outside this
+    environment. So that directory is skipped.
+    """
+    own = {Path(sys.prefix).resolve() / "bin", Path(sys.executable).resolve().parent}
+    search = os.pathsep.join(
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() not in own
+    )
+    return shutil.which(CLI, path=search)
 
 
 def _read_config(home: Path) -> dict:
@@ -311,7 +341,8 @@ def status() -> dict:
     - ``connected`` — pinned to an agent; the workspace is available.
     - ``signed_in`` — authenticated but no agent pinned; connect finishes it.
     - ``installed`` — the client is present but this machine is not signed in.
-    - ``absent`` — no client; `npx papaya-agent connect` would install one.
+    - ``absent`` — no client of the person's own; `ppy papaya connect` installs one
+      (:func:`installer` says how) and connects it.
     """
     path = installed()
     who = identity()
@@ -365,47 +396,191 @@ def client_env() -> dict[str, str]:
     return env
 
 
-def connect_argv(*, harness: str = "claude") -> list[str]:
-    """The exact command that establishes the connection.
+def installer() -> str | None:
+    """How this machine would get the client: ``installed``, ``npx``, ``uv``, or None."""
+    if installed():
+        return "installed"
+    if shutil.which("npx"):
+        return "npx"
+    if shutil.which("uv"):
+        return "uv"
+    return None
 
-    Prefers an installed `papaya-agent`; falls back to the npm shim, which installs
-    the client as a side effect so the next run takes the first branch.
+
+def connect_argv(
+    *,
+    harness: str = "claude",
+    workspace: str | None = None,
+    agent: str | None = None,
+    device: bool = False,
+    no_browser: bool = False,
+) -> list[str] | None:
+    """The exact command that establishes the connection, or None with no way to run one.
+
+    Prefers an installed `papaya-agent`; then the npm shim (`npx papaya-agent`), which
+    installs the client as a side effect so the next run takes the first branch; then
+    the same client through `uv` for a machine with no Node.
     """
-    path = installed()
-    base = [path] if path else list(BOOTSTRAP)
-    return [*base, "connect", "--harness", harness]
+    how = installer()
+    if how == "installed":
+        base = [str(installed())]
+    elif how == "npx":
+        base = list(BOOTSTRAP)
+    elif how == "uv":
+        base = list(UV_BOOTSTRAP)
+    else:
+        return None
+    argv = [*base, "connect", "--harness", harness]
+    if workspace:
+        argv += ["--workspace", workspace]
+    if agent:
+        argv += ["--agent", agent]
+    if device:
+        argv.append("--device")
+    if no_browser:
+        argv.append("--no-browser")
+    return argv
 
 
-def connect(*, harness: str = "claude", timeout: int = CONNECT_TIMEOUT) -> dict:
-    """Run the connect flow and report what happened, without ever raising.
+def _stream(argv: list[str], *, timeout: int, echo: Any) -> tuple[int, list[str]]:
+    """Run ``argv`` with no stdin, echoing each line as it comes, and keep the lines.
 
-    The flow is interactive by design: it opens a sign-in link and waits for the
-    person to click Approve. That is the one moment a person is in the loop, and it
-    is a browser click rather than a command they have to type.
+    No stdin is what makes the client answer with its choices instead of prompting a
+    terminal nobody is at; echoing is what puts the sign-in link in front of the person
+    while the flow waits for them, rather than after it has timed out.
     """
-    argv = connect_argv(harness=harness)
+    import threading
+
+    env = client_env()
+    # The client is Python writing to a pipe, so it buffers: the sign-in link sat in
+    # that buffer until the flow ended, and on a timeout it was never seen at all.
+    # The variable passes through `npx` and `uv` to the interpreter.
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    lines: list[str] = []
+
+    def pump() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            lines.append(line)
+            if echo is not None:
+                print(line, file=echo, flush=True)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     try:
-        proc = _run(argv, timeout=timeout)
-    except subprocess.TimeoutExpired:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        reader.join(timeout=5)
+        # What was printed before the wait ran out (the sign-in link) rides the error.
+        exc.output = "\n".join(lines)
+        raise
+    reader.join(timeout=5)
+    return code, lines
+
+
+def connect(
+    *,
+    harness: str = "claude",
+    workspace: str | None = None,
+    agent: str | None = None,
+    device: bool = False,
+    no_browser: bool = False,
+    timeout: int = CONNECT_TIMEOUT,
+    echo: Any = None,
+) -> dict:
+    """Install the client if it is missing, run its connect flow, and say what happened.
+
+    Never raises. The flow opens a sign-in link and waits for the person to click
+    Approve: that is the one moment a person is in the loop, and it is a browser
+    click, never a command they type. ``reason`` on a failure is what the caller
+    branches on:
+
+    - ``choose`` — the account has several workspaces or agents; ``kind``, ``flag`` and
+      ``choices`` say which, so the person picks in conversation and it is re-run with
+      that flag;
+    - ``timeout`` — nobody approved in time; ``link`` is the sign-in link when one was
+      printed;
+    - ``no_installer`` — neither Node (`npx`) nor `uv` is on this machine;
+    - ``unavailable``, ``failed``, ``declined`` — as the words say, with ``detail``.
+    """
+    argv = connect_argv(
+        harness=harness, workspace=workspace, agent=agent, device=device, no_browser=no_browser
+    )
+    if argv is None:
+        return {
+            "ok": False,
+            "reason": "no_installer",
+            "detail": "neither `npx` (Node) nor `uv` is on this machine to install the client",
+            "command": None,
+        }
+    how = installer()
+    lines: list[str] = []
+    try:
+        code, lines = _stream(argv, timeout=timeout, echo=echo)
+    except subprocess.TimeoutExpired as exc:
+        printed = exc.output if isinstance(exc.output, str) else ""
         return {
             "ok": False,
             "reason": "timeout",
-            "detail": f"the connect flow was still waiting after {timeout}s",
+            "detail": f"the sign-in was still waiting for Approve after {timeout}s",
+            "link": _first_link(printed.splitlines()),
             "command": argv,
         }
     except OSError as exc:
         return {"ok": False, "reason": "unavailable", "detail": str(exc), "command": argv}
+    for line in lines:
+        choice = _CHOICE.search(line.strip())
+        if choice is not None:
+            return {
+                "ok": False,
+                "reason": "choose",
+                "kind": choice["kind"],
+                "flag": choice["flag"],
+                "choices": [c.strip() for c in choice["choices"].split(";") if c.strip()],
+                "detail": line.strip(),
+                "command": argv,
+            }
     after = status()
     if after["state"] == "connected":
-        return {"ok": True, "status": after, "command": argv}
-    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        result: dict[str, Any] = {"ok": True, "status": after, "command": argv, "via": how}
+        if how == "uv" and not installed():
+            # The npm shim keeps the client on the PATH after a connect; do the same.
+            try:
+                kept = _run(list(UV_INSTALL), timeout=PROBE_TIMEOUT * 4)
+                result["installed"] = kept.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                result["installed"] = False
+        return result
+    tail = [line for line in lines if line.strip()]
     return {
         "ok": False,
-        "reason": "declined" if proc.returncode == 0 else "failed",
-        "detail": detail[-1] if detail else f"exit {proc.returncode}",
+        "reason": "declined" if code == 0 else "failed",
+        "detail": tail[-1] if tail else f"exit {code}",
+        "link": _first_link(lines),
         "status": after,
         "command": argv,
     }
+
+
+def _first_link(lines: list[str]) -> str | None:
+    """The sign-in link the client printed for the person — never an API call it logged."""
+    for line in lines:
+        if "HTTP Request:" in line:
+            continue
+        match = _LINK.search(line)
+        if match is not None:
+            return match.group(0)
+    return None
 
 
 def context(*, refresh: bool = False) -> dict | None:

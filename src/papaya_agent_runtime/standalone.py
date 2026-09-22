@@ -5,9 +5,10 @@ repositories, briefs, dispatches, reviews, delivers and follows what it delivere
 exactly as a connected one does. Two things differ, and this module owns both:
 
 - **The invitation.** Once per session (and once per `ppy serve` start) the runtime
-  says, in one plain line, that it is better with Papaya, with the link. It is a
-  fact, not a nag: never repeated on later commands, never a comment, never a
-  prompt, and `PPY_QUIET_INVITE=1` or config ``papaya.invite = false`` turns even
+  says, in one plain line, that it is better with Papaya, and offers to set it up:
+  `ppy papaya connect` installs the client if it is missing and the person clicks
+  Approve. An offer, not a nag: said once, never repeated on later commands, never a
+  comment, and `PPY_QUIET_INVITE=1` or config ``papaya.invite = false`` turns even
   that line off.
 - **The ticket steps.** A task with no Papaya work item behind it (created locally)
   has no item to set a status on, comment on, or write acceptance criteria to. Those
@@ -25,7 +26,8 @@ from typing import Any
 #: The one line. Kept to one line on purpose: a host shows the last thing said.
 INVITE_LINE = (
     "Running without Papaya. It's better with it: tickets, comments and the team's "
-    "record flow in and out by themselves. https://trypapaya.ai"
+    "record flow in and out by themselves. `ppy papaya connect` sets it up: it installs "
+    "the client if needed and you click Approve in your browser. https://trypapaya.ai"
 )
 
 #: Set to anything but ``0``/``false``/empty to silence the invitation.

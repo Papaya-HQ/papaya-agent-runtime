@@ -40,10 +40,16 @@ hands authentication steps back to the user.
    machine is pinned to an agent. Connected, that is the session's identity. Not
    connected is a mode, not a blocker: run standalone, with everything local working
    the same, and say once the one line the runtime prints ("Running without Papaya.
-   It's better with it: … https://trypapaya.ai") — unless `PPY_QUIET_INVITE=1` or
-   `papaya.invite = false` silenced it. Do not start a sign-in or wait for one. If the
-   user asks to connect, `ppy papaya connect` signs in, pins the machine and installs
-   the harness plugin; their only step is clicking Approve in the browser.
+   It's better with it: … `ppy papaya connect` sets it up … https://trypapaya.ai") —
+   unless `PPY_QUIET_INVITE=1` or `papaya.invite = false` silenced it — offering to do
+   it for them. Never wait on it. If they say yes, run `ppy papaya connect` yourself
+   with a timeout of at least ten minutes: it installs the client when there is none
+   (`npx papaya-agent`, or `uv` on a machine without Node), opens a sign-in link, pins
+   the machine and installs the harness plugin; their only step is clicking Approve.
+   Relay the link it prints. If it exits listing several workspaces or agents, ask the
+   person which in the conversation and re-run with `--workspace`/`--agent`; if it says
+   there is neither Node nor `uv`, tell them which to install. Then `ppy papaya tools`
+   and `/mcp`.
 6. Register work with `ppy repo add <url-or-path>`. If the user does not name one,
    run `ppy repo discover` and offer what it finds rather than asking an open
    question. Then `ppy repo onboard <name>` each newly registered repo — see the

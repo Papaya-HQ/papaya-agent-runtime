@@ -265,3 +265,30 @@ def test_serve_without_a_connection_runs_rounds_and_says_what_is_off(
     # connect, is attempted without a connection.
     assert reclaims == []
     assert "reclaim" not in said
+
+
+def test_the_session_offers_to_set_papaya_up_and_knows_how(monkeypatch) -> None:
+    """Shane, 2026-09-22: help the person set the client up, don't just mention it."""
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.delenv(standalone.QUIET_ENV, raising=False)
+    said = hooks.invitation_context({"source": "startup"})
+    assert said is not None
+    assert "offer to set it up" in said
+    assert "Do not ask the person to connect" not in said
+    for step in ("ppy papaya connect", "npx papaya-agent", "`--agent`", "Approve", "/mcp"):
+        assert step in said
+    assert standalone.INVITE_LINE in said
+
+
+def test_a_launched_session_is_not_told_twice_but_still_knows_how(monkeypatch) -> None:
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.delenv(standalone.QUIET_ENV, raising=False)
+    monkeypatch.setenv("PPY_MANAGER_SESSION", "1")
+    said = hooks.invitation_context({"source": "startup"})
+    assert said is not None and "do not repeat it" in said
+    assert standalone.INVITE_LINE not in said
+    assert "ppy papaya connect" in said

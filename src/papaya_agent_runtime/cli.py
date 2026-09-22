@@ -716,6 +716,88 @@ def _cmd_track(args: argparse.Namespace) -> int:
     return 0
 
 
+def _papaya_connect(args: argparse.Namespace) -> int:
+    """`ppy papaya connect`: install the client if needed, sign in, and say what is next.
+
+    Every outcome ends with the one thing to do about it, because the reader is usually
+    a session relaying it to a person: pick an agent, click the link, install Node.
+    """
+    from papaya_agent_runtime import papaya
+
+    before = papaya.status()["state"]
+    how = papaya.installer()
+    if how in ("npx", "uv"):
+        tool = "npx papaya-agent" if how == "npx" else "uv tool run --from papaya-agent-client"
+        print(f"the Papaya client is not installed here; installing it with `{tool}`", flush=True)
+    if before != "connected":
+        print(
+            "a sign-in link opens in the browser (it is also printed below); the person "
+            "clicks Approve there",
+            flush=True,
+        )
+    kwargs: dict[str, object] = {
+        "harness": args.harness,
+        "workspace": args.workspace,
+        "agent": args.agent,
+        "device": args.device,
+        "no_browser": args.no_browser,
+        "echo": sys.stdout,
+    }
+    if args.timeout:
+        kwargs["timeout"] = args.timeout
+    result = papaya.connect(**kwargs)
+    if result["ok"]:
+        print(f"connected as {result['status']['addressed']}")
+        if result.get("installed") is False:
+            print(
+                "note: connected, but `uv tool install papaya-agent-client` failed, so "
+                "`papaya-agent` is not on the PATH for the Claude Code plugin; run it by hand",
+                file=sys.stderr,
+            )
+        print(
+            "next: `ppy papaya tools` gives sessions here the Papaya tools (then `/mcp`), and "
+            "the next `ppy serve` start picks the connection up"
+        )
+        return 0
+    reason = result["reason"]
+    if reason == "choose":
+        kind, flag = result["kind"], result["flag"]
+        print(f"this account has more than one {kind}; choose one:", file=sys.stderr)
+        for choice in result["choices"]:
+            print(f"  - {choice}", file=sys.stderr)
+        rerun = ["ppy papaya connect"]
+        if args.workspace:
+            rerun.append(f'--workspace "{args.workspace}"')
+        if args.agent and flag != "--agent":
+            rerun.append(f'--agent "{args.agent}"')
+        rerun.append(f'{flag} "<the {kind} chosen>"')
+        print(f"then: {' '.join(rerun)}", file=sys.stderr)
+        return 2
+    if reason == "no_installer":
+        print(
+            "cannot install the Papaya client: this machine has neither Node (for `npx "
+            "papaya-agent`) nor `uv`. Install Node from https://nodejs.org or uv from "
+            "https://docs.astral.sh/uv/, then run `ppy papaya connect` again",
+            file=sys.stderr,
+        )
+        return 1
+    if reason == "timeout":
+        link = result.get("link")
+        where = f" The link was: {link}" if link else ""
+        print(
+            f"not connected: nobody clicked Approve in time.{where} Run `ppy papaya connect` "
+            "again when the person is ready, or with `--device` on a machine with no browser",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"not connected ({reason}): {result['detail']} — "
+        "the runtime still works on registered repositories without Papaya",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def _cmd_papaya(args: argparse.Namespace) -> int:
     """The Papaya connection: who this runtime is, and establishing that."""
     from papaya_agent_runtime import papaya
@@ -729,16 +811,7 @@ def _cmd_papaya(args: argparse.Namespace) -> int:
         return 0 if data["state"] == "connected" else 1
 
     if args.papaya_cmd == "connect":
-        result = papaya.connect(harness=args.harness)
-        if result["ok"]:
-            print(f"connected as {result['status']['addressed']}")
-            return 0
-        print(
-            f"not connected ({result['reason']}): {result['detail']} — "
-            "the runtime still works on registered repositories without Papaya",
-            file=sys.stderr,
-        )
-        return 1
+        return _papaya_connect(args)
 
     if args.papaya_cmd == "tools":
         from papaya_agent_runtime.manager.launch import repo_root
@@ -784,7 +857,10 @@ def _papaya_status_line(data: dict) -> str:
     if state == "signed_in":
         return "signed in to Papaya but not pinned to an agent — `ppy papaya connect` finishes it"
     if state == "installed":
-        return "the Papaya client is installed but this machine is not signed in"
+        return (
+            "the Papaya client is installed but this machine is not signed in — "
+            "`ppy papaya connect` signs it in"
+        )
     return "no Papaya client on this machine; `ppy papaya connect` installs and connects one"
 
 
@@ -3573,13 +3649,41 @@ def build_parser() -> argparse.ArgumentParser:
     pstatus = psub.add_parser("status", help="which Papaya agent this machine is connected as")
     pstatus.add_argument("--json", action="store_true", help="machine-readable output")
     pconnect = psub.add_parser(
-        "connect", help="sign in and pin this machine to a Papaya agent (opens a browser)"
+        "connect",
+        help=(
+            "set up the Papaya client and pin this machine to a Papaya agent: installs the "
+            "client when it is missing (npx papaya-agent, or uv without Node), opens a "
+            "sign-in link, and the person clicks Approve"
+        ),
     )
     pconnect.add_argument(
         "--harness",
         default="claude",
         choices=("claude", "codex", "cursor"),
         help="which harness to install the Papaya plugin and hooks for",
+    )
+    pconnect.add_argument(
+        "--workspace", help="the workspace to connect in, when the account has several"
+    )
+    pconnect.add_argument(
+        "--agent", help="the agent to connect as (name, handle or id), when there are several"
+    )
+    pconnect.add_argument(
+        "--device",
+        action="store_true",
+        help="sign in with a device code instead of a browser (SSH, no browser here)",
+    )
+    pconnect.add_argument(
+        "--no-browser",
+        dest="no_browser",
+        action="store_true",
+        help="print the sign-in link instead of opening a browser",
+    )
+    pconnect.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="seconds to wait for the person to click Approve (default 300)",
     )
     pcontext = psub.add_parser(
         "context", help="the connected agent's persona, rules and memories, as JSON"
