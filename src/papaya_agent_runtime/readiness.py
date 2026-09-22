@@ -694,7 +694,11 @@ def _papaya_problems(problems: list[Problem]) -> None:
                     "running without Papaya: work is local only, tickets and comments do "
                     "not flow in or out"
                 ),
-                fix="`ppy papaya connect`, or connect from the Papaya desktop app, when wanted",
+                fix=(
+                    "`ppy papaya connect` sets it up — it installs the client if needed "
+                    "(npx papaya-agent, or uv without Node) and the person clicks Approve — "
+                    "or connect from the Papaya desktop app"
+                ),
                 owner=USER,
                 blocking=False,
                 info=True,

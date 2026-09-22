@@ -121,6 +121,7 @@ def test_connect_argv_prefers_the_installed_client(monkeypatch) -> None:
 def test_connect_argv_falls_back_to_the_npm_shim(monkeypatch) -> None:
     """With no client installed there is still a way in, so preflight is never stuck."""
     monkeypatch.setattr(papaya, "installed", lambda: None)
+    _only_on_path(monkeypatch, "npx", "uv")
     argv = papaya.connect_argv(harness="codex")
     assert argv[: len(papaya.BOOTSTRAP)] == list(papaya.BOOTSTRAP)
     assert argv[-2:] == ["--harness", "codex"]
@@ -130,11 +131,11 @@ def test_connect_reports_a_timeout_without_raising(client_home, monkeypatch) -> 
     """A person who never clicks Approve must degrade, not break the session."""
     import subprocess
 
-    def boom(argv, *, timeout):
+    def boom(argv, *, timeout, echo):
         raise subprocess.TimeoutExpired(argv, timeout)
 
     monkeypatch.setattr(papaya, "installed", lambda: "/usr/local/bin/papaya-agent")
-    monkeypatch.setattr(papaya, "_run", boom)
+    monkeypatch.setattr(papaya, "_stream", boom)
     result = papaya.connect(timeout=1)
     assert result["ok"] is False
     assert result["reason"] == "timeout"
@@ -224,3 +225,209 @@ def test_status_names_everywhere_it_looked(homes) -> None:
     searched = papaya.status()["searched"]
     assert len(searched) >= 2
     assert str(homes[1]) in searched
+
+
+# --------------------------------------------------------------------------- #
+# Setting the client up for a person who has none
+# --------------------------------------------------------------------------- #
+
+
+def _only_on_path(monkeypatch, *programs: str) -> None:
+    """Make exactly ``programs`` findable, so the test does not depend on this machine."""
+    real = papaya.shutil.which
+
+    def which(name, *args, **kwargs):
+        if name == papaya.CLI:
+            return real(name, *args, **kwargs)
+        return f"/opt/bin/{name}" if name in programs else None
+
+    monkeypatch.setattr(papaya.shutil, "which", which)
+
+
+def test_the_runtimes_own_bundled_client_does_not_count_as_installed(tmp_path, monkeypatch) -> None:
+    """`uv run` puts the runtime's venv first on the PATH, and it bundles the client.
+
+    Finding that copy made every machine look set up, so `absent` never happened and
+    nothing ever installed the client where the plugin's hooks and MCP server look.
+    """
+    import sys
+    from pathlib import Path
+
+    own_bin = Path(sys.prefix) / "bin"
+    elsewhere = tmp_path / "bin"
+    elsewhere.mkdir()
+    monkeypatch.setenv("PATH", str(own_bin))
+    if (own_bin / papaya.CLI).exists():
+        assert papaya.installed() is None
+    person = elsewhere / papaya.CLI
+    person.write_text("#!/bin/sh\n")
+    person.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{own_bin}{papaya.os.pathsep}{elsewhere}")
+    assert papaya.installed() == str(person)
+
+
+@pytest.mark.parametrize(
+    ("installed", "on_path", "expected"),
+    [
+        ("/home/me/.local/bin/papaya-agent", ("npx", "uv"), "installed"),
+        (None, ("npx", "uv"), "npx"),
+        (None, ("uv",), "uv"),
+        (None, (), None),
+    ],
+)
+def test_the_installer_prefers_the_persons_client_then_npx_then_uv(
+    monkeypatch, installed, on_path, expected
+) -> None:
+    monkeypatch.setattr(papaya, "installed", lambda: installed)
+    _only_on_path(monkeypatch, *on_path)
+    assert papaya.installer() == expected
+
+
+def test_without_node_the_client_is_reached_through_uv(monkeypatch) -> None:
+    monkeypatch.setattr(papaya, "installed", lambda: None)
+    _only_on_path(monkeypatch, "uv")
+    argv = papaya.connect_argv(agent="Engineering Agent", workspace="papaya-hq")
+    assert argv[: len(papaya.UV_BOOTSTRAP)] == list(papaya.UV_BOOTSTRAP)
+    assert argv[len(papaya.UV_BOOTSTRAP) :] == [
+        "connect",
+        "--harness",
+        "claude",
+        "--workspace",
+        "papaya-hq",
+        "--agent",
+        "Engineering Agent",
+    ]
+
+
+def test_with_no_way_to_install_it_says_so_instead_of_failing_obscurely(monkeypatch) -> None:
+    monkeypatch.setattr(papaya, "installed", lambda: None)
+    _only_on_path(monkeypatch)
+    result = papaya.connect()
+    assert result == {
+        "ok": False,
+        "reason": "no_installer",
+        "detail": "neither `npx` (Node) nor `uv` is on this machine to install the client",
+        "command": None,
+    }
+
+
+def _fake_client(tmp_path, monkeypatch, script: str):
+    """A real `papaya-agent` executable that prints ``script`` and exits as told."""
+    import sys
+
+    path = tmp_path / "papaya-agent"
+    path.write_text(f"#!{sys.executable}\n{script}")
+    path.chmod(0o755)
+    monkeypatch.setattr(papaya, "installed", lambda: str(path))
+    return path
+
+
+def test_several_agents_come_back_as_a_choice_to_put_to_the_person(tmp_path, monkeypatch) -> None:
+    """With no terminal the client lists the agents and exits; that list is the question."""
+    _fake_client(
+        tmp_path,
+        monkeypatch,
+        "import sys\n"
+        "print('Open https://app.trypapaya.ai/signin?code=abc to sign in')\n"
+        "print('Multiple Papaya agents found. Re-run with `--agent <agent>`. Available: "
+        "Engineering Agent @engineering_agent (engineer); QA Agent @qa (tester)', "
+        "file=sys.stderr)\n"
+        "sys.exit(1)\n",
+    )
+    result = papaya.connect(timeout=30)
+    assert result["reason"] == "choose"
+    assert result["kind"] == "agent"
+    assert result["flag"] == "--agent"
+    assert result["choices"] == [
+        "Engineering Agent @engineering_agent (engineer)",
+        "QA Agent @qa (tester)",
+    ]
+
+
+def test_the_sign_in_link_reaches_the_person_while_the_flow_waits(tmp_path, monkeypatch) -> None:
+    """Captured output hid the link until the flow had already timed out."""
+    import io
+
+    _fake_client(
+        tmp_path,
+        monkeypatch,
+        "import time\n"
+        "print('Open https://app.trypapaya.ai/signin?code=xyz to sign in', flush=True)\n"
+        "time.sleep(30)\n",
+    )
+    echo = io.StringIO()
+    result = papaya.connect(timeout=2, echo=echo)
+    assert "https://app.trypapaya.ai/signin?code=xyz" in echo.getvalue()
+    assert result["reason"] == "timeout"
+    assert result["link"] == "https://app.trypapaya.ai/signin?code=xyz"
+
+
+def test_connecting_through_uv_keeps_the_client_on_the_path_afterwards(
+    tmp_path, monkeypatch
+) -> None:
+    """The npm shim installs the client after a connect; the uv path does the same."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(papaya, "installer", lambda: "uv")
+    monkeypatch.setattr(papaya, "installed", lambda: None)
+    monkeypatch.setattr(papaya, "connect_argv", lambda **_k: ["uv", "tool", "run", "connect"])
+    monkeypatch.setattr(papaya, "_stream", lambda argv, *, timeout, echo: (0, ["Connected."]))
+    monkeypatch.setattr(papaya, "status", lambda: {"state": "connected", "addressed": "@eng"})
+
+    def run(argv, *, timeout, env=None, cwd=None):
+        calls.append(argv)
+        return papaya.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(papaya, "_run", run)
+    result = papaya.connect()
+    assert result["ok"] is True and result["via"] == "uv" and result["installed"] is True
+    assert calls == [list(papaya.UV_INSTALL)]
+
+
+def test_the_cli_names_the_choices_and_the_exact_command_to_rerun(monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setattr(papaya, "status", lambda: {"state": "absent"})
+    monkeypatch.setattr(papaya, "installer", lambda: "npx")
+    monkeypatch.setattr(
+        papaya,
+        "connect",
+        lambda **_k: {
+            "ok": False,
+            "reason": "choose",
+            "kind": "workspace",
+            "flag": "--workspace",
+            "choices": ["Papaya HQ (papaya-hq)", "Acme (acme)"],
+            "detail": "",
+        },
+    )
+    assert cli.main(["papaya", "connect", "--agent", "Engineering Agent"]) == 2
+    out = capsys.readouterr()
+    assert "installing it with `npx papaya-agent`" in out.out
+    assert "  - Papaya HQ (papaya-hq)" in out.err
+    assert (
+        'then: ppy papaya connect --agent "Engineering Agent" --workspace "<the workspace chosen>"'
+        in out.err
+    )
+
+
+def test_a_logged_api_call_is_never_mistaken_for_the_sign_in_link() -> None:
+    """Found running it for real: the client logs its API calls, URLs and all."""
+    lines = [
+        '07:34:21 [INFO] HTTP Request: GET https://api.trypapaya.ai/api/v1/auth/cli/start "200"',
+        "https://app.trypapaya.ai/cli/authorize?state=s&client_name=reptar",
+    ]
+    assert (
+        papaya._first_link(lines)
+        == "https://app.trypapaya.ai/cli/authorize?state=s&client_name=reptar"
+    )
+
+
+def test_the_client_runs_unbuffered_so_the_link_is_not_held_back(tmp_path, monkeypatch) -> None:
+    """Also found for real: Python buffers a pipe, so the link waited until the flow ended."""
+    _fake_client(
+        tmp_path,
+        monkeypatch,
+        "import os\nprint('PYTHONUNBUFFERED=' + os.environ.get('PYTHONUNBUFFERED', ''))\n",
+    )
+    code, lines = papaya._stream([papaya.installed()], timeout=30, echo=None)
+    assert code == 0 and lines == ["PYTHONUNBUFFERED=1"]
