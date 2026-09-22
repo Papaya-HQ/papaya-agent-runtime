@@ -64,11 +64,23 @@ of this one.
 
 ## 2. Decide
 
-- **It meets the brief**: `ppy review approve <worker task id> --note "<what you checked
-  and accepted>"`, then `ppy deliver <worker task id>`.
+- **It meets the brief**: write the pull request description (below) to
+  `{runtime_dir}/.ppy/pr-descriptions/<worker task id>.md`, then
+  `ppy review approve <worker task id> --note "<what you checked and accepted>"
+  --pr-description {runtime_dir}/.ppy/pr-descriptions/<worker task id>.md`, then
+  `ppy deliver <worker task id>`.
 - **It does not**: `ppy steer <worker task id> --message "<every finding, at once>"`.
   One consolidated round, not a finding per turn. If the failure is a decision for the
   requester rather than for the worker, say so on the work item instead.
+
+### The pull request description
+
+It is the pull request's body, exactly as you write it, for the people who will read and
+merge it — not a log of this run. Follow the skill's "The pull request description"
+section: five `##` sections (Summary, Why, Product impact, How to test, Risks and what
+was not verified), in the product's language, with no `.ppy-evidence/` paths, SHAs or
+round numbers. `ppy review approve` refuses one that falls short, and delivery refuses
+without one.
 
 ## 3. Report where the work came from
 

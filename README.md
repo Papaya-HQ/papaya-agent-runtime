@@ -55,7 +55,12 @@ following, self-reported issues, config ownership, learned tools, `board`, `heal
 `handoff` all work exactly as they do connected. It says so once — at session start, on
 `ppy start`, `ppy status` and `ppy doctor`, and when `ppy serve` starts — in one line:
 
-    Running without Papaya. It's better with it: tickets, comments and the team's record flow in and out by themselves. https://trypapaya.ai
+    Running without Papaya. It's better with it: tickets, comments and the team's record flow in and out by themselves. `ppy papaya connect` sets it up: it installs the client if needed and you click Approve in your browser. https://trypapaya.ai
+
+Say yes and the session runs `ppy papaya connect` for you: it installs the Papaya
+client with `npx papaya-agent` (or through `uv` on a machine without Node), opens a
+sign-in link, and asks you in the conversation which agent to connect as when there is
+more than one. Your only step is clicking Approve.
 
 What is off without a connection:
 
@@ -384,7 +389,8 @@ ppy sweep                               # ask the running serve to look for assi
 ppy supervisor start                    # per-task runners, durable state; detached, outlives the session
 ppy dispatch --repo your-repo --brief brief.md --provider claude
 ppy worktree list                       # every leased slot: task, state, size
-ppy review show <task_id> && ppy review approve <task_id>   # diffs from HEAD's merge-base with the PR's base
+ppy review show <task_id>               # diffs from HEAD's merge-base with the PR's base
+ppy review approve <task_id> --pr-description pr.md   # the PR body, written for people; bound to this head
 ppy deliver <task_id>                   # refused unless approved at current head; again updates the open PR
 ppy track <task_id> --record ENG-1183 --provider linear --url ... --title "..."
 ppy answer <task_id> --answer "use /v2/health" --scope run   # recorded + reused

@@ -144,8 +144,22 @@ def readiness_context() -> str | None:
     return "\n".join(lines)
 
 
+#: How a session sets Papaya up for a person, said in the hook so every session
+#: carries it out the same way.
+_CONNECT_STEPS = (
+    "run `ppy papaya connect` yourself, with a timeout of at least 10 minutes (it installs "
+    "the client with `npx papaya-agent`, or `uv` on a machine without Node, then waits "
+    "while the person clicks Approve in the browser tab it opens). Tell them to look for "
+    "that tab, and relay the sign-in link it prints in case no browser opened. If it exits "
+    "listing several workspaces or agents, ask the person which one in the conversation "
+    "and re-run with the `--workspace` or `--agent` it names. If it says the machine has "
+    "neither Node nor uv, tell them which to install. Once connected, run `ppy papaya "
+    "tools` and ask them to run `/mcp`."
+)
+
+
 def invitation_context(payload: dict[str, Any] | None = None) -> str | None:
-    """Running without Papaya: say it once, in the session's first reply, and carry on.
+    """Running without Papaya: say it once, offer to set it up, and carry on either way.
 
     Once per session: a compaction re-fires this hook, so it is skipped there, and a
     session `ppy start` launched already printed the line before the harness started.
@@ -161,13 +175,15 @@ def invitation_context(payload: dict[str, Any] | None = None) -> str | None:
         return (
             "RUNNING WITHOUT PAPAYA: this machine has no Papaya connection. Everything local "
             "works as usual; tickets, comments and DMs do not flow. The person was already "
-            "told once at launch — do not repeat it."
+            "told once at launch, with the offer to set it up — do not repeat it. If they "
+            f"ask for it: {_CONNECT_STEPS}"
         )
     return (
         "RUNNING WITHOUT PAPAYA: this machine has no Papaya connection. Everything local "
-        "works as usual; tickets, comments and DMs do not flow. Do not ask the person to "
-        "connect and do not block on it. Say this line once, verbatim, in your first reply "
-        f"and never again this session:\n{line}"
+        "works as usual; tickets, comments and DMs do not flow. In your first reply, say "
+        "this line once, verbatim, and offer to set it up for them — never again this "
+        f"session, and never block local work on it:\n{line}\n"
+        f"If they say yes: {_CONNECT_STEPS}"
     )
 
 

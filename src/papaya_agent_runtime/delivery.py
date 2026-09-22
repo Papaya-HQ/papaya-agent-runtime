@@ -277,18 +277,22 @@ def _pr_tool() -> str | None:
 
 
 def _pr_body(task_id: int, head: str, body_file: str | None) -> str:
-    """The pull request body: the caller's file if given, else a composed one.
+    """The pull request body: the caller's file if given, else the reviewer's description.
 
     ``--body-file`` overrides everything — a manager who has written the body by
-    hand should never have it second-guessed. Otherwise the body is composed from
-    the brief, the worker's reports, and the review; see
-    :mod:`papaya_agent_runtime.pr_body`.
+    hand should never have it second-guessed. Otherwise the body is the description
+    the reviewer wrote with the approval of this head; see
+    :mod:`papaya_agent_runtime.pr_body`. With neither, delivery is refused: a pull
+    request goes out explained for the people who read it, or not at all.
     """
     if body_file:
         return Path(body_file).expanduser().read_text(encoding="utf-8")
     from papaya_agent_runtime import pr_body
 
-    return pr_body.compose(task_id, head_sha=head)
+    try:
+        return pr_body.compose(task_id, head_sha=head)
+    except pr_body.MissingDescription as exc:
+        raise DeliveryError(f"refusing to deliver: {exc}") from exc
 
 
 def _forge_for_task(conn, task) -> tuple[str, str | None]:
@@ -379,6 +383,10 @@ def deliver(
     if not approved:
         raise DeliveryError(f"refusing to deliver: {reason}")
 
+    # Written before anything is pushed: a delivery without a description for people
+    # stops here, with nothing on the remote to explain.
+    body = _pr_body(task_id, head, body_file) if open_pr else ""
+
     pushed = False
     if push:
         proc = _run(["git", "push", remote, f"HEAD:{branch}"], cwd=worktree)
@@ -404,7 +412,7 @@ def deliver(
             number = pr_number(existing)
             name = f"PR #{number}" if number else existing
             edit = [tool, "pr", "edit", str(number or existing), "--body"]
-            edit.append(_pr_body(task_id, head, body_file))
+            edit.append(body)
             if forge_slug:
                 edit += ["--repo", forge_slug]
             proc = _run(edit, cwd=worktree)
@@ -424,7 +432,7 @@ def deliver(
                 "--title",
                 title or task["title"],
                 "--body",
-                _pr_body(task_id, head, body_file),
+                body,
             ]
             if base:
                 argv += ["--base", base]

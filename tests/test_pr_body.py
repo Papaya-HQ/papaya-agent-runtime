@@ -1,4 +1,11 @@
-"""`ppy deliver` writes the pull request body from the brief, the reports, and the review."""
+"""The pull request body is a description the reviewer wrote for people, not quotes.
+
+PAP-279's PR #811 (2026-09-21) went out with a body quoted from the worker's last
+progress note and the reviewer's shorthand: nothing about what changed for a user or
+how to check it. These tests hold the replacement: the reviewer writes five sections,
+approval refuses one that falls short, and delivery refuses a head without one before
+it pushes anything.
+"""
 
 from __future__ import annotations
 
@@ -6,30 +13,33 @@ from types import SimpleNamespace
 
 import pytest
 
-from papaya_agent_runtime import delivery, pr_body, preflight, progress, review
+from papaya_agent_runtime import cli, delivery, pr_body, review
 from papaya_agent_runtime.state import init_db, store
 
-BRIEF = """# Rebuild the review surface
+DESCRIPTION = """## Summary
 
-## Gap (every delivery this week)
+Activity cards now say when someone commented on your work item, naming who, on web
+and iOS.
 
-The pull request body said only that the delivery was automated, so a reviewer who
-had not seen the brief had nothing to read.
+## Why
 
-## Proposal
+The backend began sending a "commented" reason in PAP-276, and both clients showed it
+as a generic card. Requested on PAP-279.
 
-Compose the body from what the run already holds.
-"""
+## Product impact
 
-DONE_NOTE = """Rebuilt the surface. The panel now renders the worker's own report first.
+People see "@dana commented on PAP-12" in Activity; tapping it opens the item scrolled
+to that comment. Needs a new iOS build to reach phones.
 
-## Outside scope, required to build
+## How to test
 
-Bumped the linter pin; the old one could not parse the new syntax.
+1. As one person, comment on a work item assigned to someone else.
+2. As the assignee, open Activity: the card names the commenter.
+3. Tap it: the item opens at that comment, highlighted.
 
-## Flagged, not done
+## Risks and what was not verified
 
-The dark theme still has a contrast problem on the diffstat.
+iOS was checked by unit tests of the mechanism only; nobody tapped it on a device.
 """
 
 
@@ -66,173 +76,130 @@ def task(home, tmp_path):
     return SimpleNamespace(id=task_id, conn=conn)
 
 
-# --------------------------------------------------------------------------- #
-# The parts
-# --------------------------------------------------------------------------- #
-
-
-def test_first_section_takes_the_sub_section_after_the_opening_heading() -> None:
-    section = pr_body.first_section(BRIEF)
-    assert section.startswith("**Gap (every delivery this week)**")
-    assert "nothing to read" in section
-    assert "Proposal" not in section  # the next section of the same depth ends it
-
-
-def test_first_section_takes_prose_written_straight_under_the_heading() -> None:
-    section = pr_body.first_section("# Title\n\nThe reason, in prose.\n\n## Next\n\nMore.\n")
-    assert section == "The reason, in prose."
-
-
-def test_first_section_is_empty_when_the_heading_is_all_there_is() -> None:
-    assert pr_body.first_section("# Title only\n") == ""
-
-
-def test_named_section_quotes_the_body_verbatim_however_the_heading_is_written() -> None:
-    assert "Bumped the linter pin" in pr_body.named_section(
-        DONE_NOTE, "Outside scope, required to build"
-    )
-    bold = "Done.\n\n**Flagged, not done**\n\nThe contrast problem stands.\n"
-    assert pr_body.named_section(bold, "Flagged, not done") == "The contrast problem stands."
-    plain = "Done.\n\nFlagged, not done:\n\nOne thing left.\n"
-    assert pr_body.named_section(plain, "Flagged, not done") == "One thing left."
-    assert pr_body.named_section("nothing here", "Flagged, not done") == ""
+@pytest.fixture
+def described(task):
+    """A task whose reviewer recorded a description at every head these tests use."""
+    for head in ("b" * 40, "c" * 40, "f" * 40):
+        pr_body.record_description(task.id, head, DESCRIPTION, conn=task.conn)
+    return task
 
 
 # --------------------------------------------------------------------------- #
-# The composed body
+# What a description has to say
 # --------------------------------------------------------------------------- #
 
 
-def test_the_body_is_composed_from_the_brief_the_reports_and_the_approval(
-    task, monkeypatch
-) -> None:
-    preflight.archive_brief("papaya", task.id, BRIEF)
-    progress.record(task.id, phase="test", note="Full suite: 326 passed.", conn=task.conn)
-    progress.record(task.id, phase="done", note=DONE_NOTE, conn=task.conn)
-    monkeypatch.setattr(review, "head_sha", lambda _wt: "b" * 40)
-    review.record_review(task.id, "approved", note="Opened both captures; spacing is right.")
-
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-
-    assert "## Why" in body
-    assert "nothing to read" in body  # from the brief's first section
-    assert "The panel now renders the worker's own report first." in body
-    assert "Bumped the linter pin" in body
-    assert "contrast problem" in body
-    assert "Full suite: 326 passed." in body
-    assert "Opened both captures; spacing is right." in body
-    assert "Bottom of its stack" in body
-    assert "ppy/task-1-abc" in body
-    # Plain references: no bare task identifier stands in for the work.
-    assert f"task {task.id}" not in body
-    assert "Automated delivery" not in body
+def test_a_description_with_all_five_sections_is_accepted() -> None:
+    assert pr_body.validate_description(DESCRIPTION) == []
 
 
-def test_a_section_the_closing_report_missed_is_carried_from_an_earlier_report(
-    task, monkeypatch
-) -> None:
-    progress.record(
-        task.id,
-        phase="implement",
-        note="Halfway.\n\n## Flagged, not done\n\nThe migration needs a second pass.\n",
-        conn=task.conn,
+def test_every_missing_section_is_named() -> None:
+    problems = pr_body.validate_description("## Summary\n\n" + "Changed a thing. " * 5)
+    for title in ("Why", "Product impact", "How to test", "Risks and what was not verified"):
+        assert f'missing the "## {title}" section' in problems
+
+
+def test_a_section_that_is_only_a_label_is_refused() -> None:
+    thin = DESCRIPTION.replace(
+        "1. As one person, comment on a work item assigned to someone else.\n"
+        "2. As the assignee, open Activity: the card names the commenter.\n"
+        "3. Tap it: the item opens at that comment, highlighted.",
+        "See diff.",
     )
-    progress.record(task.id, phase="done", note="Finished the panel.", conn=task.conn)
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-    assert "Finished the panel." in body
-    assert "**Flagged, not done**" in body
-    assert "The migration needs a second pass." in body
+    (problem,) = pr_body.validate_description(thin)
+    assert '"## How to test" says too little' in problem
 
 
-def test_a_brief_whose_first_section_is_why_says_why_once(task) -> None:
-    """The composed "## Why" already names the section; a bold lead repeats the word."""
-    preflight.archive_brief(
-        "papaya",
-        task.id,
-        "# Rebuild the review surface\n\n## Why\n\nShane, 2026-09-04: every body was "
-        "rewritten by hand.\n\n## In scope\n\nThe three fixes.\n",
-    )
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-    assert "**Why**" not in body
-    assert body.count("## Why") == 1
-    assert "Shane, 2026-09-04: every body was rewritten by hand." in body
-    assert "The three fixes." not in body  # the next section of the same depth ends it
+def test_a_path_only_this_machine_has_is_refused() -> None:
+    """#811 pointed its reader at .ppy-evidence/*.png, which never left the machine."""
+    local = DESCRIPTION + "\nScreenshot: .ppy-evidence/web-commented-card.png\n"
+    (problem,) = pr_body.validate_description(local)
+    assert "`.ppy-evidence`" in problem and "cannot open it" in problem
 
 
-def test_a_brief_whose_first_section_has_another_name_keeps_its_bold_lead(task) -> None:
-    preflight.archive_brief(
-        "papaya",
-        task.id,
-        "# Rebuild the review surface\n\n## Problem\n\nThe body said only that the "
-        "delivery was automated.\n",
-    )
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-    assert "**Problem**" in body
-    assert "The body said only that the delivery was automated." in body
+def test_sections_are_read_at_the_shallowest_heading_level() -> None:
+    """A `###` inside a section is part of it, and `#`-level sections read the same."""
+    nested = DESCRIPTION.replace("## How to test\n", "## How to test\n\n### Web\n")
+    assert pr_body.validate_description(nested) == []
+    assert pr_body.validate_description(DESCRIPTION.replace("## ", "# ")) == []
 
 
-def test_the_stack_section_names_the_branch_the_work_was_started_from(task) -> None:
-    store.update_task_fields(task.conn, task.id, stacked_on="ppy/task-7-abc")
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-    assert "`ppy/task-7-abc`" in body
-    assert "Merge that one first" in body
-    assert "Bottom of its stack" not in body
+# --------------------------------------------------------------------------- #
+# The body is the description, bound to the head it was written for
+# --------------------------------------------------------------------------- #
 
 
-def test_a_task_started_from_the_default_branch_is_the_bottom_of_its_stack(task) -> None:
-    """`--base main` records the default branch, which is not a layer below."""
-    store.update_task_fields(task.conn, task.id, stacked_on="main")
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-    assert "Bottom of its stack" in body
-    assert "Merge that one first" not in body
-
-
-def test_the_newest_report_stands_in_when_the_done_note_has_not_landed(task) -> None:
-    """Task 114: the closing report arrived seconds after delivery, not before it."""
-    progress.record(task.id, phase="implement", note="Halfway.", conn=task.conn)
-    progress.record(task.id, phase="review", note="Self-review clean; suite green.", conn=task.conn)
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
-    assert "The worker's latest report, filed at the `review` phase:" in body
-    assert "Self-review clean; suite green." in body
-    assert "filed no closing report" not in body
-
-
-def test_a_task_with_no_brief_and_no_reports_still_produces_a_valid_body(task) -> None:
-    body = pr_body.compose(task.id, head_sha="c" * 40, conn=task.conn)
-    for heading in ("## Why", "## What", "## Verification", "## Stack"):
-        assert heading in body
-    assert "No brief was archived" in body
-    assert '"Rebuild the review surface"' in body
-    assert "filed no closing report" in body
-    assert "Neither a verification report nor a note" in body
+def test_the_body_is_the_description_then_the_stack_then_the_credit(described) -> None:
+    body = pr_body.compose(described.id, head_sha="b" * 40, conn=described.conn)
+    assert body.startswith("## Summary\n\nActivity cards now say")
+    assert body.index("## Risks and what was not verified") < body.index("## Stack")
+    assert body.index("## Stack") < body.index("Driven by")
     assert body.endswith("\n")
 
 
-def test_the_footer_credits_the_runtime_and_the_worker_by_default(task, monkeypatch) -> None:
-    monkeypatch.delenv(pr_body.SESSION_URL_ENV, raising=False)
-    body = pr_body.compose(task.id, head_sha="c" * 40, conn=task.conn)
-    assert "Driven by Papaya Agent Runtime" in body
-    assert "implemented by a dispatched" in body
-    assert "Generated with" not in body
+def test_no_description_at_this_head_is_refused_with_the_command_to_fix_it(task) -> None:
+    pr_body.record_description(task.id, "b" * 40, DESCRIPTION, conn=task.conn)
+    with pytest.raises(pr_body.MissingDescription) as refused:
+        pr_body.compose(task.id, head_sha="9" * 40, conn=task.conn)
+    message = str(refused.value)
+    assert f"ppy review approve {task.id}" in message and "--pr-description" in message
+    assert "--body-file" in message
 
 
-def test_the_session_link_rides_the_attribution_when_supplied(task, monkeypatch) -> None:
-    monkeypatch.setenv(pr_body.SESSION_URL_ENV, "https://example/session")
-    body = pr_body.compose(task.id, head_sha="c" * 40, conn=task.conn)
-    assert "Driven by Papaya Agent Runtime" in body
-    assert "Session: https://example/session" in body
+def test_the_newest_description_for_a_head_wins(task) -> None:
+    pr_body.record_description(task.id, "b" * 40, DESCRIPTION, conn=task.conn)
+    rewritten = DESCRIPTION.replace("Activity cards now say", "Activity cards finally say")
+    pr_body.record_description(task.id, "b" * 40, rewritten, conn=task.conn)
+    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
+    assert "finally say" in body
 
 
-def test_extra_footer_lines_are_appended_after_the_attribution(task, monkeypatch) -> None:
-    monkeypatch.setenv(pr_body.FOOTER_ENV, "Deployed by the release train")
-    body = pr_body.compose(task.id, head_sha="c" * 40, conn=task.conn)
-    assert body.index("Driven by Papaya Agent Runtime") < body.index(
-        "Deployed by the release train"
-    )
+def test_recording_a_description_that_falls_short_is_refused(task) -> None:
+    with pytest.raises(pr_body.DescriptionError, match="missing the"):
+        pr_body.record_description(task.id, "b" * 40, "## Summary\n\nStuff.", conn=task.conn)
+    assert pr_body.description_for(task.conn, task.id, "b" * 40) == ""
 
 
 # --------------------------------------------------------------------------- #
-# Delivery uses it
+# Approval takes the description, and checks it before approving
+# --------------------------------------------------------------------------- #
+
+
+def _approve(monkeypatch, task_id: int, description_path) -> int:
+    from papaya_agent_runtime import supervision
+
+    monkeypatch.setattr(supervision, "full_suite_missing", lambda tid: "")
+    monkeypatch.setattr(review, "head_sha", lambda wt: "b" * 40)
+    return cli.main(["review", "approve", str(task_id), "--pr-description", str(description_path)])
+
+
+def test_approve_records_the_description_against_the_approved_head(
+    task, tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "pr.md"
+    path.write_text(DESCRIPTION)
+    assert _approve(monkeypatch, task.id, path) == 0
+    assert review.approval_note(task.id) == ""  # approved, with no --note
+    assert "Activity cards now say" in pr_body.description_for(init_db(), task.id, "b" * 40)
+
+
+def test_approve_refuses_a_thin_description_and_records_no_approval(
+    task, tmp_path, monkeypatch, capsys
+) -> None:
+    path = tmp_path / "pr.md"
+    path.write_text("## Summary\n\nFixed it.\n")
+    assert _approve(monkeypatch, task.id, path) == 1
+    assert "would not help the person reading it" in capsys.readouterr().err
+    assert review.latest_review(task.id) is None
+
+
+def test_approve_without_a_description_is_a_usage_error(task) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["review", "approve", str(task.id)])
+
+
+# --------------------------------------------------------------------------- #
+# Delivery
 # --------------------------------------------------------------------------- #
 
 
@@ -249,23 +216,7 @@ def _fake_gh(monkeypatch, calls: list[list[str]]) -> None:
     monkeypatch.setattr(delivery, "_pr_tool", lambda: "gh")
 
 
-def test_deliver_opens_the_pull_request_with_the_composed_body(task, monkeypatch) -> None:
-    preflight.archive_brief("papaya", task.id, BRIEF)
-    progress.record(task.id, phase="done", note=DONE_NOTE, conn=task.conn)
-    calls: list[list[str]] = []
-    _fake_gh(monkeypatch, calls)
-
-    delivery.deliver(task.id)
-
-    argv = next(a for a in calls if a[:3] == ["gh", "pr", "create"])
-    body = argv[argv.index("--body") + 1]
-    assert "## Why" in body
-    assert "nothing to read" in body
-    assert argv[argv.index("--title") + 1] == "Rebuild the review surface"
-
-
 def test_a_body_file_and_a_title_override_everything(task, tmp_path, monkeypatch) -> None:
-    preflight.archive_brief("papaya", task.id, BRIEF)
     calls: list[list[str]] = []
     _fake_gh(monkeypatch, calls)
     handwritten = tmp_path / "body.md"
@@ -278,19 +229,87 @@ def test_a_body_file_and_a_title_override_everything(task, tmp_path, monkeypatch
     assert argv[argv.index("--title") + 1] == "A title I chose"
 
 
-def test_the_stack_section_states_the_merge_order_when_the_parent_is_a_task(task) -> None:
+def test_deliver_opens_the_pull_request_with_the_description(described, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    _fake_gh(monkeypatch, calls)
+
+    delivery.deliver(described.id)
+
+    argv = next(a for a in calls if a[:3] == ["gh", "pr", "create"])
+    body = argv[argv.index("--body") + 1]
+    assert body.startswith("## Summary")
+    assert "## How to test" in body
+    assert argv[argv.index("--title") + 1] == "Rebuild the review surface"
+
+
+def test_deliver_refuses_before_pushing_when_nothing_was_written(task, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    _fake_gh(monkeypatch, calls)
+
+    with pytest.raises(delivery.DeliveryError, match="no pull request description"):
+        delivery.deliver(task.id)
+
+    assert not any(a[:2] == ["git", "push"] for a in calls)
+    assert not any(a[:3] == ["gh", "pr", "create"] for a in calls)
+
+
+# --------------------------------------------------------------------------- #
+# What the runtime adds: the stack and the credit
+# --------------------------------------------------------------------------- #
+
+
+def test_the_stack_section_names_the_branch_the_work_was_started_from(described) -> None:
+    store.update_task_fields(described.conn, described.id, stacked_on="ppy/task-7-abc")
+    body = pr_body.compose(described.id, head_sha="b" * 40, conn=described.conn)
+    assert "`ppy/task-7-abc`" in body
+    assert "Merge that one first" in body
+    assert "Bottom of its stack" not in body
+
+
+def test_a_task_started_from_the_default_branch_is_the_bottom_of_its_stack(described) -> None:
+    """`--base main` records the default branch, which is not a layer below."""
+    store.update_task_fields(described.conn, described.id, stacked_on="main")
+    body = pr_body.compose(described.id, head_sha="b" * 40, conn=described.conn)
+    assert "Bottom of its stack" in body
+    assert "Merge that one first" not in body
+
+
+def test_the_stack_section_states_the_merge_order_when_the_parent_is_a_task(described) -> None:
     """A recorded stack parent is named in order, not just as a branch (issue #61)."""
-    parent = store.add_task(task.conn, run_id=1, title="bottom layer", repo_id=1)
-    store.update_task_fields(task.conn, parent, branch="ppy/task-7-abc")
+    parent = store.add_task(described.conn, run_id=1, title="bottom layer", repo_id=1)
+    store.update_task_fields(described.conn, parent, branch="ppy/task-7-abc")
     store.update_task_fields(
-        task.conn, task.id, stacked_on="ppy/task-7-abc", stacked_on_task=parent
+        described.conn, described.id, stacked_on="ppy/task-7-abc", stacked_on_task=parent
     )
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
+    body = pr_body.compose(described.id, head_sha="b" * 40, conn=described.conn)
     assert "Merge that one first" in body
     assert "Stack: layer 2 of 2; its pull request targets ppy/task-7-abc." in body
     assert f'task {parent} "bottom layer" (branch ppy/task-7-abc, unmerged)' in body
-    assert f"then this task {task.id}." in body
+    assert f"then this task {described.id}." in body
 
-    store.update_task_fields(task.conn, parent, merged_at="2026-09-06T00:00:00+00:00")
-    body = pr_body.compose(task.id, head_sha="b" * 40, conn=task.conn)
+    store.update_task_fields(described.conn, parent, merged_at="2026-09-06T00:00:00+00:00")
+    body = pr_body.compose(described.id, head_sha="b" * 40, conn=described.conn)
     assert "(branch ppy/task-7-abc, merged)" in body
+
+
+def test_the_footer_credits_the_runtime_and_the_worker_by_default(described, monkeypatch) -> None:
+    monkeypatch.delenv(pr_body.SESSION_URL_ENV, raising=False)
+    body = pr_body.compose(described.id, head_sha="c" * 40, conn=described.conn)
+    assert "Driven by Papaya Agent Runtime" in body
+    assert "implemented by a dispatched" in body
+    assert "Generated with" not in body
+
+
+def test_the_session_link_rides_the_attribution_when_supplied(described, monkeypatch) -> None:
+    monkeypatch.setenv(pr_body.SESSION_URL_ENV, "https://example/session")
+    body = pr_body.compose(described.id, head_sha="c" * 40, conn=described.conn)
+    assert "Driven by Papaya Agent Runtime" in body
+    assert "Session: https://example/session" in body
+
+
+def test_extra_footer_lines_are_appended_after_the_attribution(described, monkeypatch) -> None:
+    monkeypatch.setenv(pr_body.FOOTER_ENV, "Deployed by the release train")
+    body = pr_body.compose(described.id, head_sha="c" * 40, conn=described.conn)
+    assert body.index("Driven by Papaya Agent Runtime") < body.index(
+        "Deployed by the release train"
+    )

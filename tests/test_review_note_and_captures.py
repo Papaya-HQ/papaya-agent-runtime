@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import PR_DESCRIPTION
 from papaya_agent_runtime import captures, cli, progress, review
 from papaya_agent_runtime.state import init_db, store
 from papaya_agent_runtime.state.db import _column_names
@@ -118,11 +119,21 @@ def test_reviews_gain_a_note_column_on_fresh_and_existing_databases(home) -> Non
 
 
 def test_the_approval_note_round_trips_and_is_bound_to_the_reviewed_commit(
-    task, monkeypatch, capsys
+    task, monkeypatch, capsys, tmp_path
 ) -> None:
     monkeypatch.setattr(review, "head_sha", lambda _wt: "c" * 40)
+    description = tmp_path / "pr.md"
+    description.write_text(PR_DESCRIPTION)
     rc = cli.main(
-        ["review", "approve", str(task.id), "--note", "opened both captures; spacing is right"]
+        [
+            "review",
+            "approve",
+            str(task.id),
+            "--note",
+            "opened both captures; spacing is right",
+            "--pr-description",
+            str(description),
+        ]
     )
     assert rc == 0
     assert "opened both captures" in capsys.readouterr().out

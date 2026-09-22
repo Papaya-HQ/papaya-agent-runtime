@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import wait_until
+from conftest import approve_with_description, wait_until
 from papaya_agent_runtime import (
     cli,
     delivery,
@@ -29,7 +29,6 @@ from papaya_agent_runtime import (
     sweep,
 )
 from papaya_agent_runtime.config import ManagerProfile, MMConfig, WorkerCeiling, save_config
-from papaya_agent_runtime.review import record_review
 from papaya_agent_runtime.setup import discovery, doctor
 from papaya_agent_runtime.state import init_db
 from papaya_agent_runtime.supervisor.client import SupervisorClient
@@ -166,7 +165,7 @@ def test_a_local_task_goes_brief_to_delivery_with_no_papaya_call(
             what="the worker to finish",
             interval=0.1,
         )
-        record_review(task_id, "approved", "looks good")
+        approve_with_description(task_id, "looks good")
         result = delivery.deliver(task_id, push=False, open_pr=True)
     finally:
         server.stop()
@@ -266,3 +265,30 @@ def test_serve_without_a_connection_runs_rounds_and_says_what_is_off(
     # connect, is attempted without a connection.
     assert reclaims == []
     assert "reclaim" not in said
+
+
+def test_the_session_offers_to_set_papaya_up_and_knows_how(monkeypatch) -> None:
+    """Shane, 2026-09-22: help the person set the client up, don't just mention it."""
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.delenv(standalone.QUIET_ENV, raising=False)
+    said = hooks.invitation_context({"source": "startup"})
+    assert said is not None
+    assert "offer to set it up" in said
+    assert "Do not ask the person to connect" not in said
+    for step in ("ppy papaya connect", "npx papaya-agent", "`--agent`", "Approve", "/mcp"):
+        assert step in said
+    assert standalone.INVITE_LINE in said
+
+
+def test_a_launched_session_is_not_told_twice_but_still_knows_how(monkeypatch) -> None:
+    from papaya_agent_runtime import hooks
+
+    monkeypatch.delenv("PPY_DEV", raising=False)
+    monkeypatch.delenv(standalone.QUIET_ENV, raising=False)
+    monkeypatch.setenv("PPY_MANAGER_SESSION", "1")
+    said = hooks.invitation_context({"source": "startup"})
+    assert said is not None and "do not repeat it" in said
+    assert standalone.INVITE_LINE not in said
+    assert "ppy papaya connect" in said

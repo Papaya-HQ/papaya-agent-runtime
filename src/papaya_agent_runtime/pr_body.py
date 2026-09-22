@@ -1,27 +1,27 @@
-"""The pull request body a delivery writes, composed from what the run already holds.
+"""The pull request body a delivery writes: a description a person wrote for people.
 
 Every delivery on 2026-09-04 opened its pull request with the body "Automated
-delivery of task N (sha)." and the manager then rewrote it by hand from three things
-the control plane was already holding: the brief the worker was dispatched with, the
-worker's own closing and test reports, and the review that approved the commit. That
-rewrite is where a reviewer's context came from, and it happened outside the tool, so
-it was done differently every time and skipped whenever the day was busy.
+delivery of task N (sha)." The fix then was to compose the body from what the run
+already held — the brief's first section, the worker's closing report, the reviewer's
+approval note — quoted verbatim, "nothing invented".
 
-This module composes that body instead:
+That produced bodies nobody outside the run could read (Shane, 2026-09-21, on
+papaya-frontend-monorepo PR #811: "cryptic slop"). Every source was written for the
+machine: a worker's last progress note is the story of its final round ("DONE
+(evidence round). New head … Not pushed by me"), a brief's first section is often
+repository layout, and a reviewer's note is shorthand for the ledger. None of them
+says what changed for a user or how a person should check it, and a quote cannot say
+what its author never wrote.
 
-- **Why** — the first section of the archived brief, after its opening heading.
-- **What** — the worker's closing report — or, when the done note has not landed
-  yet, its newest report with the phase named — plus anything it filed under
-  "Outside scope, required to build" or "Flagged, not done" in an earlier report.
-- **Verification** — the worker's last test report and the reviewer's approval note.
-- **Stack** — the branch this work was dispatched from, when that branch is a layer
-  below rather than the repository's own default branch, or a plain statement that
-  it targets the default branch.
-
-Everything is quoted from what people actually wrote; nothing is invented. Sections
-with no source say so in a sentence rather than going missing, so a body is always
-valid — and every reference is described in words, never left as a bare identifier a
-reader outside the run would have to look up.
+So the body is *written*, once, by the reviewer — the one party that has just read
+the whole diff and knows what it does. ``ppy review approve --pr-description <file>``
+records it against the commit it approves, :func:`validate_description` refuses one
+that is missing any of :data:`DESCRIPTION_SECTIONS` (or points a reader at files that
+never leave the machine), and :func:`compose` uses it verbatim, adding only what the
+runtime knows better than any author: where the change sits in its stack, and who
+drove it. A delivery with no description for its head is refused before anything is
+pushed (:class:`MissingDescription`); a person who wrote the whole body themselves
+still passes ``ppy deliver --body-file``.
 """
 
 from __future__ import annotations
@@ -38,13 +38,24 @@ SESSION_URL_ENV = "PPY_SESSION_URL"
 #: already set it). The attribution itself never depends on it.
 FOOTER_ENV = "PPY_PR_FOOTER"
 
-#: Length ceilings, so one enormous report cannot become an unreadable body.
-WHY_CAP = 1500
-WHAT_CAP = 4000
-VERIFICATION_CAP = 2000
-
-#: Headings a worker is asked to file, quoted verbatim when they appear.
-CARRIED_HEADINGS = ("Outside scope, required to build", "Flagged, not done")
+#: The sections every pull request description carries, in this order. Each answers
+#: a question the person reviewing or merging the change asks, in their words:
+#: what is this, why does it exist, what changes for the people who use the product,
+#: how do I see it working, and what should I not assume.
+DESCRIPTION_SECTIONS = (
+    "Summary",
+    "Why",
+    "Product impact",
+    "How to test",
+    "Risks and what was not verified",
+)
+#: The event a recorded description rides, on the worker's task, bound to a head.
+DESCRIPTION_EVENT = "pr_description"
+#: Below this a section is a label, not an answer ("n/a", "see diff").
+MIN_SECTION_CHARS = 40
+#: Paths that exist only on the machine that did the work. A reader of the pull
+#: request cannot open them, so a description that cites them points at nothing.
+_LOCAL_ONLY = (".ppy-evidence", "/private/tmp", ".treehouse/")
 
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s*(.+?)\s*$")
 _BOLD_LINE = re.compile(r"^\s*\*\*(.+?)\*\*\s*:?\s*$")
@@ -70,71 +81,6 @@ def _heading_of(line: str) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _cap(text: str, limit: int) -> str:
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + " … (trimmed)"
-
-
-def first_section(text: str, *, own_title: str = "") -> str:
-    """The brief's first section after its opening heading.
-
-    A brief opens with the outcome and then explains why the work is worth doing;
-    that explanation is exactly what a reviewer who has not seen the brief needs.
-    Prose directly under the opening heading counts as that section; so does the
-    first sub-section, whose own heading is kept as a bold lead line so its wording
-    is not lost.
-
-    ``own_title`` is the heading the caller is about to put this section under. A
-    brief whose first sub-section is "## Why" would otherwise render under the
-    composed "## Why" as a bold "**Why**" line saying the same word twice, so a lead
-    that matches is dropped; any other label ("Problem", "Gap") is kept.
-    """
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines) and _heading_of(lines[index])[0] is None:
-        index += 1
-    index += 1  # step past the opening heading (or past the end, harmlessly)
-    while index < len(lines) and not lines[index].strip():
-        index += 1
-    if index >= len(lines):
-        return ""
-
-    body: list[str] = []
-    depth, label = _heading_of(lines[index])
-    if label is not None:
-        if not own_title or _normalize(label) != _normalize(own_title):
-            body.append(f"**{label}**")
-        index += 1
-    for line in lines[index:]:
-        line_depth, line_label = _heading_of(line)
-        if line_label is not None and (depth is None or line_depth <= depth):
-            break
-        body.append(line)
-    return "\n".join(body).strip()
-
-
-def named_section(text: str, title: str) -> str:
-    """The verbatim body under the heading ``title``, or "" when it is not there."""
-    want = _normalize(title)
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        depth, label = _heading_of(line)
-        if label is None and _normalize(line) == want and line.strip():
-            depth, label = 6, line.strip()
-        if label is None or _normalize(label) != want:
-            continue
-        body: list[str] = []
-        for following in lines[index + 1 :]:
-            next_depth, next_label = _heading_of(following)
-            if next_label is not None and next_depth is not None and next_depth <= (depth or 6):
-                break
-            body.append(following)
-        return "\n".join(body).strip()
-    return ""
-
-
 def _repo_name(conn: sqlite3.Connection, repo_id: int | None) -> str | None:
     if repo_id is None:
         return None
@@ -156,79 +102,104 @@ def archived_brief(conn: sqlite3.Connection, task: sqlite3.Row) -> str:
         return ""
 
 
-def _latest_note(notes: list[dict], phase: str) -> str:
-    for entry in notes:  # newest first
-        if entry.get("phase") == phase:
-            return (entry.get("note") or "").strip()
-    return ""
+class DescriptionError(ValueError):
+    """A description that would not tell a reader what they need; says what is missing."""
 
 
-def _why(conn: sqlite3.Connection, task: sqlite3.Row) -> str:
-    brief = archived_brief(conn, task)
-    if brief.strip():
-        section = first_section(brief, own_title="Why") or brief
-        return _cap(section, WHY_CAP)
-    return (
-        "No brief was archived for this work, so there is nothing to quote here. "
-        f'The objective it was dispatched with, in full: "{task["title"]}".'
+class MissingDescription(DescriptionError):
+    """No description was recorded for the commit being delivered."""
+
+
+def sections_of(text: str) -> dict[str, str]:
+    """Each top-level section's body, keyed by its normalised heading.
+
+    The shallowest heading level in the text is the section level, so a description
+    written with ``##`` and one written with ``#`` read the same, and a ``###`` inside
+    a section stays part of it.
+    """
+    headed = [
+        (index, depth, label)
+        for index, line in enumerate(text.splitlines())
+        for depth, label in [_heading_of(line)]
+        if depth is not None and label is not None and _HEADING.match(line)
+    ]
+    if not headed:
+        return {}
+    top = min(depth for _, depth, _ in headed)
+    lines = text.splitlines()
+    marks = [(index, label) for index, depth, label in headed if depth == top]
+    out: dict[str, str] = {}
+    for position, (index, label) in enumerate(marks):
+        stop = marks[position + 1][0] if position + 1 < len(marks) else len(lines)
+        out[_normalize(label)] = "\n".join(lines[index + 1 : stop]).strip()
+    return out
+
+
+def validate_description(text: str) -> list[str]:
+    """Every reason ``text`` would not serve a person reading the pull request.
+
+    Empty means it will do. The checks are the ones a reader cannot recover from:
+    a question left unanswered (a missing or token section), and a pointer to files
+    that stayed on the machine that did the work.
+    """
+    problems: list[str] = []
+    if not text.strip():
+        return ["the description is empty"]
+    found = sections_of(text)
+    for title in DESCRIPTION_SECTIONS:
+        body = found.get(_normalize(title))
+        if body is None:
+            problems.append(f'missing the "## {title}" section')
+        elif len(body) < MIN_SECTION_CHARS:
+            problems.append(
+                f'"## {title}" says too little to help a reader ({len(body)} characters; '
+                f"write at least {MIN_SECTION_CHARS})"
+            )
+    for marker in _LOCAL_ONLY:
+        if marker in text:
+            problems.append(
+                f"it cites `{marker}`, which only exists on the machine that did the work; "
+                "a reader of the pull request cannot open it — describe what it showed, or "
+                "attach the file"
+            )
+    return problems
+
+
+def record_description(task_id: int, head: str, text: str, *, conn: sqlite3.Connection) -> None:
+    """Store ``text`` as the description for ``task_id`` at ``head``, or raise why not."""
+    from papaya_agent_runtime.state import store
+
+    problems = validate_description(text)
+    if problems:
+        raise DescriptionError("; ".join(problems))
+    store.append_event(
+        conn,
+        kind=DESCRIPTION_EVENT,
+        task_id=task_id,
+        payload={"head_sha": head, "text": text.strip()},
     )
 
 
-def _latest_report(notes: list[dict]) -> tuple[str, str]:
-    """(note, phase) for the newest report that says anything, else ("", "")."""
-    for entry in notes:  # newest first
-        note = (entry.get("note") or "").strip()
-        if note:
-            return note, (entry.get("phase") or "").strip()
-    return "", ""
+def description_for(conn: sqlite3.Connection, task_id: int, head: str) -> str:
+    """The newest description recorded for exactly ``head``, or "".
 
+    Bound to the commit like the approval it was written with: a description of an
+    earlier head describes code that has since changed.
+    """
+    import json
 
-def _what(notes: list[dict]) -> str:
-    lead = _latest_note(notes, "done")
-    if lead:
-        parts = [lead]
-    else:
-        # A done note filed seconds after delivery is not in hand yet, but the
-        # worker's last word is — quote it, and say which phase it came from so no
-        # reader mistakes a mid-flight report for a closing one.
-        lead, phase = _latest_report(notes)
-        if not lead:
-            return (
-                "The worker filed no closing report, so there is nothing to quote here; "
-                "the change itself is the diff on this branch."
-            )
-        phase_label = f"`{phase}`" if phase else "its last recorded"
-        parts = [f"The worker's latest report, filed at the {phase_label} phase:\n\n{lead}"]
-    for heading in CARRIED_HEADINGS:
-        if _normalize(heading) in _normalize(lead):
-            continue  # the report already quoted above carries it, verbatim
-        for entry in notes:
-            carried = named_section(entry.get("note") or "", heading)
-            if carried:
-                parts.append(f"**{heading}**\n\n{carried}")
-                break
-    return _cap("\n\n".join(parts), WHAT_CAP)
-
-
-def _verification(notes: list[dict], approval: str, head: str) -> str:
-    parts: list[str] = []
-    test_note = _latest_note(notes, "test")
-    if test_note:
-        parts.append(f"The worker's last verification report:\n\n{test_note}")
-    if approval:
-        parts.append(f"The reviewer approved this exact commit and wrote:\n\n{approval}")
-    if not parts:
-        parts.append(
-            "Neither a verification report nor a note from the reviewer was filed. "
-            "Delivery still required an approval bound to the exact commit below, "
-            "which is the only way work leaves the machine."
-        )
-    else:
-        parts.append(
-            f"Delivery was gated on an approval bound to commit {head[:8]}, the commit "
-            "this pull request carries."
-        )
-    return _cap("\n\n".join(parts), VERIFICATION_CAP)
+    if not head:
+        return ""
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC",
+        (task_id, DESCRIPTION_EVENT),
+    ).fetchall()
+    for row in rows:
+        payload = json.loads(row["payload"] or "{}")
+        recorded = str(payload.get("head_sha") or "")
+        if recorded and (recorded.startswith(head) or head.startswith(recorded)):
+            return str(payload.get("text") or "")
+    return ""
 
 
 def _default_branch(conn: sqlite3.Connection, repo_id: int | None) -> str:
@@ -325,27 +296,33 @@ def _footer(task: sqlite3.Row, head: str, conn: sqlite3.Connection | None = None
 
 
 def compose(task_id: int, *, head_sha: str = "", conn: sqlite3.Connection | None = None) -> str:
-    """The full pull request body for a delivered task."""
-    from papaya_agent_runtime import progress
-    from papaya_agent_runtime.review import approval_note
+    """The pull request body for a delivered task: its description, stack and credit.
+
+    Raises :class:`MissingDescription` when no description was recorded for this
+    head — delivery calls this before it pushes, so nothing leaves the machine with
+    a body nobody wrote.
+    """
     from papaya_agent_runtime.state import init_db, store
 
     conn = conn or init_db()
     task = store.get_task(conn, task_id)
     if task is None:
         raise ValueError(f"task {task_id} not found")
-    notes = progress.history(task_id, conn=conn)
     head = head_sha or ""
-
+    description = description_for(conn, task_id, head)
+    if not description:
+        sections = ", ".join(f'"{title}"' for title in DESCRIPTION_SECTIONS)
+        raise MissingDescription(
+            f"no pull request description was written for task {task_id} at "
+            f"{head[:8] or 'its head'}. Approve it with `ppy review approve {task_id} "
+            f"--pr-description <file>` — a description for people, with the sections "
+            f"{sections} — or pass `ppy deliver {task_id} --body-file <file>` with a body "
+            "you wrote yourself"
+        )
     return (
         "\n\n".join(
             [
-                "## Why",
-                _why(conn, task),
-                "## What",
-                _what(notes),
-                "## Verification",
-                _verification(notes, approval_note(task_id), head),
+                description.strip(),
                 "## Stack",
                 _stack(conn, task),
                 "---",
@@ -357,11 +334,17 @@ def compose(task_id: int, *, head_sha: str = "", conn: sqlite3.Connection | None
 
 
 __all__ = [
-    "CARRIED_HEADINGS",
+    "DESCRIPTION_EVENT",
+    "DESCRIPTION_SECTIONS",
     "FOOTER_ENV",
+    "MIN_SECTION_CHARS",
     "SESSION_URL_ENV",
+    "DescriptionError",
+    "MissingDescription",
     "archived_brief",
     "compose",
-    "first_section",
-    "named_section",
+    "description_for",
+    "record_description",
+    "sections_of",
+    "validate_description",
 ]

@@ -52,7 +52,7 @@ def world(tmp_path, monkeypatch):
     root.mkdir()
     user_config = tmp_path / ".claude.json"
     monkeypatch.setenv(papaya.CLAUDE_USER_CONFIG_ENV, str(user_config))
-    monkeypatch.setattr(papaya.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(papaya.shutil, "which", lambda name, **_kw: f"/bin/{name}")
     calls: list[tuple[list[str], dict]] = []
 
     def run(argv, *, timeout, env=None, cwd=None):
