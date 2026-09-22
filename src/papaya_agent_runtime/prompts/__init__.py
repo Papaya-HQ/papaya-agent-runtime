@@ -5,7 +5,9 @@ done on the record, brief and dispatch), ``answer.md`` (unblock a worker's quest
 or take it to a person), ``review.md`` (review at head, deliver, report back),
 ``checkin.md`` (the rounds' look at a running worker: continue, steer, or stop and
 resume, said on one last line the runner acts on) and ``ledger.md`` (the next steps
-that sat in the ledger: do each, defer it with a reason, or drop it). The answer and
+that sat in the ledger: do each, defer it with a reason, or drop it), and a sixth,
+``instruction.md`` (answer an instruction a person sent this machine from its own state,
+ending in an `OUTCOME:` block the runner posts where they asked). The answer and
 review turns run with a held Papaya work item or without one (a worker dispatched from
 a session, or whose ticket ended: `lanes`); the facts say which.
 
@@ -28,7 +30,9 @@ ANSWER = "answer"
 REVIEW = "review"
 CHECKIN = "checkin"
 LEDGER = "ledger"
-TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER)
+#: The answer path of an instruction a person sent this machine (`instructions.py`).
+INSTRUCTION = "instruction"
+TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION)
 #: Not a manager turn: the scoped brief a reconciler worker starts from when the
 #: session that delivered a pull request cannot be resumed to fix it.
 RECONCILE = "reconcile"
@@ -225,6 +229,7 @@ __all__ = [
     "PLAN_REPLY_PREFIX",
     "FACTS_HEADING",
     "GATE_TIERS_RULE",
+    "INSTRUCTION",
     "LEDGER",
     "MEMORY_RULE",
     "REVIEW",

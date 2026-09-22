@@ -1044,6 +1044,47 @@ its own comment (backend #636). Until then the phase comments are the ticket's r
 Without Papaya, or for a local task with no work item, the status line is never written;
 `ppy status --team` and `ppy tail` work the same either way.
 
+### Asking the machine from Papaya
+
+Papaya keeps one **status snapshot** per connected machine, and the hosted agent answers
+"what is my machine working on?" from it. `ppy serve` publishes it every round and
+within ten seconds of a change (a ticket's phase, an ask appearing or resolving, a
+capability request decided, even by another process); `ppy status` publishes it once
+when this machine is connected. It carries what is in flight (with the work item or
+`MI-n` each task serves), what waits on you and what you can send back to unblock it
+("Send me: approve capability 12", "Reply here with your decision (todo 7)", and for a
+pull request "Review and merge it on GitHub, or send me: hold PR 1024", or "Send me:
+merge PR 1024" where `ppy config authority --allow-merge` lets the runtime merge), what
+is blocked, the last ten things it finished, its capacity and its health. Every string
+is redacted and cut to the wire's bounds; an identical snapshot is not sent twice in
+thirty seconds, and one Papaya refuses (422) is logged with the field and never resent.
+
+A person can also send their own machine an **instruction** (`machine.instruction`, with
+no work item). `ppy serve` takes it on its subject, so a repeat lands on the same ticket,
+and runs it one of three ways, chosen by rule and said in its first progress note:
+
+- **answer**: status, the board, blockers, the last few things finished, a question about
+  a task, approving or denying a capability request, holding a pull request, or merging
+  one where this install may merge. One manager turn (`prompts/instruction.md`), no
+  worker. Its `ppy` commands are limited to the manager's own (`instructions.ANSWER_ALLOWED`,
+  enforced in `cli.main`); a merge on an install without merge authority is answered
+  without a turn: it says the machine may not merge here and who can.
+- **work**: it names exactly one repository (registered, or a GitHub URL that can be).
+  One worker is dispatched with a brief composed from the instruction, its references,
+  who asked, and the agent's standing instructions as quoted data, `--ends-at done`,
+  then reviewed and delivered as any ticket is. A worker that found rather than built
+  answers with its findings. On this path no turn may approve a capability request; the
+  request reaches you in the snapshot, and you can send it back as an instruction.
+- **unanswerable**: no ask, or no single repository. The one question (which repository?
+  what do you want done?) goes back, and the result is reported `failed` with it.
+
+The answer is posted where the instruction was asked, using only the reply block the
+event carried, then reported to Papaya; a reply that fails is retried once, and then the
+report says `failed` with the outcome kept in it. A crash between the reply and the
+report is finished by the next round. A machine that cannot take an instruction (setup
+blocked, or a repository it cannot register) declines it, and Papaya tells the person
+it is still listed as `MI-n`.
+
 ## Where state lives
 
 All working state is under `.ppy/` (gitignored):

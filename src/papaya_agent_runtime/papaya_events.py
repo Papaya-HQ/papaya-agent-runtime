@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import urllib.error
 import urllib.parse
@@ -32,6 +33,10 @@ PAPAYA_EVENT_METADATA = "papaya_event_metadata"
 #: title, recorded once when the ticket is taken so `ppy workers` can say it.
 WORK_ITEM_KEY = "papaya_work_item_key"
 WORK_ITEM_TITLE = "papaya_work_item_title"
+#: The work item's link in the app, when its event carried one: the status
+#: snapshot's `about.url` (the ledger has no other way to build an app URL).
+WORK_ITEM_URL = "papaya_work_item_url"
+_URL_KEYS = ("url", "web_url", "app_url", "html_url")
 #: Where a work item carries its display id: `WorkItemOut.short_id` on the full
 #: record, `display_id` on an event summary, then older names.
 _DISPLAY_ID_KEYS = ("short_id", "display_id", "key", "identifier", "ticket_key")
@@ -48,6 +53,54 @@ _PAPAYA_WORKSPACE_ENV = "PAPAYA_WORKSPACE_ID"
 
 class PapayaEventError(RuntimeError):
     """A Papaya event primitive needs an actionable correction."""
+
+
+class PapayaHTTPError(PapayaEventError):
+    """Papaya answered with an HTTP error: its status and the body it said it in.
+
+    Still a :class:`PapayaEventError` with the same message, so every caller that
+    reads the sentence keeps working; the code and ``detail`` are for a caller that
+    has to tell a 422 on one field from a 409 with a reason (the status snapshot,
+    an instruction's result).
+    """
+
+    def __init__(self, message: str, *, code: int, detail: Any = None) -> None:
+        super().__init__(message)
+        self.code = int(code)
+        self.detail = detail
+
+    @property
+    def reason(self) -> str:
+        """The `detail.reason` Papaya's 409/403 bodies carry, or ``""``."""
+        detail = self.detail.get("detail") if isinstance(self.detail, dict) else None
+        return str(detail.get("reason") or "") if isinstance(detail, dict) else ""
+
+    def fields(self) -> list[str]:
+        """The fields a 422 names (`detail[].loc`, joined with dots), in order."""
+        detail = self.detail.get("detail") if isinstance(self.detail, dict) else None
+        found: list[str] = []
+        for entry in detail if isinstance(detail, list) else []:
+            loc = entry.get("loc") if isinstance(entry, dict) else None
+            if isinstance(loc, list | tuple):
+                found.append(".".join(str(part) for part in loc if part != "body"))
+        return [name for name in found if name]
+
+
+#: The subject kinds Papaya reserves (`SUBJECT_KINDS` on the backend) that this
+#: runtime takes: a work item, and an instruction a person sent to this machine.
+SUBJECT_WORK_ITEM = "work_item"
+SUBJECT_INSTRUCTION = "instruction"
+SUBJECT_KINDS = (SUBJECT_WORK_ITEM, SUBJECT_INSTRUCTION)
+#: The event kind of an instruction a person sent to their own machine.
+MACHINE_INSTRUCTION = "machine.instruction"
+
+
+def subject_parts(subject: str) -> tuple[str, str] | None:
+    """``(kind, id)`` for a subject of a kind in :data:`SUBJECT_KINDS`, else ``None``."""
+    kind, sep, ident = str(subject or "").strip().partition(":")
+    if not sep or kind not in SUBJECT_KINDS or not ident.strip():
+        return None
+    return kind, ident.strip()
 
 
 @dataclass(frozen=True)
@@ -187,9 +240,11 @@ def _papaya_request(
             raw = response.read().decode("utf-8")
             payload = json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as exc:
-        raise PapayaEventError(
+        raise PapayaHTTPError(
             f"Papaya refused the work-item {what} (HTTP {exc.code}); "
-            "refresh this agent connection and retry"
+            "refresh this agent connection and retry",
+            code=exc.code,
+            detail=_error_body(exc),
         ) from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         raise PapayaEventError(
@@ -200,6 +255,18 @@ def _papaya_request(
     if not isinstance(payload, shape) and not (shape is list and payload == {}):
         raise PapayaEventError(f"Papaya returned an invalid work-item {what}; retry")
     return [] if shape is list and payload == {} else payload
+
+
+def _error_body(exc: urllib.error.HTTPError) -> Any:
+    """The JSON an HTTP error carried, or ``None``; never raises."""
+    try:
+        raw = exc.read()
+    except Exception:  # noqa: BLE001 - a body we cannot read is simply not there
+        return None
+    try:
+        return json.loads(raw.decode("utf-8")) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def _with_work_item(event: PapayaEvent, work_item: Mapping[str, Any]) -> PapayaEvent:
@@ -362,6 +429,227 @@ def read_agent_record(
     return agent if isinstance(agent, dict) else None
 
 
+# ── machine instructions and the status snapshot ─────────────────────────────
+
+
+REPLY_THREAD = "thread_reply"
+REPLY_DM = "agent_dm_reply"
+#: Papaya's bounds on a result (`report_machine_instruction_result`).
+RESULT_SUMMARY_MAX = 10_000
+RESULT_MESSAGE_ID_MAX = 128
+
+
+@dataclass(frozen=True)
+class Instruction:
+    """A `machine.instruction` event's payload: what a person sent this machine."""
+
+    instruction_id: str
+    #: `MI-<n>`, what a person calls it.
+    short_id: str
+    title: str
+    text: str
+    references: tuple[str, ...]
+    origin: dict[str, Any]
+    requested_by: dict[str, Any]
+    #: The agent's persona, verbatim: standing instructions, and data, never commands.
+    agent_instructions: str
+    #: Where the answer goes, exactly as the event said: never taken from anything else.
+    reply: dict[str, Any]
+
+    @property
+    def subject(self) -> str:
+        return f"{SUBJECT_INSTRUCTION}:{self.instruction_id}"
+
+    @property
+    def requester(self) -> str:
+        who = self.requested_by
+        return str(who.get("display_name") or who.get("handle") or who.get("id") or "someone")
+
+    def as_json(self) -> str:
+        return json.dumps(
+            {
+                "instruction_id": self.instruction_id,
+                "short_id": self.short_id,
+                "title": self.title,
+                "instruction": self.text,
+                "references": list(self.references),
+                "origin": self.origin,
+                "requested_by": self.requested_by,
+                "agent_instructions": self.agent_instructions,
+                "reply": self.reply,
+            },
+            sort_keys=True,
+        )
+
+
+def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instruction:
+    """An :class:`Instruction` from a payload (an event's, or one recorded on a task).
+
+    Refuses a payload with no id, no `MI-<n>` or no reply block: an instruction this
+    machine cannot answer where it was asked is not one it can take.
+    """
+    parts = subject_parts(subject) if subject else None
+    ident = _clean(payload.get("instruction_id")) or (parts[1] if parts else None)
+    short_id = _clean(payload.get("short_id"))
+    reply = payload.get("reply")
+    if not ident or not short_id or not isinstance(reply, Mapping):
+        raise PapayaEventError(
+            "a machine instruction needs instruction_id, short_id and a reply block"
+        )
+    references = payload.get("references")
+    origin = payload.get("origin")
+    who = payload.get("requested_by")
+    return Instruction(
+        instruction_id=ident,
+        short_id=short_id,
+        title=str(payload.get("title") or "").strip(),
+        text=str(payload.get("instruction") or ""),
+        references=tuple(str(r) for r in references if str(r).strip())
+        if isinstance(references, list)
+        else (),
+        origin=dict(origin) if isinstance(origin, Mapping) else {},
+        requested_by=dict(who) if isinstance(who, Mapping) else {},
+        agent_instructions=str(payload.get("agent_instructions") or ""),
+        reply=dict(reply),
+    )
+
+
+def parse_instruction(event: PapayaEvent) -> Instruction:
+    """The instruction a `machine.instruction` event carries, or refuse."""
+    parts = subject_parts(event.subject)
+    if event.kind != MACHINE_INSTRUCTION or parts is None or parts[0] != SUBJECT_INSTRUCTION:
+        raise PapayaEventError(
+            f"not a machine instruction: kind {event.kind!r}, subject {event.subject!r}"
+        )
+    return instruction_from(event.payload, event.subject)
+
+
+def _workspace_path(environ: Mapping[str, str]) -> str:
+    workspace = _clean(environ.get(_PAPAYA_WORKSPACE_ENV))
+    return re.escape(workspace) if workspace else "[^/]+"
+
+
+def reply_paths(reply: Mapping[str, Any], environ: Mapping[str, str]) -> tuple[str, str]:
+    """The reply block's ``(path, result_path)``, checked against this workspace.
+
+    Only the two shapes the wire names, in this connection's workspace: a path
+    anywhere else is not somewhere this machine was asked, whoever wrote it.
+    """
+    ws = _workspace_path(environ)
+    kind = str(reply.get("kind") or "")
+    path = str(reply.get("path") or "")
+    result_path = str(reply.get("result_path") or "")
+    shapes = {
+        REPLY_THREAD: rf"/api/v1/workspaces/{ws}/channels/[^/]+/messages",
+        REPLY_DM: rf"/api/v1/workspaces/{ws}/polyweave-agents/me/dm-conversations/[^/]+/replies",
+    }
+    shape = shapes.get(kind)
+    if shape is None or str(reply.get("method") or "POST").upper() != "POST":
+        raise PapayaEventError(f"an instruction's reply block has an unknown kind {kind!r}")
+    if not re.fullmatch(shape, path):
+        raise PapayaEventError("an instruction's reply path is not in this workspace")
+    if not re.fullmatch(rf"/api/v1/workspaces/{ws}/machine-instructions/[^/]+/result", result_path):
+        raise PapayaEventError("an instruction's result path is not in this workspace")
+    return path, result_path
+
+
+def _api_url(environ: Mapping[str, str], path: str) -> str | None:
+    """``path`` (`/api/v1/...`) on this connection's Papaya, or ``None`` when unknown."""
+    api_url = _clean(environ.get(_PAPAYA_API_ENV))
+    if not api_url:
+        return None
+    base = api_url.rstrip("/")
+    base = base.removesuffix("/api/v1")
+    return base + path
+
+
+def post_instruction_reply(
+    reply: Mapping[str, Any],
+    text: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> str | None:
+    """Answer an instruction where it was asked. Returns the posted message's id.
+
+    A channel origin posts ``{"content", "parent_id"}`` and answers with the
+    message's ``id``; a DM posts ``{"text"}`` and answers with the ``turn_id`` the
+    result route takes as ``result_message_id``. ``None`` when there is nothing to
+    call with (not connected). A refusal raises :class:`PapayaHTTPError`.
+    """
+    env = os.environ if environ is None else environ
+    path, _result = reply_paths(reply, env)
+    url = _api_url(env, path)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    body: dict[str, Any]
+    if reply.get("kind") == REPLY_THREAD:
+        body = {"content": text, "parent_id": reply.get("parent_id")}
+    else:
+        body = {"text": text}
+    answer = _papaya_request(
+        url, token, method="POST", body=body, what="instruction reply", opener=opener
+    )
+    key = "id" if reply.get("kind") == REPLY_THREAD else "turn_id"
+    found = answer.get(key)
+    if found is None and isinstance(answer.get("message"), dict):
+        found = answer["message"].get("id")
+    return str(found) if found is not None else ""
+
+
+def report_instruction_result(
+    reply: Mapping[str, Any],
+    status: str,
+    summary: str,
+    message_id: str | None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> bool:
+    """Report an instruction's outcome to its ``result_path``. Returns whether a call was made."""
+    if status not in ("done", "failed"):
+        raise PapayaEventError(f"an instruction's result is done or failed, not {status!r}")
+    env = os.environ if environ is None else environ
+    _path, result_path = reply_paths(reply, env)
+    url = _api_url(env, result_path)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return False
+    body: dict[str, Any] = {"status": status, "result_summary": str(summary)[:RESULT_SUMMARY_MAX]}
+    if message_id:
+        body["result_message_id"] = str(message_id)[:RESULT_MESSAGE_ID_MAX]
+    _papaya_request(url, token, method="POST", body=body, what="instruction result", opener=opener)
+    return True
+
+
+def put_connection_status(
+    snapshot: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> bool:
+    """PUT this machine's status snapshot. Returns whether a call was made.
+
+    `PUT .../polyweave-agents/me/connection/status` with the connection's own token:
+    the token is the connection, so nothing in the path or body names it.
+    """
+    env = os.environ if environ is None else environ
+    workspace = _clean(env.get(_PAPAYA_WORKSPACE_ENV))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if not workspace or not token:
+        return False
+    url = _api_url(
+        env,
+        f"/api/v1/workspaces/{urllib.parse.quote(workspace, safe='')}"
+        "/polyweave-agents/me/connection/status",
+    )
+    if url is None:
+        return False
+    _papaya_request(url, token, method="PUT", body=snapshot, what="status snapshot", opener=opener)
+    return True
+
+
 def _repository_value(value: object) -> str | None:
     if isinstance(value, Mapping):
         for key in _REPOSITORY_VALUE_KEYS:
@@ -402,7 +690,11 @@ def ensure_repository(event: PapayaEvent) -> solicit.Ensured:
     No override is passed: repositories outside the user's account and
     organizations still require the existing explicit ``allow_outside`` path.
     """
-    spec = repository_spec(event)
+    return ensure_spec(repository_spec(event))
+
+
+def ensure_spec(spec: str) -> solicit.Ensured:
+    """Register ``spec`` (a URL, slug, or checkout whose origin is read) through `solicit`."""
     path = Path(spec).expanduser()
     if path.is_dir():
         origin = repos.remote_url(str(path))
@@ -475,16 +767,43 @@ def record_work_item_label(conn: sqlite3.Connection, task_id: int, event: Papaya
     taken under is the one its work was briefed against.
     """
     key, title = work_item_label(event)
-    for name, value in ((WORK_ITEM_KEY, key), (WORK_ITEM_TITLE, title)):
+    item = event.payload.get("work_item")
+    url = ""
+    if isinstance(item, dict):
+        url = next(
+            (
+                str(item[name]).strip()
+                for name in _URL_KEYS
+                if str(item.get(name) or "").strip().startswith(("http://", "https://"))
+            ),
+            "",
+        )
+    for name, value in ((WORK_ITEM_KEY, key), (WORK_ITEM_TITLE, title), (WORK_ITEM_URL, url)):
         if value and not store.get_task_env(conn, task_id, name):
             store.set_task_env(conn, task_id, name, value, source="papaya_event")
 
 
 __all__ = [
+    "MACHINE_INSTRUCTION",
     "PAPAYA_EVENT_KEY",
     "PAPAYA_EVENT_METADATA",
+    "REPLY_DM",
+    "REPLY_THREAD",
+    "SUBJECT_INSTRUCTION",
+    "SUBJECT_KINDS",
+    "SUBJECT_WORK_ITEM",
     "WORK_ITEM_KEY",
     "WORK_ITEM_TITLE",
+    "WORK_ITEM_URL",
+    "Instruction",
+    "PapayaHTTPError",
+    "instruction_from",
+    "parse_instruction",
+    "post_instruction_reply",
+    "put_connection_status",
+    "reply_paths",
+    "report_instruction_result",
+    "subject_parts",
     "STATUS_BLOCKED",
     "STATUS_IN_PROGRESS",
     "STATUS_REVIEW",

@@ -53,6 +53,13 @@ Answer in a way that keeps both true.
 Never guess an answer to get the worker moving. End the turn once you have answered,
 steered, or recorded the wait.
 
+**When the facts name an instruction** (`instruction: MI-<n>`) instead of a work item,
+the worker is doing what a person sent this machine directly, and there is no work item
+to post on: post nothing on one. A question that needs the person is recorded the same
+way (`ppy todo add ... --blocked-on user`); the runtime tells them. On an instruction's
+work path you may not approve a capability request: the person decides it, by sending
+it back as an instruction.
+
 ## 3. When the worker stopped at its plan note
 
 The facts say `the worker stopped at its plan note` when a worker ended its turn after
