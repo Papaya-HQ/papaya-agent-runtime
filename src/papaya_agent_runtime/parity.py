@@ -277,6 +277,36 @@ CAPABILITIES: tuple[Capability, ...] = (
         interactive=("papaya_agent_runtime.lanes", "papaya_agent_runtime.team"),
     ),
     Capability(
+        "machine_status",
+        SHARED,
+        "what this machine is doing and what it needs from a person is published to Papaya "
+        "as one bounded snapshot: every round and on change under serve, once per status check "
+        "in a session",
+        serve=("Rounds.watch_changes",),
+        shared="papaya_agent_runtime.machine_status",
+        interactive=("papaya_agent_runtime.cli",),
+    ),
+    Capability(
+        "machine_instructions",
+        HOST,
+        "an instruction a person sent this machine is taken on its subject, classified, run "
+        "as an answer turn or one worker, answered at its origin and then reported; only the "
+        "holder of the instruction's lease can reply and report",
+        serve=(
+            "TicketRunner._take_instruction",
+            "TicketRunner._hold_instruction",
+            "TicketRunner._instruction_env",
+            "TicketRunner._report_seam",
+            "TicketRunner._instruction_reply",
+            "TicketRunner._instruction_facts",
+            "TicketRunner._snapshot_text",
+            "TicketRunner._instruction_answer",
+            "TicketRunner._instruction_work",
+            "TicketRunner._has_commits",
+            "Rounds._instruction_lane",
+        ),
+    ),
+    Capability(
         "ticket_hold_protocol",
         HOST,
         "holding a Papaya ticket: taking, reserving, keeping it alive, status lines, handing back",

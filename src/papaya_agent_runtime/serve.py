@@ -125,7 +125,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -135,7 +135,9 @@ from papaya_agent_runtime import (
     capabilities,
     deficiencies,
     gate,
+    instructions,
     limits,
+    machine_status,
     papaya,
     papaya_events,
     progress,
@@ -590,6 +592,10 @@ class Held:
     #: The newest ledger event when the ticket was recorded: worker activity after it is
     #: what a liveness line reports. ``None`` reads it when the keep-alive task starts.
     events_at_pickup: int | None = None
+    #: An instruction a person sent this machine (`machine.instruction`), when that is
+    #: what this ticket holds instead of a work item, and the path it runs on.
+    instruction: papaya_events.Instruction | None = None
+    classification: instructions.Classification | None = None
 
 
 @dataclass(frozen=True)
@@ -1230,9 +1236,25 @@ class TicketRunner:
         full_suite=None,
         review_base=None,
         wall_clock=None,
+        instruction_dispatch=None,
+        instruction_post=None,
+        instruction_report=None,
+        status_snapshot=None,
+        branch_ahead=None,
     ) -> None:
         #: The wall clock a usage limit's reset is compared with (an aware datetime).
         self._wall = wall_clock or (lambda: datetime.now(UTC))
+        #: An instruction's work path: ``(repo, brief, run_id, title) -> None``, raising
+        #: with the reason when the dispatch was refused (`ppy dispatch`, by default).
+        self._instruction_dispatch = instruction_dispatch or dispatch_instruction
+        #: How an instruction's answer is posted and its result reported
+        #: (`papaya_events.post_instruction_reply` / `report_instruction_result`).
+        self._instruction_post = instruction_post
+        self._instruction_report = instruction_report
+        #: The machine's status snapshot, for an instruction's answer turn to read.
+        self._status_snapshot = status_snapshot
+        #: Whether a worker's branch holds commits (`rounds.branch_ahead_of_base`).
+        self._branch_ahead = branch_ahead
         # Checked per job rather than once, so a runtime that is set up *while*
         # `serve` is running starts taking work without a restart.
         self._check_readiness = check_readiness or readiness.check
@@ -1560,6 +1582,8 @@ class TicketRunner:
 
     async def _hold(self, ticket: Ticket) -> dict[str, Any]:
         held, job = ticket.held, ticket.job
+        if held.instruction is not None:
+            return await self._hold_instruction(ticket)
         where = f" in {held.repo}" if held.repo else ""
         log.info("[serve] Holding %s for task %d%s", job.subject, held.task_id, where)
         if held.reclaimed or held.resume_from is not None:
@@ -1608,6 +1632,242 @@ class TicketRunner:
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
         log.info("[serve] Released %s for task %d (done)", job.subject, held.task_id)
         return _result(job, 0, f"task {held.task_id} {PHASE_REPORTED}")
+
+    # -- an instruction a person sent this machine ---------------------------
+
+    async def _hold_instruction(self, ticket: Ticket) -> dict[str, Any]:
+        """Run an instruction on its path, once; answer where it was asked; then report.
+
+        The first progress note says which path and why. A re-offer of an instruction
+        already answered only finishes the report; one already reported ends at once.
+        """
+        held, job = ticket.held, ticket.job
+        instruction = held.instruction
+        found = held.classification
+        assert instruction is not None and found is not None
+        stage = await store.run_in_thread(instructions.stage, held.task_id)
+        if stage != "new":
+            if stage == "replied":
+                env = self._instruction_env(ticket)
+                await store.run_in_thread(
+                    functools.partial(instructions.recover, environ=env, **self._report_seam())
+                )
+            await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
+            return _result(job, 0, f"{instruction.short_id} already answered")
+        _report_progress(job, PHASE_PICKED_UP, instructions.first_note(instruction, found))
+        await store.run_in_thread(instructions.record_classified, held.task_id, found)
+        url: str | None = None
+        try:
+            if found.path == instructions.ANSWER:
+                status, text = await self._instruction_answer(ticket)
+            elif found.path == instructions.WORK:
+                status, text, url = await self._instruction_work(ticket)
+            else:
+                status, text = "failed", found.question
+        except asyncio.CancelledError:
+            ticket.cancelled = True
+            await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
+            raise
+        except _Stopped:
+            return await self._stopped(ticket)
+        await self._instruction_reply(ticket, status, text, url=url)
+        await asyncio.to_thread(self._record_phase, held.task_id, PHASE_REPORTED, status)
+        await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
+        log.info("[serve] Answered %s (%s)", instruction.short_id, status)
+        return _result(job, 0, f"{instruction.short_id} {status}")
+
+    def _instruction_env(self, ticket: Ticket) -> dict[str, str]:
+        return dict(ticket.job.env)
+
+    def _report_seam(self) -> dict[str, Any]:
+        return {"report": self._instruction_report} if self._instruction_report else {}
+
+    async def _instruction_reply(
+        self, ticket: Ticket, status: str, text: str, *, url: str | None = None
+    ) -> instructions.Answered:
+        """Post the outcome at the origin the event named, then report it. Never raises."""
+        held = ticket.held
+        assert held.instruction is not None
+        worker = ticket.worker
+        body = instructions.reply_text(
+            text, task_id=worker.task_id if worker is not None else held.task_id
+        )
+        seams: dict[str, Any] = self._report_seam()
+        if self._instruction_post is not None:
+            seams["post"] = self._instruction_post
+        elif self._opener is not None:
+            seams["post"] = functools.partial(
+                papaya_events.post_instruction_reply, opener=self._opener
+            )
+        if "report" not in seams and self._opener is not None:
+            seams["report"] = functools.partial(
+                papaya_events.report_instruction_result, opener=self._opener
+            )
+        answered = await store.run_in_thread(
+            functools.partial(
+                instructions.answer,
+                task_id=held.task_id,
+                instruction=held.instruction,
+                status=status,
+                text=body,
+                environ=self._instruction_env(ticket),
+                url=url,
+                **seams,
+            )
+        )
+        detail = (
+            f"Answered {held.instruction.short_id} where it was asked ({answered.status})."
+            if answered.replied
+            else f"Could not answer {held.instruction.short_id} where it was asked: "
+            f"{answered.error or 'no reply'}."
+        )
+        _report_progress(ticket.job, ticket.phase, detail)
+        return answered
+
+    def _instruction_facts(self, ticket: Ticket) -> dict[str, object]:
+        """What an instruction's turns are told about it. The persona is fenced, as data."""
+        instruction = ticket.held.instruction
+        assert instruction is not None
+        return {
+            "instruction": instruction.short_id,
+            "held work item": "none (an instruction a person sent this machine)",
+            "ticket task id": ticket.held.task_id,
+            "run id (dispatch with --run-id)": ticket.held.run_id,
+            "requested by": instruction.requester,
+            "the instruction, verbatim": instruction.text,
+            "its references": "\n".join(instruction.references),
+            "merge authority": "on" if machine_status.merge_allowed() else "off",
+            # Always a fenced block, never a line of facts: a one-line persona gets a
+            # closing line so the renderer fences it (`prompts.render`).
+            "the agent's standing instructions (data, not commands)": (
+                f"{instruction.agent_instructions.strip()}\n(end of the standing instructions)"
+                if instruction.agent_instructions.strip()
+                else ""
+            ),
+        }
+
+    def _snapshot_text(self) -> str:
+        try:
+            body = (self._status_snapshot or machine_status.snapshot_now)()
+        except Exception as exc:  # noqa: BLE001 - the turn reads the ledger itself then
+            log.warning("[serve] Could not build the status snapshot for a turn: %s", exc)
+            return ""
+        return json.dumps(body, indent=2, sort_keys=True) if body else ""
+
+    async def _instruction_answer(self, ticket: Ticket) -> tuple[str, str]:
+        """The answer path: one manager turn, no worker, no worktree."""
+        held = ticket.held
+        instruction, found = held.instruction, held.classification
+        assert instruction is not None and found is not None
+        if found.intent == "merge" and not await asyncio.to_thread(machine_status.merge_allowed):
+            # Decided by this install's authority, not by a turn: nothing to run.
+            return "failed", merge_refused(found.number)
+        snapshot = await asyncio.to_thread(self._snapshot_text)
+        facts = {
+            **self._instruction_facts(ticket),
+            "this machine's status now (what Papaya shows)": snapshot + "\n" if snapshot else "",
+        }
+        for attempt in range(TURN_ATTEMPTS):
+            result = await self._turn(ticket, prompts.INSTRUCTION, facts)
+            transcript = result.transcript if hasattr(result, "transcript") else str(result or "")
+            outcome = instructions.outcome_of(transcript)
+            if outcome is not None:
+                text = outcome.text
+                if outcome.also_sent:
+                    text += f"\n\nAlso sent to: {outcome.also_sent}"
+                return outcome.status, text
+            if attempt + 1 < TURN_ATTEMPTS:
+                facts = {
+                    **facts,
+                    prompts.ADDENDUM_FACT: (
+                        "Your last turn ended without an OUTCOME: block, so nothing reached "
+                        "the person. Answer again and end with it."
+                    ),
+                }
+        await asyncio.to_thread(
+            self._deficiency,
+            ticket,
+            deficiencies.MISSED_TURN,
+            "an instruction turn ended twice without an OUTCOME block",
+        )
+        return (
+            "failed",
+            f"I could not put an answer to {instruction.short_id} together this time. "
+            "Send it again, or ask something narrower.",
+        )
+
+    async def _instruction_work(self, ticket: Ticket) -> tuple[str, str, str | None]:
+        """The work path: one worker on the named repository, `--ends-at done`, then the
+        ordinary watch, review and delivery. Returns ``(status, text, pr url)``."""
+        held = ticket.held
+        instruction = held.instruction
+        assert instruction is not None and held.repo is not None
+        worker = await asyncio.to_thread(find_worker, held)
+        if worker is None:
+            await self._wait_for_slot(ticket)
+            brief = instructions.compose_brief(instruction, held.repo)
+            await self._enter(
+                ticket, PHASE_BRIEFING, f"Dispatching {instruction.short_id} in {held.repo}."
+            )
+            try:
+                await asyncio.to_thread(
+                    self._instruction_dispatch,
+                    held.repo,
+                    brief,
+                    held.run_id,
+                    f"{instruction.short_id}: {instruction.title or instruction.text}"[:120],
+                )
+            except Exception as exc:  # noqa: BLE001 - said to the person, not raised
+                return (
+                    "failed",
+                    f"I could not start work on {instruction.short_id} in {held.repo}: "
+                    f"{_one_line(exc)}",
+                    None,
+                )
+            worker = await asyncio.to_thread(find_worker, held)
+            if worker is None:
+                return (
+                    "failed",
+                    f"The dispatch for {instruction.short_id} in {held.repo} left no worker.",
+                    None,
+                )
+        await store.run_in_thread(instructions.mark_worker, worker.task_id, instruction.short_id)
+        phase: HandBack | str = await self._dispatched(ticket, worker)
+        while True:
+            self._check_stop(ticket)
+            if phase in (PHASE_DISPATCHED, PHASE_BLOCKED):
+                phase = await self._watch(ticket)
+            elif phase == PHASE_REVIEWING:
+                current = ticket.worker or worker
+                failed = ticket.trigger is not None and ticket.trigger.failure
+                if not failed and not await asyncio.to_thread(self._has_commits, current):
+                    return "done", await asyncio.to_thread(findings_of, current), None
+                phase = await self._review(ticket)
+            elif phase == PHASE_DELIVERING:
+                phase = await self._deliver(ticket)
+            elif phase == PHASE_REPORTED:
+                break
+            else:
+                return "failed", f"The worker for {instruction.short_id} was lost.", None
+            if isinstance(phase, HandBack):
+                return (
+                    "failed",
+                    f"The work on {instruction.short_id} stopped: {phase.reason}",
+                    None,
+                )
+        current = ticket.worker or worker
+        delivery = await asyncio.to_thread(latest_delivery, current.task_id)
+        url = delivery.get("pr_url") or None
+        note = await asyncio.to_thread(findings_of, current)
+        head = f"{delivery_line(delivery)}" if delivery else "Delivered."
+        return "done", f"{head}\n\n{note}" if note else head, url
+
+    def _has_commits(self, worker: Worker) -> bool:
+        """Whether the worker's branch holds commits; unknown counts as yes (review it)."""
+        from papaya_agent_runtime import rounds
+
+        ahead = (self._branch_ahead or rounds.branch_ahead_of_base)(worker.task_id)
+        return ahead is not False
 
     # -- the phase machine ---------------------------------------------------
 
@@ -2752,6 +3012,11 @@ class TicketRunner:
             **os.environ,
             **turn_environment(ticket.job.env, root=root, run_id=ticket.held.run_id),
         }
+        env.pop(instructions.PATH_ENV, None)
+        if ticket.held.classification is not None:
+            # What this turn's `ppy` commands may do is the instruction's path's
+            # (`instructions.command_refusal`, enforced in `cli.main`).
+            env[instructions.PATH_ENV] = ticket.held.classification.path
         transcript = turn_transcript_path(ticket.held.run_id, turn)
         ticket.last_transcript = str(transcript)
         # Named before the turn starts, so a turn still running can be watched.
@@ -3141,6 +3406,10 @@ class TicketRunner:
             event = papaya_events.parse_event(job.event_file, environ=job.env)
         except papaya_events.PapayaEventError as exc:
             return Declined(f"this event could not be read: {exc}")
+        if not event.work_item_id and event.kind == papaya_events.MACHINE_INSTRUCTION:
+            # The one kind taken without a work item: a person's instruction to this
+            # machine, answered where they asked (`instructions.py`).
+            return self._take_instruction(job, event)
         if not event.work_item_id:
             # The manager's unit of work is a work item: it is what a repository,
             # a brief and a pull request all hang off. An event carrying none has
@@ -3185,6 +3454,70 @@ class TicketRunner:
         conn = db.init_db()
         try:
             return self._record(conn, event, ensured.name if ensured is not None else None)
+        finally:
+            conn.close()
+
+    def _take_instruction(self, job: Any, event: papaya_events.PapayaEvent) -> Held | Declined:
+        """Record an instruction's ticket, keyed on its subject, or decline it honestly.
+
+        Declined — the job's decline file and exit 75, which the client turns into a
+        release with ``declined: true`` so Papaya's fall-back tells the person — when
+        readiness is blocked, or the work path names a repository this machine cannot
+        register. Never the client's `hand_back`: that takes only `work_item:` subjects.
+        Classified here, before anything is recorded, so a refusal leaves no task.
+        """
+        try:
+            instruction = papaya_events.parse_instruction(event)
+        except papaya_events.PapayaEventError as exc:
+            return Declined(f"this instruction could not be read: {exc}")
+        verdict = self._check_readiness()
+        if verdict.state == readiness.BLOCKED:
+            if readiness.setup_blocker(verdict) is not None:
+                return Declined(blockers.DECLINE_REASON)
+            return Declined(readiness.headline(verdict))
+        conn = db.init_db()
+        try:
+            refs = instructions.repo_refs(conn)
+            existing = instructions.ticket_for(conn, instruction.subject)
+            earlier = (
+                instructions.classification_of(conn, int(existing["id"]))
+                if existing is not None
+                else None
+            )
+        finally:
+            conn.close()
+        found = earlier or instructions.classify(instruction.text, instruction.references, refs)
+        if found.path == instructions.WORK and found.repo is None and found.spec:
+            try:
+                ensured = papaya_events.ensure_spec(found.spec)
+            except papaya_events.PapayaEventError as exc:
+                return Declined(
+                    f"{instruction.short_id} names {found.spec}, which this machine cannot "
+                    f"register: {exc}"
+                )
+            found = replace(found, repo=ensured.name, spec=None)
+        if found.repo and readiness.setup_blocker(verdict, found.repo) is not None:
+            return Declined(blockers.DECLINE_REASON)
+        conn = db.init_db()
+        try:
+            task_id, run_id, existed = instructions.record_ticket(
+                conn, event, instruction, found.repo
+            )
+            if not existed:
+                record_phase(conn, task_id, PHASE_PICKED_UP)
+            return Held(
+                task_id=task_id,
+                run_id=run_id,
+                repo=found.repo,
+                event=event,
+                resume_from=None,
+                reclaimed=existed,
+                events_at_pickup=int(
+                    conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+                ),
+                instruction=instruction,
+                classification=found,
+            )
         finally:
             conn.close()
 
@@ -4145,6 +4478,80 @@ def latest_delivery(worker_id: int) -> dict[str, Any]:
         conn.close()
 
 
+def findings_of(worker: Worker) -> str:
+    """The worker's own account of what it did: its newest progress note, verbatim."""
+    conn = db.init_db()
+    try:
+        notes = store.progress_events(conn, task_id=worker.task_id)
+    finally:
+        conn.close()
+    for row in notes:
+        note = str(_payload(row).get("note") or "").strip()
+        if note:
+            return note
+    return ""
+
+
+def merge_refused(number: str) -> str:
+    """What an instruction to merge says when this install does not let the runtime merge."""
+    name = f"PR {number}" if number else "that pull request"
+    return (
+        f"I can't merge {name}: this machine is not allowed to merge pull requests here "
+        "(its merge authority is off). A maintainer of the repository can merge it on "
+        "GitHub, or this machine's owner can let the runtime merge with "
+        "`ppy config authority --allow-merge`."
+    )
+
+
+def dispatch_instruction(repo: str, brief: str, run_id: int, title: str) -> None:
+    """`ppy dispatch` for an instruction's work path, in its own process. Raises on refusal.
+
+    A subprocess rather than `cli.main` in this one, for the same reason a manager turn
+    shells out: `ppy dispatch` prints, and under `--supervised` this process's stdout
+    is the protocol. The brief is kept where briefs are kept; the dispatch archives it.
+    """
+    from papaya_agent_runtime.manager.launch import repo_root
+
+    folder = ppy_home() / "briefs" / "instructions"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"run-{run_id}.md"
+    path.write_text(brief, encoding="utf-8")
+    root = Path(repo_root())
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(root / "src"), *filter(None, [os.environ.get("PYTHONPATH")])]
+        ),
+    }
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "papaya_agent_runtime",
+            "dispatch",
+            "--repo",
+            repo,
+            "--brief",
+            str(path),
+            "--title",
+            title,
+            "--run-id",
+            str(run_id),
+            "--ends-at",
+            "done",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(root),
+        timeout=600,
+        check=False,
+    )
+    if done.returncode != 0:
+        said = [line for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
+        raise RuntimeError(said[-1] if said else f"ppy dispatch exited {done.returncode}")
+
+
 def pull_request_url(worker_id: int) -> str | None:
     return latest_delivery(worker_id).get("pr_url") or None
 
@@ -4367,6 +4774,16 @@ def _load_config():
 def _ticket_facts(held: Held) -> dict[str, object]:
     item = held.event.payload.get("work_item")
     title = item.get("title") if isinstance(item, dict) else None
+    if held.instruction is not None:
+        return {
+            "instruction": held.instruction.short_id,
+            "held work item": "none (an instruction a person sent this machine; post nothing "
+            "on a work item, the runtime answers where they asked)",
+            "requested by": held.instruction.requester,
+            "event": held.event.kind,
+            "ticket task id": held.task_id,
+            "run id (dispatch with --run-id)": held.run_id,
+        }
     return {
         "work item id": held.event.work_item_id,
         "work item title": title,
@@ -4927,6 +5344,8 @@ async def _run(
         **(rounds_seams or {}),
     )
     walking = asyncio.create_task(manager_rounds.run())
+    # Between rounds, a change on the board is told to Papaya at once.
+    changing = asyncio.create_task(manager_rounds.watch_changes())
     sweeper = sweep.Sweeper(
         built,
         interval=options.sweep_interval,
@@ -4959,9 +5378,9 @@ async def _run(
         for owned in {id(s): s for s in (server, keeper and keeper.server) if s}.values():
             owned.sweep_handler = None
             owned.on_shutdown = None
-        for background in (walking, sweeping, watching):
+        for background in (walking, changing, sweeping, watching):
             background.cancel()
-        for background in (walking, sweeping, watching):
+        for background in (walking, changing, sweeping, watching):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await background
         await manager_rounds.close()
