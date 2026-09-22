@@ -2587,39 +2587,6 @@ def _counted(kind: str, detail: str, scope: str, task_id: int) -> bool:
     return any(e.get("scope") == key and e.get("task_id") == task_id for e in entries)
 
 
-def denial_kinds(conn: Any, deficiency: Deficiency) -> set[str]:
-    """The kinds today's classifier gives a `worker-denial` row's denials.
-
-    A row written before kinds existed carries only the pattern, so its commands are
-    read back from the `permission_denied` events of the tasks in its evidence. An
-    empty set means nothing could be read, which is never a reason to close an issue.
-    """
-    pattern = next(
-        (str(e["pattern"]) for e in deficiency.evidence if e.get("pattern")),
-        deficiency.detail.strip("`"),
-    )
-    kinds: set[str] = set()
-    task_ids: set[int] = set()
-    for entry in deficiency.evidence:
-        if isinstance(entry.get("task_id"), int):
-            task_ids.add(int(entry["task_id"]))
-        if entry.get("command") and pattern.startswith("Bash("):
-            kinds.add(tool_learning.classify("Bash", str(entry["command"]), None).kind)
-    for task_id in sorted(task_ids):
-        rows = conn.execute(
-            "SELECT payload FROM events WHERE kind = ? AND task_id = ?",
-            (tool_learning.PERMISSION_DENIED, task_id),
-        ).fetchall()
-        for row in rows:
-            try:
-                payload = json.loads(row["payload"])
-            except (TypeError, ValueError):
-                continue
-            if payload.get("pattern") == pattern:
-                kinds.add(tool_learning.kind_of(payload))
-    return kinds
-
-
 #: A `worker-denial` the request loop carries now: the manager decides it.
 REQUEST_ROUTE = "capability_request"
 #: A plain safe-family denial of a program the family has since gained: learned.
@@ -2674,50 +2641,67 @@ def denial_routes(conn: Any, deficiency: Deficiency) -> list[tuple[str | None, s
         ]
     from papaya_agent_runtime import config
 
-    profile = tool_learning._profile()
-    if profile is None:
-        profile = set(config.CLAUDE_PROFILE)
-    seen: dict[tuple[str | None, str], None] = {}
+    # The code's own profile, not this install's: a pattern a person added here since
+    # (psql, 2026-09-22) is exactly what a request would have carried to them.
+    profile = set(config.CLAUDE_PROFILE)
+    seen: dict[tuple[str | None, str], str] = {}
     for payload in payloads:
-        seen.setdefault(_route(payload, profile), None)
-    return list(seen)
+        route, key, line = _route(payload, profile)
+        # One line per route and reason: ten copies of one refusal say nothing nine more times.
+        seen.setdefault((route, key), line)
+    return [(route, line) for (route, _key), line in seen.items()]
 
 
-def _route(payload: dict[str, Any], profile: set[str]) -> tuple[str | None, str]:
-    """One recorded denial judged again: its route and the line a comment says for it."""
+#: A URL's `user:password@`, which no comment may carry (`redact` keeps URLs whole).
+_URL_CREDENTIALS = re.compile(r"(?<=://)[^/\s@'\"]+@")
+
+
+def _route(payload: dict[str, Any], profile: set[str]) -> tuple[str | None, str, str]:
+    """One recorded denial judged again: its route, what makes it the same as another
+    (the reason, or the pattern asked for), and the line a comment says for it."""
     from papaya_agent_runtime.providers.command_rules import rewrite_for
 
     tool = str(payload.get("tool") or "Bash")
     command = payload.get("command")
     worktree = payload.get("worktree")
     if payload.get("kind") == tool_learning.HOOK_REFUSAL:
-        return None, f"a repository hook refused `{tool}`"
+        return None, "hook", f"a repository hook refused `{tool}`"
     verdict = tool_learning.classify(tool, command, worktree)
     kind = verdict.kind
+    reason = verdict.reason.rstrip(".")
     if kind == tool_learning.COMMAND_SHAPE:
         found = rewrite_for(str(command or ""), worktree)
-        instead = found.instead if found is not None else verdict.reason
-        return kind, f"`command_shape`: {verdict.reason} Instead: {instead}"
+        instead = f" Instead: {found.instead}" if found is not None else ""
+        # Keyed by the rewrite's shape too: one reason can have two different answers
+        # (`--note` has a file form, `--self` has none).
+        shape = f"{found.shape}|{found.runnable}" if found is not None else ""
+        return kind, f"{reason}|{shape}", f"`command_shape`: {reason}.{instead}"
     if kind == tool_learning.POLICY_REFUSAL:
-        return kind, f"`policy_refusal`: {tool_learning.policy_rule(verdict.program)}"
+        rule = tool_learning.policy_rule(verdict.program)
+        return kind, rule, f"`policy_refusal`: {rule}"
     if kind == tool_learning.OUTSIDE_WORKTREE:
-        return kind, f"`outside_worktree`: {verdict.reason}"
+        return kind, reason, f"`outside_worktree`: {reason}."
     if kind != tool_learning.PROFILE_GAP:
-        return None, f"`{kind}`"
+        return None, kind, f"`{kind}`"
     if not verdict.in_family and verdict.pattern and verdict.pattern not in profile:
-        return REQUEST_ROUTE, f"`capability_request` for `{verdict.pattern}`: {REQUEST_PATH}"
+        line = f"`capability_request` for `{verdict.pattern}`: {REQUEST_PATH}."
+        return REQUEST_ROUTE, verdict.pattern, line
     if verdict.in_family and not payload.get("in_family"):
-        return LEARNED_ROUTE, (
+        return (
+            LEARNED_ROUTE,
+            verdict.program,
             f"`learned`: `{verdict.program}` is in the safe family now, and a plain denial "
-            "of it is learned into the worker profile for the next dispatch"
+            "of it is learned into the worker profile for the next dispatch.",
         )
-    text = " ".join(str(command or "").split())
+    text = _URL_CREDENTIALS.sub("[redacted]@", " ".join(str(command or "").split()))
     text = text if len(text) <= 160 else text[:157] + "…"
     said = f"`{text}`" if text else f"the `{tool}` tool"
-    return None, (
-        f"{said} was refused while `{verdict.pattern or tool}` was already allowed: it is a "
-        "plain call, so no rewrite, request or policy explains it, and a grant of what "
-        "the worker already has would change nothing"
+    return (
+        None,
+        text,
+        f"{said} was refused while `{verdict.pattern or tool}` was already allowed: it is "
+        "a plain call, so no rewrite, request or policy explains it, and a grant of what "
+        "the worker already has would change nothing.",
     )
 
 
@@ -2968,7 +2952,7 @@ __all__ = [
     "canonical_fingerprint",
     "closing_marker",
     "comment_body",
-    "denial_kinds",
+    "denial_routes",
     "duplicate_body",
     "fingerprint",
     "issue_for_kind",

@@ -1225,7 +1225,7 @@ def _reported_denial_row(
     """A reported `worker-denial` issue about ``pattern``, and the denials behind it."""
     from papaya_agent_runtime.state import store
 
-    run_id, tasks = _denial_tasks(2, repo=f"r{abs(hash(pattern)) % 10_000}")
+    run_id, tasks = _denial_tasks(2, repo=f"repo-{len(gh.issues)}")
     conn = init_db()
     for n, event in enumerate(events):
         store.append_event(
@@ -1257,7 +1257,7 @@ def _nine(worktree: str) -> dict[int, tuple[str, list[dict[str, Any]]]]:
     return {
         138: (
             "Bash(psql:*)",
-            [{**gap, "command": 'psql postgresql://localhost/app -c "select 1"'}],
+            [{**gap, "command": 'psql postgresql://app:hunter2@localhost/app -c "select 1"'}],
         ),
         139: ("WebFetch", [{**gap, "tool": "WebFetch", "command": None}]),
         142: (
@@ -1313,6 +1313,7 @@ def _nine(worktree: str) -> dict[int, tuple[str, list[dict[str, Any]]]]:
             [
                 {**gap, "command": "chrome-devtools-axi --help"},
                 {**allowed, "command": "chrome-devtools-axi open http://localhost:5199/harness"},
+                {**allowed, "command": "chrome-devtools-axi open http://app:hunter2@localhost/x"},
                 {**allowed, "command": "chrome-devtools-axi eval \"() => p['$ref']\""},
             ],
         ),
@@ -1381,3 +1382,4 @@ def test_nothing_private_is_in_a_correcting_comment(ppy_home, tmp_path, privacy_
         for comment in issue["comments"]:
             assert not leaked(comment), comment
             assert "/Users/someone" not in comment
+            assert "hunter2" not in comment  # a URL's password, even in a quoted command
