@@ -244,14 +244,18 @@ KINDS: dict[str, Kind] = {
         title="Workers were denied a plain command the runtime cannot learn",
         happened=(
             "Workers in one repository were refused {detail} more than once, for a plain "
-            "command (one program, no operators). Either it is outside the safe family, so "
-            "the runtime does not learn it, or the profile already allows it and the harness "
-            "refused it anyway; every dispatch there meets the same refusal."
+            "command (one program, no operators), and no capability request carries it: "
+            "either the profile already allows it and the harness refused it anyway, or "
+            "the request could not be recorded. The evidence says which."
         ),
-        instead="Learned nothing; the workers carried on without the tool.",
+        instead=(
+            "Learned nothing and asked nobody: a denial the request loop can carry goes to "
+            "the manager (and, escalated, to the connection owner) instead of here."
+        ),
         remedy=(
-            "Decide whether the pattern belongs in the worker profile, or whether the briefs "
-            "for that repository should route around it."
+            "For an allowed pattern the harness still refuses, find what about the call it "
+            "refused and teach the rewrite; for a request that could not be recorded, fix "
+            "what stopped it."
         ),
         threshold=2,
     ),
@@ -450,6 +454,8 @@ EVIDENCE_FIELDS = (
     "hook_said",
     "inferred",
     "reason",
+    # A `worker-denial`: why no capability request carries it.
+    "no_request",
 )
 
 #: How many occurrences a ledger row keeps in full.
@@ -1339,6 +1345,7 @@ _EVIDENCE_LABELS = {
     "event_id": "event",
     "pr": "pull request",
     "transcript": "transcript",
+    "no_request": "no request because",
 }
 
 
@@ -2130,10 +2137,15 @@ class Reporter:
                     if body is None:
                         continue
                 else:
-                    kinds = denial_kinds(conn, deficiency)
-                    if not kinds or tool_learning.PROFILE_GAP in kinds:
+                    routes = denial_routes(conn, deficiency)
+                    if not routes:
                         continue
-                    body = reclassified_body(kinds)
+                    if any(route is None for route, _line in routes):
+                        repo = self._note_unexplained(deficiency, routes, repo)
+                        continue
+                    body = reclassified_body(
+                        {route for route, _line in routes if route}, [line for _r, line in routes]
+                    )
                 if deficiency.status == REPORTED and deficiency.issue_url:
                     if repo is None:
                         config = self._settings()
@@ -2155,6 +2167,31 @@ class Reporter:
         for line in done:
             log.info("[deficiencies] %s (re-classified)", line)
         return done
+
+    def _note_unexplained(
+        self, deficiency: Deficiency, routes: list[tuple[str | None, str]], repo: str | None
+    ) -> str | None:
+        """Say once, on an issue left open, what the harness refused that nothing explains.
+
+        Only for a safe-family pattern: the one class of denial where the profile holds
+        the program and the harness still refused the call. Anything else left open is
+        a report the reclassification has nothing new to say about.
+        """
+        pattern = deficiency.detail.strip("`")
+        program = pattern[len("Bash(") : -len(":*)")] if pattern.startswith("Bash(") else ""
+        if program not in tool_learning.SAFE_FAMILY:
+            return repo
+        if deficiency.status != REPORTED or not deficiency.issue_url:
+            return repo
+        if repo is None:
+            config = self._settings()
+            repo = runtime_repo(config, self._origin) if config.enabled else None
+        if repo is None:
+            return repo
+        body = unexplained_body(pattern, [line for route, line in routes if route is None])
+        if self._forge.said(deficiency.issue_url, closing_marker(body)) is False:
+            self._forge.comment(deficiency.issue_url, body)
+        return repo
 
     def merge_duplicates(self) -> list[str]:
         """Fold turn-report rows that reduce to one cause into one. Never raises.
@@ -2386,9 +2423,11 @@ def record_denials(
     deduplicated by `tool_learning.learn`, and judged with the same
     `tool_learning.classify`, so the two never disagree about which is which:
 
-    - ``profile_gap``: a `worker-denial` when learning cannot close it, that is when
-      the program is outside the safe family, or ``profile`` (the tools the worker
-      was dispatched with, when known) already allowed the pattern.
+    - ``profile_gap``: a `worker-denial` when neither learning nor the request loop
+      carries it — ``profile`` (the tools the worker was dispatched with, when known)
+      already allowed the pattern, or the capability request could not be recorded
+      (``request_error``), and the evidence says which. A denial with a
+      `capability_request` for its pattern on its task is the manager's, not an issue.
     - ``hook_refusal``: a `worker-denial-hook`, scoped to the repository AND the hook,
       so a repository with two hooks raises two and one hook raises one however many
       commands it refuses. The profile is beside the point and is not mentioned.
@@ -2436,14 +2475,52 @@ def record_denials(
                 continue
             if verdict.in_family and (allowed is None or pattern not in allowed):
                 continue  # the runtime learns this one
+            if requested(task_id, pattern):
+                continue  # the request loop carries it: the manager's, not an issue
             record(
                 WORKER_DENIAL,
                 f"`{pattern}`",
-                evidence={**evidence, "pattern": pattern},
+                evidence={
+                    **evidence,
+                    "pattern": pattern,
+                    "no_request": _no_request_reason(denial, pattern, allowed),
+                },
                 scope=f"repo:{repo or '?'}",
             )
     except Exception as exc:  # noqa: BLE001 - a worker's turn must end whatever this does
         log.warning("[deficiencies] Could not read task %s's denials: %s", task_id, exc)
+
+
+def requested(task_id: int, pattern: str) -> bool:
+    """Whether a capability request on the task carries ``pattern``. False if unreadable."""
+    from papaya_agent_runtime import capability_requests
+    from papaya_agent_runtime.state import init_db
+
+    try:
+        conn = init_db()
+        try:
+            rows = conn.execute(
+                "SELECT payload FROM events WHERE kind = ? AND task_id = ?",
+                (capability_requests.REQUEST_EVENT, task_id),
+            ).fetchall()
+        finally:
+            conn.close()
+        return any(json.loads(r["payload"]).get("pattern") == pattern for r in rows)
+    except Exception:  # noqa: BLE001 - unreadable is "not carried": the ledger still hears it
+        return False
+
+
+def _no_request_reason(denial: dict, pattern: str, allowed: set[str] | None) -> str:
+    """Why this denial is not a capability request, which is why it is a deficiency."""
+    error = str(denial.get("request_error") or "").strip()
+    if error:
+        return f"no capability request could be recorded: {error}"
+    if allowed is not None and pattern in allowed:
+        return (
+            f"{pattern} is already in the worker profile and the harness refused it anyway; "
+            "no grant would change that"
+        )
+    return "no capability request was recorded for it"
 
 
 def _decided(verdict: dict | None) -> tool_learning.Verdict | None:
@@ -2543,16 +2620,139 @@ def denial_kinds(conn: Any, deficiency: Deficiency) -> set[str]:
     return kinds
 
 
-def reclassified_body(kinds: Iterable[str]) -> str:
-    """The one comment a re-classified issue gets as it is closed."""
+#: A `worker-denial` the request loop carries now: the manager decides it.
+REQUEST_ROUTE = "capability_request"
+#: A plain safe-family denial of a program the family has since gained: learned.
+LEARNED_ROUTE = "learned"
+
+#: How the capability path reads in a correcting comment.
+REQUEST_PATH = (
+    "a denied program or tool is now a capability request on its task "
+    "(`ppy capability list`): this install's `capabilities.never` refuses it, the safe "
+    "family or `capabilities.auto_grant` grants it, and anything else is the manager's to "
+    "approve or deny (`ppy capability approve <id>` / `ppy capability deny <id> --reason "
+    '"..."`), escalated to the connection owner only when only they can decide '
+    '(`ppy capability escalate <id> --why "..."`)'
+)
+
+
+def denial_routes(conn: Any, deficiency: Deficiency) -> list[tuple[str | None, str]]:
+    """Where each of a `worker-denial` row's denials goes today, and one line saying so.
+
+    Every `permission_denied` event for the row's pattern on the tasks in its evidence
+    is judged again with today's classifier, on the worktree it was refused in. A route
+    is a kind the worker is steered about (`command_shape`, `policy_refusal`,
+    `outside_worktree`), :data:`REQUEST_ROUTE` or :data:`LEARNED_ROUTE`; ``None`` is a
+    denial nothing explains — the profile held the pattern and the harness still
+    refused it. An empty list means nothing could be read, which never closes an issue.
+    """
+    pattern = next(
+        (str(e["pattern"]) for e in deficiency.evidence if e.get("pattern")),
+        deficiency.detail.strip("`"),
+    )
+    task_ids = sorted(
+        {int(e["task_id"]) for e in deficiency.evidence if isinstance(e.get("task_id"), int)}
+    )
+    payloads: list[dict[str, Any]] = []
+    for task_id in task_ids:
+        for row in conn.execute(
+            "SELECT payload FROM events WHERE kind = ? AND task_id = ? ORDER BY id",
+            (tool_learning.PERMISSION_DENIED, task_id),
+        ).fetchall():
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if payload.get("pattern") == pattern:
+                payloads.append(payload)
+    if not payloads and pattern.startswith("Bash("):
+        # A row older than its events: its commands are in its evidence.
+        payloads = [
+            {"tool": "Bash", "command": str(e["command"]), "pattern": pattern}
+            for e in deficiency.evidence
+            if e.get("command")
+        ]
+    from papaya_agent_runtime import config
+
+    profile = tool_learning._profile()
+    if profile is None:
+        profile = set(config.CLAUDE_PROFILE)
+    seen: dict[tuple[str | None, str], None] = {}
+    for payload in payloads:
+        seen.setdefault(_route(payload, profile), None)
+    return list(seen)
+
+
+def _route(payload: dict[str, Any], profile: set[str]) -> tuple[str | None, str]:
+    """One recorded denial judged again: its route and the line a comment says for it."""
+    from papaya_agent_runtime.providers.command_rules import rewrite_for
+
+    tool = str(payload.get("tool") or "Bash")
+    command = payload.get("command")
+    worktree = payload.get("worktree")
+    if payload.get("kind") == tool_learning.HOOK_REFUSAL:
+        return None, f"a repository hook refused `{tool}`"
+    verdict = tool_learning.classify(tool, command, worktree)
+    kind = verdict.kind
+    if kind == tool_learning.COMMAND_SHAPE:
+        found = rewrite_for(str(command or ""), worktree)
+        instead = found.instead if found is not None else verdict.reason
+        return kind, f"`command_shape`: {verdict.reason} Instead: {instead}"
+    if kind == tool_learning.POLICY_REFUSAL:
+        return kind, f"`policy_refusal`: {tool_learning.policy_rule(verdict.program)}"
+    if kind == tool_learning.OUTSIDE_WORKTREE:
+        return kind, f"`outside_worktree`: {verdict.reason}"
+    if kind != tool_learning.PROFILE_GAP:
+        return None, f"`{kind}`"
+    if not verdict.in_family and verdict.pattern and verdict.pattern not in profile:
+        return REQUEST_ROUTE, f"`capability_request` for `{verdict.pattern}`: {REQUEST_PATH}"
+    if verdict.in_family and not payload.get("in_family"):
+        return LEARNED_ROUTE, (
+            f"`learned`: `{verdict.program}` is in the safe family now, and a plain denial "
+            "of it is learned into the worker profile for the next dispatch"
+        )
+    text = " ".join(str(command or "").split())
+    text = text if len(text) <= 160 else text[:157] + "…"
+    said = f"`{text}`" if text else f"the `{tool}` tool"
+    return None, (
+        f"{said} was refused while `{verdict.pattern or tool}` was already allowed: it is a "
+        "plain call, so no rewrite, request or policy explains it, and a grant of what "
+        "the worker already has would change nothing"
+    )
+
+
+def reclassified_body(kinds: Iterable[str], lines: Iterable[str] = ()) -> str:
+    """The one comment a re-classified issue gets as it is closed.
+
+    ``lines`` say, for each distinct route the row's denials take today, what the
+    worker is told or where the request goes.
+    """
     names = "/".join(sorted(kinds))
-    return (
+    said = [
         f"re-classified as {names}; closing.\n\n"
         "The runtime now tells a denial's kind apart. `command_shape` is a command the "
         "command rules refuse for its shape (operators, pipes, redirection, inline "
         "environment), and `policy_refusal` is a program workers are never given. Neither "
         "is a tool missing from the worker profile: the worker is steered with the rule "
-        "instead, and only `profile_gap` denials open issues."
+        "instead. A program or tool that is missing is a capability request the manager "
+        "decides, and only a denial neither can carry opens an issue."
+    ]
+    extra = [line for line in dict.fromkeys(lines) if line]
+    if extra:
+        said.append(
+            "What each of these denials is today:\n\n" + "\n".join(f"- {line}" for line in extra)
+        )
+    return redact("\n\n".join(said))
+
+
+def unexplained_body(pattern: str, lines: Iterable[str]) -> str:
+    """The one comment on an issue left open: what the harness refused, and why it stays."""
+    said = "\n".join(f"- {line}" for line in dict.fromkeys(lines))
+    return redact(
+        f"left open: `{pattern}` is in the worker profile and the harness still refused it.\n\n"
+        f"{said}\n\n"
+        "Every other denial on this issue is now steered with its rule, carried by a "
+        "capability request, or learned. These are not, so the issue stays open."
     )
 
 

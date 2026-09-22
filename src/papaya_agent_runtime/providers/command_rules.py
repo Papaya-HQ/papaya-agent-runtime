@@ -95,7 +95,24 @@ REWRITES: tuple[tuple[str, str], ...] = (
         "cp <your session's tool-results file> <evidence>",
         "`ppy evidence add <that file> --task <task id> --as <name>.txt`",
     ),
+    (
+        "export PATH=<dir>:$PATH",
+        "`ppy need <task id> --capability <program> --why-file <path>` — PATH comes from "
+        "the runtime's environment block, not your shell",
+    ),
+    (
+        "source .venv/bin/activate, . <file>",
+        "the worktree's own tools are run by path or by `uv run`/`npx`/`pnpm exec`; never activate",
+    ),
+    (
+        "export, set, unset, alias, ulimit, umask <…>",
+        "nothing: each call runs in a fresh shell, so a worker cannot change its own; ask "
+        "for a missing program with `ppy need <task id> --capability <program>`",
+    ),
 )
+
+#: The rows above for a shell builtin, by what the builtin was used for.
+_PATH_ROW, _ACTIVATE_ROW, _BUILTIN_ROW = REWRITES[14], REWRITES[15], REWRITES[16]
 
 #: How a worker keeps the full output of a command it could only see a preview of.
 EVIDENCE_RULE = (
@@ -234,6 +251,7 @@ def rewrite_for(
         # command), and "split it into two calls" is not the answer to either half.
         return saved
     for rule in (
+        _rewrite_builtin,
         _rewrite_cd,
         _rewrite_inline_env,
         _rewrite_commit_substitution,
@@ -263,6 +281,20 @@ def rewrites_for(
             seen.add(rewrite.command)
             found.append(rewrite)
     return found
+
+
+def _rewrite_builtin(command: str, worktree: str | None) -> Rewrite | None:
+    """A builtin that changes the shell: what it was for, asked for the way that works."""
+    from papaya_agent_runtime.tool_learning import SHELL_BUILTINS
+
+    word = (command.split() or [""])[0]
+    if word not in SHELL_BUILTINS:
+        return None
+    if word == "export" and re.match(r"^export\s+PATH=", command):
+        return Rewrite(command, _PATH_ROW[0], _PATH_ROW[1])
+    if word in ("source", "."):
+        return Rewrite(command, _ACTIVATE_ROW[0], _ACTIVATE_ROW[1])
+    return Rewrite(command, _BUILTIN_ROW[0], _BUILTIN_ROW[1], runnable=False)
 
 
 def _split_cd(command: str) -> tuple[str, str] | None:

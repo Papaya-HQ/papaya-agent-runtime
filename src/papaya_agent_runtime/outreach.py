@@ -225,6 +225,7 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
         if task is None or task["status"] not in (*owed.RUNNING_STATUSES, *owed.OWED_STATUSES):
             continue
         why = f" — {item.why}" if item.why else ""
+        why += capability_requests.where(item)
         command = f" (it ran `{item.command}`)" if item.command else ""
         only = f"; only you can decide it because: {item.reason}" if item.reason else ""
         # A request's id is the id of the event that recorded it.
@@ -233,7 +234,7 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
             Ask(
                 key=f"capability:{item.id}",
                 kind=CAPABILITY,
-                text=f"worker task {item.task_id} needs `{item.program}`{why}{command}{only}",
+                text=f"worker task {item.task_id} needs `{item.label}`{why}{command}{only}",
                 how=(
                     f"`ppy capability approve {item.id}` (add `--always` for every worker on "
                     f'this machine) or `ppy capability deny {item.id} --reason "..."`'

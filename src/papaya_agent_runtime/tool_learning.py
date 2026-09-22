@@ -11,8 +11,9 @@ The safe family is a closed list in code, and the only thing ever added is
 `Bash(<program>:*)` for a program on it. Nothing else is ever learned: no `Bash(*)`,
 no `sudo`, no network tool, no command named by an arbitrary path, no compound or
 redirected command, and no file verb whose target is outside the worker's worktree.
-A denial outside the family changes nothing; readiness surfaces it once, with the
-exact pattern a person would add.
+A gap outside the family is a capability request (`capability_requests`): a program,
+a program named by path (decided by where it resolves, granted as that path), or a
+tool that is not the shell (granted by its name).
 
 A learned pattern is a prefix, so once `Bash(cp:*)` is learned from a `cp` inside the
 worktree it matches any `cp`. That is the same trade the documented profile already
@@ -24,13 +25,15 @@ which the profile allows and the command rules refuse for its shape, and "denied
 `Bash(docker:*)`" for a worker querying a container it was told was not its own:
 
 - ``command_shape``: operators, a pipe, redirection, substitution, an inline
-  environment assignment. The worker broke the command rules. After two on one worker
+  environment assignment, a shell builtin that changes the shell, a quoted argument
+  the harness will not analyse. The worker broke the command rules. After two on one worker
   it is steered once with the rules themselves; three workers in one repository in a
   day is a `prompt-clarity` deficiency about the rules text.
 - ``policy_refusal``: a program the NEVER list or the environment block keeps from
   workers. Counted, never reported; the worker is steered once with the rule.
 - ``profile_gap``: a plain command the profile did not let through. Learned when it
-  is in the safe family; a gap learning cannot close is a `worker-denial` deficiency.
+  is in the safe family; a gap learning cannot close is a capability request, and
+  only one no request carries is a `worker-denial` deficiency.
 
 The harness reports one denial on two paths (a live `permission_denied` stream line
 and the turn's `result`), and a worker often retries a refused line as it was, so a
@@ -172,6 +175,36 @@ ENVIRONMENT_FORBIDS = frozenset({"docker", "docker-compose", "podman"})
 #: A denial of one of these is the worker breaking a rule, not a gap in its profile.
 POLICY = NEVER | ENVIRONMENT_FORBIDS
 
+#: Shell builtins that change the worker's own shell. None is a program a grant could
+#: add: each call runs in a fresh shell, so the change would not outlive the call, and
+#: PATH and the rest of the environment come from the runtime's environment block. A
+#: denial of one is a SHAPE, answered with what to do instead (issue #140: three
+#: `export PATH=…` denials became requests for a program called `export`). `eval`,
+#: `exec` and `env` are not here: they run other commands and stay on :data:`NEVER`.
+SHELL_BUILTINS = frozenset(
+    {
+        ".",
+        "alias",
+        "declare",
+        "export",
+        "readonly",
+        "set",
+        "source",
+        "typeset",
+        "ulimit",
+        "umask",
+        "unalias",
+        "unset",
+    }
+)
+
+#: The harness will not analyse a quoted argument holding one of these, whatever the
+#: program (its own reasons: "Contains simple_expansion", "Contains brace with quote
+#: character", "Newline followed by # inside a quoted argument"). Issue #130: seven
+#: `ppy progress --note "…"` refusals, every one of them a note with a backtick, a
+#: `$(`, a brace or a second line in it.
+QUOTED_HAZARDS = ("\n", "`", "$", "{")
+
 _FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"})
 _OPERATORS = set(";&|<>`\n")
 
@@ -196,6 +229,101 @@ class Verdict:
     #: than on a hook the runtime could actually read. Said in the recorded reason
     #: and in the issue, because it is the one part that is deduced, not observed.
     inferred: bool = False
+    #: For a program named by path: the path as it was run, which is the pattern's prefix.
+    path: str = ""
+    #: Where that path resolved, or ``arguments`` for a safe program refused for what it
+    #: was asked to do (`capability_requests.IN_WORKTREE` and its siblings).
+    reach: str = ""
+    #: The path fully resolved.
+    resolved: str = ""
+
+
+def _quoted_hazard(command: str) -> str:
+    """The first character the harness will not analyse inside a quoted argument, or ""."""
+    quote = ""
+    escaped = False
+    for ch in command:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+            elif ch in QUOTED_HAZARDS:
+                return ch
+            continue
+        if ch in "'\"":
+            quote = ch
+    return ""
+
+
+def path_reach(program: str, worktree: str | None, roots: Iterable[str] = ()) -> tuple[str, str]:
+    """Where a program named by path resolves: ``(reach, resolved path)``.
+
+    ``..`` is normalised first and symlinks are then resolved strictly, so a path that
+    leaves the worktree through a link is outside, and one that cannot be resolved at
+    all is outside too: nothing is granted on a path nobody could check. ``roots`` are
+    the other places a worktree's own tools may live — the repository's base clone,
+    which the runtime links a worktree's virtualenv to (`worktree.provision.link_venv`),
+    so `.venv/bin/python` resolving there is the worktree's own interpreter.
+    """
+    from papaya_agent_runtime.capability_requests import ABSOLUTE, IN_WORKTREE, OUTSIDE
+
+    if program.startswith("~") or os.path.isabs(program):
+        return ABSOLUTE, os.path.normpath(os.path.expanduser(program))
+    if not worktree:
+        return OUTSIDE, program
+    root = os.path.normpath(worktree)
+    joined = os.path.normpath(os.path.join(root, program))
+    if not joined.startswith(root + os.sep):
+        return OUTSIDE, joined
+    try:
+        resolved = os.path.realpath(joined, strict=True)
+    except OSError:
+        return OUTSIDE, joined
+    for place in (root, *roots):
+        try:
+            base = os.path.realpath(place, strict=True)
+        except OSError:
+            continue
+        if resolved.startswith(base + os.sep):
+            return IN_WORKTREE, resolved
+    return OUTSIDE, resolved
+
+
+def _profiled(program: str) -> bool:
+    """Whether the code's own profile already allows ``program`` by name."""
+    from papaya_agent_runtime import config
+
+    return f"Bash({program}:*)" in config.CLAUDE_PROFILE
+
+
+def _tool_verdict(tool: str) -> Verdict:
+    """A tool that is not the shell: a capability by its own name, or a place it pointed."""
+    from papaya_agent_runtime import capability_requests, config
+
+    if tool in config.CLAUDE_PROFILE:
+        # The worker has the tool; the harness refused where it pointed (a Read or a
+        # Glob outside the session's directories). No grant of the tool changes that.
+        return Verdict(
+            "",
+            False,
+            f"the worker has {tool}; the harness refused where it pointed, outside the worktree",
+            OUTSIDE_WORKTREE,
+            tool,
+        )
+    if not capability_requests.is_tool(tool):
+        return Verdict("", False, f"`{tool}` cannot be named as a tool to grant")
+    return Verdict(
+        tool,
+        False,
+        f"{tool} is not in the worker's tools; it is asked for as a capability by its name",
+        PROFILE_GAP,
+        tool,
+    )
 
 
 def _unquoted(command: str) -> str | None:
@@ -238,7 +366,8 @@ def _reaches_out(paths: list[str], worktree: str) -> bool:
     outside it was still refused for the shape of the profile, and a mixed case is
     not clear enough evidence to stop learning from.
     """
-    real = [p for p in paths if not p.startswith("-")]
+    # A bare number is an option's value (`tail -n 6 <file>`), never a path (#131).
+    real = [p for p in paths if not p.startswith("-") and not p.isdigit()]
     return bool(real) and not any(_inside(p, worktree) for p in real)
 
 
@@ -304,12 +433,34 @@ def _hook_verdict(tool: str, command: str, worktree: str | None) -> Verdict:
     )
 
 
+_BUILTIN_REASON = (
+    "{name} changes the worker's own shell, which no tool pattern can give it: each call "
+    "runs in a fresh shell, and PATH and the environment come from the runtime's "
+    "environment block. Run the worktree's own tools by path or through `uv run`/`npx`/"
+    "`pnpm exec`, and ask for a missing program with `ppy need <task id> --capability "
+    "<program>`"
+)
+
+_HAZARD_REASON = (
+    "the harness will not analyse a quoted argument holding a newline, a backtick, `$` "
+    "or a brace, however plain the program; write the text to a file and pass the path "
+    "(`--note-file`, `--why-file`, `git commit -F`)"
+)
+
+_CP_FLAGS_REASON = (
+    "the harness asks a person to approve any `cp` with flags, whatever the profile "
+    "allows; copy one file per call without flags, or keep a receipt with `ppy "
+    "evidence add`"
+)
+
+
 def classify(
     tool: str,
     command: str | None,
     worktree: str | None,
     *,
     refusal: dict | None = None,
+    roots: Iterable[str] = (),
 ) -> Verdict:
     """Which kind of denial this is, and which pattern would have allowed it.
 
@@ -322,9 +473,14 @@ def classify(
 
     Then the shape is judged before the program: `cd x && grep y` names `cd`, which
     the profile has, and was refused for the `&&`.
+
+    A tool that is not the shell is a gap asked for by its own name. A program named
+    by path carries its ``reach`` (see :func:`path_reach`; ``roots`` are the other
+    places the worktree's own tools may resolve to), and a safe-family program refused
+    for its arguments carries ``arguments``: neither is granted by the family alone.
     """
     if tool != "Bash":
-        return Verdict(tool, False, f"{tool} is not a shell command; only Bash is learned")
+        return _tool_verdict(tool)
     command = (command or "").strip()
     if refusal is not None and not refusal.get("harness_line", True):
         return _hook_verdict(tool, command, worktree)
@@ -344,12 +500,22 @@ def classify(
         # worktree" is what it needs to hear. It is emphatically NOT a profile gap:
         # `cp` must stay refused, which is the whole point of issue #127.
         return Verdict(suggestion, False, _EVIDENCE_REASON, COMMAND_SHAPE, program)
+    if program in SHELL_BUILTINS:
+        # Before the operators: `source .venv/bin/activate && pytest` needs to hear
+        # "never activate", not "split it into two calls" and then activate anyway.
+        return Verdict("", False, _BUILTIN_REASON.format(name=program), COMMAND_SHAPE, program)
     if _OPERATORS & set(bare) or "$(" in bare:
         return Verdict(suggestion, False, _SHAPE_REASON, COMMAND_SHAPE, program)
     if "=" in program and not program.startswith(("/", ".")):
         return Verdict(
             "", False, "an inline environment assignment is never learned", COMMAND_SHAPE
         )
+    launcher = program in ("ppy", "./bin/ppy") or program.endswith("/bin/ppy")
+    if (launcher or program in SAFE_FAMILY or _profiled(program)) and _quoted_hazard(command):
+        # The program is allowed or learnable; only the argument can have been refused.
+        return Verdict(suggestion, False, _HAZARD_REASON, COMMAND_SHAPE, program)
+    if program == "cp" and any(a.startswith("-") for a in words[1:]):
+        return Verdict(suggestion, False, _CP_FLAGS_REASON, COMMAND_SHAPE, program)
     if program == "ppy" or program == "./bin/ppy":
         return Verdict(suggestion, True, "the runtime's own launcher", program=program)
     if program.endswith("/bin/ppy"):
@@ -368,7 +534,7 @@ def classify(
             name,
         )
     if "/" in program:
-        return Verdict(suggestion, False, "a program named by path is never learned", program=name)
+        return _path_verdict(program, name, worktree, roots)
     family = SAFE_FAMILY.get(program)
     if family is None:
         return Verdict(suggestion, False, f"{program} is not in the safe family", program=program)
@@ -389,23 +555,66 @@ def classify(
             program,
         )
     refusal = ""
+    targets: list[str] = []
     if family == "write":
         if not worktree:
             refusal = "no worktree to hold the write to"
-        elif not paths or not all(_inside(p, worktree, strict=program == "rm") for p in paths):
-            refusal = f"{program} reaches outside the worktree"
+        elif not paths:
+            refusal = f"{program} names no path inside the worktree"
+        else:
+            targets = paths
+            if program == "rm" and not all(_inside(p, worktree, strict=True) for p in paths):
+                refusal = "rm of the worktree itself"
     elif program == "find":
         if _FIND_ACTIONS & set(args):
             refusal = "find with an action that runs or deletes"
     elif program == "sed":
         in_place = any(a.startswith("-i") or a.startswith("--in-place") for a in args)
-        if in_place and (not worktree or not all(_inside(p, worktree) for p in paths[1:])):
-            refusal = "sed -i edits a file outside the worktree"
+        if in_place:
+            targets = paths[1:]
+            if not worktree:
+                refusal = "sed -i with no worktree to hold the edit"
     elif program == "awk" and any(">" in a or "|" in a or "system" in a for a in args):
         refusal = "awk that writes or runs a command"
+    if worktree and targets and not all(_inside(p, worktree) for p in targets):
+        # A write that leaves the worktree is refused for WHERE it points, like a read
+        # that does: learning the verb (or granting it, which is what the request loop
+        # did on 2026-09-18, auto-granting `cp`, `mv` and `mkdir` to every worker) would
+        # let every later call of it write anywhere.
+        return Verdict(
+            "",
+            False,
+            f"{program} writes outside the worktree, which no tool pattern allows; keep "
+            "receipts with `ppy evidence add` and outputs inside the worktree",
+            OUTSIDE_WORKTREE,
+            program,
+        )
     if refusal:
-        return Verdict(suggestion, False, refusal, program=program)
+        from papaya_agent_runtime.capability_requests import ARGUMENTS
+
+        return Verdict(suggestion, False, refusal, program=program, reach=ARGUMENTS)
     return Verdict(suggestion, True, f"{program} is in the safe family ({family})", program=program)
+
+
+def _path_verdict(program: str, name: str, worktree: str | None, roots: Iterable[str]) -> Verdict:
+    """A program named by path: asked for as its basename, granted as the path it ran by."""
+    from papaya_agent_runtime.capability_requests import IN_WORKTREE, pattern_for
+
+    reach, resolved = path_reach(program, worktree, roots)
+    try:
+        pattern = pattern_for(name, path=program)
+    except Exception:  # noqa: BLE001 - a path no pattern can hold is said, not requested
+        return Verdict("", False, f"`{program}` cannot be written as a tool pattern", program=name)
+    where = "inside the worktree" if reach == IN_WORKTREE else f"{reach} ({resolved})"
+    return Verdict(
+        pattern,
+        False,
+        f"{name} named by path, {where}: asked for as `{pattern}`",
+        program=name,
+        path=program,
+        reach=reach,
+        resolved=resolved,
+    )
 
 
 #: How much of a hook's own output is kept as evidence and shown to a person.
@@ -471,6 +680,17 @@ def _is_duplicate(conn, task_id: int | None, tool_use_id: str, command: str | No
     return False
 
 
+def _repository_roots(conn, task_id: int | None) -> tuple[str, ...]:
+    """The task's repository base clone: where its worktree's linked virtualenv lives."""
+    if task_id is None:
+        return ()
+    row = conn.execute(
+        "SELECT r.local_path FROM tasks t JOIN repos r ON r.id = t.repo_id WHERE t.id = ?",
+        (task_id,),
+    ).fetchone()
+    return (str(row["local_path"]),) if row is not None and row["local_path"] else ()
+
+
 def _full_suite_verdict(
     conn, task_id: int | None, tool: str, command: str | None
 ) -> Verdict | None:
@@ -508,6 +728,7 @@ def record(
     written: list[dict] = []
     conn = init_db()
     try:
+        roots = _repository_roots(conn, task_id)
         for denial in denials:
             if not isinstance(denial, dict):
                 continue
@@ -518,7 +739,7 @@ def record(
             refusal = denial.get("refusal") if isinstance(denial.get("refusal"), dict) else None
             # A hook block is judged before the full-suite rule: the repository
             # refused this call, whatever the command happened to be.
-            verdict = classify(tool, command, worktree, refusal=refusal)
+            verdict = classify(tool, command, worktree, refusal=refusal, roots=roots)
             if verdict.kind != HOOK_REFUSAL:
                 verdict = _full_suite_verdict(conn, task_id, tool, command) or verdict
             payload = {
@@ -532,6 +753,8 @@ def record(
                 "reason": verdict.reason,
                 "worktree": worktree,
             }
+            if verdict.path or verdict.reach:
+                payload.update(path=verdict.path, reach=verdict.reach, resolved=verdict.resolved)
             if verdict.kind == HOOK_REFUSAL:
                 payload["hook"] = verdict.hook
                 payload["hook_settings"] = verdict.hook_settings
@@ -571,6 +794,9 @@ def learn(
             return []
         if task_id is not None:
             _steer_about(task_id, run_id, new, branch, worktree)
+            # The request comes first: a denial that entered the loop is the manager's
+            # (or, escalated, the connection owner's), never a GitHub issue.
+            _request_capabilities(task_id, new, profile)
             deficiencies.record_denials(
                 [_as_denial(p) for p in new],
                 task_id=task_id,
@@ -581,35 +807,47 @@ def learn(
     except Exception as exc:  # noqa: BLE001 - a worker's turn must end whatever this does
         log.warning("[tool_learning] Could not record task %s's denials: %s", task_id, exc)
         return []
-    if task_id is not None:
-        _request_capabilities(task_id, new)
     if not any(p["in_family"] for p in new):
         return []
     return config_changes.apply(context=f"learned from task {task_id}'s denials")
 
 
-def _request_capabilities(task_id: int, new: list[dict]) -> None:
-    """A plain command the profile refused, outside the safe family, is a request.
+def _request_capabilities(task_id: int, new: list[dict], profile: set[str] | None = None) -> None:
+    """A gap in the profile that learning cannot close is a request. Never raises.
 
     The worker does not have to ask twice: the refusal itself is the need, decided by
-    this install's policy and, when policy cannot, put in front of a person
-    (`capability_requests`). Never raises.
+    this install's policy and, when policy cannot, put in front of the manager
+    (`capability_requests`) — a program, a program named by path, or a tool that is
+    not the shell, on any stack. Not a pattern the profile already has: a grant of
+    it would change nothing, so that denial stays the runtime's own to report.
+
+    Each payload is marked with the outcome, ``request_id`` or ``request_error``, so the
+    ledger can tell a denial the loop carries from one it could not record.
     """
     from papaya_agent_runtime import capability_requests
 
     for payload in new:
         program = str(payload.get("program") or "")
+        pattern = str(payload.get("pattern") or "")
         if payload.get("kind") != PROFILE_GAP or payload.get("in_family") or not program:
             continue
+        if not pattern or (profile is not None and pattern in profile):
+            continue
+        tool = str(payload.get("tool") or "Bash")
         try:
-            capability_requests.request(
+            made = capability_requests.request(
                 task_id,
                 program,
                 why="",
                 source=capability_requests.DENIAL,
-                command=payload.get("command"),
+                command=payload.get("command") or (None if tool == "Bash" else tool),
+                path=payload.get("path") or None,
+                reach=payload.get("reach") or None,
+                resolved=payload.get("resolved") or None,
             )
+            payload["request_id"] = made.id
         except Exception as exc:  # noqa: BLE001 - a request that cannot be made is logged
+            payload["request_error"] = str(exc) or type(exc).__name__
             log.warning(
                 "[tool_learning] Could not request %s for task %s: %s", program, task_id, exc
             )
@@ -626,6 +864,8 @@ def _as_denial(payload: dict) -> dict:
         "tool_name": payload.get("tool"),
         "tool_use_id": payload.get("tool_use_id"),
         "tool_input": {"command": payload.get("command")},
+        "request_id": payload.get("request_id"),
+        "request_error": payload.get("request_error"),
         "verdict": {
             "kind": payload.get("kind"),
             "pattern": payload.get("pattern"),

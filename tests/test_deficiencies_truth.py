@@ -1108,3 +1108,276 @@ def test_a_forge_that_refuses_the_correcting_close_is_tried_again_later(ppy_home
     refused[0] = False
     assert broken.flush() == [f"closed {url}: it never happened in one place"]
     assert _row(row.fingerprint).status == deficiencies.WATCHING
+
+
+# ── a denial that became a request is not a deficiency (2026-09-22) ─────────
+#
+# Nine of the sixteen open runtime issues said "worker denied X". Each was a denial
+# the request loop should carry to the manager, or a shape, or a place the worker
+# pointed; only a denial nothing can carry is the runtime's own to report.
+
+
+def _denial_tasks(n: int, *, repo: str = "api") -> tuple[int, list[int]]:
+    from papaya_agent_runtime.state import store
+
+    conn = init_db()
+    run_id = store.create_run(conn, "run")
+    repo_id = store.add_repo(
+        conn,
+        name=repo,
+        origin=f"https://github.com/acme/{repo}",
+        local_path="/tmp/nowhere-base",
+        default_branch="main",
+        base_sha=None,
+    )
+    tasks = [store.add_task(conn, run_id=run_id, title="w", repo_id=repo_id) for _ in range(n)]
+    for task in tasks:
+        store.set_task_status(conn, task, "in_progress")
+    conn.close()
+    return run_id, tasks
+
+
+def _learn_all(task: int, run_id: int, worktree: str, denials: list[tuple[str, str | None]]):
+    from papaya_agent_runtime import tool_learning
+
+    for n, (tool, command) in enumerate(denials):
+        denial: dict[str, Any] = {"tool_name": tool, "tool_use_id": f"t{task}-{n}"}
+        denial["tool_input"] = {"command": command} if command is not None else {}
+        tool_learning.learn([denial], task_id=task, run_id=run_id, worktree=worktree)
+
+
+@pytest.fixture
+def quiet_steers(monkeypatch):
+    from papaya_agent_runtime import tool_learning
+
+    monkeypatch.setattr(tool_learning, "steer_worker", lambda task, message: None)
+
+
+def test_denials_the_request_loop_carries_record_no_worker_denial(
+    ppy_home, tmp_path, quiet_steers
+) -> None:
+    from papaya_agent_runtime import capability_requests
+
+    worktree = tmp_path / "wt"
+    (worktree / ".venv" / "bin").mkdir(parents=True)
+    (worktree / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    run_id, tasks = _denial_tasks(2)
+    for task in tasks:
+        _learn_all(
+            task,
+            run_id,
+            str(worktree),
+            [
+                ("WebSearch", None),  # (a)
+                ("Bash", '.venv/bin/python -c "import app"'),  # (b)
+                ("Bash", "/opt/tool/bin/thing x"),  # (b)
+                ("Bash", "export PATH=/x:$PATH"),  # (c)
+                ("Bash", "source .venv/bin/activate"),  # (c)
+                ("Bash", "zig build test"),  # (d)
+            ],
+        )
+
+    conn = init_db()
+    carried = {r.pattern for r in capability_requests.all_requests(conn)}
+    assert carried == {
+        "WebSearch",
+        "Bash(.venv/bin/python:*)",
+        "Bash(/opt/tool/bin/thing:*)",
+        "Bash(zig:*)",
+    }
+    kinds = {d.kind for d in deficiencies.ledger(include_all=True)}
+    assert deficiencies.WORKER_DENIAL not in kinds
+
+
+def test_a_denial_the_loop_could_not_record_still_reaches_the_threshold_and_says_why(
+    ppy_home, monkeypatch, quiet_steers
+) -> None:
+    from papaya_agent_runtime import capability_requests
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise capability_requests.CapabilityError("the state db was locked")
+
+    monkeypatch.setattr(capability_requests, "request", broken)
+    run_id, tasks = _denial_tasks(2)
+    for task in tasks:
+        _learn_all(task, run_id, "/w", [("Bash", "zig build test")])
+
+    (row,) = [
+        d for d in deficiencies.ledger(include_all=True) if d.kind == deficiencies.WORKER_DENIAL
+    ]
+    assert row.detail == "`Bash(zig:*)`" and row.count == 2
+    assert row.status == deficiencies.PENDING  # two workers in one repository: an issue
+    assert {e["no_request"] for e in row.evidence} == {
+        "no capability request could be recorded: the state db was locked"
+    }
+    gh = FakeGh()
+    _reporter(gh, Wall(datetime.now(UTC))).flush()
+    (issue,) = gh.created()
+    assert "no request because `no capability request could be recorded" in issue["body"]
+
+
+# ── the nine issues, corrected once on the reporter's next pass ────────────
+
+
+def _reported_denial_row(
+    gh: FakeGh, wall: Wall, pattern: str, events: list[dict[str, Any]], *, worktree: str
+) -> str:
+    """A reported `worker-denial` issue about ``pattern``, and the denials behind it."""
+    from papaya_agent_runtime.state import store
+
+    run_id, tasks = _denial_tasks(2, repo=f"r{abs(hash(pattern)) % 10_000}")
+    conn = init_db()
+    for n, event in enumerate(events):
+        store.append_event(
+            conn,
+            kind="permission_denied",
+            payload={"tool": "Bash", "pattern": pattern, "worktree": worktree, **event},
+            run_id=run_id,
+            task_id=tasks[n % 2],
+        )
+    conn.close()
+    for task in tasks:
+        deficiencies.record(
+            deficiencies.WORKER_DENIAL,
+            f"`{pattern}`",
+            evidence={"pattern": pattern, "repo": "runtime", "task_id": task, "run_id": run_id},
+            scope="repo:runtime",
+            clock=wall,
+        )
+    _reporter(gh, wall, max_per_day=50).flush()
+    (url,) = [u for u, issue in gh.issues.items() if f"`{pattern}`" in issue["title"]]
+    return url
+
+
+def _nine(worktree: str) -> dict[int, tuple[str, list[dict[str, Any]]]]:
+    """The recorded denials behind each issue, as the live ledger holds them (paths made up)."""
+    gap = {"kind": "profile_gap", "in_family": False}
+    allowed = {"kind": "profile_gap", "in_family": True}
+    results = "/Users/someone/.claude/projects/-wt/0f0e/tool-results/b6s2oukvq.txt"
+    return {
+        138: (
+            "Bash(psql:*)",
+            [{**gap, "command": 'psql postgresql://localhost/app -c "select 1"'}],
+        ),
+        139: ("WebFetch", [{**gap, "tool": "WebFetch", "command": None}]),
+        142: (
+            "Bash(.venv/bin/python:*)",
+            [
+                {**gap, "command": ".venv/bin/python -m pytest tests -q"},
+                {**gap, "command": '.venv/bin/python -c "import app.main" 2>&1 | tail -20'},
+            ],
+        ),
+        140: (
+            "Bash(export:*)",
+            [
+                {**gap, "command": 'export PATH="$HOME/.nvm/versions/node/v24/bin:$PATH"'},
+                {**gap, "command": 'export PATH="$HOME/bin:$PATH" && pnpm exec vitest'},
+            ],
+        ),
+        127: (
+            "Bash(cp:*)",
+            [
+                {**gap, "command": f"cp {results} {worktree}/.ppy-evidence/tests.txt"},
+                {**gap, "command": f"cp /tmp/done-note.txt {worktree}/.ppy-evidence/note.txt"},
+                {**allowed, "command": "cp -R docs/generated/icons .ppy-evidence/icons"},
+            ],
+        ),
+        129: (
+            "Bash(xcrun:*)",
+            [
+                {
+                    **gap,
+                    "command": "xcrun xcresulttool get test-results tests --path "
+                    f"{worktree}/.ppy-evidence/run.xcresult",
+                },
+                {**gap, "command": 'xcrun simctl boot 07DC 2>&1; echo "booted"'},
+            ],
+        ),
+        130: (
+            "Bash(ppy:*)",
+            [
+                {**allowed, "command": 'ppy reflect 97 --self "grepped `cancelled` first"'},
+                {**allowed, "command": 'ppy progress 99 --phase done --note "HEAD 0e8\n# Gate"'},
+                {**allowed, "command": 'ppy progress 164 --phase done --note "$(cat n.txt)"'},
+            ],
+        ),
+        131: (
+            "Bash(tail:*)",
+            [
+                {**allowed, "command": "tail -n 6 /Users/someone/runtime/.ppy/memory/notes.md"},
+                {**gap, "command": "tail -30 /Users/someone/runtime/notes.md | head -5"},
+            ],
+        ),
+        126: (
+            "Bash(chrome-devtools-axi:*)",
+            [
+                {**gap, "command": "chrome-devtools-axi --help"},
+                {**allowed, "command": "chrome-devtools-axi open http://localhost:5199/harness"},
+                {**allowed, "command": "chrome-devtools-axi eval \"() => p['$ref']\""},
+            ],
+        ),
+    }
+
+
+def test_the_nine_worker_denial_issues_are_each_corrected_once(ppy_home, tmp_path) -> None:
+    worktree = str(tmp_path / "wt")
+    wall = Wall(datetime.now(UTC))
+    gh = FakeGh()
+    urls = {
+        number: _reported_denial_row(gh, wall, pattern, events, worktree=worktree)
+        for number, (pattern, events) in _nine(worktree).items()
+    }
+    assert all(gh.issues[u]["state"] == "OPEN" for u in urls.values())
+    reporter = _reporter(gh, wall)
+
+    closed = reporter.reclassify()
+
+    first = {n: gh.issues[u]["comments"][0].splitlines()[0] for n, u in urls.items()}
+    assert first == {
+        138: "re-classified as capability_request; closing.",
+        139: "re-classified as capability_request; closing.",
+        142: "re-classified as capability_request/command_shape; closing.",
+        140: "re-classified as command_shape; closing.",
+        127: "re-classified as command_shape/outside_worktree; closing.",
+        129: "re-classified as command_shape/learned; closing.",
+        130: "re-classified as command_shape; closing.",
+        131: "re-classified as command_shape/outside_worktree; closing.",
+        126: "left open: `Bash(chrome-devtools-axi:*)` is in the worker profile and the "
+        "harness still refused it.",
+    }
+    assert sorted(closed) == sorted(f"closed {u}" for n, u in urls.items() if n != 126)
+    assert gh.issues[urls[126]]["state"] == "OPEN"
+    note = gh.issues[urls[126]]["comments"][0]
+    assert "chrome-devtools-axi open http://localhost:5199/harness" in note
+    assert "a grant of what the worker already has would change nothing" in note
+    # The request path is named where it is the answer, and the exact rewrite where one is.
+    assert "ppy capability approve <id>" in gh.issues[urls[142]]["comments"][0]
+    assert "--note-file" in gh.issues[urls[130]]["comments"][0]
+    assert "ppy need <task id> --capability" in gh.issues[urls[140]]["comments"][0]
+    assert "ppy evidence add" in gh.issues[urls[127]]["comments"][0]
+
+    # Said once: the next start has nothing more to say to any of them.
+    assert reporter.reclassify() == []
+    assert all(len(gh.issues[u]["comments"]) == 1 for u in urls.values())
+    assert _row_status(urls[126]) == deficiencies.REPORTED
+    for n, url in urls.items():
+        if n != 126:
+            assert _row_status(url) == deficiencies.RECLASSIFIED
+
+
+def _row_status(url: str) -> str:
+    (row,) = [d for d in deficiencies.ledger(include_all=True) if d.issue_url == url]
+    return row.status
+
+
+def test_nothing_private_is_in_a_correcting_comment(ppy_home, tmp_path, privacy_leaks) -> None:
+    worktree = str(tmp_path / "wt")
+    wall = Wall(datetime.now(UTC))
+    gh = FakeGh()
+    for pattern, events in _nine(worktree).values():
+        _reported_denial_row(gh, wall, pattern, events, worktree=worktree)
+    _reporter(gh, wall).reclassify()
+    for issue in gh.issues.values():
+        for comment in issue["comments"]:
+            assert not leaked(comment), comment
+            assert "/Users/someone" not in comment
