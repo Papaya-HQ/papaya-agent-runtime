@@ -271,3 +271,295 @@ def test_the_worker_rules_say_to_ask_in_the_plan_phase() -> None:
     from papaya_agent_runtime.providers.command_rules import command_rules
 
     assert "ppy need <task id>" in command_rules("claude", "ppy/task-1-x")
+
+
+# ── every denial enters the loop, whatever the tool and whatever the stack ──
+#
+# 2026-09-22 (issues #139, #140, #142): a denied `WebFetch` could only ever become a
+# GitHub issue, `.venv/bin/python` became a request for `python` whose grant never
+# matched the refused command, and `export PATH=…` became a request for a program
+# called `export`.
+
+
+def _deny(task_id: int, command: str | None, *, tool: str = "Bash", worktree=None, use="t1"):
+    denial = {"tool_name": tool, "tool_use_id": use, "tool_input": {}}
+    if command is not None:
+        denial["tool_input"] = {"command": command}
+    tool_learning.learn([denial], task_id=task_id, run_id=None, worktree=worktree)
+    conn = init_db()
+    try:
+        return cr.all_requests(conn, task_id=task_id)
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def worktree(tmp_path):
+    """A worktree with its own interpreter in `.venv`, as a provisioned one has."""
+    root = tmp_path / "wt"
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    return root
+
+
+def _policy(auto_grant=(), never=()) -> None:
+    cfg = load_config()
+    cfg.capabilities.auto_grant = list(auto_grant)
+    cfg.capabilities.never = list(never)
+    save_config(cfg)
+
+
+# (a) a tool that is not the shell
+
+
+def test_a_denied_web_search_is_a_request_for_the_tool_the_manager_decides(home) -> None:
+    task_id = _task()
+
+    [request] = _deny(task_id, None, tool="WebSearch")
+
+    assert (request.program, request.pattern, request.state) == (
+        "WebSearch",
+        "WebSearch",
+        cr.PENDING,
+    )
+    assert any("`WebSearch`" in m and "waiting on the manager" in m for _t, m in home)
+
+
+def test_a_web_search_the_install_never_grants_is_refused_with_the_rule(home) -> None:
+    _policy(never=["WebSearch"])
+
+    [request] = _deny(_task(), None, tool="WebSearch")
+
+    assert request.state == cr.REFUSED
+    assert request.reason == tool_learning.policy_rule("WebSearch")
+
+
+def test_a_web_search_the_install_grants_is_in_the_next_launch_by_its_own_name(home) -> None:
+    _policy(auto_grant=["WebSearch"])
+    task_id = _task()
+
+    [request] = _deny(task_id, None, tool="WebSearch")
+
+    assert request.state == cr.AUTO_GRANTED
+    tools = _launch_tools(task_id)
+    assert "WebSearch" in tools and "Bash(WebSearch:*)" not in tools
+    assert "WebSearch" in load_config().claude.extra_tools
+
+
+def test_an_mcp_tool_name_is_a_capability_too(home) -> None:
+    _policy(never=["mcp__docs__delete"])
+    [request] = _deny(_task(), None, tool="mcp__docs__delete")
+    assert (request.pattern, request.state) == ("mcp__docs__delete", cr.REFUSED)
+
+
+@pytest.mark.parametrize("bad", ["Bash", "Bash(*)", "Web Fetch", "Web(Fetch)", "a:b"])
+def test_the_shell_itself_or_a_malformed_tool_is_never_a_capability(home, bad) -> None:
+    with pytest.raises(cr.CapabilityError):
+        cr.request(_task(), bad)
+    verdict = tool_learning.classify(bad, None, "/w")
+    assert verdict.pattern in ("", bad) and not verdict.pattern.startswith("Bash(")
+    if verdict.pattern:
+        assert cr.is_tool(bad)
+
+
+def test_a_tool_the_worker_already_has_refused_is_where_it_pointed(home) -> None:
+    verdict = tool_learning.classify("Read", None, "/w")
+    assert verdict.kind == tool_learning.OUTSIDE_WORKTREE
+    assert _deny(_task(), None, tool="Read") == []
+
+
+def test_a_declared_tool_is_asked_for_by_its_own_name(home, capsys) -> None:
+    task_id = _task()
+    assert main(["need", str(task_id), "--capability", "WebFetch", "--why", "read the docs"]) == 0
+    [request] = cr.all_requests(init_db(), task_id=task_id)
+    assert request.pattern == "WebFetch"
+
+
+# (b) a program named by path: decided by reach, granted in the shape that runs
+
+
+def test_the_worktrees_own_python_by_path_is_granted_as_that_path(home, worktree) -> None:
+    task_id = _task()
+
+    [request] = _deny(task_id, '.venv/bin/python -c "import app"', worktree=str(worktree))
+
+    assert (request.program, request.pattern, request.state) == (
+        "python",
+        "Bash(.venv/bin/python:*)",
+        cr.AUTO_GRANTED,
+    )
+    assert (request.path, request.reach) == (".venv/bin/python", cr.IN_WORKTREE)
+    assert "Bash(.venv/bin/python:*)" in _launch_tools(task_id)
+    # A path names one worktree's files: it is this task's, never every worker's.
+    assert "Bash(.venv/bin/python:*)" not in load_config().claude.extra_tools
+    assert "Bash(.venv/bin/python:*)" not in _launch_tools(_task())
+    assert any("granted as `Bash(.venv/bin/python:*)`" in m for _t, m in home)
+
+
+def test_a_venv_the_runtime_linked_to_the_base_clone_is_the_worktrees_own(home, tmp_path) -> None:
+    base = tmp_path / "base"
+    (base / ".venv" / "bin").mkdir(parents=True)
+    (base / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
+    root = tmp_path / "linked"
+    root.mkdir()
+    (root / ".venv").symlink_to(base / ".venv", target_is_directory=True)
+    conn = init_db()
+    repo_id = store.add_repo(
+        conn,
+        name="api",
+        origin="https://github.com/acme/api",
+        local_path=str(base),
+        default_branch="main",
+        base_sha=None,
+    )
+    task_id = store.add_task(conn, run_id=store.create_run(conn, "api"), title="t", repo_id=repo_id)
+    store.set_task_status(conn, task_id, "in_progress")
+    conn.close()
+
+    [request] = _deny(task_id, ".venv/bin/python -m pytest", worktree=str(root))
+
+    assert (request.reach, request.state) == (cr.IN_WORKTREE, cr.AUTO_GRANTED)
+
+
+def test_an_absolute_path_waits_on_the_manager_with_the_path_in_the_request(home) -> None:
+    task_id = _task()
+
+    [request] = _deny(task_id, "/opt/tool/bin/thing x", worktree="/w")
+
+    assert (request.state, request.reach, request.path) == (
+        cr.PENDING,
+        cr.ABSOLUTE,
+        "/opt/tool/bin/thing",
+    )
+    assert request.pattern == "Bash(/opt/tool/bin/thing:*)"
+    [problem] = [p for p in readiness.check().problems if p.code == cr.MANAGER_PROBLEM_CODE]
+    assert "/opt/tool/bin/thing" in problem.summary and "absolute path" in problem.summary
+
+
+def test_a_python_outside_the_worktree_is_never_granted_by_the_family(home, worktree) -> None:
+    [request] = _deny(_task(), "../other/bin/python -c 1", worktree=str(worktree))
+
+    assert (request.state, request.reach) == (cr.PENDING, cr.OUTSIDE)
+    assert request.resolved and request.resolved.endswith("/other/bin/python")
+
+
+def test_a_path_that_leaves_the_worktree_through_a_link_is_outside(
+    home, worktree, tmp_path
+) -> None:
+    elsewhere = tmp_path / "elsewhere" / "bin"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "python").write_text("#!/bin/sh\n")
+    (worktree / "tools").symlink_to(elsewhere, target_is_directory=True)
+
+    [request] = _deny(_task(), "tools/python -c 1", worktree=str(worktree))
+
+    assert (request.state, request.reach) == (cr.PENDING, cr.OUTSIDE)
+    assert request.resolved == str((elsewhere / "python").resolve())
+
+
+def test_a_dotdot_that_comes_back_inside_is_normalised_first(home, worktree) -> None:
+    [request] = _deny(_task(), ".venv/../.venv/bin/python -c 1", worktree=str(worktree))
+    assert (request.reach, request.state) == (cr.IN_WORKTREE, cr.AUTO_GRANTED)
+    assert request.pattern == "Bash(.venv/../.venv/bin/python:*)"
+
+
+def test_one_path_asked_twice_is_one_request_and_another_path_is_a_second(home, worktree) -> None:
+    (worktree / "bin").mkdir()
+    (worktree / "bin" / "python").write_text("#!/bin/sh\n")
+    task_id = _task()
+
+    _deny(task_id, ".venv/bin/python -c 1", worktree=str(worktree), use="a")
+    _deny(task_id, ".venv/bin/python -c 2", worktree=str(worktree), use="b")
+    found = _deny(task_id, "bin/python -c 3", worktree=str(worktree), use="c")
+
+    assert [r.pattern for r in found] == ["Bash(.venv/bin/python:*)", "Bash(bin/python:*)"]
+
+
+@pytest.mark.parametrize(
+    ("command", "auto_grant", "never", "state"),
+    [
+        (".venv/bin/python -c 1", (), (), cr.AUTO_GRANTED),  # the family
+        (".venv/bin/python -c 1", (), ("python",), cr.REFUSED),  # never beats the family
+        (".venv/bin/python -c 1", ("python",), ("python",), cr.REFUSED),  # and auto_grant
+        ("zig-out/bin/zig build", ("zig",), (), cr.AUTO_GRANTED),  # auto_grant beats pending
+        ("zig-out/bin/zig build", (), (), cr.PENDING),  # nothing grants it: the manager's
+    ],
+)
+def test_never_beats_auto_grant_beats_the_family_for_the_resolved_basename(
+    home, worktree, command, auto_grant, never, state
+) -> None:
+    _policy(auto_grant, never)
+    zig = worktree / "zig-out" / "bin"
+    zig.mkdir(parents=True)
+    (zig / "zig").write_text("#!/bin/sh\n")
+
+    [request] = _deny(_task(), command, worktree=str(worktree))
+
+    assert request.state == state
+
+
+def test_a_path_is_never_granted_to_every_worker(home) -> None:
+    [request] = _deny(_task(), "/opt/tool/bin/thing x", worktree="/w")
+
+    with pytest.raises(cr.CapabilityError, match="without --always"):
+        cr.decide_request(request.id, approve=True, always=True)
+    decided = cr.decide_request(request.id, approve=True)
+
+    assert decided.state == cr.GRANTED
+    conn = init_db()
+    assert cr.granted_patterns(conn, request.task_id) == ["Bash(/opt/tool/bin/thing:*)"]
+    assert "Bash(/opt/tool/bin/thing:*)" not in load_config().claude.extra_tools
+
+
+# A safe program refused for where or how it was used is not a grant (plan item 7)
+
+
+def test_a_family_write_outside_the_worktree_is_outside_and_asks_nobody(home) -> None:
+    task_id = _task()
+    for use, command in (("a", "cp /tmp/note.txt .ppy-evidence/"), ("b", "mkdir /tmp/x")):
+        assert _deny(task_id, command, worktree="/w", use=use) == []
+        assert tool_learning.classify("Bash", command, "/w").kind == tool_learning.OUTSIDE_WORKTREE
+
+
+def test_a_family_program_refused_for_its_arguments_waits_on_the_manager(home) -> None:
+    task_id = _task()
+    [request] = _deny(task_id, "rm -rf /w", worktree="/w")
+    assert (request.program, request.state, request.reach) == ("rm", cr.PENDING, cr.ARGUMENTS)
+    assert "Bash(rm:*)" not in load_config().claude.extra_tools
+    # One the profile already has cannot be granted into anything: the ledger's, not a request.
+    assert _deny(task_id, "find . -name '*.pyc' -delete", worktree="/w", use="t2") == [request]
+
+
+# (d) a stack nothing in the runtime has heard of
+
+
+def test_zig_goes_to_the_manager_then_the_launch_and_escalated_to_the_owner(home) -> None:
+    from datetime import UTC, datetime
+
+    from papaya_agent_runtime import outreach, papaya_events
+
+    conn = init_db()
+    run_id = store.create_run(conn, "ticket PAP-301")
+    ticket = store.add_task(conn, run_id=run_id, title="ticket PAP-301")
+    store.set_task_env(
+        conn, ticket, papaya_events.PAPAYA_EVENT_METADATA, json.dumps({"work_item_id": "PAP-301"})
+    )
+    task_id = store.add_task(conn, run_id=run_id, title="build it in zig")
+    store.set_task_status(conn, task_id, "in_progress")
+    conn.close()
+
+    [request] = _deny(task_id, "zig build test", worktree="/w")
+    assert (request.program, request.pattern, request.state) == ("zig", "Bash(zig:*)", cr.PENDING)
+
+    assert (
+        main(["capability", "escalate", str(request.id), "--why", "needs the org's zig cache"]) == 0
+    )
+    conn = init_db()
+    asks = [a for a in outreach.collect(conn) if a.kind == outreach.CAPABILITY]
+    said = outreach.message(conn, asks, now=datetime.now(UTC), host="mac")
+    assert "`zig`" in said and f"worker task {task_id}" in said and "[PAP-301]" in said
+    assert f"ppy capability approve {request.id}" in said
+
+    assert main(["capability", "approve", str(request.id)]) == 0
+    assert "Bash(zig:*)" in _launch_tools(task_id)
+    assert "Bash(zig:*)" not in load_config().claude.extra_tools

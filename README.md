@@ -889,9 +889,14 @@ the signals, recorded where they already happen:
   evidence. A `policy_refusal` (a program workers are never given, such as `sudo`,
   `curl` or `docker`) is counted per repository and never an issue; the worker is
   steered once with the rule it broke. A denial is recorded once per tool call, and a
-  retry of the same line within a minute is the same denial. At start, `serve`
-  re-classifies older `worker-denial` rows, and comments on and closes any issue whose
-  denials were never profile gaps. It closes a `turn-report` issue the same way, with
+  retry of the same line within a minute is the same denial. A denial that became a
+  capability request is the manager's and never a `worker-denial`; that kind is left
+  for a denial nothing carries (a pattern the profile already has, refused anyway, or
+  a request that could not be recorded), and its evidence says which. At start,
+  `serve` re-classifies older `worker-denial` rows, and comments on and closes any
+  issue whose denials are today a shape, a policy refusal, a place outside the
+  worktree, a capability request or learned, naming each route and its rewrite. It
+  closes a `turn-report` issue the same way, with
   one comment, when every occurrence came from a check-in a later fix made impossible:
   the round record that started the check-in names only fixed triggers
   (`deficiencies.FIXED_CHECKINS`) and lacks the field each fix added (for `push`,
@@ -1068,11 +1073,18 @@ All working state is under `.ppy/` (gitignored):
   dispatch. A plain command outside the family is a **capability request**, the same as
   one a worker declares in its plan with `ppy need <task> --capability <program> --why
   "..."`: this machine's policy (`ppy config capabilities --auto-grant/--never`) grants
-  or refuses it, and anything else waits on a person as a blocker with its commands,
-  `ppy capability approve <id> [--always]` (this task, or every worker here) or
-  `ppy capability deny <id> --reason "..."`. The worker is told the outcome and a
-  grant reaches it on its next launch. A command refused for its shape or by policy
-  never becomes a request, because no pattern would help. Every change is a `config_change` event:
+  or refuses it, and anything else is the manager's to decide, `ppy capability approve
+  <id> [--always]` (this task, or every worker here) or `ppy capability deny <id>
+  --reason "..."`, escalated to the connection owner (`ppy capability escalate <id>
+  --why "..."`) only when only they can decide. So is a denied tool that is not the
+  shell (`WebFetch`, `WebSearch`, an `mcp__…` tool), asked for and granted by its own
+  name, and a program run by path (`.venv/bin/python`), decided as its basename and
+  granted as that literal path to its task alone — by policy only when the path
+  resolves inside the worktree. The worker is told the outcome and a
+  grant reaches it on its next launch. A command refused for its shape (including a
+  shell builtin such as `export PATH=…` or `source .venv/bin/activate`), by policy, or
+  for pointing outside the worktree never becomes a request, because no pattern would
+  help. Every change is a `config_change` event:
   `ppy config history` lists them, and `ppy serve` start and `ppy doctor` print one
   line each. `ppy config claude --lock extra_tools` (or `dropped_tools`) stops the
   runtime changing a key; a change a lock refuses is a readiness warning naming it.

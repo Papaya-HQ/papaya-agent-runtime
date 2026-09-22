@@ -29,6 +29,19 @@ Now there is one loop, the same whether the worker declared the need or was deni
 Requests live on the event log (``capability_request``, ``capability_decision``), so
 there is no table to migrate and the history reads like the rest of a task's.
 
+A request carries the pattern that makes the refused call run, which is not always
+``Bash(<program>:*)`` (2026-09-22, issues #139 and #142):
+
+- **a tool that is not the shell** (`WebFetch`, `WebSearch`, an `mcp__…` tool) is
+  asked for by its own name, and its pattern is that name;
+- **a program named by path** is decided as its basename (`.venv/bin/python` is
+  `python` to the policy), and granted as the literal path it was run by,
+  `Bash(.venv/bin/python:*)`, because `Bash(python:*)` does not match it. The family
+  and ``auto_grant`` grant it only when the path resolves inside the worktree (its
+  ``reach``); an absolute path, or one that leaves the worktree, waits on the manager
+  with the resolved path in the request. A path is granted to its task alone, never
+  to every worker: it names one worktree's files.
+
     state \\ event  auto_grant    never     other     approve   approve --always  deny     escalate
     (new)          auto_granted  refused   pending   —         —                 —        —
     pending        —             —         —         granted   granted (+policy) denied   escalated
@@ -71,8 +84,23 @@ PROBLEM_CODE = "capability_request_pending"
 #: The readiness problem code for a request the manager has not decided yet.
 MANAGER_PROBLEM_CODE = "capability_request_undecided"
 
-_PROGRAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
-_PATTERN = re.compile(r"^Bash\(([A-Za-z0-9][A-Za-z0-9._+-]*)(?::\*)?\)$")
+#: Where a program named by path resolved (`tool_learning.path_reach`). Only
+#: :data:`IN_WORKTREE` may be granted by policy; the rest wait on the manager.
+IN_WORKTREE = "worktree"
+OUTSIDE = "outside"
+ABSOLUTE = "absolute"
+#: A safe-family program refused for its arguments (`find -exec`, `rm` of the worktree
+#: itself): the program is safe, what it was asked to do is not, so a person decides.
+ARGUMENTS = "arguments"
+
+_PROGRAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
+_PATTERN = re.compile(r"^Bash\(([A-Za-z0-9][A-Za-z0-9_.+-]*)(?::\*)?\)$")
+#: A tool the harness has besides the shell: `WebFetch`, `mcp__server__tool`.
+_TOOL = re.compile(r"^(?:mcp__[A-Za-z0-9_-]+|[A-Z][A-Za-z0-9]*)$")
+#: A program path a pattern can hold literally: no spaces, globs, parens or colons.
+_PATH = re.compile(r"^[A-Za-z0-9._+~/-]*/[A-Za-z0-9._+-]+$")
+#: The shell is never a capability by name: `Bash` alone would allow every command.
+SHELL_TOOL = "Bash"
 
 
 class CapabilityError(RuntimeError):
@@ -92,11 +120,23 @@ class Request:
     decided_by: str | None = None
     reason: str | None = None
     scope: str | None = None
+    #: The program as it was run, when it was named by path (`.venv/bin/python`).
+    path: str | None = None
+    #: Where that path resolved: :data:`IN_WORKTREE`, :data:`OUTSIDE`, :data:`ABSOLUTE`,
+    #: or :data:`ARGUMENTS` for a safe program refused for what it was asked to do.
+    reach: str | None = None
+    #: The path fully resolved, which is what a person deciding it needs to see.
+    resolved: str | None = None
+
+    @property
+    def label(self) -> str:
+        """What was asked for, as the worker ran it: the path when there was one."""
+        return self.path or self.program
 
     def line(self) -> str:
         why = f": {self.why}" if self.why else ""
         tail = f" ({self.reason})" if self.reason else ""
-        return f"request {self.id} · task {self.task_id} · `{self.program}` {self.state}{why}{tail}"
+        return f"request {self.id} · task {self.task_id} · `{self.label}` {self.state}{why}{tail}"
 
     def public(self) -> dict[str, Any]:
         return {
@@ -111,6 +151,9 @@ class Request:
             "decided_by": self.decided_by,
             "reason": self.reason,
             "scope": self.scope,
+            "path": self.path,
+            "reach": self.reach,
+            "resolved": self.resolved,
         }
 
 
@@ -125,20 +168,41 @@ def floor() -> frozenset[str]:
 
 
 def program_of(capability: str) -> str:
-    """The program a capability names: `xcodegen` or `Bash(xcodegen:*)`. Raises when unclear."""
+    """The program a capability names: `xcodegen` or `Bash(xcodegen:*)`. Raises when unclear.
+
+    A tool the harness has besides the shell is named the same way (`WebSearch`,
+    `mcp__server__tool`); the shell itself is not a capability.
+    """
     text = capability.strip()
     match = _PATTERN.match(text)
-    if match:
-        return match.group(1)
-    if _PROGRAM.match(text):
-        return text
+    name = match.group(1) if match else text if _PROGRAM.match(text) else ""
+    if name and name != SHELL_TOOL:
+        return name
     raise CapabilityError(
         f"`{capability}` is not a program name: name one program, e.g. `xcodegen` or "
-        "`Bash(xcodegen:*)`; a path, a wildcard or a compound command is never granted"
+        "`Bash(xcodegen:*)`, or one tool, e.g. `WebSearch`; a path, a wildcard, the shell "
+        "itself or a compound command is never granted"
     )
 
 
-def pattern_for(program: str) -> str:
+def is_tool(name: str) -> bool:
+    """Whether ``name`` is a harness tool (`WebFetch`, `mcp__x__y`) rather than a program."""
+    return name != SHELL_TOOL and bool(_TOOL.match(name))
+
+
+def pattern_for(program: str, *, path: str | None = None) -> str:
+    """The allowed-tools entry that lets the refused call run.
+
+    A tool is allowed by its bare name; a program by `Bash(<prefix>:*)`, whose prefix
+    the harness matches literally against the start of the command, so a program run
+    by path is granted by that path.
+    """
+    if path:
+        if not _PATH.match(path):
+            raise CapabilityError(f"`{path}` cannot be written as a tool pattern")
+        return f"Bash({path}:*)"
+    if is_tool(program):
+        return program
     return f"Bash({program}:*)"
 
 
@@ -192,6 +256,9 @@ def _load(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> list
                 "state": payload.get("state") or PENDING,
                 "command": payload.get("command"),
                 "reason": payload.get("reason"),
+                "path": payload.get("path"),
+                "reach": payload.get("reach"),
+                "resolved": payload.get("resolved"),
             }
         else:
             request = requests.get(int(payload.get("request_id") or 0))
@@ -243,8 +310,14 @@ def escalated(conn: sqlite3.Connection) -> list[Request]:
 
 
 def granted_patterns(conn: sqlite3.Connection, task_id: int) -> list[str]:
-    """The patterns granted to this task alone, for its next launch."""
-    return sorted({r.pattern for r in all_requests(conn, task_id=task_id) if r.state == GRANTED})
+    """Every pattern granted on this task's requests, for its next launch.
+
+    A path granted by policy lives here and nowhere else (it names one worktree); a
+    program or tool granted by policy is also in the install's profile, and saying it
+    twice costs nothing and keeps the task's launch right without a config file.
+    """
+    granted = (GRANTED, AUTO_GRANTED)
+    return sorted({r.pattern for r in all_requests(conn, task_id=task_id) if r.state in granted})
 
 
 def request(
@@ -254,8 +327,18 @@ def request(
     why: str = "",
     source: str = DECLARED,
     command: str | None = None,
+    path: str | None = None,
+    reach: str | None = None,
+    resolved: str | None = None,
 ) -> Request:
     """Record a need and decide what policy can. A repeat returns the existing request.
+
+    ``capability`` names the program (for a path, its basename) or the tool. ``path``
+    is the program as it was run when it was named by path, and ``reach`` where it
+    resolved; anything but :data:`IN_WORKTREE` waits on the manager whatever the
+    family or ``auto_grant`` would say, though ``never`` still refuses it. A repeat is
+    the same pattern on the same task: another path to the same program is another
+    request.
 
     The worker is steered when it has to hear something it did not ask to hear: every
     outcome of a request made from its denial, and a grant it declared, since a new
@@ -265,42 +348,44 @@ def request(
     from papaya_agent_runtime.state import init_db, store
 
     program = program_of(capability)
+    pattern = pattern_for(program, path=path)
     conn = init_db()
     try:
         task = store.get_task(conn, task_id)
         if task is None:
             raise CapabilityError(f"task {task_id} does not exist")
         existing = next(
-            (r for r in all_requests(conn, task_id=task_id) if r.program == program), None
+            (r for r in all_requests(conn, task_id=task_id) if r.pattern == pattern), None
         )
         if existing is not None:
             return existing
         state = decide(program)
+        if state == AUTO_GRANTED and (path or reach) and reach != IN_WORKTREE:
+            state = PENDING
         reason = None
         if state == REFUSED:
             from papaya_agent_runtime.tool_learning import policy_rule
 
             reason = policy_rule(program)
+        payload: dict[str, Any] = {
+            "program": program,
+            "pattern": pattern,
+            "why": why.strip(),
+            "source": source,
+            "state": state,
+            "command": command,
+            "reason": reason,
+        }
+        if path or reach:
+            payload.update(path=path, reach=reach, resolved=resolved)
         event_id = store.append_event(
-            conn,
-            kind=REQUEST_EVENT,
-            payload={
-                "program": program,
-                "pattern": pattern_for(program),
-                "why": why.strip(),
-                "source": source,
-                "state": state,
-                "command": command,
-                "reason": reason,
-            },
-            run_id=task["run_id"],
-            task_id=task_id,
+            conn, kind=REQUEST_EVENT, payload=payload, run_id=task["run_id"], task_id=task_id
         )
         made = get(conn, int(event_id))
     finally:
         conn.close()
     assert made is not None
-    if state == AUTO_GRANTED:
+    if state == AUTO_GRANTED and not made.path:
         _grant_for_install(made, by="policy")
     if source != DECLARED or state == AUTO_GRANTED:
         _tell_worker(made)
@@ -335,6 +420,11 @@ def decide_request(
             raise CapabilityError("say why it is denied: the worker is told the reason")
         if approve and found.program in _policy()[1]:
             raise CapabilityError(f"`{found.program}` is never granted to a worker")
+        if approve and always and found.path:
+            raise CapabilityError(
+                f"`{found.path}` names one worktree's files, so it is granted to task "
+                f"{found.task_id} alone: approve it without --always"
+            )
         store.append_event(
             conn,
             kind=DECISION_EVENT,
@@ -403,7 +493,7 @@ def _record_decision(conn, decided: Request, *, always: bool, run_id: int) -> No
         verb = "granted" if decided.state == GRANTED else "denied"
         record_decision(
             conn,
-            question=f"May a worker run `{decided.program}`?",
+            question=f"May a worker run `{decided.label}`?",
             answer=verb + (f": {decided.reason}" if decided.reason else ""),
             scope="global" if always else "task",
             run_id=run_id,
@@ -421,8 +511,8 @@ def _grant_for_install(granted: Request, *, by: str) -> None:
     from papaya_agent_runtime.config import effective_claude_tools, load_config, save_config
     from papaya_agent_runtime.paths import config_path
 
-    if not config_path().exists():
-        return
+    if granted.path or not config_path().exists():
+        return  # a path is its worktree's, never every worker's
     cfg = load_config()
     if granted.pattern in effective_claude_tools(cfg):
         return
@@ -448,11 +538,16 @@ def _grant_for_install(granted: Request, *, by: str) -> None:
 
 
 def worker_message(found: Request) -> str:
-    name = f"`{found.program}`"
+    name = f"`{found.label}`"
     if found.state in (GRANTED, AUTO_GRANTED):
+        again = (
+            "use the tool again"
+            if found.pattern == found.program
+            else "run the command again, exactly as you ran it, as one plain command"
+        )
         return (
-            f"Your request for {name} is granted. It is in your tool allowlist from your next "
-            "launch, which this message starts: run the command again, as one plain command."
+            f"Your request for {name} is granted as `{found.pattern}`. It is in your tool "
+            f"allowlist from your next launch, which this message starts: {again}."
         )
     if found.state == REFUSED:
         return f"Your request for {name} is refused. {found.reason or ''}".strip()
@@ -468,6 +563,19 @@ def worker_message(found: Request) -> str:
         "commit, report `--phase blocked` naming the request, and stop: you are resumed "
         "with the answer."
     )
+
+
+def where(found: Request) -> str:
+    """Why a path waits on the manager, with where it resolved; empty for anything else."""
+    if not found.path and found.reach != ARGUMENTS:
+        return ""
+    if found.reach == ARGUMENTS:
+        return " (a safe program refused for its arguments, so the family does not grant it)"
+    resolved = f" resolves to `{found.resolved}`" if found.resolved else ""
+    if found.reach == IN_WORKTREE:
+        return f" (`{found.path}`{resolved}, inside the worktree)"
+    place = "is an absolute path" if found.reach == ABSOLUTE else "leaves the worktree"
+    return f" (`{found.path}`{resolved}; it {place}, so no policy grants it)"
 
 
 def _tell_worker(found: Request) -> None:
@@ -497,12 +605,13 @@ def problems() -> list[Any]:
     for item in waiting:
         why = f" — {item.why}" if item.why else ""
         command = f" (denied `{item.command}`)" if item.command else ""
+        why += where(item)
         if item.state == PENDING:
             found.append(
                 Problem(
                     code=MANAGER_PROBLEM_CODE,
                     summary=(
-                        f"worker task {item.task_id} needs `{item.program}`{why}{command}: "
+                        f"worker task {item.task_id} needs `{item.label}`{why}{command}: "
                         f"request {item.id} is the manager's to decide"
                     ),
                     fix=(
@@ -512,7 +621,7 @@ def problems() -> list[Any]:
                     ),
                     owner=RUNTIME,
                     blocking=False,
-                    title=f"Decide whether a worker may run `{item.program}`",
+                    title=f"Decide whether a worker may run `{item.label}`",
                     scope=f"capability:{item.id}",
                 )
             )
@@ -521,7 +630,7 @@ def problems() -> list[Any]:
             Problem(
                 code=PROBLEM_CODE,
                 summary=(
-                    f"worker task {item.task_id} needs `{item.program}`{why}{command}: "
+                    f"worker task {item.task_id} needs `{item.label}`{why}{command}: "
                     f"request {item.id} is waiting on a person ({item.reason})"
                 ),
                 fix=(
@@ -530,9 +639,9 @@ def problems() -> list[Any]:
                 ),
                 owner=USER,
                 blocking=False,
-                title=f"A worker needs `{item.program}`",
+                title=f"A worker needs `{item.label}`",
                 steps=(
-                    f"worker task {item.task_id} asked to run `{item.program}`{why}",
+                    f"worker task {item.task_id} asked to run `{item.label}`{why}",
                     f"only you can decide it because: {item.reason}",
                     f"to allow it for this task: ppy capability approve {item.id}",
                     f"for every worker on this machine: ppy capability approve {item.id} --always",

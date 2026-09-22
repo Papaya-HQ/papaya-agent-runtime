@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 import test_serve
-from papaya_agent_runtime import deficiencies, tool_learning
+from papaya_agent_runtime import capability_requests, deficiencies, tool_learning
 from papaya_agent_runtime.config import MMConfig, load_config, save_config
 from papaya_agent_runtime.providers.base import ProviderEvent
 from papaya_agent_runtime.providers.claude import ClaudeAdapter
@@ -131,8 +131,12 @@ def test_three_identical_denials_in_one_second_record_once(ppy_home, steers) -> 
 
     (only,) = _recorded(task)
     assert (only["kind"], only["tool_use_id"]) == (tool_learning.PROFILE_GAP, "toolu_1")
-    (row,) = deficiencies.ledger(include_all=True)
-    assert row.count == 1
+    # One request carries it to the manager; a denial the loop carries is not an issue.
+    conn = init_db()
+    assert [r.program for r in capability_requests.all_requests(conn, task_id=task)] == [
+        "terraform"
+    ]
+    assert deficiencies.ledger(include_all=True) == []
 
 
 def test_a_live_permission_denied_line_carries_the_command_its_tool_use_ran() -> None:
@@ -264,6 +268,8 @@ def test_only_a_profile_gap_learns_or_opens_an_issue(ppy_home, steers) -> None:
             _denial(f"cd src && terraform plan -var n={n}", f"toolu_{n}c"),
             _denial(f"docker ps -a --filter n={n}", f"toolu_{n}d"),
             _denial(f"sudo ls /root/{n}", f"toolu_{n}e"),
+            # Allowed by the profile and refused anyway: nothing carries it but the ledger.
+            _denial(f"git status --short n{n}", f"toolu_{n}f"),
         )
     gh = FakeGh()
     _reporter(gh).flush()
@@ -271,11 +277,15 @@ def test_only_a_profile_gap_learns_or_opens_an_issue(ppy_home, steers) -> None:
     assert "Bash(python3:*)" not in load_config().claude.dropped_tools
     (issue,) = gh.created()
     assert issue["labels"] == [deficiencies.LABEL, deficiencies.WORKER_DENIAL]
-    assert "Bash(terraform:*)" in issue["title"]
+    assert "Bash(git:*)" in issue["title"]
+    assert "already in the worker profile" in issue["body"]
+    # The missing program went to the manager instead, once per task.
+    conn = init_db()
+    assert {r.program for r in capability_requests.pending(conn)} == {"terraform"}
     kinds = {d.kind for d in deficiencies.ledger(include_all=True)}
     assert kinds == {deficiencies.WORKER_DENIAL, deficiencies.PROMPT_CLARITY}
     assert tool_learning.counts()["api"] == {
-        tool_learning.PROFILE_GAP: 4,
+        tool_learning.PROFILE_GAP: 6,
         tool_learning.COMMAND_SHAPE: 2,
         tool_learning.POLICY_REFUSAL: 4,
     }
@@ -363,16 +373,17 @@ def test_serve_start_comments_on_and_closes_an_issue_whose_denials_changed_kind(
 
     assert gh.issues[cd]["state"] == "CLOSED"
     (comment,) = gh.issues[cd]["comments"]
-    assert comment == deficiencies.reclassified_body(["command_shape"])
     assert comment.startswith("re-classified as command_shape; closing")
+    # The exact rewrite, not the rule in general.
+    assert "Instead: `git status`, on its own" in comment
     assert gh.issues[docker]["state"] == "CLOSED"
     (comment,) = gh.issues[docker]["comments"]
     assert comment.startswith("re-classified as command_shape/policy_refusal; closing")
-    assert (gh.issues[terraform]["state"], gh.issues[terraform]["comments"]) == ("OPEN", [])
+    # A missing program is a request the manager decides now, not an issue.
+    assert gh.issues[terraform]["state"] == "CLOSED"
+    (comment,) = gh.issues[terraform]["comments"]
+    assert comment.startswith("re-classified as capability_request; closing")
+    assert "ppy capability approve <id>" in comment and "ppy capability escalate" in comment
     statuses = {d.detail: d.status for d in deficiencies.ledger(include_all=True)}
-    assert statuses == {
-        "`Bash(cd:*)`": deficiencies.RECLASSIFIED,
-        "`Bash(docker:*)`": deficiencies.RECLASSIFIED,
-        "`Bash(terraform:*)`": deficiencies.REPORTED,
-    }
-    assert [d.detail for d in deficiencies.ledger()] == ["`Bash(terraform:*)`"]
+    assert set(statuses.values()) == {deficiencies.RECLASSIFIED}
+    assert deficiencies.ledger() == []

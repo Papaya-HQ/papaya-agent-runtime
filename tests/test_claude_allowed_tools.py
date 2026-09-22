@@ -251,6 +251,16 @@ def test_a_resumed_worker_gets_the_same_profile(configured):
     assert _allowed_tools_arg(argv) == ",".join(effective_claude_tools(load_config()))
 
 
+def test_a_granted_bare_tool_name_and_a_literal_path_pattern_reach_the_launch(configured):
+    """What a capability request grants is not always `Bash(<program>:*)`: a tool that
+    is not the shell is allowed by its name, and a program run by path by that path."""
+    spec = _spec()
+    spec.granted_tools = ["WebSearch", "Bash(.venv/bin/python:*)", "mcp__docs__read"]
+    allowed = _allowed_tools_arg(ClaudeAdapter().start(spec)).split(",")
+    assert allowed[-3:] == ["WebSearch", "Bash(.venv/bin/python:*)", "mcp__docs__read"]
+    assert "Bash(WebSearch:*)" not in allowed
+
+
 def test_an_empty_profile_passes_no_allowlist_flag(configured, monkeypatch):
     monkeypatch.setenv(ALLOWED_TOOLS_ENV, "")
     assert _allowed_tools_arg(ClaudeAdapter().start(_spec())) is None
