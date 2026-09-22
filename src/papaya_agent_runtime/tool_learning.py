@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from papaya_agent_runtime.config import PPY_LAUNCHER_PATTERN
+from papaya_agent_runtime.providers import command_rules
 
 log = logging.getLogger("papaya_agent_runtime.tool_learning")
 
@@ -250,6 +251,11 @@ _SHAPE_REASON = (
     "split it into one command per call"
 )
 
+_EVIDENCE_REASON = (
+    "copying a session's saved tool output has one sanctioned command, `ppy evidence "
+    "add`; `cp` takes any path and stays refused"
+)
+
 
 def _program_of(command: str) -> str:
     try:
@@ -331,6 +337,13 @@ def classify(
         return Verdict("", False, "the command could not be read", COMMAND_SHAPE)
     program = words[0] if words else ""
     suggestion = _suggest(program)
+    if command_rules.saved_output_source(command) is not None:
+        # Judged before everything, including the operators: a worker copying its own
+        # session's saved output has an exact sanctioned replacement (`ppy evidence
+        # add`), and neither "split it into two calls" nor "cp reaches outside the
+        # worktree" is what it needs to hear. It is emphatically NOT a profile gap:
+        # `cp` must stay refused, which is the whole point of issue #127.
+        return Verdict(suggestion, False, _EVIDENCE_REASON, COMMAND_SHAPE, program)
     if _OPERATORS & set(bare) or "$(" in bare:
         return Verdict(suggestion, False, _SHAPE_REASON, COMMAND_SHAPE, program)
     if "=" in program and not program.startswith(("/", ".")):
@@ -663,7 +676,10 @@ def steer_worker(task_id: int, message: str) -> None:
 
 
 def shape_steer_message(
-    commands: list[str], branch: str | None, worktree: str | None = None
+    commands: list[str],
+    branch: str | None,
+    worktree: str | None = None,
+    task_id: int | str = "<task id>",
 ) -> str:
     """The exact command to run instead of each refused one, then the rules it broke.
 
@@ -675,7 +691,7 @@ def shape_steer_message(
     """
     from papaya_agent_runtime.providers.command_rules import command_rules, rewrites_for
 
-    rewrites = rewrites_for(commands, worktree)
+    rewrites = rewrites_for(commands, worktree, task_id)
     unmatched = [c for c in commands if all(r.command != c for r in rewrites)]
     said = [
         "These shell commands were refused for their shape, not for the program they ran, "
@@ -807,7 +823,7 @@ def _steer_about(
                 run_id=run_id,
                 task_id=task_id,
             )
-            steers.append(shape_steer_message(shapes, branch, worktree))
+            steers.append(shape_steer_message(shapes, branch, worktree, task_id))
         for payload in new:
             # One steer per hook, not per refused command: a worker that keeps
             # meeting the same hook has already been told the one thing to do.

@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -562,9 +563,30 @@ def _grouped(entries: Iterable[Mapping[str, Any]]) -> list[list[tuple[int, Mappi
     return list(groups.values())
 
 
+#: The evidence field marking an occurrence the provider's usage limit caused, not this
+#: deficiency: the provider's own words, kept so the issue can say what it was.
+LIMIT_EVIDENCE = "limit"
+
+#: The kinds whose occurrences are a manager turn's ending, so a usage limit can be what
+#: produced them. Deliberately narrow: re-reading a transcript that never was a turn's
+#: ending would judge the wrong thing.
+LIMIT_RE_READ_KINDS = frozenset({MISSED_TURN})
+
+
+def counted(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The occurrences that still count for this deficiency.
+
+    An occurrence :func:`Reporter._correct_limits` found was the provider's usage limit
+    is kept as evidence and stops counting: a turn the provider refused to run never
+    failed at its job, and counting it made the `missed-turn` report blame the manager
+    for the wall (issue #128, where 2 of 20 were plainly usage-limit deaths).
+    """
+    return [dict(e) for e in entries if not e.get(LIMIT_EVIDENCE)]
+
+
 def scope_groups(entries: Iterable[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
     """The occurrences grouped by the scope each happened in. See :func:`_grouped`."""
-    return [[entry for _, entry in group] for group in _grouped(entries)]
+    return [[entry for _, entry in group] for group in _grouped(counted(entries))]
 
 
 def _reached_at(spec: Kind, group: list[tuple[int, Mapping[str, Any]]]) -> int | None:
@@ -586,7 +608,7 @@ def met_threshold(spec: Kind, entries: Iterable[Mapping[str, Any]]) -> bool:
     ticket, "in one repository"). Counting across scopes makes those titles false, so
     it is counted here, once, for every kind.
     """
-    rows = list(entries)
+    rows = counted(entries)
     if spec.threshold <= 1:
         return bool(rows)
     return any(_reached_at(spec, group) is not None for group in _grouped(rows))
@@ -600,7 +622,7 @@ def reported_entries(spec: Kind, entries: Iterable[Mapping[str, Any]]) -> list[d
     that says one ticket was steered twice must not list another ticket's occurrence as
     evidence for it.
     """
-    rows = [dict(e) for e in entries]
+    rows = counted(entries)
     if spec.threshold <= 1:
         return rows
     reached = [
@@ -843,6 +865,8 @@ class Deficiency:
     closed_at: str | None = None
     #: When the runtime last tried to close it, whether or not the forge let it.
     close_tried_at: str | None = None
+    #: When this row's occurrences were re-read for usage-limit deaths. Set once.
+    limits_corrected_at: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Deficiency:
@@ -865,6 +889,7 @@ class Deficiency:
             reported_count=int(row["reported_count"] or 0),
             closed_at=_column(row, "closed_at"),
             close_tried_at=_column(row, "close_tried_at"),
+            limits_corrected_at=_column(row, "limits_corrected_at"),
         )
 
 
@@ -1414,6 +1439,87 @@ def superseded_body(kind: str, issue: str | None) -> str:
     )
 
 
+#: How much of a recorded transcript is read back when an occurrence is re-judged.
+#: `limits.classify_text` reads only the last non-empty line; this is generous room
+#: for it without pulling a whole turn's log into memory.
+TRANSCRIPT_TAIL_BYTES = 64 * 1024
+
+
+def transcript_tail(path: str, *, tail_bytes: int = TRANSCRIPT_TAIL_BYTES) -> str | None:
+    """The end of a recorded transcript, or ``None`` when it cannot be read.
+
+    Evidence stores the path redacted, so ``~`` is expanded here. ``None`` and "" are
+    different answers on purpose: a transcript that is gone leaves its occurrence
+    counted, and one that is empty says nothing either way.
+    """
+    text = str(path or "").strip()
+    if not text:
+        return None
+    try:
+        with open(Path(text).expanduser(), "rb") as handle:  # noqa: PTH123 - needs seek
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - tail_bytes))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def limit_of(entry: Mapping[str, Any], *, clock: Callable[[], datetime] | None = None) -> str:
+    """The provider's usage-limit line that ended this occurrence's turn, or ``""``.
+
+    The transcript recorded with the occurrence is read back and put through the one
+    classifier (`limits.classify_text`). A recorded occurrence has no exit code on file,
+    so a failing one is passed explicitly: the transcript exists because the runner
+    judged that turn to have missed its job, which is the ending being re-judged here.
+    """
+    from papaya_agent_runtime import limits
+
+    text = transcript_tail(str(entry.get("transcript") or ""))
+    if not text:
+        return ""
+    at = _at_of(entry) or (clock or (lambda: datetime.now(UTC)))()
+    limit = limits.classify_text(text, 1, at=at)
+    return limit.text if limit is not None else ""
+
+
+def _at_of(entry: Mapping[str, Any]) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(str(entry.get("at") or ""))
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def limits_corrected_body(deficiency: Deficiency, limited: int, before: int) -> str:
+    """The one correcting comment a row gets when some of its occurrences were the wall.
+
+    Closing when none are left, correcting the count when some genuine ones remain. One
+    comment, ever: the ledger stamps `limits_corrected_at` whether or not any moved.
+    """
+    spec = _spec(deficiency.kind)
+    plural = "occurrence" if limited == 1 else "occurrences"
+    head = (
+        "closing: every occurrence here was the provider's usage limit.\n\n"
+        if limited >= before
+        else f"correcting the count: {limited} of {before} occurrences here were the "
+        "provider's usage limit.\n\n"
+    )
+    tail = (
+        "Nothing here needs a person. The runtime no longer counts a limit-killed turn "
+        "as a missed one, and opens a true issue if this happens for real."
+        if limited >= before
+        else f"The remaining {before - limited} are genuine and this issue stands for them."
+    )
+    return _body_text(
+        f"{head}"
+        f"Those {plural} did not reach the provider: the turn's session was ended by a "
+        f"usage limit before it could do its job, which `{spec.title}` is not. The "
+        "runtime waits a usage limit out and runs the turn again (it did not always), "
+        "and the occurrences have been re-read from the transcripts recorded with them. "
+        f"{tail}"
+    )
+
+
 def miscounted_body(deficiency: Deficiency) -> str:
     """The one comment an issue opened on a cross-scope miscount gets as it closes."""
     spec = _spec(deficiency.kind)
@@ -1639,6 +1745,11 @@ class Reporter:
             closed_today = sum(1 for d in rows if (d.closed_at or "").startswith(today))
             # A miscount comes first: an issue that should never have been opened must
             # be corrected before this flush comments any more evidence onto it.
+            # Before either: an occurrence the provider's usage limit caused was never
+            # this deficiency at all, so it must stop counting before anything counts.
+            limited, closed_today = self._correct_limits(conn, rows, config, now, closed_today)
+            done += limited
+            rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
             corrected, closed_today = self._correct_miscounts(conn, rows, config, now, closed_today)
             done += corrected
             rows = [Deficiency.from_row(r) for r in conn.execute("SELECT * FROM deficiencies")]
@@ -1733,6 +1844,118 @@ class Reporter:
         for line in done:
             log.info("[deficiencies] %s", line)
         return done
+
+    def _correct_limits(
+        self,
+        conn: Any,
+        rows: list[Deficiency],
+        config: Settings,
+        now: datetime,
+        closed_today: int,
+    ) -> tuple[list[str], int]:
+        """Re-read each :data:`LIMIT_RE_READ_KINDS` row's occurrences for usage-limit deaths.
+
+        A manager turn the provider's usage limit ended never ran, so it did not fail at
+        its job. The runtime waits a limit out and runs the turn again, but it did not
+        always, and the occurrences from before that are still counted as missed turns:
+        issue #128 is twenty of them, two plainly ending "You've hit your weekly limit"
+        and "You've hit your session limit". Each occurrence's recorded transcript is read
+        back through :func:`limit_of`; one that classifies as a limit keeps its evidence
+        under :data:`LIMIT_EVIDENCE` and stops counting (:func:`counted`).
+
+        A transcript that is gone or unreadable leaves its occurrence counted — there is
+        no evidence to re-judge it on, and quietly dropping it would be the same kind of
+        untruth in the other direction.
+
+        Then, once per row ever (`limits_corrected_at`, stamped whether or not anything
+        moved), a REPORTED row whose counted occurrences dropped gets ONE correcting
+        comment: closing when none are left, saying how many of how many were the wall
+        when genuine ones remain. Like every other close it costs one of the day's
+        :attr:`Settings.max_per_day` and waits :data:`CLOSE_RETRY_AFTER_SECONDS` after a
+        refusal.
+        """
+        done: list[str] = []
+        for deficiency in rows:
+            if deficiency.kind not in LIMIT_RE_READ_KINDS:
+                continue
+            if deficiency.limits_corrected_at:
+                continue
+            before = len(counted(deficiency.evidence))
+            entries = [dict(entry) for entry in deficiency.evidence]
+            for entry in entries:
+                if entry.get(LIMIT_EVIDENCE):
+                    continue
+                text = limit_of(entry, clock=self._clock)
+                if text:
+                    entry[LIMIT_EVIDENCE] = redact(text, ())
+            still = len(counted(entries))
+            moved = before - still
+            if moved <= 0:
+                conn.execute(
+                    "UPDATE deficiencies SET limits_corrected_at = ? WHERE fingerprint = ?",
+                    (_stamp(self._clock), deficiency.fingerprint),
+                )
+                conn.commit()
+                continue
+            if deficiency.status == REPORTED and deficiency.issue_url:
+                if _tried_recently(deficiency, now) or closed_today >= config.max_per_day:
+                    continue  # the whole correction waits, so it is still said exactly once
+                closed_today += 1
+                conn.execute(
+                    "UPDATE deficiencies SET close_tried_at = ? WHERE fingerprint = ?",
+                    (_stamp(self._clock), deficiency.fingerprint),
+                )
+                conn.commit()
+                body = limits_corrected_body(deficiency, moved, before)
+                said = (
+                    self._end_issue(str(deficiency.issue_url), body)
+                    if still == 0
+                    else bool(self._forge.comment(str(deficiency.issue_url), body))
+                )
+                if not said:
+                    continue
+                done.append(
+                    f"closed {deficiency.issue_url}: every occurrence was the provider's "
+                    "usage limit"
+                    if still == 0
+                    else f"commented on {deficiency.issue_url}: {moved} of {before} "
+                    "occurrences were the provider's usage limit"
+                )
+            self._store_limits(conn, deficiency, entries, still)
+        return done, closed_today
+
+    def _store_limits(
+        self, conn: Any, deficiency: Deficiency, entries: list[dict[str, Any]], still: int
+    ) -> None:
+        """Write the re-read evidence back, with the row's count and status to match."""
+        if still == 0 and deficiency.status == REPORTED:
+            # Nothing of it is left: it goes back to watching with no issue of its own,
+            # exactly as a miscounted row does, so a genuine later miss opens a true one.
+            conn.execute(
+                "UPDATE deficiencies SET evidence = ?, count = ?, status = ?, issue_url = NULL, "
+                "opened_at = NULL, reported_count = 0, closed_at = NULL, "
+                "limits_corrected_at = ? WHERE fingerprint = ?",
+                (
+                    json.dumps(entries),
+                    still,
+                    WATCHING,
+                    _stamp(self._clock),
+                    deficiency.fingerprint,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE deficiencies SET evidence = ?, count = ?, reported_count = ?, "
+                "limits_corrected_at = ? WHERE fingerprint = ?",
+                (
+                    json.dumps(entries),
+                    still,
+                    min(deficiency.reported_count, still),
+                    _stamp(self._clock),
+                    deficiency.fingerprint,
+                ),
+            )
+        conn.commit()
 
     def _correct_miscounts(
         self,

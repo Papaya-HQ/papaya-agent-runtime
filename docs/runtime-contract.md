@@ -816,6 +816,19 @@ When the user gives you an objective:
    or repository fact settles it (`ppy decision list`, then `ppy answer <task_id>
    --answer ... --scope ...`). Escalate to the user only when the question is
    genuinely critical. Recorded answers are reused for equivalent questions.
+7. **A worker that stopped after posting its plan note is answered about the plan.**
+   It has written no verification and often no code, so there is nothing at its head
+   to review and no gate to run: the gate follow-up below does not apply to it, and
+   telling it to run one would be false. Both modes route it to the answer turn with
+   its plan note, its brief's plan-note gate wording, and nothing else; that turn ends
+   with one `PLAN-REPLY:` line, and that line reaches the worker verbatim under
+   "Manager reply to your plan note:" and is what resumes it. Every stopped worker at
+   its plan is answered, blocking gate or not — a stopped worker is waiting either way
+   — and a worker still *running* after a non-blocking plan note is left alone. A turn
+   that says no reply is a missed turn like any other: it is retried and then hands the
+   ticket back, and the worker is never resumed with a guess, which is exactly what a
+   blocking plan gate exists to prevent (PAP-278: task 187 posted its plan at 19:42:39Z
+   and was told seventeen seconds later that its "verification gate" had not finished).
 
 ## Reviewing and delivering
 
@@ -1109,7 +1122,7 @@ runtime's repository) is how the runtime tells its maintainers what is wrong wit
 A channel whose open issues are mostly stale or duplicated is one nobody reads — on
 2026-09-20 nine of the nineteen open issues were one crash fixed three days earlier, a
 28-comment storm went unread among them, and one issue said a check-in had steered the
-same ticket five times when it had steered five different tickets once each. Four rules
+same ticket five times when it had steered five different tickets once each. Five rules
 keep it true; they are in `deficiencies.py`, and nothing here needs doing by hand.
 
 - **Nothing stale opens.** A row is buried (`stale`, no issue) when **both** of these
@@ -1149,10 +1162,23 @@ keep it true; they are in `deficiencies.py`, and nothing here needs doing by han
   whose scope was blanked names no scope at all and counts only for itself, so an issue
   opened on such a miscount gets one comment saying so and closes, and its row goes back
   to `watching` — where a genuine second occurrence in one place opens a true issue.
+- **A turn the provider refused to run never failed at its job.** A manager turn ended
+  by a usage limit is waited out and run again, so it is not a missed turn — but the
+  occurrences recorded before that behaviour existed were still counted as misses, and
+  `missed-turn` blamed the manager for the provider's wall (issue #128 held twenty, two
+  of them ending "You've hit your weekly limit" and "You've hit your session limit").
+  Each such row's occurrences are re-read once from the transcripts recorded with them,
+  through the same classifier that pauses a live turn. One that classifies as a usage
+  limit keeps the provider's own words as evidence and stops counting; one whose
+  transcript is gone or unreadable stays counted, because there is nothing to re-judge
+  it on and dropping it would be untrue in the other direction. Then, once per row ever,
+  a reported row whose count dropped gets one correcting comment — saying how many of
+  how many were the wall, and closing back to `watching` when none are left.
 
-**Going back to an older build.** The ledger these rules use is schema 25: two columns
-on `deficiencies` (`closed_at`, `close_tried_at`) and two tables (`deficiency_aliases`,
-`runtime_builds`). An older build reading that database ignores all four — it opens and
+**Going back to an older build.** The ledger these rules use is schema 27: three columns
+on `deficiencies` (`closed_at`, `close_tried_at`, `limits_corrected_at`) and two tables
+(`deficiency_aliases`, `runtime_builds`). An older build reading that database ignores
+them all — it opens and
 comments as it always did, and the worst it does is open an issue this version would
 have held back, or comment on one this version had closed (which is a recurrence
 comment, so the issue reopens rather than duplicating). It never drops the columns, and
@@ -1245,6 +1271,29 @@ task id the command names, never from the process's working directory. A note re
 event ledger and from there pull request bodies and comments; a flag that read any path
 would be a way to publish `~/.ssh/id_rsa` or the state database with one allowed `ppy`
 call, which a worker's own Read tool would refuse.
+
+### A long command's output goes in the evidence directory with one command
+
+`ppy evidence add <source> --task <id> [--as <name>] [--force]` copies **one** file into
+that task's evidence directory. It exists because a worker cannot see a large tool result
+in full: the harness writes it to a file under the session's own `tool-results` directory
+and shows a preview, so keeping a whole build or test log as a receipt means copying that
+file. Workers worked this out and reached for `cp`; issue #127 is ten refusals, every one
+of them a worker copying its own saved output.
+
+Those refusals were right and stay right. `cp` takes any path, so `cp` in a worker's
+profile is a way to publish `~/.ssh/id_rsa`, and **no `CLAUDE_PROFILE` change is the fix
+here**. The narrower command is. After strict resolution — symlinks followed — the source
+must be either inside the named task's own worktree, or
+`<claude projects>/<project>/<session id>/tool-results/<file>` where the session id is one
+the supervisor recorded **for that task**; and in both cases a regular file, owned by the
+user running it, under the size cap. Anything else is refused by name. The destination is
+one bare filename, never overwritten without `--force`, and the task is the one on the
+command line, never the working directory.
+
+Pinning the session id is what makes the second place safe. A resumed task has several —
+the `sessions` row keeps only the newest — so the set is that row together with every
+distinct session id in the task's own events, and nothing else.
 
 ## Mode parity — you work the same in a session as under `ppy serve`
 

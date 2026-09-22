@@ -12,7 +12,8 @@ Two decisions live here so far:
   recorded gate at head and by what its worktree holds that its branch does not.
   Green is reviewable; red is sent back with the gate's summary; no gate after a stop
   is sent back to `ppy gate run`; the same red twice is a person's decision;
-  uncommitted work is sent back to commit or discard.
+  uncommitted work is sent back to commit or discard. A stop whose newest progress
+  note is `plan` is none of those: it is answered about its plan (:data:`PLAN`).
 - **Check-ins** (:func:`checkins_due`, :func:`plan_reminder`, :func:`person_has_it`,
   :func:`worker_checkins`, :func:`record_checkin`): a live worker silent past its
   budget, planning too long, running past its midpoint, or not pushing is checked on,
@@ -35,6 +36,14 @@ log = logging.getLogger("papaya_agent_runtime.supervision")
 REVIEW = "review"
 STEER = "steer"
 PERSON = "person"
+#: A worker that stopped at its plan note. Not a gate follow-up at all: there is no
+#: gate to run, so it is answered about its plan (an answer turn) and resumed with
+#: that answer. See :func:`decide_gate`.
+PLAN = "plan"
+
+#: The progress phase a worker's newest note carries when it has committed to a plan
+#: and nothing since. `store.PROGRESS_NOTE` phases are the worker's own words.
+PLAN_PHASE = "plan"
 
 #: Past this many plan budgets, a worker still planning gets the plan check-in whatever
 #: it is doing.
@@ -56,14 +65,34 @@ class GateFollowup:
     message: str = ""
 
 
-def decide_gate(recorded: Any, *, stopped: bool, detail: str, worker_id: int) -> GateFollowup:
+def decide_gate(
+    recorded: Any,
+    *,
+    stopped: bool,
+    detail: str,
+    worker_id: int,
+    phase: str | None = None,
+    plan_gate: str = "",
+) -> GateFollowup:
     """Judge a worker by its recorded gate at head (a `gate.Verdict`). No I/O.
 
     - the same red twice: a person's decision (re-running cannot change it);
     - green: reviewable;
     - red: sent back with the gate's summary;
-    - none after a stop: sent back to run `ppy gate run`;
+    - a stop whose newest progress note is `plan`, with no gate result: answered about
+      its plan, never sent to a gate (see below);
+    - none after any other stop: sent back to run `ppy gate run`;
     - none after a done note: reviewable (the review re-checks).
+
+    ``phase`` is the worker's newest progress phase (`turn_end.latest_phase`) and
+    ``plan_gate`` its brief's plan-note wording (`brief_lint.plan_note_gate`). A worker
+    that posted `--phase plan` and ended its turn has written no verification and often
+    no code, so the gate message is simply false about it: PAP-278's task 187 was told
+    its session "ended before your verification gate finished" two seconds after posting
+    a plan, and where a brief made the plan gate blocking that steer defeated the gate a
+    person had asked for. Every stopped worker at its plan is answered, blocking or not
+    — a stopped worker is waiting either way — and ``plan_gate`` tells the answer whether
+    approval was required or it may simply say proceed.
     """
     from papaya_agent_runtime import gate, serve
 
@@ -73,10 +102,24 @@ def decide_gate(recorded: Any, *, stopped: bool, detail: str, worker_id: int) ->
         return GateFollowup(REVIEW, recorded.result.line())
     if recorded.state == gate.NONE and not stopped:
         return GateFollowup(REVIEW, "no gate result recorded at its head")
+    if stopped and recorded.result is None and phase == PLAN_PHASE:
+        return GateFollowup(
+            PLAN,
+            "stopped after posting its plan note",
+            serve.plan_answer_message(worker_id, plan_gate),
+        )
     message = serve.gate_steer_message(detail, worker_id, recorded.result)
     if recorded.result is not None:
         return GateFollowup(STEER, recorded.result.line(), message)
     return GateFollowup(STEER, "stopped with no gate result recorded at its head", message)
+
+
+def repo_name(conn: Any, task: Any) -> str:
+    """The repository a task was dispatched into, by name, or ``""``."""
+    if task is None or task["repo_id"] is None:
+        return ""
+    row = conn.execute("SELECT name FROM repos WHERE id = ?", (task["repo_id"],)).fetchone()
+    return str(row["name"]) if row else ""
 
 
 def decide_commit(files: list[str] | None, branch: str | None) -> GateFollowup | None:
@@ -91,24 +134,42 @@ def decide_commit(files: list[str] | None, branch: str | None) -> GateFollowup |
 
 
 def gate_followup(worker_task_id: int, *, stopped: bool, detail: str = "") -> GateFollowup:
-    """Read a worker's record and decide: uncommitted work first, then its gate. Never raises."""
-    from papaya_agent_runtime import gate, serve
+    """Read a worker's record and decide: uncommitted work first, then its gate. Never raises.
+
+    A stop at the plan note is the one exception to "uncommitted work first": a worker
+    that has only planned may well have written nothing, and what it needs is an answer,
+    not a commit. So its phase is read before the worktree is.
+    """
+    from papaya_agent_runtime import gate, serve, turn_end
     from papaya_agent_runtime.state import init_db, store
 
     try:
         conn = init_db()
         try:
             task = store.get_task(conn, worker_task_id)
+            phase = turn_end.latest_phase(conn, worker_task_id)
+            repo = repo_name(conn, task)
         finally:
             conn.close()
+        recorded = gate.verdict(worker_task_id)
+        if stopped and recorded.result is None and phase == PLAN_PHASE:
+            return decide_gate(
+                recorded,
+                stopped=True,
+                detail=detail,
+                worker_id=worker_task_id,
+                phase=phase,
+                plan_gate=serve.brief_plan_gate(repo, worker_task_id),
+            )
         branch = task["branch"] if task is not None else None
         commit = decide_commit(serve.uncommitted_files(worker_task_id), branch)
         if commit is not None:
             return commit
-        recorded = gate.verdict(worker_task_id)
     except Exception:  # noqa: BLE001 - an unreadable record decides nothing
         return GateFollowup(REVIEW, "its gate record could not be read")
-    return decide_gate(recorded, stopped=stopped, detail=detail, worker_id=worker_task_id)
+    return decide_gate(
+        recorded, stopped=stopped, detail=detail, worker_id=worker_task_id, phase=phase
+    )
 
 
 # ── check-ins ───────────────────────────────────────────────────────────────

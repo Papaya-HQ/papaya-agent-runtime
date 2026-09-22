@@ -230,6 +230,13 @@ def collect(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ow
                 next_step = f"send it back: `ppy followup {task_id} --send` ({followup.line})"
             elif followup.action == supervision.PERSON:
                 next_step = f"decide on it: {followup.line} (`ppy task show {task_id}`)"
+            elif followup.action == supervision.PLAN:
+                # No gate to run and nothing at its head: it is waiting on an answer
+                # to the plan it posted, which is the answer turn's to write.
+                next_step = (
+                    f"read its plan and reply: `ppy progress {task_id}`, then "
+                    f'`ppy steer {task_id} --message "..."`'
+                )
         owed.append(
             Owed(
                 task_id=task_id,

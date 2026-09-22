@@ -115,6 +115,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         interactive=("papaya_agent_runtime.owed", "papaya_agent_runtime.cli"),
     ),
     Capability(
+        "plan_stop_answered",
+        SHARED,
+        "a worker that stopped after posting its plan note is answered about the plan, "
+        "never sent to a gate, and resumed with that answer verbatim",
+        serve=("TicketRunner._answer_plan", "TicketRunner._plan_facts"),
+        shared="papaya_agent_runtime.supervision",
+        interactive=("papaya_agent_runtime.lanes", "papaya_agent_runtime.owed"),
+    ),
+    Capability(
         "pull_request_repair",
         SHARED,
         "a delivered pull request that is red, conflicted, behind or reviewed is repaired",

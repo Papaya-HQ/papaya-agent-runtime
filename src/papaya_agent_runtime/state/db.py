@@ -14,7 +14,7 @@ from pathlib import Path
 
 from papaya_agent_runtime.paths import db_path
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # Five seconds is SQLite's driver default, but this runtime has a supervisor,
 # guardian threads, and worker processes writing concurrently. Thirty seconds
@@ -338,7 +338,11 @@ CREATE TABLE IF NOT EXISTS deficiencies (
     closed_at TEXT,
     -- When the runtime last tried to close it. A forge that refuses is tried again
     -- later, not on every flush.
-    close_tried_at TEXT
+    close_tried_at TEXT,
+    -- When this row's occurrences were re-read for endings that were the provider's
+    -- usage limit rather than the deficiency (`deficiencies.Reporter._correct_limits`).
+    -- Set once: the re-read and its one correcting comment never happen twice.
+    limits_corrected_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_deficiencies_status ON deficiencies(status, first_seen);
 
@@ -526,9 +530,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if col not in action_cols:
                 conn.execute(f"ALTER TABLE improvement_actions ADD COLUMN {col} TEXT")
     deficiency_cols = _column_names(conn, "deficiencies")
-    for col in ("closed_at", "close_tried_at"):
+    for col in ("closed_at", "close_tried_at", "limits_corrected_at"):
         # When the runtime closed the issue itself, and when it last tried. Unset on
         # every existing row, which is right: nothing closed one before these existed.
+        # `limits_corrected_at` likewise: every existing row is still to be re-read,
+        # which is exactly what this change is for.
         if col not in deficiency_cols:
             conn.execute(f"ALTER TABLE deficiencies ADD COLUMN {col} TEXT")
     if "said_fingerprint" not in _column_names(conn, "outreach"):

@@ -2320,6 +2320,114 @@ def test_a_worker_stopped_mid_gate_is_sent_back_and_reviewed_only_once_done(
     assert harness.results[0]["exit_code"] == 0
 
 
+PLAN_BRIEF = """\
+# Make it blue
+
+## Goals
+- Blue.
+
+## Plan-note gate
+
+blocking: stop after posting and wait for the manager's reply.
+"""
+
+
+def _stopped_at_its_plan(worker: int, *, brief: str | None = PLAN_BRIEF) -> None:
+    """The exact shape of PAP-278's task 187: a plan note, then the turn ends."""
+    from papaya_agent_runtime import preflight
+
+    worker_event(
+        worker,
+        "worker_progress",
+        phase="plan",
+        note="H1 confirmed; here is what I intend to build",
+    )
+    if brief is not None:
+        preflight.archive_brief("runtime", worker, brief)
+    worker_event(
+        worker,
+        "worker_stopped",
+        status="worker_stopped",
+        summary="worker stopped before done: the latest progress note is 'plan', not a done note",
+    )
+
+
+def test_a_worker_that_stopped_at_its_plan_is_answered_never_sent_to_a_gate(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """PAP-278: task 187 posted its plan and was told to run a gate on code that did not exist."""
+    steers: list[tuple[int, str]] = []
+
+    def steer(task_id: int, message: str) -> None:
+        steers.append((task_id, message))
+        worker_event(task_id, "resumed", status="in_progress", message=message)
+
+    def act(turn: Turn) -> str | None:
+        if turn.name == prompts.BRIEF:
+            _brief_dispatches(turn)
+            return None
+        if turn.name == prompts.ANSWER:
+            return "PLAN-REPLY: Approved as posted; build it."
+        _deliver(turn)
+        return None
+
+    turns = FakeTurns(act)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(harness, client_home, _runner(turns, FakePapaya(), steer=steer))
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        _stopped_at_its_plan(worker)
+        await _until(lambda: steers, what="the runner to answer the plan")
+        worker_event(worker, "worker_done", status="worker_done", summary="gate: 900 passed")
+        await _until(lambda: harness.results, what="the ticket to be delivered")
+        harness.loop.request_stop()
+        return await runner
+
+    assert asyncio.run(scenario()) == 0
+
+    assert turns.names() == [prompts.BRIEF, prompts.ANSWER, prompts.REVIEW]
+    ((steered, message),) = steers
+    assert steered == workers_in(int(ticket_task()["run_id"]))[0]
+    # Verbatim, and labelled so the worker knows what it is answering.
+    assert message == "Manager reply to your plan note: Approved as posted; build it."
+    assert "ppy gate run" not in message and "verification gate finished" not in message
+    facts = turns.calls[1].prompt
+    assert "- the worker stopped at its plan note:" in facts
+    assert "H1 confirmed; here is what I intend to build" in facts
+    assert "blocking: the worker was told to wait for your reply" in facts
+    assert any("resumed with the manager's reply to its plan" in d for _s, _p, d in progress_lines)
+
+
+def test_a_plan_answer_turn_that_says_nothing_twice_hands_the_ticket_back(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """No `PLAN-REPLY:` line is a missed turn: the worker is never resumed with a guess."""
+    steers: list[tuple[int, str]] = []
+    turns = FakeTurns(lambda turn: _brief_dispatches(turn) if turn.name == prompts.BRIEF else None)
+    harness = Harness(FakeEvents([EVENT]))
+
+    async def scenario() -> int:
+        runner = _serve_ticket(
+            harness,
+            client_home,
+            _runner(turns, FakePapaya(), steer=lambda t, m: steers.append((t, m))),
+        )
+        await _until(lambda: serve.PHASE_DISPATCHED in history(), what="the dispatch")
+        (worker,) = workers_in(int(ticket_task()["run_id"]))
+        _stopped_at_its_plan(worker)
+        await _until(lambda: harness.results, what="the ticket to be handed back")
+        harness.loop.request_stop()
+        return await runner
+
+    asyncio.run(scenario())
+
+    assert steers == []
+    assert turns.names() == [prompts.BRIEF, prompts.ANSWER, prompts.ANSWER]
+    assert serve.PHASE_DECLINED in history()
+
+
 def test_a_refused_gate_steer_gives_the_review_turn_the_failure(
     ppy_home, client_home, ready, registered_repo
 ) -> None:

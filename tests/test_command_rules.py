@@ -12,8 +12,9 @@ import time
 
 import pytest
 
-from papaya_agent_runtime import prompts, repos
+from papaya_agent_runtime import prompts, repos, tool_learning
 from papaya_agent_runtime.config import MMConfig, WorkerCeiling, save_config
+from papaya_agent_runtime.providers import command_rules as command_rules_module
 from papaya_agent_runtime.providers.base import TaskSpec
 from papaya_agent_runtime.providers.claude import ClaudeAdapter
 from papaya_agent_runtime.providers.codex import CodexAdapter
@@ -52,6 +53,69 @@ def test_the_block_states_every_rule():
     assert "git push origin HEAD:ppy/task-7-abc" in text
     assert "Do not try to open a pull request" in text
     assert "the manager opens the PR from it" in text
+
+
+#: The commands issue #127 records, verbatim from the runtime's own ledger. Every one
+#: is a worker copying ITS OWN session's saved output into its evidence directory.
+REFUSED_COPIES = (
+    (
+        "cp /Users/x/.claude/projects/-Users-x--treehouse-fe-bbcd55-2-fe/"
+        "e016105b-c59d-4df4-9ca4-8772fea6f1eb/tool-results/baukveark.txt "
+        "/Users/x/.treehouse/fe-bbcd55/2/fe/.ppy-evidence/blocks-build.txt",
+        "blocks-build.txt",
+    ),
+    (
+        'cp "/Users/x/.claude/projects/-Users-x--treehouse-fe-bbcd55-2-fe/'
+        'dfbdaa86-4b18-4b4f-ad65-77345a141f6c/tool-results/b6s2oukvq.txt" '
+        '"/Users/x/.treehouse/fe-bbcd55/2/fe/.ppy-evidence/ios-build-1890a0aa.txt"',
+        "ios-build-1890a0aa.txt",
+    ),
+    (
+        'cp "/Users/x/.claude/projects/-Users-x--treehouse-pa-19e1b0-1-pa/'
+        '40e89601-3930-4195-8832-943dd6330015/tool-results/bsit98i9i.txt" '
+        "/tmp/mutation-revert-output.txt\nwc -l /tmp/mutation-revert-output.txt",
+        "mutation-revert-output.txt",
+    ),
+)
+
+
+def test_the_rules_tell_a_worker_how_to_keep_a_long_commands_output():
+    """Issue #127: the refusals were right and left no sanctioned way to keep a receipt."""
+    text = command_rules("claude", "ppy/task-7-abc")
+
+    assert "ppy evidence add" in text and "tool-results" in text
+    assert "Do NOT `cp` it" in text
+
+
+@pytest.mark.parametrize(("refused", "name"), REFUSED_COPIES)
+def test_each_refused_copy_from_issue_127_gets_the_exact_command_to_run_instead(refused, name):
+    rewrite = command_rules_module.rewrite_for(refused, "/Users/x/.treehouse/fe-bbcd55/2/fe", 180)
+
+    assert rewrite is not None and rewrite.runnable
+    assert rewrite.instead.startswith("`ppy evidence add /Users/x/.claude/projects/")
+    assert f"--task 180 --as {name}`" in rewrite.instead
+    # Never "split it into two calls": the third of these carries a newline, and the
+    # answer to both halves is the one command, not the shape rule.
+    assert "one command per call" not in rewrite.instead
+
+
+def test_a_refused_copy_is_not_a_profile_gap_because_cp_must_stay_refused():
+    refused, _name = REFUSED_COPIES[0]
+
+    verdict = tool_learning.classify("Bash", refused, "/Users/x/.treehouse/fe-bbcd55/2/fe")
+
+    assert verdict.kind == tool_learning.COMMAND_SHAPE
+    assert not verdict.in_family
+    assert "ppy evidence add" in verdict.reason
+
+
+def test_the_evidence_command_is_never_rewritten_into_itself():
+    already = (
+        "ppy evidence add /Users/x/.claude/projects/-p/"
+        "e016105b-c59d-4df4-9ca4-8772fea6f1eb/tool-results/a.txt --task 5 --as a.txt"
+    )
+
+    assert command_rules_module.rewrite_for(already, "/Users/x/wt", 5) is None
 
 
 def test_the_block_tells_the_worker_to_run_the_suite_in_the_foreground():
