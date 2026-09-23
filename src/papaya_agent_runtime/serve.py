@@ -4504,7 +4504,9 @@ def keep_state_right(*, stderr) -> None:
     forge's HEAD unless it was pinned (`repos.keep_base_clones_right`) — and every
     repository's gates are read again from what it says and what its pull-request
     workflows run, keeping every answer a person set and dropping the old heuristics'
-    guesses (`solicit.keep_gate_policies_right`). A remedy that cannot finish says why
+    guesses (`solicit.keep_gate_policies_right`), and every repository's database
+    isolation is read from its compose file and Makefile rather than asked for
+    (`environment.keep_isolation_right`). A remedy that cannot finish says why
     and never stops `serve` from starting.
     """
     from papaya_agent_runtime import repos
@@ -4535,6 +4537,13 @@ def keep_state_right(*, stderr) -> None:
     from papaya_agent_runtime import solicit
 
     for line in solicit.keep_gate_policies_right():
+        _say(line, stderr=stderr)
+    # The same rule for the database the gates run against: the compose file and the
+    # Makefile already say which port and which role, so read them rather than asking
+    # a person to type them back (`environment.keep_isolation_right`).
+    from papaya_agent_runtime import environment as environment_module
+
+    for line in environment_module.keep_isolation_right():
         _say(line, stderr=stderr)
 
 

@@ -606,9 +606,12 @@ def _gate_isolation_problems(problems: list[Problem]) -> None:
                 "can fail another's: " + ", ".join(gaps)
             ),
             fix=(
-                "`ppy repo set <name> --compose-stack yes --db-port-base <port> "
-                "--db-port-variable <the Makefile's port variable> "
-                '--test-db-url-template "postgresql://...:{port}/<db>_{task_id}"`'
+                "the runtime reads these from the repository at every start "
+                "(`environment.keep_isolation_right`), and these repositories say nothing "
+                "it recognises: no database service publishing 5432 in a compose file with "
+                "a port it can name. Say it here instead: `ppy repo set <name> "
+                "--compose-stack yes --db-port-base <port> --db-port-variable <the port "
+                'variable> --test-db-url-template "postgresql://...:{port}/<db>_{task_id}"`'
             ),
             owner=USER,
             blocking=False,

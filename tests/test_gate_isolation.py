@@ -227,3 +227,176 @@ def test_readiness_warns_on_a_compose_repo_whose_gates_can_share_a_database(
     problem = warning()
     assert problem is not None
     assert "ships a compose file but declares no compose stack" in problem.summary
+
+
+# --------------------------------------------------------------------------- #
+# The repository already answers this: read it, do not ask a person (2026-09-22)
+# --------------------------------------------------------------------------- #
+
+POLYWEAVE_COMPOSE = """\
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: polyweave
+      POSTGRES_PASSWORD: polyweave
+      POSTGRES_DB: polyweave
+    ports:
+      # 5440 stays clear of the backend stack
+      - '${POLYWEAVE_DB_PORT:-5440}:5432'
+"""
+
+#: papaya-backend's shape: the compose file publishes the *superuser*, and the
+#: database its services actually use is named only in the Makefile.
+BACKEND_COMPOSE = """\
+services:
+  db:
+    image: papaya-shared-postgres:pg18-pgvector
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "${PAPAYA_DB_PORT:-5433}:5432"
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+"""
+
+BACKEND_MAKEFILE = """\
+PAPAYA_DB_PORT        ?= 5433
+BACKEND_DATABASE_URL  ?= postgresql+asyncpg://lightwork:lightwork@localhost:$(PAPAYA_DB_PORT)/lightwork
+"""
+
+
+def test_a_compose_file_answers_the_port_the_variable_and_the_database(tmp_path) -> None:
+    clone = tmp_path / "polyweave"
+    clone.mkdir()
+    (clone / "docker-compose.yml").write_text(POLYWEAVE_COMPOSE)
+
+    derived = environment.derive_isolation(clone)
+
+    assert derived is not None
+    assert derived.db_port_base == 5440
+    assert derived.db_port_variable == "POLYWEAVE_DB_PORT"
+    assert (
+        derived.test_db_url_template
+        == "postgresql://polyweave:polyweave@localhost:{port}/polyweave_test_{task_id}"
+    )
+    assert derived.evidence == "repo:docker-compose.yml:10"
+
+
+def test_the_makefiles_role_beats_the_compose_superuser(tmp_path) -> None:
+    """papaya-backend publishes `postgres:postgres` and uses `lightwork` (2026-09-22)."""
+    clone = tmp_path / "backend"
+    clone.mkdir()
+    (clone / "docker-compose.yml").write_text(BACKEND_COMPOSE)
+    (clone / "Makefile").write_text(BACKEND_MAKEFILE)
+
+    derived = environment.derive_isolation(clone)
+
+    assert derived is not None
+    assert (derived.db_port_base, derived.db_port_variable) == (5433, "PAPAYA_DB_PORT")
+    assert (
+        derived.test_db_url_template
+        == "postgresql://lightwork:lightwork@localhost:{port}/lightwork_test_{task_id}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("published", "port", "variable"),
+    [
+        ('"5433:5432"', 5433, environment.DB_PORT_VARIABLE),
+        ('"127.0.0.1:5433:5432"', 5433, environment.DB_PORT_VARIABLE),
+        ('"${DB_PORT:-5444}:5432"', 5444, "DB_PORT"),
+    ],
+)
+def test_every_way_a_port_is_published_is_read(tmp_path, published, port, variable) -> None:
+    clone = tmp_path / "repo"
+    clone.mkdir()
+    (clone / "compose.yaml").write_text(
+        "services:\n  db:\n    image: postgres:16\n    ports:\n      - " + published + "\n"
+    )
+    derived = environment.derive_isolation(clone)
+    assert derived is not None
+    assert (derived.db_port_base, derived.db_port_variable) == (port, variable)
+
+
+def test_a_variable_with_no_default_is_taken_from_the_makefile(tmp_path) -> None:
+    clone = tmp_path / "repo"
+    clone.mkdir()
+    (clone / "compose.yaml").write_text(
+        'services:\n  db:\n    image: postgres:16\n    ports:\n      - "${PG_PORT}:5432"\n'
+    )
+    (clone / "Makefile").write_text("PG_PORT ?= 5455\n")
+    derived = environment.derive_isolation(clone)
+    assert derived is not None and derived.db_port_base == 5455
+
+
+@pytest.mark.parametrize(
+    "compose",
+    [
+        "services:\n  web:\n    image: nginx\n    ports:\n      - '8080:80'\n",  # no database
+        "services:\n  db:\n    image: postgres:16\n",  # publishes nothing
+        "services:\n  db:\n    image: postgres:16\n    ports:\n      - '${PG_PORT}:5432'\n",
+        "not: a compose file\n",
+        "",
+    ],
+)
+def test_a_repository_that_says_nothing_is_left_alone(tmp_path, compose) -> None:
+    """Nothing is invented: a repository with no answer is still the person's to set."""
+    clone = tmp_path / "repo"
+    clone.mkdir()
+    (clone / "compose.yaml").write_text(compose)
+    assert environment.derive_isolation(clone) is None
+
+
+def test_the_start_remedy_fills_it_in_and_readiness_stops_asking(
+    tmp_path, ppy_home, machine
+) -> None:
+    """End to end: a registered repo with a compose file and blank settings heals itself."""
+    clone = tmp_path / "polyweave"
+    clone.mkdir()
+    _compose_repo(clone)
+    repos.set_settings(
+        "backend",
+        compose_stack="no",
+        test_db_url_template="",
+        db_port_base="",
+        db_port_variable="",
+    )
+    (clone / "docker-compose.yml").write_text(POLYWEAVE_COMPOSE)
+    machine.files.add(f"{clone}/docker-compose.yml")
+
+    def warning() -> readiness.Problem | None:
+        found = [p for p in readiness.check().problems if p.code == readiness.GATE_ENV_NOT_ISOLATED]
+        return found[0] if found else None
+
+    assert warning() is not None
+
+    (line,) = environment.keep_isolation_right()
+
+    assert "backend: gates are isolated per task" in line
+    assert "POLYWEAVE_DB_PORT from 5440" in line
+    assert "repo:docker-compose.yml:10" in line
+    env = repos.get_settings("backend").environment
+    assert env.db_port_base == 5440 and env.db_port_variable == "POLYWEAVE_DB_PORT"
+    assert "{task_id}" in (env.test_db_url_template or "")
+    assert warning() is None
+    assert environment.keep_isolation_right() == []  # nothing left to fill
+
+
+def test_a_value_a_person_set_is_never_overwritten(tmp_path, ppy_home, machine) -> None:
+    clone = tmp_path / "polyweave"
+    clone.mkdir()
+    _compose_repo(clone)
+    (clone / "docker-compose.yml").write_text(POLYWEAVE_COMPOSE)
+    machine.files.add(f"{clone}/docker-compose.yml")
+    repos.set_settings("backend", compose_stack="no", db_port_base=6000, test_db_url_template="")
+
+    environment.keep_isolation_right()
+
+    env = repos.get_settings("backend").environment
+    assert env.db_port_base == 6000  # theirs
+    assert "{task_id}" in (env.test_db_url_template or "")  # the blank was filled
