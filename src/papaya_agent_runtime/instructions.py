@@ -54,6 +54,13 @@ ANSWER = "answer"
 WORK = "work"
 UNANSWERABLE = "unanswerable"
 PATHS = (ANSWER, WORK, UNANSWERABLE)
+#: Two more command sets a turn can run under (:data:`PATH_ENV`), neither a way an
+#: instruction runs: an answer Papaya said was asked (`intent: ask`), which may read
+#: and record but never approve, deliver or merge; and the repository-choice turn, which
+#: reads other people's work-item text and so may only look at repositories.
+ASK = "ask"
+CHOICE = "choice"
+TURN_PATHS = (*PATHS, ASK, CHOICE)
 
 #: The events an instruction ticket's task carries, in the order they happen.
 CLASSIFIED = "instruction_classified"
@@ -110,8 +117,13 @@ class Classification:
     intent: str = ""
     number: str = ""
     #: A work path whose repository is still to be chosen: the registered repositories
-    #: the choice is between (empty when none is registered).
+    #: the choice is between (empty when none is registered). Only registered names:
+    #: the choice turn's answer is dispatched into as it stands.
     candidates: tuple[str, ...] = ()
+    #: GitHub URLs the instruction or its items name that are not registered here. Never
+    #: chosen by a turn; named in the question so the person can pick one, and then
+    #: registered through `ensure_spec` like a URL the text names alone.
+    unregistered: tuple[str, ...] = ()
     #: Work items the instruction references that could not be read, said in the
     #: question rather than guessed around.
     unread: tuple[str, ...] = ()
@@ -133,6 +145,7 @@ class Classification:
             "intent": self.intent,
             "number": self.number,
             "candidates": list(self.candidates),
+            "unregistered": list(self.unregistered),
             "unread": list(self.unread),
         }
 
@@ -336,7 +349,7 @@ def cannot_tell(found: Classification, why: str) -> Classification:
         found,
         path=UNANSWERABLE,
         reason=f"the repository could not be told: {why}",
-        question=which_repository(found.candidates, found.unread),
+        question=which_repository((*found.candidates, *found.unregistered), found.unread),
     )
 
 
@@ -369,30 +382,34 @@ def place(
     unread = tuple(item.ref for item in read if item.repo is None and not item.summary)
     items = tuple(item.summary for item in read if item.summary)
     named = list(dict.fromkeys(item.repo for item in read if item.repo))
-    if not found.candidates and len(named) == 1:
+    # The text named several (registered or not): the choice is between those alone.
+    text_named = bool(found.candidates or found.unregistered)
+    if not text_named and len(named) == 1:
         registered = _match_repo(named[0], repos)
         via = f"the work item {next(i.ref for i in read if i.repo)} names it"
         if registered is not None:
             return replace(found, repo=registered, reason=f"work in {registered}: {via}")
         return replace(found, spec=named[0], reason=f"work in {named[0]} (to register): {via}")
-    if not found.candidates and not named and len(names) == 1:
+    if not text_named and not named and len(names) == 1:
         return replace(
             found, repo=names[0], reason=f"work in {names[0]}: the only registered repository"
         )
-    if found.candidates:
-        candidates = found.candidates
-    elif len(named) > 1:
-        candidates = tuple(_match_repo(spec, repos) or spec for spec in named)
-    else:
+    candidates, unregistered = found.candidates, found.unregistered
+    if not text_named and len(named) > 1:
+        matched = [(spec, _match_repo(spec, repos)) for spec in named]
+        candidates = tuple(dict.fromkeys(name for _spec, name in matched if name))
+        unregistered = tuple(spec for spec, name in matched if name is None)
+    elif not text_named:
         candidates = tuple(names)
     return replace(
         found,
         candidates=candidates,
+        unregistered=unregistered,
         unread=unread,
         items=items,
-        reason=f"work; the repository is chosen between {len(candidates)} candidates"
+        reason=f"work; the repository is chosen between {len(candidates)} registered candidates"
         if candidates
-        else "work; no repository is registered",
+        else "work; no registered repository to choose",
     )
 
 
@@ -415,6 +432,11 @@ def classify(
     body = str(text or "").strip()
     if not _has_ask(body) and not references:
         return Classification(UNANSWERABLE, reason="it asks nothing", question=EMPTY_QUESTION)
+    if intent == papaya_events.INTENT_ASK:
+        # Asked, not sent as work or as a command: answered from the runtime's own state,
+        # whatever the words. "Should I merge #12?" is a question, never a merge; the
+        # turn runs on the `ask` path, which cannot approve, deliver or merge.
+        return Classification(ANSWER, reason="asked as a question: answered from its own state")
     capability = _CAPABILITY_CMD.search(body)
     if capability:
         verb = capability.group(1).lower()
@@ -431,10 +453,6 @@ def classify(
         return Classification(
             ANSWER, reason=f"{verb} PR {pr.group(2)}", intent=verb, number=pr.group(2)
         )
-    if intent == papaya_events.INTENT_ASK:
-        # Asked, not sent as work: answered from the runtime's own state, whatever the
-        # words; a question that needs work is told so by the answer turn.
-        return Classification(ANSWER, reason="asked as a question: answered from its own state")
     tickets = [
         url for url in _URL.findall(" ".join([body, *references])) if not _FORGE_URL.match(url)
     ]
@@ -456,7 +474,8 @@ def classify(
         if every:
             return Classification(
                 WORK,
-                candidates=tuple(every),
+                candidates=tuple(named),
+                unregistered=tuple(unregistered),
                 reason=f"work; it names {len(every)} repositories: {', '.join(every)}",
             )
         return Classification(WORK, reason="work; it names no repository")
@@ -508,14 +527,29 @@ ANSWER_ALLOWED: dict[str, frozenset[str] | None] = {
     "memory": None,
     "answer": None,
     "decision": frozenset({"list"}),
-    # `locate` reads the registered clones: how the repository-choice turn looks.
-    "repo": frozenset({"list", "show", "locate"}),
+    "repo": frozenset({"list", "show"}),
     "health": None,
     "doctor": None,
     "version": None,
     # Merging a pull request, only where this install lets the runtime merge.
     "stack": frozenset({"merge"}),
 }
+#: An asked question's commands: the answer path's reads and records, without the three
+#: that decide something (a capability, a delivery, a merge). The words of a question
+#: ("should I merge #12?") never become the act.
+ASK_ALLOWED: dict[str, frozenset[str] | None] = {
+    command: allowed
+    for command, allowed in ANSWER_ALLOWED.items()
+    if command not in ("capability", "deliver", "stack")
+}
+#: The repository-choice turn's commands: looking at the registered repositories and
+#: their notes, nothing else.
+CHOICE_ALLOWED: dict[str, frozenset[str] | None] = {
+    "repo": frozenset({"list", "show", "locate"}),
+    "memory": frozenset({"show"}),
+    "version": None,
+}
+_ALLOWED = {ANSWER: ANSWER_ALLOWED, ASK: ASK_ALLOWED, CHOICE: CHOICE_ALLOWED}
 #: The work path's refusals: everything today's turns run, except approving a capability.
 WORK_REFUSED: frozenset[tuple[str, str]] = frozenset({("capability", "approve")})
 
@@ -543,15 +577,19 @@ def command_refusal(
                 "this install does not let the runtime merge pull requests "
                 "(authority.merge is off); say so in the outcome and who can merge"
             )
-    if path == ANSWER:
-        if command not in ANSWER_ALLOWED:
-            return (
-                f"`ppy {command}` is not one the answer path runs: it answers from the "
-                "runtime's own state and never starts or steers a worker"
-            )
-        allowed = ANSWER_ALLOWED[command]
+    if path in _ALLOWED:
+        table = _ALLOWED[path]
+        what = {
+            ANSWER: "the answer path runs: it answers from the runtime's own state and "
+            "never starts or steers a worker",
+            ASK: "an asked question runs: it answers, and never approves, delivers or merges",
+            CHOICE: "the repository-choice turn runs: it only looks at the registered repositories",
+        }[path]
+        if command not in table:
+            return f"`ppy {command}` is not one {what}"
+        allowed = table[command]
         if allowed is not None and sub not in allowed:
-            return f"`ppy {command} {sub}` is not one the answer path runs"
+            return f"`ppy {command} {sub}` is not one {what}"
         return None
     if path == WORK and (command, sub) in WORK_REFUSED:
         return (
@@ -561,10 +599,20 @@ def command_refusal(
     return None
 
 
+def turn_path(
+    found: Classification, instruction: papaya_events.Instruction | None, *, choosing: bool
+) -> str:
+    """The command set (:data:`PATH_ENV`) one of an instruction's turns runs under."""
+    if choosing:
+        return CHOICE
+    asked = instruction is not None and instruction.intent == papaya_events.INTENT_ASK
+    return ASK if found.path == ANSWER and asked else found.path
+
+
 def refusal_from_env(environ: Mapping[str, str], argv: list[str]) -> str | None:
     """:func:`command_refusal` for the path this process's environment names."""
     path = str(environ.get(PATH_ENV) or "").strip()
-    if path not in PATHS:
+    if path not in TURN_PATHS:
         return None
     return command_refusal(path, argv)
 
@@ -807,6 +855,7 @@ def classification_of(conn: sqlite3.Connection, task_id: int) -> Classification 
         intent=str(payload.get("intent") or ""),
         number=str(payload.get("number") or ""),
         candidates=tuple(str(c) for c in payload.get("candidates") or ()),
+        unregistered=tuple(str(c) for c in payload.get("unregistered") or ()),
         unread=tuple(str(c) for c in payload.get("unread") or ()),
     )
 
@@ -1057,6 +1106,12 @@ __all__ = [
     "ALSO_SENT_PREFIX",
     "ANSWER",
     "ANSWER_ALLOWED",
+    "ASK",
+    "ASK_ALLOWED",
+    "CHOICE",
+    "CHOICE_ALLOWED",
+    "TURN_PATHS",
+    "turn_path",
     "CLASSIFIED",
     "Classification",
     "EMPTY_QUESTION",

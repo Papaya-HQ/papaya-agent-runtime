@@ -703,8 +703,11 @@ no `intent` key (an older Papaya), the words decide, as before.
   `OUTCOME:` block — the words after it are exactly what the person reads. Only the
   manager's own commands run on this path: reads, `ppy capability approve|deny`,
   `ppy todo`, `ppy deliver`, and `ppy stack merge` only where this install may merge.
-  Anything else is refused by `ppy` itself. An `ask` that would need work is answered
-  from the record and says, in one sentence, to ask the machine to do it. No
+  Anything else is refused by `ppy` itself. An `ask` runs on the narrower `ask` path:
+  words that read like a command ("should I merge #12?") stay a question, and
+  `ppy capability`, `ppy deliver` and `ppy stack merge` are refused on it. An `ask`
+  that would need work is answered from the record and says, in one sentence, to ask
+  the machine to do it. No
   acknowledgement on this path; if the turn has not answered after 20 seconds, one
   "Looking…" is posted, never more.
 - **Work path**: one worker on one repository, with a brief composed from the
@@ -721,10 +724,15 @@ repository the text names; else the repository a referenced Papaya work item nam
 is not read); else the only registered repository; else one short, bounded choice turn
 (`prompts/repo_choice.md`) that follows the brief turn's layers 2 and 3 word for word
 (`prompts.REPO_CHOICE_LAYERS`) over the instruction, its references and what the read
-items say, and ends `REPOSITORY: <candidate>` or `REPOSITORY: cannot tell`. Only "cannot
-tell" — or a choice turn that fails or overruns — asks the person, and the question names
-the candidates and says a reply with the name is picked straight up. An item that could
-not be read is said in the question, never guessed around.
+items say, and ends `REPOSITORY: <candidate>` or `REPOSITORY: cannot tell`. Its
+candidates are registered repositories only; an unregistered URL is never chosen by a
+turn — alone, it is registered through `ensure_spec` like a URL the text names. The
+turn runs on the `choice` path (`ppy repo list|show|locate`, `ppy memory show`,
+`ppy version`, nothing else), and the referenced items' text reaches it fenced, as data.
+Only "cannot tell" — or a choice turn that fails, overruns, or meets the provider's usage
+limit (never waited out while a person waits) — asks the person, and the question names
+the candidates and any unregistered URL and says a reply with the name is picked straight
+up. An item that could not be read is said in the question, never guessed around.
 
 **Seen being worked, in the conversation.** The moment the work path knows its
 repository it posts "On it — working in <repo>." where the instruction was asked. Every

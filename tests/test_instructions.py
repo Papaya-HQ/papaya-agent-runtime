@@ -254,6 +254,24 @@ PRECEDENCE = [
         None,
         ("runtime", "papaya-backend-monorepo"),
     ),
+    (
+        "two items, one repository unregistered: only the registered one is a candidate",
+        "fix PAP-1 and PAP-9",
+        THREE,
+        [FRONT, instructions.ReadItem("PAP-9", repo="https://github.com/acme/elsewhere")],
+        None,
+        None,
+        ("papaya-frontend-monorepo",),
+    ),
+    (
+        "the text names a registered and an unregistered one",
+        "fix it in runtime or https://github.com/acme/elsewhere",
+        THREE,
+        [],
+        None,
+        None,
+        ("runtime",),
+    ),
     ("none registered", "fix the bug", [], [], None, None, ()),
 ]
 
@@ -326,9 +344,69 @@ def test_the_choice_turn_follows_the_brief_turns_own_layers_word_for_word() -> N
     choice = prompts.load(prompts.REPO_CHOICE)
     assert prompts.REPO_CHOICE_LAYERS in choice
     assert f"{prompts.REPOSITORY_PREFIX} {prompts.REPOSITORY_CANNOT_TELL}" in choice
-    # The choice turn only reads: its commands are the answer path's, `locate` included.
-    assert instructions.command_refusal(ANSWER, ["repo", "locate", "activity feed"]) is None
-    assert instructions.command_refusal(ANSWER, ["dispatch", "--repo", "x"]) is not None
+
+
+CHOICE_COMMANDS = [
+    # (argv, allowed on the choice path)
+    (["repo", "list"], True),
+    (["repo", "show", "runtime"], True),
+    (["repo", "locate", "activity feed"], True),
+    (["memory", "show", "--repo", "runtime"], True),
+    (["version"], True),
+    (["repo", "ensure", "https://github.com/acme/x"], False),
+    (["memory", "add", "x"], False),
+    (["capability", "approve", "12"], False),
+    (["deliver", "41"], False),
+    (["answer", "41", "go"], False),
+    (["outreach"], False),
+    (["status"], False),
+    (["stack", "merge", "41"], False),
+    (["dispatch", "--repo", "x"], False),
+]
+
+
+@pytest.mark.parametrize(("argv", "allowed"), CHOICE_COMMANDS)
+def test_the_choice_turn_may_only_look_at_repositories(argv, allowed) -> None:
+    refusal = instructions.command_refusal(instructions.CHOICE, argv, merge_allowed=True)
+    assert (refusal is None) == allowed, refusal
+
+
+def test_the_choice_path_is_enforced_by_ppy_itself(ppy_home, monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, instructions.CHOICE)
+    assert cli.main(["capability", "approve", "12"]) != 0
+    assert "repository-choice turn" in capsys.readouterr().err
+
+
+ASK_COMMANDS = [
+    (["status", "--team"], True),
+    (["task", "show", "41"], True),
+    (["todo", "add", "look at it", "--blocked-on", "user"], True),
+    (["capability", "approve", "12"], False),
+    (["capability", "deny", "12"], False),
+    (["deliver", "41"], False),
+    (["stack", "merge", "41"], False),
+    (["dispatch", "--repo", "x"], False),
+]
+
+
+@pytest.mark.parametrize(("argv", "allowed"), ASK_COMMANDS)
+def test_an_asked_question_never_approves_delivers_or_merges(argv, allowed) -> None:
+    refusal = instructions.command_refusal(instructions.ASK, argv, merge_allowed=True)
+    assert (refusal is None) == allowed, refusal
+
+
+@pytest.mark.parametrize(
+    "text", ["should I merge #12?", "merge PR 12", "approve capability 12", "hold 1024"]
+)
+def test_an_ask_that_reads_like_a_command_is_a_plain_question(text) -> None:
+    found = instructions.classify(text, [], REPOS, intent="ask")
+    assert (found.path, found.intent, found.number) == (ANSWER, "", "")
+    asked = papaya_events.instruction_from(payload(intent="ask"))
+    assert instructions.turn_path(found, asked, choosing=False) == instructions.ASK
+    # Without an `ask` from Papaya, the words are still the command they were.
+    assert instructions.turn_path(found, instruction(), choosing=False) == ANSWER
 
 
 def test_the_choice_turn_counts_only_a_candidate() -> None:
