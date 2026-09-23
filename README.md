@@ -404,7 +404,11 @@ cd papaya-agent-runtime
 #    .venv/bin/papaya-agent login --token-stdin
 
 ./bin/ppy repo add https://github.com/you/your-repo    # once per repository
+
+# Start it, with this checkout as the working folder:
 ./bin/ppy serve --working-directory "$PWD"
+# ...or the same start through the client, which hands itself to ./bin/ppy serve here:
+#    .venv/bin/papaya-agent listen --working-directory "$PWD"
 ```
 
 - `connect --device` prints a code and a link. Approve it on any device where you are
@@ -413,13 +417,18 @@ cd papaya-agent-runtime
   `--no-install` leaves your own Claude Code's plugins alone: the runtime's turns get
   the agent's Papaya tools from the client directly. Add `--harness codex` if Codex is
   the harness you connect with. The connection is stored in `~/.papaya-agent/`.
-- Pass `--working-directory` to `ppy serve`, as above, and not to `connect`. The client
-  takes it on `connect` only with `--access-token-stdin` (the desktop app's path) and
-  exits 2 otherwise. The directory is this checkout, the same folder the app would be
-  pointed at.
+- The working folder is set when you start, not when you connect. `connect --device`
+  does not accept `--working-directory`: the client takes it on `connect` only with
+  `--access-token-stdin` (the desktop app's path) and exits 2 otherwise. Give it to
+  `ppy serve` or to `papaya-agent listen`, as above. It is this checkout, the same
+  folder the app would be pointed at.
+- `ppy serve` and `papaya-agent listen --working-directory <this checkout>` are one
+  start. `listen` sees a runtime checkout (a `bin/ppy` beside a `.ppy/`, which
+  `./bin/ppy env sync` creates), asks it `./bin/ppy capabilities --json`, and replaces
+  its own process with `./bin/ppy serve`, passing its flags through. It never listens
+  on its own there: `ppy serve` runs the client's listener inside itself.
 - `login --token-stdin` reads the token from stdin, as a hidden prompt on a terminal.
   Never pass it as an argument, where other processes can read it.
-- Do not run `papaya-agent listen`. `ppy serve` runs the client's listener inside itself.
 - A work item or request that names a repository registers it on pick-up, so
   `ppy repo add` just gets ahead of that.
 - `ppy serve` sets the runtime up on its first start, exactly as it does for the app,
