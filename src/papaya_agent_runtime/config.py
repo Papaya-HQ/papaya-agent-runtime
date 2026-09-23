@@ -529,7 +529,7 @@ class MMConfig:
         for name in ("auto_grant", "never"):
             value = getattr(self.capabilities, name)
             if not isinstance(value, list) or not all(
-                isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", v)
+                isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", v)
                 for v in value
             ):
                 raise ConfigError(

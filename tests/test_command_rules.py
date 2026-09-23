@@ -281,6 +281,23 @@ def test_dispatch_gives_a_claude_worker_the_rules_naming_its_real_branch(
     assert f"git push origin HEAD:{spec.branch}" in prompt
 
 
+@pytest.mark.parametrize(
+    ("command", "says"),
+    [
+        ('export PATH="$HOME/.nvm/versions/node/v24/bin:$PATH"', "ppy need <task id>"),
+        ("source .venv/bin/activate && pytest", "never activate"),
+        (". ./env.sh", "never activate"),
+        ("unset PYTHONPATH", "cannot change its own"),
+        ("ulimit -n 4096", "cannot change its own"),
+    ],
+)
+def test_a_shell_builtin_gets_what_to_do_instead_in_the_rules_and_the_steer(command, says):
+    rewrite = command_rules_module.rewrite_for(command)
+    assert rewrite is not None and says in rewrite.instead
+    assert rewrite.shape in command_rules("claude", "ppy/task-1-x")
+    assert tool_learning.classify("Bash", command, "/w").kind == tool_learning.COMMAND_SHAPE
+
+
 def test_dispatch_leaves_a_codex_worker_prompt_alone(server, source_repo, monkeypatch):
     spec = _capture_dispatch(server, source_repo, monkeypatch, "codex")
     assert HEADING not in CodexAdapter().worker_prompt(spec)

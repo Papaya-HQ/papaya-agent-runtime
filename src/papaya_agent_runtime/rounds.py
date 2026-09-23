@@ -69,6 +69,11 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    `.ppy/repos`), then `git worktree prune` and `git fetch --prune` on the base
    clones. A kept slot that is a loose end — terminal, dirty or unpushed, a day old
    — becomes one "waiting on you" item.
+8. **Instructions and status**: an instruction a person sent this machine that was
+   answered at its origin and never reported (a crash between the two) is reported
+   (:func:`instructions.recover`), and this machine's status snapshot is published to
+   Papaya (:mod:`papaya_agent_runtime.machine_status`) — once a round, and between
+   rounds whenever the board changes (:meth:`Rounds.watch_changes`).
 
 Step 1 covers every delivered pull request, live ticket or not: one a live ticket owns
 goes through that ticket's review turn; every other one (no ticket, or a ticket that
@@ -93,6 +98,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -105,7 +111,9 @@ from typing import Any
 from papaya_agent_runtime import (
     deficiencies,
     health,
+    instructions,
     lanes,
+    machine_status,
     outreach,
     papaya_events,
     serve,
@@ -1150,6 +1158,9 @@ class Rounds:
         turns: lanes.TurnRunner | None = None,
         reporter: Any = None,
         on_round: Callable[[], Awaitable[list[str]]] | None = None,
+        status_publisher: machine_status.Publisher | None = None,
+        change_sleep: Callable[[float], Awaitable[None]] | None = None,
+        instruction_report: Callable[..., bool] | None = None,
     ) -> None:
         self._built = built
         #: What the process running the rounds checks of its own each round (`serve`:
@@ -1189,6 +1200,14 @@ class Rounds:
         )
         #: What opens the runtime's recorded deficiencies as issues (`serve` hands in its own).
         self._reporter = reporter
+        #: What tells Papaya this machine's status: every round, and on change.
+        self.status = status_publisher or machine_status.Publisher(
+            build=machine_status.snapshot_now,
+            put=lambda body: papaya_events.put_connection_status(body, environ=self._papaya_env()),
+        )
+        self._change_sleep = change_sleep
+        #: How an instruction replied to and never reported is reported now.
+        self._instruction_report = instruction_report
         self._last_deficiencies: datetime | None = None
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
@@ -1254,6 +1273,7 @@ class Rounds:
         tickets = await asyncio.to_thread(ticket_tasks)
         parts = await self._reclaim(tickets)
         parts += await self._reoffer_missed(tickets)
+        parts += await self._instruction_lane()
         return parts
 
     async def _round(self) -> list[str]:
@@ -1285,7 +1305,27 @@ class Rounds:
         ):
             self._last_hygiene = now
             parts += await self._hygiene(None, now)
+        if not self._standalone():
+            parts += await self._instruction_lane()
+            await self.status.publish("round")
         return parts
+
+    async def _instruction_lane(self) -> list[str]:
+        """An instruction answered and never reported (a crash between the two) is reported."""
+        seams = {"report": self._instruction_report} if self._instruction_report else {}
+        try:
+            return await store.run_in_thread(
+                functools.partial(instructions.recover, environ=self._papaya_env(), **seams)
+            )
+        except Exception as exc:  # noqa: BLE001 - the rounds keep going
+            log.warning("[rounds] Could not finish reporting instructions: %s", exc)
+            return []
+
+    async def watch_changes(self) -> None:
+        """Publish the status snapshot as soon as the board changes, between rounds."""
+        if self._standalone():
+            return
+        await self.status.watch(machine_status.mark_now, sleep=self._change_sleep)
 
     async def close(self) -> None:
         """End the turns the lanes have running: serve is stopping."""

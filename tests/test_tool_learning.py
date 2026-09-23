@@ -112,6 +112,112 @@ def test_a_non_shell_tool_is_never_learned() -> None:
     assert tool_learning.classify("WebFetch", None, WORKTREE).in_family is False
 
 
+# ── shell builtins are a shape, not a missing tool (issue #140) ──────────────
+
+
+def test_the_builtins_list_is_closed() -> None:
+    assert (
+        frozenset(
+            {
+                ".",
+                "alias",
+                "declare",
+                "export",
+                "readonly",
+                "set",
+                "source",
+                "typeset",
+                "ulimit",
+                "umask",
+                "unalias",
+                "unset",
+            }
+        )
+        == tool_learning.SHELL_BUILTINS
+    )
+    # Builtins that RUN something stay a policy refusal, never a shape.
+    assert not tool_learning.SHELL_BUILTINS & tool_learning.NEVER
+    for program in ("eval", "exec", "env"):
+        assert program in tool_learning.NEVER
+        verdict = tool_learning.classify("Bash", f"{program} ls", WORKTREE)
+        assert verdict.kind == tool_learning.POLICY_REFUSAL
+
+
+def test_export_path_is_a_shape_whose_rewrite_asks_for_the_program() -> None:
+    from papaya_agent_runtime.providers.command_rules import rewrite_for
+
+    command = "export PATH=/x:$PATH"
+    verdict = tool_learning.classify("Bash", command, WORKTREE)
+
+    assert (verdict.kind, verdict.pattern) == (tool_learning.COMMAND_SHAPE, "")
+    assert "ppy need" in verdict.reason
+    rewrite = rewrite_for(command, WORKTREE)
+    assert rewrite is not None and "ppy need <task id> --capability <program>" in rewrite.instead
+    assert "environment block" in rewrite.instead
+
+
+@pytest.mark.parametrize("command", ["source .venv/bin/activate", ". .venv/bin/activate"])
+def test_activating_a_virtualenv_is_a_shape_with_the_never_activate_rewrite(command) -> None:
+    from papaya_agent_runtime.providers.command_rules import rewrite_for
+
+    assert tool_learning.classify("Bash", command, WORKTREE).kind == tool_learning.COMMAND_SHAPE
+    rewrite = rewrite_for(command, WORKTREE)
+    assert rewrite is not None
+    assert rewrite.instead == (
+        "the worktree's own tools are run by path or by `uv run`/`npx`/`pnpm exec`; never activate"
+    )
+
+
+def test_a_builtin_denial_makes_no_request(ppy_home, monkeypatch) -> None:
+    from papaya_agent_runtime import capability_requests
+    from papaya_agent_runtime.state import init_db, store
+
+    monkeypatch.setattr(tool_learning, "steer_worker", lambda t, m: None)
+    save_config(MMConfig())
+    conn = init_db()
+    task_id = store.add_task(conn, run_id=store.create_run(conn, "r"), title="t")
+    conn.close()
+    for use, command in (
+        ("a", 'export PATH="$HOME/bin:$PATH"'),
+        ("b", "source .venv/bin/activate"),
+    ):
+        tool_learning.learn(
+            [_denial(command, use=use)], task_id=task_id, run_id=None, worktree=WORKTREE
+        )
+    assert capability_requests.all_requests(init_db(), task_id=task_id) == []
+
+
+# ── a quoted argument the harness will not analyse is a shape (#126, #130) ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'ppy progress 7 --phase done --note "line one\nline two"',
+        'ppy progress 7 --phase done --note "ran `make test`"',
+        'ppy progress 7 --phase done --note "$(cat note.txt)"',
+        "chrome-devtools-axi eval \"() => p['$ref']\"",
+        "git commit -m \"fix {a: 'b'}\"",
+    ],
+)
+def test_an_allowed_program_refused_for_a_quoted_argument_is_a_shape(command) -> None:
+    verdict = tool_learning.classify("Bash", command, WORKTREE)
+    assert verdict.kind == tool_learning.COMMAND_SHAPE
+    assert "--note-file" in verdict.reason
+
+
+def test_a_missing_program_with_a_quoted_argument_is_still_a_gap() -> None:
+    verdict = tool_learning.classify("Bash", 'terraform plan -var "x=$Y"', WORKTREE)
+    assert verdict.kind == tool_learning.PROFILE_GAP and verdict.program == "terraform"
+
+
+def test_cp_with_flags_is_a_shape_and_plain_cp_inside_the_worktree_still_learns() -> None:
+    flagged = tool_learning.classify("Bash", "cp -R docs/out .ppy-evidence/out", WORKTREE)
+    assert flagged.kind == tool_learning.COMMAND_SHAPE and "ppy evidence add" in flagged.reason
+    plain = tool_learning.classify("Bash", "cp build/out.txt .mm-evidence/out.txt", WORKTREE)
+    assert (plain.kind, plain.in_family) == (tool_learning.PROFILE_GAP, True)
+
+
 # ── learning ────────────────────────────────────────────────────────────────
 
 

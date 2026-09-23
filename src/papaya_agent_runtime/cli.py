@@ -3172,8 +3172,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 - status must never crash
         pass
     _say_delta()
-    from papaya_agent_runtime import standalone
+    from papaya_agent_runtime import machine_status, standalone
 
+    # What this check saw is what Papaya shows about this machine: published once,
+    # when connected (nothing is sent, and nothing is said, when not).
+    machine_status.publish_once()
     standalone.say_invitation(sys.stdout)
     return 0
 
@@ -4722,8 +4725,18 @@ def main(argv: list[str] | None = None) -> int:
         # parser is what makes "ignored with a warning" possible at all: argparse
         # would refuse an unknown flag and exit before `serve` could say anything.
         return _cmd_serve(argparse.Namespace(listen_args=raw[1:]))
+    argv = _normalize_argv(raw)
+    if os.environ.get("PPY_INSTRUCTION_PATH"):
+        # A turn answering an instruction runs only its path's commands
+        # (`instructions.command_refusal`): enforced here, not left to its prompt.
+        from papaya_agent_runtime import instructions
+
+        refusal = instructions.refusal_from_env(os.environ, argv)
+        if refusal:
+            print(f"ppy: refused on this instruction's path: {refusal}", file=sys.stderr)
+            return 2
     parser = build_parser()
-    args = parser.parse_args(_normalize_argv(raw))
+    args = parser.parse_args(argv)
     return args.func(args)
 
 

@@ -90,6 +90,10 @@ person who asked, not as a build log. With no held work item, the tracker record
 facts name (`tracked as`) is where it goes; with none at all, the delivery on the record
 is the report, and nothing is posted anywhere.
 
+When the facts name an instruction (`instruction: MI-<n>`), a person sent this work to
+their machine directly and there is no work item: post nothing. The runtime answers them
+where they asked, with the pull request you delivered and the worker's own account.
+
 End the turn once you have delivered and reported, or steered, or with `WAITING:` as
 above. A turn that ends with none of those is a miss, and a second miss hands the
 ticket back.
