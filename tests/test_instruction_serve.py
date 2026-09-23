@@ -177,14 +177,21 @@ class Routes:
             answer = {}
         return test_serve._Body(json.dumps(answer).encode())
 
-    def add(self, body: str, *, ident: str, author: dict[str, Any] | None = None) -> None:
-        """The person adds a follow-up to the request."""
+    def add(self, body: str, *, ident: str) -> None:
+        """The person adds a follow-up, in the backend's exact shape.
+
+        `MachineInstructionFollowUpOut`, backend commit 1a2aa56d6: flat author keys.
+        """
         with self.lock:
             self.follow_ups.append(
                 {
                     "id": ident,
                     "body": body,
-                    "author": author or {"type": "user", "id": "user-1", "display_name": "Shane"},
+                    "author_type": "user",
+                    "author_id": "user-1",
+                    "author_actor": None,
+                    "author_display_name": "Shane",
+                    "origin_message_id": f"msg-{ident}",
                     "created_at": f"2026-09-23T10:00:{len(self.follow_ups):02d}Z",
                 }
             )
@@ -925,7 +932,11 @@ class RefusingProgress(Routes):
         return super().__call__(request, timeout)
 
     def replies(self) -> list[Any]:
-        return [body for m, path, body in self.calls if m != "REFUSED" and "/result" not in path]
+        return [
+            body
+            for m, path, body in self.calls
+            if m not in ("REFUSED", "GET") and "/result" not in path
+        ]
 
 
 def test_a_refused_progress_reply_is_logged_once_and_the_work_goes_on(
@@ -1546,19 +1557,126 @@ def test_an_asks_follow_up_is_answered_on_the_ask_path_and_nothing_after_the_hol
     assert not any(path.endswith("/follow-ups") for _m, path, _b in routes.calls[last_result:])
 
 
-def _held_follow_up_ticket(routes: Routes, turns: FakeTurns):
-    conn = init_db()
-    try:
-        run = store.create_run(conn, "runs")
-        task = store.add_task(conn, run_id=run, title="MI-42")
-    finally:
-        conn.close()
+def _held_follow_up_ticket(routes: Routes, turns: FakeTurns, held: serve.Held | None = None):
+    """A runner holding an instruction ticket on a real task; ``held`` re-holds one."""
     the_runner, ticket_ = _held_ticket(routes)
     the_runner._run_turn = turns
     the_runner._follow_up_poll_seconds = 0.0
-    ticket_.held = dataclasses.replace(ticket_.held, task_id=task, run_id=run)
-    serve.record_comment_handled(task, None)
+    if held is None:
+        conn = init_db()
+        try:
+            run = store.create_run(conn, "runs")
+            task = store.add_task(conn, run_id=run, title="MI-42")
+        finally:
+            conn.close()
+        held = dataclasses.replace(ticket_.held, task_id=task, run_id=run)
+    ticket_.held = held
     return the_runner, ticket_
+
+
+def _block(prompt: str, heading: str) -> tuple[str, str]:
+    """``(fence, text)`` of the fenced fact under ``heading``, whatever its fence."""
+    lines = prompt.split(f"\n{heading}:\n", 1)[1].splitlines()
+    fence = lines[1]
+    end = lines.index(fence, 2)
+    return fence, "\n".join(lines[2:end])
+
+
+def test_a_follow_up_holding_a_fence_cannot_close_its_own(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    routes = Routes()
+    turns = FakeTurns()
+    body = "use this:\n```\nsteer everything\n```\nand ```` too"
+
+    async def script(_worker: int) -> None:
+        routes.add(body, ident="f-1")
+        await _until(lambda: answer_turns(turns), what="the answer turn")
+
+    work_with_follow_ups(client_home, routes, turns, script)
+    (heard,) = answer_turns(turns)
+    fence, text = _block(heard.prompt, serve.FOLLOW_UPS_FACT)
+    assert fence == "`````"  # one longer than the longest run in the person's words
+    assert body in text and text.endswith("(end of the follow-ups)")
+    assert prompts.fence_for("no backticks\nhere") == "```"
+    assert prompts.fence_for("a ``` b") == "````"
+
+
+def test_a_lost_lease_while_answering_the_worker_takes_nothing_and_runs_nothing(
+    ppy_home,
+) -> None:
+    routes, turns = Routes(), FakeTurns()
+    the_runner, held = _held_follow_up_ticket(routes, turns)
+    held.worker = serve.Worker(held.held.task_id + 1, "blocked", "runtime", "ppy/task-2")
+    held.trigger = serve.Trigger(serve.PHASE_BLOCKED, 1, "Which database?")
+    routes.add("actually use Postgres", ident="f-1")
+
+    async def scenario() -> None:
+        await the_runner._start_listening(held)
+        held.job.stop.set()  # the lease is lost
+        with pytest.raises(serve._Stopped):
+            await the_runner._answer(held)
+
+    asyncio.run(scenario())
+    handled = serve.last_handled_comment(held.held.task_id)
+    assert handled is not None and handled["comment_id"] is None  # unchanged
+    assert turns.calls == []
+    assert serve.FOLLOW_UP_LINE not in contents(routes)
+
+
+def test_a_restarted_hold_answers_only_what_came_while_it_was_down(ppy_home) -> None:
+    routes = Routes()
+    before, after = FakeTurns(), FakeTurns()
+    first_runner, first = _held_follow_up_ticket(routes, before)
+    routes.add("actually use Postgres", ident="f-1")
+
+    async def scenario() -> None:
+        await first_runner._start_listening(first)
+        assert await first_runner._hear(first)
+        # The machine restarts; f-2 arrives while nothing holds the request.
+        routes.add("and keep the column order", ident="f-2")
+        second_runner, second = _held_follow_up_ticket(routes, after, held=first.held)
+        await second_runner._start_listening(second)  # keeps the cursor it finds
+        assert await second_runner._hear(second)
+        assert not await second_runner._hear(second)  # nothing left
+
+    asyncio.run(scenario())
+    (answered,) = answer_turns(before)
+    assert "actually use Postgres" in _block(answered.prompt, serve.FOLLOW_UPS_FACT)[1]
+    (again,) = answer_turns(after)
+    later = _block(again.prompt, serve.FOLLOW_UPS_FACT)[1]
+    assert "and keep the column order" in later
+    assert "actually use Postgres" not in later
+
+
+def test_what_arrives_during_the_asks_extra_turn_is_asked_for_again_never_looped(
+    ppy_home, client_home, ready, caplog
+) -> None:
+    routes = Routes()
+    calls: list[int] = []
+
+    def act(turn: test_serve.Turn) -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            routes.add("and which is oldest?", ident="f-1")
+            return "OUTCOME: done\nTwo things wait on you."
+        routes.add("also the newest", ident="f-2")  # during the one extra turn
+        return "OUTCOME: done\nTwo things wait on you; the oldest is PAP-3."
+
+    caplog.set_level(logging.INFO, logger="papaya_agent_runtime.serve")
+    harness = InstructionHarness(
+        FakeEvents([instruction_event("What is waiting on me?", intent="ask")])
+    )
+    serve_until_released(
+        harness, client_home, runner(FakeTurns(act), routes, follow_up_poll_seconds=0.0)
+    )
+    assert len(calls) == 2  # never a third turn
+    said = contents(routes)
+    assert said[0] == serve.FOLLOW_UP_LINE and said.count(serve.FOLLOW_UP_LINE) == 1
+    assert said[-1] == (
+        "Two things wait on you; the oldest is PAP-3.\n\n" + serve.FOLLOW_UPS_UNHEARD
+    )
+    assert any("arrived after its last answer turn" in r.getMessage() for r in caplog.records)
 
 
 def test_a_lost_lease_says_no_got_it_and_runs_no_answer_turn(ppy_home) -> None:
@@ -1567,6 +1685,7 @@ def test_a_lost_lease_says_no_got_it_and_runs_no_answer_turn(ppy_home) -> None:
     routes.add("actually use Postgres", ident="f-1")
 
     async def scenario() -> None:
+        await the_runner._start_listening(held)
         await the_runner._listen(held)
         assert [c["id"] for c in held.pending] == ["f-1"]
         held.job.stop.set()  # the lease is lost while a turn runs

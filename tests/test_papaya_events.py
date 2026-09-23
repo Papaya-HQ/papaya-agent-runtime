@@ -491,6 +491,52 @@ def test_follow_ups_are_read_beside_the_result_route_as_comments() -> None:
     assert papaya_events.list_instruction_follow_ups(_reply("dm"), environ={}) is None
 
 
+#: One follow-up exactly as Papaya serves it (`MachineInstructionFollowUpOut`, backend
+#: commit 1a2aa56d6): the author is flat, and a person's `author_actor` is null.
+BACKEND_FOLLOW_UP = {
+    "id": "4b1f0c2e-9d7a-4e1b-8f3c-2a6d5e7f9b10",
+    "body": "actually use Postgres",
+    "author_type": "user",
+    "author_id": "user-1",
+    "author_actor": None,
+    "author_display_name": "Shane",
+    "origin_message_id": "msg-77",
+    "created_at": "2026-09-23T10:00:05Z",
+}
+
+
+def test_the_backends_flat_follow_up_reads_as_a_persons_comment() -> None:
+    from papaya_agent_runtime import serve
+
+    def open_request(request, timeout):
+        return _Response([BACKEND_FOLLOW_UP])
+
+    (found,) = papaya_events.list_instruction_follow_ups(
+        _reply("channel"), environ=CONNECTED, opener=open_request
+    )
+    assert found["id"] == BACKEND_FOLLOW_UP["id"]
+    assert found["body"] == "actually use Postgres"
+    assert found["created_at"] == "2026-09-23T10:00:05Z"
+    assert (found["author_type"], found["author_id"], found["author_name"]) == (
+        "user",
+        "user-1",
+        "Shane",
+    )
+    assert "author_actor" not in found
+    assert serve.is_own_comment(found, "user-1") is False
+    assert serve.is_own_comment(found, None) is False
+
+
+def test_an_agents_flat_follow_up_is_still_an_agents() -> None:
+    from papaya_agent_runtime import serve
+
+    agent = papaya_events.follow_up_as_comment(
+        {**BACKEND_FOLLOW_UP, "author_type": "agent", "author_id": "agent-1"}
+    )
+    assert serve.is_own_comment(agent, "agent-1") is True
+    assert serve.is_own_comment(agent, "agent-2") is False
+
+
 def test_a_page_of_follow_ups_and_an_empty_answer_read_the_same_way() -> None:
     def page(request, timeout):
         return _Response({"items": [{"id": "f-1", "body": "hi", "author": PERSON}]})

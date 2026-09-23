@@ -757,8 +757,10 @@ path: on the work path it steers, answers or stops the worker (`ppy stop`), stil
 approves a capability; it says something back with a last `REPLY: <line>`, which the
 runtime posts at the origin. On the answer path (and an `ask`'s narrower one),
 follow-ups that arrive while the answer is written get one more turn before the reply,
-on that same path. Listening ends with the hold, so a follow-up after the answer is never
-acted on. A Papaya without the route (404) is logged once and the request goes on
+on that same path — once: what arrives during that extra turn is not answered, and the
+reply adds one sentence asking them to send it again. Listening ends with the hold, so a
+follow-up after the answer is never acted on. A person's words are fenced with a fence
+longer than any backtick run in them, so they cannot close it. A Papaya without the route (404) is logged once and the request goes on
 unchanged; any other failed read keeps the cursor and is read again at the next poll.
 
 **A setup blocker gates only work.** A question is answered whatever this machine still

@@ -720,7 +720,12 @@ FOLLOW_UPS_LIMIT = 200
 
 
 def follow_up_as_comment(follow_up: Mapping[str, Any]) -> dict[str, Any]:
-    """A follow-up (`{id, body, author, created_at}`) in the shape a comment has.
+    """A follow-up in the shape a comment has, from Papaya's follow-up record.
+
+    Papaya's shape is flat (`MachineInstructionFollowUpOut`): `{id, body, author_type,
+    author_id, author_actor, author_display_name, origin_message_id, created_at}`, a
+    person's with `author_type: "user"` and `author_actor: null`. A nested
+    `author: {type, id, display_name}` is read as a fallback.
 
     So the comment cursor, dedupe and authorship rule apply unchanged. A person's
     follow-up never carries `author_actor`: that key alone makes a comment an agent's
@@ -728,9 +733,14 @@ def follow_up_as_comment(follow_up: Mapping[str, Any]) -> dict[str, Any]:
     """
     author = follow_up.get("author")
     who: Mapping[str, Any] = author if isinstance(author, Mapping) else {}
-    kind = str(who.get("type") or who.get("kind") or "").strip().lower()
+    kind = (
+        str(follow_up.get("author_type") or who.get("type") or who.get("kind") or "")
+        .strip()
+        .lower()
+    )
     name = (
-        _clean(who.get("display_name"))
+        _clean(follow_up.get("author_display_name"))
+        or _clean(who.get("display_name"))
         or _clean(who.get("name"))
         or _clean(who.get("handle"))
         or (_clean(author) if isinstance(author, str) else None)
@@ -740,11 +750,14 @@ def follow_up_as_comment(follow_up: Mapping[str, Any]) -> dict[str, Any]:
         "body": str(follow_up.get("body") or ""),
         "created_at": follow_up.get("created_at"),
         "author_type": "agent" if kind == "agent" else (kind or "user"),
-        "author_id": _clean(who.get("id")),
+        "author_id": _clean(follow_up.get("author_id")) or _clean(who.get("id")),
         "author_name": name,
     }
     if kind == "agent":
-        comment["author_actor"] = {"name": name} if name else {"agent": True}
+        actor = follow_up.get("author_actor")
+        comment["author_actor"] = (
+            dict(actor) if isinstance(actor, Mapping) and actor else {"name": name or "agent"}
+        )
     return comment
 
 

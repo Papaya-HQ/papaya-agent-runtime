@@ -24,6 +24,7 @@ fill-in brief. Writing those is the turn's job.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -215,7 +216,9 @@ def render(turn: str, *, runtime_dir: str | Path, facts: Mapping[str, object]) -
     ``facts`` are rendered as a plain list in the order given. A value that is
     ``None`` or empty is left out rather than written as "none", so a turn never
     reads an absent repository as a repository called "none". Multi-line values
-    (a worker's question, a failure summary) are kept verbatim in a fenced block.
+    (a worker's question, a failure summary) are kept verbatim in a fenced block, whose
+    fence is longer than any run of backticks in the value (:func:`fence_for`), so text
+    somebody else wrote can never close it early.
     """
     body = load(turn).replace(RUNTIME_DIR, str(Path(runtime_dir).resolve()))
     lines = ["", FACTS_HEADING, ""]
@@ -227,10 +230,17 @@ def render(turn: str, *, runtime_dir: str | Path, facts: Mapping[str, object]) -
         if not text:
             continue
         if "\n" in text:
-            blocks.extend(["", f"{key}:", "", "```", text, "```"])
+            fence = fence_for(text)
+            blocks.extend(["", f"{key}:", "", fence, text, fence])
         else:
             lines.append(f"- {key}: {text}")
     return body.rstrip() + "\n" + "\n".join(lines + blocks) + "\n"
+
+
+def fence_for(text: str) -> str:
+    """A backtick fence one longer than the longest backtick run in ``text``, at least 3."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 __all__ = [
@@ -242,6 +252,7 @@ __all__ = [
     "BRIEF_SKILL",
     "CHECKIN",
     "CHECKIN_CONTINUE",
+    "fence_for",
     "CHECKIN_DECISIONS",
     "CHECKIN_NOTE",
     "CHECKIN_PREFIX",

@@ -316,9 +316,12 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._outcome_turns",
             # What the person adds to a held request reaches the running work, the way a
             # comment reaches a held work item, read under the same lease.
+            "TicketRunner._start_listening",
             "TicketRunner._follow_ups",
             "TicketRunner._follow_ups_failed",
             "TicketRunner._reply_to_follow_ups",
+            "TicketRunner._unheard_follow_ups",
+            "TicketRunner._also_sent",
             "Rounds._instruction_lane",
         ),
     ),
