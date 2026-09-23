@@ -291,6 +291,26 @@ def hydrate_work_item(
     return _with_work_item(event, _papaya_request(url, token, what="read", opener=opener))
 
 
+def read_work_item(
+    event: PapayaEvent,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Papaya's current record of this event's work item: its status and owner now.
+
+    ``None`` when there is nothing to call with (not connected), which a caller must
+    read as "cannot tell". A refusal or an unreachable Papaya raises
+    :class:`PapayaEventError`, like every other read here.
+    """
+    env = os.environ if environ is None else environ
+    url = _papaya_work_item_url(event, env)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    return _papaya_request(url, token, what="read", opener=opener)
+
+
 #: The work-item statuses `ppy serve` sets while it holds a ticket. Status is
 #: *state*, not judgment: each of these follows mechanically from where the work
 #: has got to, and anything said in words on the item is a manager turn's to say.

@@ -1122,6 +1122,12 @@ recorded 527 times, both unseen).
   A parked ticket missing from a successful listing (closed, or no longer assigned
   here) is forgotten; a failed listing forgets nothing. `ppy sweep
   --include-declined` offers it by hand; any pickup forgets it.
+- **A missed-turn re-offer trusts Papaya, not the ledger.** Before a ticket handed back
+  for a missed turn is offered again at start, its work item is read once: `done` or
+  `cancelled` closes the ticket (`ticket_closed`, reason `item_closed`, phase `done`),
+  an owner id other than this connection's agent id closes it with `not_agents_item`,
+  and neither is offered or reserved. A read that fails offers nothing, keeps the
+  ticket, and is retried on the next round.
 - **Repetition is a deficiency, once.** A work item picked up three times inside an
   hour with no phase beyond the brief records `repeated-without-progress`,
   fingerprinted on the ticket and how it ended (`reported`, `declined`, `stalled`,
