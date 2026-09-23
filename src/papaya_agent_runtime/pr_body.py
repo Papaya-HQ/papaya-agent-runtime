@@ -344,9 +344,10 @@ def for_request(conn: sqlite3.Connection, task_id: int, text: str) -> str:
     from papaya_agent_runtime import instructions
     from papaya_agent_runtime.state import store
 
-    if not store.get_task_env(conn, task_id, instructions.INSTRUCTION_KEY):
+    own = store.get_task_env(conn, task_id, instructions.INSTRUCTION_KEY)
+    if not own:
         return text
-    return instructions.without_ids(text)
+    return instructions.without_ids(text, str(own))
 
 
 __all__ = [

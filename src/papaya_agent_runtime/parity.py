@@ -307,6 +307,9 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._instruction_steps",
             "TicketRunner._say_once",
             "TicketRunner._note_said",
+            "TicketRunner._findings_answer",
+            "TicketRunner._has_ticket",
+            "TicketRunner._decline_ticket",
             "TicketRunner._has_commits",
             # Placing work nothing named, acknowledging it and following it live happen
             # in the conversation the instruction came from, under its lease.
@@ -327,6 +330,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._also_sent",
             "Rounds._instruction_lane",
             "Rounds._reclaim_instructions",
+            "Rounds._instruction_status",
             "Rounds._post_seam",
             "Rounds._report_seam",
         ),

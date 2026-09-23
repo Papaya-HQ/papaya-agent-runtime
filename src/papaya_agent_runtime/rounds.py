@@ -1035,15 +1035,12 @@ def close_ticket(ticket: Ticket, reason: str, item: dict[str, Any]) -> None:
 
 # ── instruction tickets: a person's request a hold started and did not finish ──
 
-#: Why an instruction ticket was closed without being taken back up.
+#: Why an instruction ticket was closed without being taken back up: Papaya refused
+#: it to this machine, or Papaya has it closed already (answered, failed, cancelled).
 CLOSED_NOT_RECLAIMED = "not_reclaimed"
-#: The phases after which an instruction ticket is over: nothing to take back up.
-INSTRUCTION_OVER = (
-    serve.PHASE_REPORTED,
-    serve.PHASE_DECLINED,
-    serve.PHASE_DONE,
-    serve.PHASE_HANDED_BACK,
-)
+CLOSED_AT_PAPAYA = "closed_at_papaya"
+#: What an offer answers when it raised: nothing is known, so the next round tries again.
+OFFER_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -1076,12 +1073,14 @@ class InstructionTicket:
 
 
 def unfinished_instructions(conn: Any) -> list[InstructionTicket]:
-    """Every instruction ticket a hold took and nobody answered, nor ended.
+    """Every instruction ticket this process lost to its own shutdown or a crash.
 
-    What a restart leaves: the hold was cancelled (`released`), or the process died
-    under it (`picked_up`, a working phase), and Papaya still has the request
-    `picked_up` with nobody holding it. One replied to and not reported is not here:
-    `instructions.recover` finishes that.
+    What a restart leaves: the hold was cancelled at shutdown (`released`, marked
+    `instructions.SHUTDOWN`), or the process died under it (`picked_up`, a working
+    phase), and Papaya still has the request `picked_up` with nobody holding it. Not a
+    lost lease — Papaya took it back, or a person released it in the app — nor a
+    decline, nor anything answered (`instructions.live`). One replied to and not
+    reported is `instructions.recover`'s.
     """
     from papaya_agent_runtime.lifecycle import TERMINAL_STATUSES
 
@@ -1093,9 +1092,7 @@ def unfinished_instructions(conn: Any) -> list[InstructionTicket]:
     found = []
     for row in rows:
         task_id = int(row["id"])
-        if row["status"] in TERMINAL_STATUSES or row["phase"] in INSTRUCTION_OVER:
-            continue
-        if instructions.stage(conn, task_id) != "new":
+        if row["status"] in TERMINAL_STATUSES or not instructions.live(conn, task_id):
             continue
         instruction = instructions.instruction_of(conn, task_id)
         if instruction is None:
@@ -1112,38 +1109,43 @@ def close_instruction(
     environ: dict[str, str],
     post: Callable[..., str | None] | None,
     report: Callable[..., bool] | None,
-) -> instructions.Answered:
-    """An instruction that cannot be taken back up: told so at its origin, then closed.
+    tell: bool = True,
+) -> instructions.Answered | None:
+    """An instruction that cannot be taken back up, closed here.
 
-    The person hears it once, where they asked, with what it was waiting on; the result
-    is reported `failed` so Papaya stops showing it `picked_up`; what it was blocked on
-    is closed with it, so no report says it later. Answering records `replied`, so a
-    later round never finds it again, whatever the post did.
+    ``tell``: Papaya refused it to this machine while it still has it open, so the
+    person hears it once, where they asked, with what it was waiting on, and the result
+    is reported `failed` so Papaya stops showing it `picked_up`. Not ``tell``: Papaya
+    has it closed already (answered, failed, cancelled), and nothing is said or
+    reported — it is only closed on this side. Either way what it was blocked on is
+    closed with it, so no report says it later, and phase `done` keeps every later
+    round from finding it again.
     """
-    waits = [
-        instructions.for_person(text, ticket.instruction)
-        for text in instructions.open_waits(conn, ticket.run_id)
-    ]
-    text = instructions.not_finished(ticket.instruction, why, [w for w in waits if w])
-    seams: dict[str, Any] = {}
-    if post is not None:
-        seams["post"] = post
-    if report is not None:
-        seams["report"] = report
-    answered = instructions.answer(
-        conn, ticket.task_id, ticket.instruction, "failed", text, environ=environ, **seams
-    )
+    answered = None
+    if tell:
+        waits = [
+            instructions.for_person(text, ticket.instruction, allow_empty=True)
+            for text in instructions.open_waits(conn, ticket.run_id)
+        ]
+        text = instructions.not_finished(ticket.instruction, why, [w for w in waits if w])
+        seams: dict[str, Any] = {}
+        if post is not None:
+            seams["post"] = post
+        if report is not None:
+            seams["report"] = report
+        answered = instructions.answer(
+            conn, ticket.task_id, ticket.instruction, "failed", text, environ=environ, **seams
+        )
+    reason = CLOSED_NOT_RECLAIMED if tell else CLOSED_AT_PAPAYA
     instructions.close_waits(conn, ticket.run_id)
     store.append_event(
         conn,
         kind=TICKET_CLOSED,
-        payload={"task_id": ticket.task_id, "reason": CLOSED_NOT_RECLAIMED, "why": why},
+        payload={"task_id": ticket.task_id, "reason": reason, "why": why},
         run_id=ticket.run_id,
         task_id=ticket.task_id,
     )
-    serve.record_phase(
-        conn, ticket.task_id, serve.PHASE_DONE, f"closed ({CLOSED_NOT_RECLAIMED}): {why}"
-    )
+    serve.record_phase(conn, ticket.task_id, serve.PHASE_DONE, f"closed ({reason}): {why}")
     return answered
 
 
@@ -1338,6 +1340,7 @@ class Rounds:
         instruction_report: Callable[..., bool] | None = None,
         read_item: Callable[[Ticket], dict[str, Any] | None] | None = None,
         instruction_post: Callable[..., str | None] | None = None,
+        read_instruction: Callable[..., str | None] | None = None,
     ) -> None:
         self._built = built
         #: What the process running the rounds checks of its own each round (`serve`:
@@ -1388,6 +1391,9 @@ class Rounds:
         #: How the rounds say something where an instruction was asked (a request that
         #: could not be taken back up, an ask about it): the runner's own, by default.
         self._instruction_post = instruction_post
+        #: Papaya's status for an instruction before it is taken back up:
+        #: ``(reply block, environ=) -> status | None`` (`read_instruction_status`).
+        self._read_instruction = read_instruction
         self._last_deficiencies: datetime | None = None
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
@@ -1736,61 +1742,113 @@ class Rounds:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad offer must not end the round
             log.warning("[rounds] Could not offer %s: %s", subject, exc)
-            status = "done"
+            status = OFFER_FAILED
         refused = self._refused.pop(subject, None)
         if refused is not None and status != sweep.OFFER_PENDING:
             return refused
         return status
 
     async def _reclaim_instructions(self) -> list[str]:
-        """Take back up every request a restart left `picked_up` with nobody holding it.
+        """Take back up every request this process lost to its shutdown or a crash.
 
-        Offered to the loop as the `machine.instruction` it came as: reserved again, the
+        First Papaya's word on it (`papaya_events.read_instruction_status`): one Papaya
+        has closed (answered, failed, cancelled, never picked up) is closed here without
+        a word; one that cannot be read is left for the next round. An open one is
+        offered to the loop as the `machine.instruction` it came as: reserved again, the
         hold lands on the same ticket and resumes from its state (its worker, what it
-        already said). One that cannot be — Papaya refused it, or it is not this loop's
-        any more — is told to the person at its origin as not finished, with what it
-        was waiting on, and closed, so it never lingers `picked_up`. A busy loop
-        (`blocked`) is tried again next round.
+        already said). Only a reserve Papaya refused (`SubjectHeld`, with its holder) is
+        told to the person at the origin as not finished, with what it waited on, and
+        closed. Anything else — a bare `done` (already running here, a playbook or scope
+        skip), a busy loop, an offer that raised — changes nothing and is looked at
+        again next round.
         """
         loop = getattr(self._built, "loop", None)
         if loop is None:
             return []
         self._watch_refusals(loop)
-        running, held = self._running(), self._held_ids()
         agent_config = getattr(self._built, "agent_config", None) or {}
         parts: list[str] = []
         for request in await store.run_in_thread(unfinished_instructions):
-            if request.instruction.subject in running or request.task_id in held:
+            subject = request.instruction.subject
+            if subject in self._running() or request.task_id in self._held_ids():
                 continue
             named = instructions.named(request.instruction)
+            status = await asyncio.to_thread(self._instruction_status, request)
+            if status is None:
+                continue
+            if status not in papaya_events.INSTRUCTION_OPEN:
+                await store.run_in_thread(
+                    functools.partial(
+                        close_instruction,
+                        ticket=request,
+                        why=f"Papaya has it {status}",
+                        environ=self._papaya_env(),
+                        post=None,
+                        report=None,
+                        tell=False,
+                    )
+                )
+                parts.append(
+                    f"closed ticket task {request.task_id} for request {named}: Papaya has "
+                    f"it {status}"
+                )
+                continue
             envelope = request.envelope(
                 agent_id=str(agent_config.get("agent_id") or ""),
                 workspace_id=str(agent_config.get("workspace_id") or ""),
             )
-            outcome = await self._send_offer(loop, request.instruction.subject, envelope)
+            outcome = await self._send_offer(loop, subject, envelope)
             if outcome == sweep.OFFER_PENDING:
                 parts.append(f"took request {named} back up (ticket task {request.task_id})")
                 continue
-            if outcome == sweep.OFFER_BLOCKED:
+            if not isinstance(outcome, dict):
+                # Nothing refused it: already running (a race with the stream), a skip,
+                # a busy loop or an offer that raised. The next round looks again.
+                if subject not in self._running() and request.task_id not in self._held_ids():
+                    log.info(
+                        "[rounds] Offering request %s back answered %s; trying again next round",
+                        named,
+                        outcome,
+                    )
                 continue
-            why = "this machine restarted while working on it and could not take it back up"
-            if isinstance(outcome, dict):
-                why += f" (it is held by {sweep.holder_name(outcome)})"
             await store.run_in_thread(
                 functools.partial(
                     close_instruction,
                     ticket=request,
-                    why=why,
+                    why=(
+                        "this machine restarted while working on it and could not take it back up"
+                    ),
                     environ=self._papaya_env(),
                     post=self._post_seam(),
                     report=self._report_seam(),
                 )
             )
             parts.append(
-                f"could not take request {named} back up: told the person and closed "
-                f"ticket task {request.task_id}"
+                f"could not take request {named} back up (held by "
+                f"{sweep.holder_name(outcome)}): told the person and closed ticket task "
+                f"{request.task_id}"
             )
         return parts
+
+    def _instruction_status(self, request: InstructionTicket) -> str | None:
+        """Papaya's status for a request, or ``None``: not connected, or not readable now."""
+        read = self._read_instruction or functools.partial(
+            papaya_events.read_instruction_status,
+            **(
+                {"opener": getattr(self._runner, "_opener", None)}
+                if getattr(self._runner, "_opener", None) is not None
+                else {}
+            ),
+        )
+        try:
+            return read(request.instruction.reply, environ=self._papaya_env())
+        except Exception as exc:  # noqa: BLE001 - an unread request waits for the next round
+            log.warning(
+                "[rounds] Could not read request %s from Papaya; trying again next round: %s",
+                instructions.named(request.instruction),
+                exc,
+            )
+            return None
 
     def _post_seam(self) -> Callable[..., str | None] | None:
         """How the rounds post at an instruction's origin: their seam, else the runner's."""

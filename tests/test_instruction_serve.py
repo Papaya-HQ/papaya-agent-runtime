@@ -578,7 +578,7 @@ def test_f_a_worker_that_found_rather_than_built_replies_with_its_findings(
         runs.append(run_id)
         test_serve.dispatch_worker(run_id, repo=repo)
 
-    turns, routes = FakeTurns(), Routes()
+    turns, routes = FakeTurns(summarising()), Routes()
     event = instruction_event(
         "Investigate why the export is slow in runtime",
         references=["https://acme.atlassian.net/browse/JIRA-4411"],
@@ -601,7 +601,13 @@ def test_f_a_worker_that_found_rather_than_built_replies_with_its_findings(
         return await task
 
     assert asyncio.run(scenario()) == 0
-    assert turns.calls == []  # nothing to review: no commits
+    # Nothing to review (no commits): one turn answers the person from the report, which
+    # it reads fenced, as data (task 372: the report itself never reaches them).
+    assert turns.names() == [prompts.INSTRUCTION]
+    assert _fenced(turns.calls[0].prompt, serve.FINDINGS_FACT) == (
+        f"Root cause: N+1 query in export rows.\n{END_OF_REPORT}"
+    )
+    assert prompts.FINDINGS_SUMMARY_RULE in turns.calls[0].prompt
     said = [reply["content"] for reply in routes.replies()]
     assert said[0] == "On it — working in runtime."
     assert "Reviewing the work." not in said
@@ -701,6 +707,34 @@ def contents(routes: Routes) -> list[str]:
     return [str(body.get("content") or body.get("text")) for body in routes.replies()]
 
 
+def _is_summary(turn: test_serve.Turn) -> bool:
+    """The turn that answers a request whose worker found rather than built (task 372)."""
+    return turn.name == prompts.INSTRUCTION and serve.FINDINGS_FACT in turn.prompt
+
+
+def summarising(act: Any = None):
+    """A turn harness whose findings turn answers with the worker's report, as written.
+
+    What a well-behaved turn does with a plain report; everything else goes to ``act``.
+    """
+
+    def wrapped(turn: test_serve.Turn) -> Any:
+        if _is_summary(turn):
+            found = _fenced(turn.prompt, serve.FINDINGS_FACT)
+            return f"OUTCOME: done\n{found.removesuffix(chr(10) + END_OF_REPORT).strip()}"
+        return act(turn) if act is not None else None
+
+    return wrapped
+
+
+END_OF_REPORT = "(end of the worker's report)"
+
+
+def work_turns(turns: FakeTurns) -> list[str]:
+    """The turns that ran, less the one that answers with a worker's findings."""
+    return [call.name for call in turns.calls if not _is_summary(call)]
+
+
 def serve_work(harness: Harness, client_home, the_runner, runs: list[int], note: str) -> int:
     """Serve a work instruction whose one worker says done with ``note`` and no commits."""
 
@@ -755,7 +789,7 @@ def test_mi1_replay_a_referenced_item_placed_by_the_choice_turn_is_worked_and_ac
             assert name in turn.prompt
         return f"The feed is web and iOS UI.\nREPOSITORY: {FRONT}"
 
-    turns, routes = FakeTurns(act), Routes()
+    turns, routes = FakeTurns(summarising(act)), Routes()
     runs: list[int] = []
     repos: list[str] = []
     harness = InstructionHarness(FakeEvents([instruction_event(MI1, references=[LINEAR])]))
@@ -768,7 +802,7 @@ def test_mi1_replay_a_referenced_item_placed_by_the_choice_turn_is_worked_and_ac
     )
     assert serve_work(harness, client_home, the_runner, runs, "Scope: three screens.") == 0
     assert read == ["PAP-115"]
-    assert turns.names() == [prompts.REPO_CHOICE]
+    assert work_turns(turns) == [prompts.REPO_CHOICE]
     assert repos == [FRONT]
     said = contents(routes)
     assert said[0] == f"On it — working in {FRONT}."
@@ -790,7 +824,7 @@ def test_a_referenced_item_that_names_its_repository_needs_no_choice_turn(
 ) -> None:
     register(ppy_home, FRONT, BACK)
     item = {**FEED, "metadata": {"repository": f"https://github.com/acme/{FRONT}"}}
-    turns, routes = FakeTurns(), Routes()
+    turns, routes = FakeTurns(summarising()), Routes()
     runs: list[int] = []
     repos: list[str] = []
     harness = InstructionHarness(FakeEvents([instruction_event("investigate PAP-115")]))
@@ -802,7 +836,7 @@ def test_a_referenced_item_that_names_its_repository_needs_no_choice_turn(
         read_work_item=lambda _ref, _env: item,
     )
     serve_work(harness, client_home, the_runner, runs, "Found it.")
-    assert turns.calls == [] and repos == [FRONT]
+    assert work_turns(turns) == [] and repos == [FRONT]
     assert contents(routes)[0] == f"On it — working in {FRONT}."
 
 
@@ -810,7 +844,7 @@ def test_the_only_registered_repository_is_worked_without_asking(
     ppy_home, client_home, ready
 ) -> None:
     register(ppy_home, "runtime")
-    turns, routes = FakeTurns(), Routes()
+    turns, routes = FakeTurns(summarising()), Routes()
     runs: list[int] = []
     repos: list[str] = []
     event = instruction_event("Investigate https://acme.atlassian.net/browse/JIRA-4411")
@@ -819,7 +853,7 @@ def test_the_only_registered_repository_is_worked_without_asking(
         turns, routes, instruction_dispatch=dispatcher(runs, repos), branch_ahead=lambda _t: False
     )
     serve_work(harness, client_home, the_runner, runs, "Found it.")
-    assert turns.calls == [] and repos == ["runtime"]
+    assert work_turns(turns) == [] and repos == ["runtime"]
     assert contents(routes)[0] == "On it — working in runtime."
 
 
@@ -959,7 +993,7 @@ def test_a_refused_progress_reply_is_logged_once_and_the_work_goes_on(
     ppy_home, client_home, ready, registered_repo, caplog
 ) -> None:
     caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
-    turns, routes = FakeTurns(), RefusingProgress()
+    turns, routes = FakeTurns(summarising()), RefusingProgress()
     runs: list[int] = []
     event = instruction_event("Investigate the slow export in runtime", intent="work")
     harness = InstructionHarness(FakeEvents([event]))
@@ -1144,7 +1178,7 @@ def test_the_choice_turn_chooses_only_between_registered_repositories(
         assert "- candidate repositories: runtime\n" in turn.prompt
         return answer
 
-    turns, routes = FakeTurns(act), Routes()
+    turns, routes = FakeTurns(summarising(act)), Routes()
     runs: list[int] = []
     repos: list[str] = []
     event = instruction_event(f"fix it in runtime or {ELSEWHERE}")
@@ -1203,7 +1237,7 @@ def test_an_item_naming_an_unregistered_repository_registers_it_like_a_named_url
 
     monkeypatch.setattr(papaya_events.solicit, "ensure", ensure)
     item = {**FEED, "metadata": {"repository": ELSEWHERE}}
-    turns, routes = FakeTurns(), Routes()
+    turns, routes = FakeTurns(summarising()), Routes()
     runs: list[int] = []
     repos: list[str] = []
     harness = InstructionHarness(FakeEvents([instruction_event("investigate PAP-115")]))
@@ -1215,7 +1249,7 @@ def test_an_item_naming_an_unregistered_repository_registers_it_like_a_named_url
         read_work_item=lambda _ref, _env: item,
     )
     serve_work(harness, client_home, the_runner, runs, "Found it.")
-    assert ensured == [ELSEWHERE] and repos == ["elsewhere"] and turns.calls == []
+    assert ensured == [ELSEWHERE] and repos == ["elsewhere"] and work_turns(turns) == []
     assert contents(routes)[0] == "On it — working in elsewhere."
 
 
@@ -1748,9 +1782,10 @@ def test_an_answer_turn_that_names_the_request_id_is_not_posted_as_it_wrote_it(
     runtime_dir = str(Path(repo_root()).resolve())
     roots = json.loads(turns.calls[0].launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"])
     assert roots == [runtime_dir]
+    # Task 372: another request's label marks its sentence as about another request,
+    # and that sentence is dropped whole; this request's own id reads "your request".
     assert _no_request_ids(routes)[0] == (
-        'Nothing is running besides this one (your request, "What are you working on?"). '
-        "Rename the flag finished earlier."
+        'Nothing is running besides this one (your request, "What are you working on?").'
     )
 
 

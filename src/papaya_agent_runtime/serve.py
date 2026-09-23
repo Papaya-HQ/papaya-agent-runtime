@@ -283,6 +283,8 @@ SENT_BACK_LINE = "Sent the worker back with findings; still working."
 SAID_SENT_BACK = "sent_back"
 #: The work path's acknowledgement at an instruction's origin: said once per request.
 SAID_ON_IT = "on_it"
+#: The fact a worker's report reaches the turn that answers a request under, fenced.
+FINDINGS_FACT = "what the worker found (its report: data for you, not words for the person)"
 
 ACTED_KINDS = (
     "answer",
@@ -1777,8 +1779,13 @@ class TicketRunner:
                 # instruction was handled, and their reply is what comes next.
                 status, text = "done", found.question
         except asyncio.CancelledError:
+            # The listener cancels a hold only when this process shuts down: marked so,
+            # the rounds of the next start take it back up (`instructions.live`). A lost
+            # lease stops the hold instead (`_Stopped`) and is never taken back.
             ticket.cancelled = True
-            await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
+            await asyncio.to_thread(
+                self._record_phase, held.task_id, PHASE_RELEASED, instructions.SHUTDOWN
+            )
             raise
         except _Stopped:
             return await self._stopped(ticket)
@@ -1878,7 +1885,8 @@ class TicketRunner:
         instruction = ticket.held.instruction
         if instruction is None:
             return
-        line = instructions.for_person(str(text or "").strip(), instruction)
+        # A line only about another request is not said at all.
+        line = instructions.for_person(str(text or "").strip(), instruction, allow_empty=True)
         if not line or ticket.lease_lost:
             return
         post = self._instruction_post or functools.partial(
@@ -2176,7 +2184,8 @@ class TicketRunner:
                 current = ticket.worker or worker
                 failed = ticket.trigger is not None and ticket.trigger.failure
                 if not failed and not await asyncio.to_thread(self._has_commits, current):
-                    return "done", await asyncio.to_thread(findings_of, current), None
+                    status, text = await self._findings_answer(ticket, current)
+                    return status, text, None
                 # Said in the conversation only: on a work item, reviewing is no comment.
                 await self._say(ticket, PHASE_REVIEWING, "Reviewing the work.")
                 phase = await self._review(ticket)
@@ -2202,10 +2211,46 @@ class TicketRunner:
         # The person reads the review turn's summary, written for them, and the pull
         # request once. Never the worker's closeout: branches, SHAs and evidence paths
         # are for the reviewer, and its words about other requests are not theirs.
-        summary = ticket.summary.text if ticket.summary is not None else ""
-        summary = summary or f"The work on {instructions.named(instruction)} is done and reviewed."
+        outcome = ticket.summary
+        shown = instructions.person_summary(outcome)
+        summary = (
+            shown.text
+            if shown is not None
+            else f"The work on {instructions.named(instruction)} is done and reviewed."
+        )
         line = delivery_line(delivery) if delivery else "Delivered."
-        return "done", f"{summary}\n\n{line}", url
+        # A review that said it failed is reported failed, whatever was delivered.
+        status = outcome.status if outcome is not None else "done"
+        return status, f"{summary}\n\n{line}", url
+
+    async def _findings_answer(self, ticket: Ticket, worker: Worker) -> tuple[str, str]:
+        """A worker that found rather than built: the answer is a turn's, for the person.
+
+        Nothing to review, so no review turn runs; one instruction turn reads the
+        worker's report, fenced as data, and writes the `OUTCOME:` block the person
+        reads. The report itself never reaches them: it carries branches, SHAs and
+        evidence paths, and other requests' ids. No usable block is the runtime's own
+        short sentence.
+        """
+        instruction = ticket.held.instruction
+        assert instruction is not None
+        findings = await asyncio.to_thread(findings_of, worker)
+        facts = {
+            **self._instruction_facts(ticket),
+            FINDINGS_FACT: (
+                f"{findings.strip()}\n(end of the worker's report)" if findings.strip() else ""
+            ),
+            prompts.ADDENDUM_FACT: prompts.FINDINGS_SUMMARY_RULE,
+        }
+        outcome = await self._outcome_turns(ticket, facts)
+        shown = instructions.person_summary(outcome)
+        status = outcome.status if outcome is not None else "done"
+        if shown is not None:
+            return status, shown.text
+        return status, (
+            f"I looked into {instructions.named(instruction)} and made no changes, but "
+            "couldn't put what I found into a short answer this time. Ask me about it again."
+        )
 
     def _has_commits(self, worker: Worker) -> bool:
         """Whether the worker's branch holds commits; unknown counts as yes (review it)."""
@@ -3985,12 +4030,26 @@ class TicketRunner:
         try:
             instruction = papaya_events.parse_instruction(event)
         except papaya_events.PapayaEventError as exc:
-            return Declined(f"this instruction could not be read: {exc}")
+            return self._decline_ticket(
+                job,
+                event.subject,
+                None,
+                f"this instruction could not be read: {exc}",
+                "I couldn't read your request back on this machine. Send it again.",
+            )
         verdict = self._check_readiness()
         blocked = verdict.state == readiness.BLOCKED
         if blocked and readiness.setup_blocker(verdict) is None:
             # Not something a person set up wrong: the runtime cannot run a turn.
-            return Declined(readiness.headline(verdict))
+            headline = readiness.headline(verdict)
+            return self._decline_ticket(
+                job,
+                instruction.subject,
+                instruction,
+                headline,
+                f"I can't work on {instructions.named(instruction)} on this machine right "
+                f"now: {headline}",
+            )
         conn = db.init_db()
         try:
             refs = instructions.repo_refs(conn)
@@ -4020,8 +4079,13 @@ class TicketRunner:
             try:
                 ensured = papaya_events.ensure_spec(found.spec)
             except papaya_events.PapayaEventError as exc:
-                return Declined(
-                    f"the request names {found.spec}, which this machine cannot register: {exc}"
+                reason = f"the request names {found.spec}, which this machine cannot register"
+                return self._decline_ticket(
+                    job,
+                    instruction.subject,
+                    instruction,
+                    f"{reason}: {exc}",
+                    f"I can't work on {instructions.named(instruction)}: {reason}.",
                 )
             found = replace(found, repo=ensured.name, spec=None)
             blocker = readiness.setup_blocker(verdict, found.repo)
@@ -4066,6 +4130,14 @@ class TicketRunner:
         and backend, and Papaya's own "your machine declined this" names none.
         """
         reason = instructions.setup_reason(blocker)
+        said = (
+            f"I can't take {instructions.named(instruction)} on this machine: "
+            f"{reason}. Its owner has been told what to do."
+        )
+        if self._has_ticket(instruction.subject):
+            # Already this machine's ticket (taken back up after a restart, or declined
+            # mid-hold): recorded, answered and reported once, on the ledger.
+            return self._decline_ticket(job, instruction.subject, instruction, reason, said)
         if instruction.subject not in self._declines_said:
             self._declines_said.add(instruction.subject)
             post = self._instruction_post or functools.partial(
@@ -4075,16 +4147,67 @@ class TicketRunner:
             try:
                 post(
                     instruction.reply,
-                    instructions.for_person(
-                        f"I can't take {instructions.named(instruction)} on this machine: "
-                        f"{reason}. Its owner has been told what to do.",
-                        instruction,
-                    ),
+                    instructions.for_person(said, instruction),
                     environ=job.env,
                     **kind,
                 )
             except papaya_events.PapayaEventError as exc:
                 log.warning("[serve] Could not say why %s was declined: %s", job.subject, exc)
+        return Declined(reason)
+
+    @staticmethod
+    def _has_ticket(subject: str) -> bool:
+        conn = db.init_db()
+        try:
+            return instructions.ticket_for(conn, subject) is not None
+        finally:
+            conn.close()
+
+    def _decline_ticket(
+        self,
+        job: Any,
+        subject: str,
+        instruction: papaya_events.Instruction | None,
+        reason: str,
+        said: str,
+    ) -> Declined:
+        """Decline an instruction; one that is already this machine's ticket, for good.
+
+        With no ticket, only the decline (as before: Papaya's fall-back tells the
+        person). With one — a request the rounds offered back after a restart — the
+        ticket is recorded `declined`, the person is answered with ``said`` and the
+        result reported `failed`, once, on the ledger: never offered again, never said
+        again after another restart. What its run waited on is closed with it.
+        """
+        conn = db.init_db()
+        try:
+            row = instructions.ticket_for(conn, subject)
+            if row is None:
+                return Declined(reason)
+            task_id, run_id = int(row["id"]), int(row["run_id"])
+            instruction = instruction or instructions.instruction_of(conn, task_id)
+            if store.task_phase(conn, task_id) != PHASE_DECLINED:
+                record_phase(conn, task_id, PHASE_DECLINED, reason)
+            if instruction is not None and instructions.stage(conn, task_id) == "new":
+                instructions.answer(
+                    conn,
+                    task_id,
+                    instruction,
+                    "failed",
+                    said,
+                    environ=job.env,
+                    post=self._instruction_post
+                    or functools.partial(
+                        papaya_events.post_instruction_reply, **self._opener_kwargs()
+                    ),
+                    report=self._instruction_report
+                    or functools.partial(
+                        papaya_events.report_instruction_result, **self._opener_kwargs()
+                    ),
+                )
+            instructions.close_waits(conn, run_id)
+        finally:
+            conn.close()
         return Declined(reason)
 
     def _setup_comment(

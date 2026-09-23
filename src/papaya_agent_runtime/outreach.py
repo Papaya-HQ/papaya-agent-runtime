@@ -126,6 +126,10 @@ class Ask:
     #: The instruction ticket this ask belongs to, when a person's request is behind it:
     #: the ask is said where they asked (:data:`VIA_ORIGIN`).
     instruction_task_id: int | None = None
+    #: What is needed and how to answer, in plain words for a person in Papaya (no task
+    #: ids, no commands to run at a terminal): what is said at a request's origin.
+    person: str = ""
+    person_how: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -196,7 +200,13 @@ def work_item_of(conn: sqlite3.Connection, task_id: int | None) -> str | None:
 
 
 def instruction_ticket_of(conn: sqlite3.Connection, task_id: int | None) -> int | None:
-    """The instruction ticket a task belongs to (its own, or its run's), or ``None``."""
+    """The instruction ticket a task belongs to (its own, or its run's), while its
+    request is still being answered (`instructions.live`); else ``None``.
+
+    Once the person has their answer, or the request is over, the conversation is not
+    where a later ask goes: a pull request the reconcile lane gives up on after the
+    final reply is the owner's, said the usual way.
+    """
     if task_id is None:
         return None
     from papaya_agent_runtime import instructions
@@ -207,7 +217,9 @@ def instruction_ticket_of(conn: sqlite3.Connection, task_id: int | None) -> int 
         "ORDER BY tasks.id LIMIT 1",
         (task_id, instructions.INSTRUCTION_SUBJECT),
     ).fetchone()
-    return int(row["id"]) if row is not None else None
+    if row is None or not instructions.live(conn, int(row["id"])):
+        return None
+    return int(row["id"])
 
 
 def _decisions(conn: sqlite3.Connection) -> list[Ask]:
@@ -233,6 +245,8 @@ def _decisions(conn: sqlite3.Connection) -> list[Ask]:
                 work_item_id=work_item_of(conn, task_id),
                 since=row["created_at"],
                 instruction_task_id=instruction_ticket_of(conn, task_id),
+                person=text,
+                person_how="Reply here with your answer.",
             )
         )
     return found
@@ -268,6 +282,18 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
                 work_item_id=work_item_of(conn, item.task_id),
                 since=since["created_at"] if since is not None else None,
                 instruction_task_id=instruction_ticket_of(conn, item.task_id),
+                person=(
+                    f"The work needs your permission to run `{item.label}`"
+                    + (f", to {item.why.rstrip('.')}" if item.why else "")
+                    + "."
+                ),
+                # A reply in the conversation cannot grant it (no turn on a request's work
+                # path may): a new message to this machine, in these words, does.
+                person_how=(
+                    "To allow it, send me a new message saying "
+                    f'"approve capability {item.id}". To refuse, say '
+                    f'"deny capability {item.id} because …".'
+                ),
             )
         )
     return found
@@ -295,6 +321,12 @@ def _pull_requests(conn: sqlite3.Connection) -> list[Ask]:
                 work_item_id=work_item_of(conn, task_id),
                 since=marked["created_at"] if marked is not None else None,
                 instruction_task_id=instruction_ticket_of(conn, task_id),
+                person="The pull request for your request needs a person to look at it.",
+                person_how=(
+                    f"Please look at it ({url}); I pick it up again once it changes."
+                    if url
+                    else "Please look at the pull request; I pick it up again once it changes."
+                ),
             )
         )
     return found
@@ -506,18 +538,12 @@ def ticket_bodies(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -
     return bodies
 
 
-def _origin_how(ask: Ask) -> str:
-    """What unblocks an ask, said to a person in Papaya rather than at a terminal."""
-    if ask.kind == CAPABILITY:
-        ident = ask.key.rsplit(":", 1)[-1]
-        return f"Reply here: approve capability {ident} (or: deny capability {ident} because …)"
-    if ask.kind == PULL_REQUEST:
-        return "Look at the pull request; I pick it up again once it changes."
-    return "Reply here with your answer."
-
-
 def origin_bodies(asks: list[Ask]) -> dict[int, str]:
-    """One progress reply per request, for the asks about it, said where it was asked."""
+    """One progress reply per request, for the asks about it, said where it was asked.
+
+    In the words a person in Papaya reads (:attr:`Ask.person`): what is needed and how
+    to answer, never a task id, a command it ran, or a `ppy` command to type.
+    """
     from papaya_agent_runtime import blockers
 
     by_request: dict[int, list[Ask]] = {}
@@ -532,8 +558,8 @@ def origin_bodies(asks: list[Ask]) -> dict[int, str]:
             else f"{len(group)} things need you before I can go on:"
         ]
         for ask in group:
-            lines.append(f"- {ask.text}")
-            lines.append(f"  {_origin_how(ask)}")
+            lines.append(f"- {ask.person or ask.text}")
+            lines.append(f"  {ask.person_how or 'Reply here with your answer.'}")
         bodies[request] = blockers.redact("\n".join(lines))
     return bodies
 
@@ -708,7 +734,7 @@ def post_origin(
             conn.close()
         if instruction is None:
             return False
-        text = instructions.for_person(body, instruction)
+        text = instructions.for_person(body, instruction, allow_empty=True)
         if not text:
             return False
         kind = {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}

@@ -299,7 +299,10 @@ def _pr_title(conn, task_id: int, title: str) -> str:
     """The pull request's title: a person's request is named by its title, never its id."""
     from papaya_agent_runtime import pr_body
 
-    return pr_body.for_request(conn, task_id, str(title or "")).strip() or str(title or "")
+    return (
+        pr_body.for_request(conn, task_id, str(title or "")).strip()
+        or "Work on a request sent to this machine"
+    )
 
 
 def _forge_for_task(conn, task) -> tuple[str, str | None]:

@@ -772,8 +772,13 @@ none. When the work is delivered, the review turn ends with an `OUTCOME: done` b
 two to four sentences for the person — what changed, what the tests show; no branch,
 SHA, evidence path or worker report (`prompts.INSTRUCTION_SUMMARY_RULE`) — and the final
 reply is those words and then "Pull request open: <url>", the only time that line is
-said. A review turn that wrote no block gets the runtime's one plain sentence instead;
-the worker's closeout never reaches the person. A progress reply Papaya
+said. A review block that says `failed` is reported failed. A worker that found rather
+than built (no commits, nothing to review) gets one instruction turn instead, which reads
+its report fenced as data (`prompts.FINDINGS_SUMMARY_RULE`) and writes the `OUTCOME:`
+block. Any such summary is cut to 1,200 characters, and one carrying a commit SHA, a
+`ppy/task-…` branch, an evidence path or an absolute path is not posted: the runtime's
+one plain sentence goes instead, as it does when no block was written. The worker's
+closeout never reaches the person. A progress reply Papaya
 refuses is logged once and the work goes on; once the hold is over (a lost lease, a
 stop) nothing more is said from this machine. `kind: progress|final` is sent on replies
 only when the event carried an `intent` key — an older DM route refuses the field.
@@ -812,28 +817,43 @@ the outcome with the reply block the event carried, then reports it; neither a t
 nor a worker chooses where it goes. Nothing said there names the request by its
 `MI-<n>`, which is internal: the runtime's own lines call it "your question" or by its
 title, the turns are told the same, and any `MI-<n>` a turn still writes is taken out of
-what is posted: the request's own becomes "your request", and a sentence naming another
-request is dropped whole, never garbled into "another request …". The ticket and its
-worker are titled with the request's title, so neither a pull request's title nor its
-body carries an `MI-<n>` either, and the status report this machine publishes names a
-request by its title (`task-<id>` as its ref), never its id.
+what is posted: this request's own label is dropped and its id becomes "your request";
+any other request's label or id marks its sentence as about another request, and that
+sentence is dropped whole, never garbled into "another request …". A final reply that
+was only about other requests says so in one plain sentence; it is never empty. The
+ticket and its worker are titled with the request's title, so neither a pull request's
+title nor its body carries an `MI-<n>` either (the same rule, the task's own request
+reading "this request"), and the status report this machine publishes names a request by
+its title, with its ticket's `task-<id>` as the identifier (`about.short_id`, `ref`).
 
-**A restart never loses a request.** An instruction ticket a hold took and nobody
-answered — released by a shutdown, or left `picked_up` by a crash — is offered back by the
-rounds (at start and every round) as the `machine.instruction` it came as: re-reserved, it
-lands on the same ticket and resumes from its state (its worker watched, reviewed and
-delivered; nothing said twice). One that cannot be taken back up — Papaya refuses the
-reserve, or it is not this loop's any more — is told to the person at its origin, once,
-as not finished with what it was waiting on, reported `failed`, and closed (`done`), so
-it never lingers `picked_up` with nobody holding it. A busy loop is tried again next
-round. Whenever a request's ticket ends (answered, declined, closed), what its run was
-blocked on or waiting for is closed with it, so no report or outreach says it again.
+**A restart never loses a request.** Only what this process lost itself is taken back: a
+hold the listener cancelled at shutdown (`released`, marked `instructions.SHUTDOWN`) or
+one a crash left in a holding phase with nobody holding it (`instructions.live`). A lost
+lease — Papaya took it back, or a person released it in the app — is never taken back,
+nor is a decline or anything answered. The rounds (at start and every round) first read
+the request from Papaya (`GET .../machine-instructions/<ref>`): one Papaya has closed
+(done, failed, cancelled, never picked up) is closed here without a word; one that
+cannot be read waits for the next round. An open one is offered back as the
+`machine.instruction` it came as: re-reserved, it lands on the same ticket and resumes
+from its state (its worker watched, reviewed and delivered; nothing said twice). Only a
+reserve Papaya refused, naming a holder, is told to the person at its origin, once, as
+not finished with what it was waiting on, reported `failed`, and closed (`done`). An
+offer answered `done` with no refusal (already running here, a playbook or scope skip),
+a busy loop, or an offer that raised changes nothing and is tried next round. A request
+taken back and then declined (a setup blocker, a runtime that cannot run a turn, an
+unreadable request) is recorded `declined`, answered and reported `failed` once, on the
+ledger, so it is neither offered nor said again after another restart. Whenever a
+request's ticket ends (answered, declined, closed), what its run was blocked on or
+waiting for is closed with it, so no report or outreach says it again.
 
-**What waits on the person is said where they asked.** A decision, capability request or
-pull request waiting on a person, when a request is behind it, is said at that request's
-origin as a progress reply — once per change of what it asks, not held to the owner's DM
-interval — and not in the owner's DM or on any work item. Unlanded, it is due again the
-next round.
+**What waits on the person is said where they asked, while it is theirs.** While a
+request is live, a decision, capability request or pull request waiting on a person for
+it is said at its origin as a progress reply — once per change of what it asks, not held
+to the owner's DM interval — and not in the owner's DM or on any work item. It is said in
+plain words: what is needed and how to answer ("To allow it, send me a new message
+saying …"), never a worker task id, a command it ran, or a `ppy` command. Once the request
+is answered or over, a later ask goes to the owner the usual way. Unlanded, it is due
+again the next round.
 
 ## Turning intent into work
 

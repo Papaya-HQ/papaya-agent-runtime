@@ -126,6 +126,17 @@ INSTRUCTION_SUMMARY_RULE = (
     "words. " + NO_REQUEST_ID_RULE
 )
 
+#: What the instruction turn is told when a worker finished with nothing to review (an
+#: investigation, a spike that found rather than built): its report is data, and the
+#: answer to the person is this turn's to write.
+FINDINGS_SUMMARY_RULE = (
+    "The worker finished and changed nothing; its report is above. Do not start, steer "
+    "or stop any work. End your turn with an `OUTCOME: done` block written for the "
+    "person who asked: what was found and what you propose, in a few plain sentences. "
+    "No branch names, commit SHAs, evidence paths or worker task ids, and do not paste "
+    "the worker's report. " + NO_REQUEST_ID_RULE
+)
+
 #: The rule every brief, environment block and command-rules block gives a worker
 #: about when its work reaches the remote. A worker once held two hours of finished
 #: work in its worktree for one commit after a green full suite, and a restart would
@@ -288,6 +299,7 @@ __all__ = [
     "MEMORY_RULE",
     "NO_REQUEST_ID_RULE",
     "INSTRUCTION_SUMMARY_RULE",
+    "FINDINGS_SUMMARY_RULE",
     "REPOSITORY_CANNOT_TELL",
     "REPOSITORY_PREFIX",
     "REPO_CHOICE",
