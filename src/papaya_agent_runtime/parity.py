@@ -341,6 +341,10 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._wait_for_slot",
             "Rounds._reclaim",
             "Rounds._reoffer_missed",
+            # A re-offer reads the item and compares its owner with the listener's
+            # agent before it offers: part of the reclaim, which a session never does.
+            "Rounds._read_work_item",
+            "Rounds._agent_id",
             "Rounds._offer",
             "Rounds._watch_refusals",
             "Rounds._post",
