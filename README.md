@@ -399,7 +399,7 @@ cd papaya-agent-runtime
 ./bin/ppy env sync       # builds .venv, and with it the Papaya client, papaya-agent
 
 # Connect this machine as one of your workspace's agents, with a device code:
-.venv/bin/papaya-agent connect --device --workspace <workspace> --agent <handle> --no-install
+.venv/bin/papaya-agent connect --device --no-install
 # ...or with a connection token the Papaya app generated for a headless machine:
 #    .venv/bin/papaya-agent login --token-stdin
 
@@ -411,10 +411,12 @@ cd papaya-agent-runtime
 #    .venv/bin/papaya-agent listen --working-directory "$PWD"
 ```
 
-- `connect --device` prints a code and a link. Approve it on any device where you are
-  signed in to Papaya. `--workspace` (id, slug or name) and `--agent` (the agent's
-  handle) choose without a prompt. Leave them out and it lists the choices.
-  `--no-install` leaves your own Claude Code's plugins alone: the runtime's turns get
+- `connect --device` prints a code and a link. Open it on any device where you are
+  signed in to Papaya. The workspace and the agent are chosen there, in the Papaya app,
+  when you approve the code. `--workspace` and `--agent` do nothing with `--device`: the
+  client says "--workspace and --agent apply to `--password` sign-in" and ignores them.
+  They choose only for `--password` sign-in. `login --token-stdin` takes `--workspace`
+  alone, and refuses a token from another workspace. `--no-install` leaves your own Claude Code's plugins alone: the runtime's turns get
   the agent's Papaya tools from the client directly. Add `--harness codex` if Codex is
   the harness you connect with. The connection is stored in `~/.papaya-agent/`.
 - The working folder is set when you start, not when you connect. `connect --device`

@@ -430,7 +430,9 @@ quietly; do not narrate the steps or report diagnostics.
    exits listing them: ask the person which one in the conversation, then re-run with
    the `--workspace` or `--agent` it names — never guess. With neither Node nor `uv`
    on the machine it says which to install. On a machine with no browser (SSH, a
-   server, WSL2), add `--device`: the person approves a code from any device. The
+   server, WSL2), add `--device`: the person approves a code from any device and
+   chooses the workspace and agent in the Papaya app as they approve it, so pass no
+   `--workspace`/`--agent` with it (the client ignores them there). The
    whole setup for a machine without the desktop app, including keeping `ppy serve`
    running, is the README's
    [Run it on a machine without the app](../README.md#run-it-on-a-machine-without-the-app);

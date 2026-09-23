@@ -52,7 +52,9 @@ hands authentication steps back to the user.
    (`npx papaya-agent`, or `uv` on a machine without Node), opens a sign-in link, pins
    the machine and installs the harness plugin; their only step is clicking Approve.
    Relay the link it prints; on a machine with no browser, add `--device` so they
-   approve a code from another device. If it exits listing several workspaces or agents, ask the
+   approve a code from another device, choosing the workspace and agent in the Papaya
+   app as they approve (`--workspace`/`--agent` are ignored with `--device`). If the
+   browser flow exits listing several workspaces or agents, ask the
    person which in the conversation and re-run with `--workspace`/`--agent`; if it says
    there is neither Node nor `uv`, tell them which to install. Then `ppy papaya tools`
    and `/mcp`.
