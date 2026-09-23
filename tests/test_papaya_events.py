@@ -455,6 +455,128 @@ def test_an_instruction_reply_carries_kind_only_when_given(origin) -> None:
     assert bodies[1]["kind"] == "progress"
 
 
+PERSON = {"type": "user", "id": "user-1", "display_name": "Shane"}
+
+
+def test_follow_ups_are_read_beside_the_result_route_as_comments() -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        return _Response(
+            [
+                {
+                    "id": "f-1",
+                    "body": "actually use Postgres",
+                    "author": PERSON,
+                    "created_at": "t1",
+                },
+                {"id": "f-2", "body": "and the reports", "author": PERSON, "created_at": "t2"},
+            ]
+        )
+
+    found = papaya_events.list_instruction_follow_ups(
+        _reply("dm"), environ=CONNECTED, opener=open_request
+    )
+    assert calls[0].method == "GET"
+    assert calls[0].full_url == (
+        "https://papaya.example/api/v1/workspaces/ws-1/machine-instructions/MI-1/follow-ups"
+        "?limit=200"
+    )
+    assert [(c["id"], c["body"], c["created_at"]) for c in found] == [
+        ("f-1", "actually use Postgres", "t1"),
+        ("f-2", "and the reports", "t2"),
+    ]
+    assert found[0]["author_name"] == "Shane"
+    assert papaya_events.list_instruction_follow_ups(_reply("dm"), environ={}) is None
+
+
+#: One follow-up exactly as Papaya serves it (`MachineInstructionFollowUpOut`, backend
+#: commit 1a2aa56d6): the author is flat, and a person's `author_actor` is null.
+BACKEND_FOLLOW_UP = {
+    "id": "4b1f0c2e-9d7a-4e1b-8f3c-2a6d5e7f9b10",
+    "body": "actually use Postgres",
+    "author_type": "user",
+    "author_id": "user-1",
+    "author_actor": None,
+    "author_display_name": "Shane",
+    "origin_message_id": "msg-77",
+    "created_at": "2026-09-23T10:00:05Z",
+}
+
+
+def test_the_backends_flat_follow_up_reads_as_a_persons_comment() -> None:
+    from papaya_agent_runtime import serve
+
+    def open_request(request, timeout):
+        return _Response([BACKEND_FOLLOW_UP])
+
+    (found,) = papaya_events.list_instruction_follow_ups(
+        _reply("channel"), environ=CONNECTED, opener=open_request
+    )
+    assert found["id"] == BACKEND_FOLLOW_UP["id"]
+    assert found["body"] == "actually use Postgres"
+    assert found["created_at"] == "2026-09-23T10:00:05Z"
+    assert (found["author_type"], found["author_id"], found["author_name"]) == (
+        "user",
+        "user-1",
+        "Shane",
+    )
+    assert "author_actor" not in found
+    assert serve.is_own_comment(found, "user-1") is False
+    assert serve.is_own_comment(found, None) is False
+
+
+def test_an_agents_flat_follow_up_is_still_an_agents() -> None:
+    from papaya_agent_runtime import serve
+
+    agent = papaya_events.follow_up_as_comment(
+        {**BACKEND_FOLLOW_UP, "author_type": "agent", "author_id": "agent-1"}
+    )
+    assert serve.is_own_comment(agent, "agent-1") is True
+    assert serve.is_own_comment(agent, "agent-2") is False
+
+
+def test_a_page_of_follow_ups_and_an_empty_answer_read_the_same_way() -> None:
+    def page(request, timeout):
+        return _Response({"items": [{"id": "f-1", "body": "hi", "author": PERSON}]})
+
+    def empty(request, timeout):
+        return _Response({})
+
+    found = papaya_events.list_instruction_follow_ups(_reply("dm"), environ=CONNECTED, opener=page)
+    assert [c["id"] for c in found] == ["f-1"]
+    assert (
+        papaya_events.list_instruction_follow_ups(_reply("dm"), environ=CONNECTED, opener=empty)
+        == []
+    )
+
+
+def test_a_papaya_without_the_follow_up_route_refuses_with_404() -> None:
+    def open_request(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    with pytest.raises(papaya_events.PapayaHTTPError) as raised:
+        papaya_events.list_instruction_follow_ups(
+            _reply("channel"), environ=CONNECTED, opener=open_request
+        )
+    assert raised.value.code == 404
+
+
+@pytest.mark.parametrize("agent_id", [None, "agent-1", "user-1"])
+def test_a_persons_follow_up_is_never_taken_for_the_agents_own_comment(agent_id) -> None:
+    """The one authorship rule (`serve.is_own_comment`) holds on a follow-up too."""
+    from papaya_agent_runtime import serve
+
+    person = papaya_events.follow_up_as_comment({"id": "f-1", "body": "hi", "author": PERSON})
+    assert "author_actor" not in person
+    assert serve.is_own_comment(person, agent_id) is False
+    agent = papaya_events.follow_up_as_comment(
+        {"id": "f-2", "body": "ok", "author": {"type": "agent", "id": "agent-1"}}
+    )
+    assert serve.is_own_comment(agent, "agent-1") is True
+
+
 def test_intent_is_kept_only_when_the_event_carries_the_key() -> None:
     base = {"instruction_id": "i-1", "short_id": "MI-1", "reply": _reply("dm")}
     assert papaya_events.instruction_from(base).intent is None

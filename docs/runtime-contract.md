@@ -745,6 +745,24 @@ refuses is logged once and the work goes on; once the hold is over (a lost lease
 stop) nothing more is said from this machine. `kind: progress|final` is sent on replies
 only when the event carried an `intent` key — an older DM route refuses the field.
 
+**What the person adds reaches the running work.** While an instruction is held, the
+runtime reads its follow-ups (`GET .../machine-instructions/<ref>/follow-ups`, beside its
+result route) every 15 seconds and right after every turn, and handles them exactly as a
+work item's comments: the same cursor on the ticket task (starting at the request itself,
+so what was added before pickup counts), the same dedupe, and one answer turn for
+everything pending. Each batch taken for a turn gets one "Got it — passing that on." at
+the origin, and nothing once the lease is lost. The answer turn gets the request as sent
+and the follow-ups, fenced as the person's words, and acts under the instruction's own
+path: on the work path it steers, answers or stops the worker (`ppy stop`), still never
+approves a capability; it says something back with a last `REPLY: <line>`, which the
+runtime posts at the origin. On the answer path (and an `ask`'s narrower one),
+follow-ups that arrive while the answer is written get one more turn before the reply,
+on that same path — once: what arrives during that extra turn is not answered, and the
+reply adds one sentence asking them to send it again. Listening ends with the hold, so a
+follow-up after the answer is never acted on. A person's words are fenced with a fence
+longer than any backtick run in them, so they cannot close it. A Papaya without the route (404) is logged once and the request goes on
+unchanged; any other failed read keeps the cursor and is read again at the next poll.
+
 **A setup blocker gates only work.** A question is answered whatever this machine still
 needs, since answering needs no worker, clone or forge. Work meeting a setup blocker is
 declined with the blocker as the reason in plain words ("this machine needs setup:
