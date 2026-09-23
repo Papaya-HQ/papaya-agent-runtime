@@ -498,6 +498,30 @@ def test_cli_refuses_a_command_outside_the_turns_path(ppy_home, monkeypatch, cap
     assert cli.main(["version"]) == 0
 
 
+@pytest.mark.parametrize("path", instructions.TURN_PATHS)
+@pytest.mark.parametrize("event", ["session-start", "stop", "session-end"])
+def test_the_harness_hooks_run_on_every_instruction_path(
+    ppy_home, monkeypatch, capsys, path, event
+) -> None:
+    """Goal 1: `.claude/settings.json` runs `ppy hook …` in every turn; a refused one
+    failed the turn after it had answered (2026-09-23, "Answered MI-1 (failed)")."""
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, path)
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    assert cli.main(["hook", event]) == 0
+    assert "refused" not in capsys.readouterr().err
+    assert instructions.command_refusal(path, ["hook", event], merge_allowed=False) is None
+
+
+def test_a_hook_exemption_opens_nothing_else_on_the_ask_path(ppy_home, monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, instructions.ASK)
+    assert cli.main(["capability", "approve", "12"]) == 2
+    assert "refused on this instruction's path" in capsys.readouterr().err
+
+
 # ── the work path's brief ───────────────────────────────────────────────────
 
 

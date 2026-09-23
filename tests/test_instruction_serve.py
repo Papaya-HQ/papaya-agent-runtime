@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -39,6 +40,7 @@ from papaya_agent_runtime import (
     serve,
     solicit,
 )
+from papaya_agent_runtime.manager.launch import repo_root
 from papaya_agent_runtime.state import store
 from papaya_agent_runtime.state.db import init_db
 
@@ -328,9 +330,10 @@ def test_e_a_status_ask_is_answered_from_the_snapshot_and_names_what_waits(
     harness = InstructionHarness(FakeEvents([instruction_event("What are you working on?")]))
     serve_until_released(harness, client_home, runner(turns, routes))
     (reply,) = routes.replies()
-    # The instruction being answered is itself in flight while its turn runs.
+    # The instruction being answered is itself in flight while its turn runs, named
+    # by its title: its `MI-42` is an internal id and never reaches the person.
     assert reply["content"] == (
-        "In flight: Snapshot route; MI-42: What are you working on?.\n"
+        "In flight: Snapshot route; What are you working on?.\n"
         "Waiting on you: Which pill copy ships?."
     )
     assert reply["parent_id"] == "root-1"
@@ -1098,7 +1101,7 @@ def test_a_setup_blocker_declines_work_with_the_blocker_as_the_reason(
     assert harness.events.hand_backs == []
     assert routes.replies() == [
         {
-            "content": f"I can't take MI-42 on this machine: {reason}. "
+            "content": f'I can\'t take "fix the flaky test in runtime" on this machine: {reason}. '
             "Its owner has been told what to do.",
             "parent_id": "root-1",
             "kind": "final",
@@ -1696,3 +1699,94 @@ def test_a_lost_lease_says_no_got_it_and_runs_no_answer_turn(ppy_home) -> None:
     asyncio.run(scenario())
     assert turns.calls == []
     assert contents(routes) == []
+
+
+# ── no internal id reaches the person (task 370) ────────────────────────────
+
+
+def _no_request_ids(routes: Routes) -> list[str]:
+    """Every string posted where the person asked, and the reported summaries too."""
+    posted = contents(routes) + [str(r.get("result_summary") or "") for r in routes.results()]
+    assert posted
+    for text in posted:
+        assert not re.search(r"MI-\d", text), text
+    return posted
+
+
+def test_an_answer_turn_that_names_the_request_id_is_not_posted_as_it_wrote_it(
+    ppy_home, client_home, ready
+) -> None:
+    """Matrix row 4: the prompt rule, and the post-filter for a turn that ignores it.
+
+    The 2026-09-23 end-to-end run's answer wrote `(MI-1, "What are you working on
+    right now?")` into its reply.
+    """
+    turns = FakeTurns(
+        lambda _turn: (
+            "OUTCOME: done\nNothing is running besides this one "
+            '(MI-42, "What are you working on?"). MI-7: Rename the flag finished earlier.'
+        )
+    )
+    routes = Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("What are you working on?")]))
+    serve_until_released(harness, client_home, runner(turns, routes))
+    assert prompts.NO_REQUEST_ID_RULE in turns.calls[0].prompt
+    # Matrix row 3: the instruction's own manager turn still writes only in the runtime.
+    runtime_dir = str(Path(repo_root()).resolve())
+    roots = json.loads(turns.calls[0].launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"])
+    assert roots == [runtime_dir]
+    assert _no_request_ids(routes)[0] == (
+        'Nothing is running besides this one (your request, "What are you working on?"). '
+        "Rename the flag finished earlier."
+    )
+
+
+def test_the_instruction_and_answer_prompts_say_never_to_name_the_request_id() -> None:
+    for turn in (prompts.INSTRUCTION, prompts.ANSWER):
+        assert prompts.NO_REQUEST_ID_RULE in prompts.load(turn), turn
+
+
+def test_the_runtimes_own_fallback_names_your_question(ppy_home, client_home, ready) -> None:
+    """The "I could not put an answer to MI-1 together" line of the same run."""
+    turns, routes = FakeTurns(lambda _turn: "no outcome block"), Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("What are you working on?")]))
+    serve_until_released(harness, client_home, runner(turns, routes))
+    assert _no_request_ids(routes)[0] == (
+        "I could not put an answer to your question together this time. "
+        "Send it again, or ask something narrower."
+    )
+
+
+def test_a_work_path_that_could_not_start_names_the_request_by_its_title(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    def refuse(*_args: Any) -> None:
+        raise RuntimeError("the worker pool refused it")
+
+    routes = Routes()
+    event = instruction_event("fix the flaky test in runtime", intent="work")
+    harness = InstructionHarness(FakeEvents([event]))
+    serve_until_released(
+        harness, client_home, runner(FakeTurns(), routes, instruction_dispatch=refuse)
+    )
+    posted = _no_request_ids(routes)
+    assert posted[0] == "On it — working in runtime."
+    assert posted[-2] == (
+        'I could not start work on "fix the flaky test in runtime" in runtime: '
+        "the worker pool refused it"
+    )
+
+
+def test_a_progress_line_naming_the_request_id_is_posted_without_it() -> None:
+    routes = Routes()
+    the_runner, held = _held_ticket(routes)
+
+    async def scenario() -> None:
+        await the_runner._instruction_progress(held, "Dispatching MI-42 in runtime.")
+        await the_runner._say(held, serve.PHASE_REVIEWING, "Reviewing MI-42 beside MI-9.")
+
+    asyncio.run(scenario())
+    assert _no_request_ids(routes) == [
+        "Dispatching your request in runtime.",
+        "Reviewing your request beside another request.",
+    ]

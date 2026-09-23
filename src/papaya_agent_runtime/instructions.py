@@ -560,6 +560,10 @@ CHOICE_ALLOWED: dict[str, frozenset[str] | None] = {
 _ALLOWED = {ANSWER: ANSWER_ALLOWED, ASK: ASK_ALLOWED, CHOICE: CHOICE_ALLOWED}
 #: The work path's refusals: everything today's turns run, except approving a capability.
 WORK_REFUSED: frozenset[tuple[str, str]] = frozenset({("capability", "approve")})
+#: Commands the harness runs, not the turn: `.claude/settings.json` calls `ppy hook
+#: session-start|stop|session-end` in every turn, and a refused hook fails the turn
+#: whatever it answered. Never refused on any path.
+HARNESS_COMMANDS = frozenset({"hook"})
 
 
 def _words(argv: list[str]) -> list[str]:
@@ -575,6 +579,8 @@ def command_refusal(
     words = _words(list(argv))
     command = words[0] if words else ""
     sub = words[1] if len(words) > 1 else ""
+    if command in HARNESS_COMMANDS:
+        return None
     if command == "stack" and sub == "merge":
         if merge_allowed is None:
             from papaya_agent_runtime import machine_status
@@ -761,6 +767,35 @@ def reply_text(
         return main
     room = REPLY_MAX - len(where) - 1
     return main[:room].rstrip() + "…" + where
+
+
+#: An instruction's internal id (`MI-<n>`), as a label ahead of its title and bare.
+_REQUEST_LABEL = re.compile(r"\bMI-\d+:\s+")
+_REQUEST_ID = re.compile(r"\bMI-\d+\b")
+
+
+def named(instruction: papaya_events.Instruction) -> str:
+    """How a line the runtime writes names the request to the person: its title, quoted."""
+    title = " ".join(str(instruction.title or instruction.text or "").split())
+    if not title:
+        return "your request"
+    return f'"{title[:77]}…"' if len(title) > 80 else f'"{title}"'
+
+
+def for_person(text: str, instruction: papaya_events.Instruction) -> str:
+    """``text`` as it may be posted where the person asked: no `MI-<n>` in it.
+
+    The id is internal; the person never typed it and Papaya does not show it in the
+    conversation. A label ahead of a title (`MI-42: What are you working on?`) is
+    dropped and the title kept; this request's own id elsewhere becomes "your
+    request", and another request's "another request". The turns are told the same
+    (`prompts.NO_REQUEST_ID_RULE`); this is what holds when a turn does not listen.
+    """
+    own = str(instruction.short_id or "")
+    return _REQUEST_ID.sub(
+        lambda match: "your request" if match.group(0) == own else "another request",
+        _REQUEST_LABEL.sub("", str(text or "")),
+    )
 
 
 # ── the ticket on the ledger ────────────────────────────────────────────────
@@ -1019,6 +1054,7 @@ def answer(
     """
     post = post or papaya_events.post_instruction_reply
     report = report or papaya_events.report_instruction_result
+    text = for_person(text, instruction)
     message_id: str | None = None
     error = ""
     replied = False
@@ -1123,6 +1159,7 @@ __all__ = [
     "CLASSIFIED",
     "Classification",
     "EMPTY_QUESTION",
+    "HARNESS_COMMANDS",
     "INSTRUCTION",
     "INSTRUCTION_KEY",
     "INSTRUCTION_SUBJECT",
@@ -1151,8 +1188,10 @@ __all__ = [
     "compose_brief",
     "finished_tickets",
     "first_note",
+    "for_person",
     "instruction_of",
     "mark_worker",
+    "named",
     "on_it",
     "open_tickets",
     "outcome_of",

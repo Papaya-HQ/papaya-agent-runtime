@@ -1864,8 +1864,10 @@ class TicketRunner:
         ticket and the work goes on; the final reply is posted regardless.
         """
         instruction = ticket.held.instruction
-        line = str(text or "").strip()
-        if instruction is None or not line or ticket.lease_lost:
+        if instruction is None:
+            return
+        line = instructions.for_person(str(text or "").strip(), instruction)
+        if not line or ticket.lease_lost:
             return
         post = self._instruction_post or functools.partial(
             papaya_events.post_instruction_reply, **self._opener_kwargs()
@@ -2047,7 +2049,7 @@ class TicketRunner:
         )
         return (
             "failed",
-            f"I could not put an answer to {instruction.short_id} together this time. "
+            "I could not put an answer to your question together this time. "
             "Send it again, or ask something narrower.",
         )
 
@@ -2117,7 +2119,7 @@ class TicketRunner:
             except Exception as exc:  # noqa: BLE001 - said to the person, not raised
                 return (
                     "failed",
-                    f"I could not start work on {instruction.short_id} in {held.repo}: "
+                    f"I could not start work on {instructions.named(instruction)} in {held.repo}: "
                     f"{_one_line(exc)}",
                     None,
                 )
@@ -2125,7 +2127,8 @@ class TicketRunner:
             if worker is None:
                 return (
                     "failed",
-                    f"The dispatch for {instruction.short_id} in {held.repo} left no worker.",
+                    f"The dispatch for {instructions.named(instruction)} in {held.repo} "
+                    "left no worker.",
                     None,
                 )
         await store.run_in_thread(instructions.mark_worker, worker.task_id, instruction.short_id)
@@ -2147,11 +2150,15 @@ class TicketRunner:
             elif phase == PHASE_REPORTED:
                 break
             else:
-                return "failed", f"The worker for {instruction.short_id} was lost.", None
+                return (
+                    "failed",
+                    f"The worker for {instructions.named(instruction)} was lost.",
+                    None,
+                )
             if isinstance(phase, HandBack):
                 return (
                     "failed",
-                    f"The work on {instruction.short_id} stopped: {phase.reason}",
+                    f"The work on {instructions.named(instruction)} stopped: {phase.reason}",
                     None,
                 )
         current = ticket.worker or worker
@@ -3934,8 +3941,7 @@ class TicketRunner:
                 ensured = papaya_events.ensure_spec(found.spec)
             except papaya_events.PapayaEventError as exc:
                 return Declined(
-                    f"{instruction.short_id} names {found.spec}, which this machine cannot "
-                    f"register: {exc}"
+                    f"the request names {found.spec}, which this machine cannot register: {exc}"
                 )
             found = replace(found, repo=ensured.name, spec=None)
             blocker = readiness.setup_blocker(verdict, found.repo)
@@ -3989,8 +3995,11 @@ class TicketRunner:
             try:
                 post(
                     instruction.reply,
-                    f"I can't take {instruction.short_id} on this machine: {reason}. "
-                    "Its owner has been told what to do.",
+                    instructions.for_person(
+                        f"I can't take {instructions.named(instruction)} on this machine: "
+                        f"{reason}. Its owner has been told what to do.",
+                        instruction,
+                    ),
                     environ=job.env,
                     **kind,
                 )

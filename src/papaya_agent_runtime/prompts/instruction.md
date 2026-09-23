@@ -71,8 +71,9 @@ optional `ALSO-SENT:` line and an optional `RUNTIME:` line:
 
 Write `OUTCOME: failed` instead when you could not do what was asked, and say why and
 what would let you. The words after `OUTCOME:` are exactly what the person reads; the
-runtime adds nothing. Name ids and pull requests, never tokens or paths under a home
+runtime adds nothing. Name tasks and pull requests, never tokens or paths under a home
 directory.
+Never name the request's `MI-<n>` to the person: it is an internal id. Call it "your question", "your request", or by its title.
 
 ## Where durable facts go
 

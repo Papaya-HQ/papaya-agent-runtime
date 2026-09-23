@@ -104,6 +104,15 @@ TEN_MINUTE_RULE = (
     "use `ppy gate run`, or push and let the hook run it. Never background a gate and wait."
 )
 
+#: What an instruction's turns are told about its `MI-<n>`: an internal id, never said to
+#: the person (a reply once read "(MI-1, "What are you working on right now?")"). The
+#: instruction and answer prompts carry it verbatim; `instructions.for_person` also takes
+#: any that slips through out of what is posted.
+NO_REQUEST_ID_RULE = (
+    "Never name the request's `MI-<n>` to the person: it is an internal id. Call it "
+    '"your question", "your request", or by its title.'
+)
+
 #: The rule every brief, environment block and command-rules block gives a worker
 #: about when its work reaches the remote. A worker once held two hours of finished
 #: work in its worktree for one commit after a green full suite, and a restart would
@@ -264,6 +273,7 @@ __all__ = [
     "INSTRUCTION",
     "LEDGER",
     "MEMORY_RULE",
+    "NO_REQUEST_ID_RULE",
     "REPOSITORY_CANNOT_TELL",
     "REPOSITORY_PREFIX",
     "REPO_CHOICE",

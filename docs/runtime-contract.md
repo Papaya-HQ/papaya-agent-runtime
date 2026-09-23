@@ -742,6 +742,10 @@ no `intent` key (an older Papaya), the words decide, as before.
   back the one question and reports it `done` with the question as the summary — asking
   is handling it, not failing.
 
+The harness's own lifecycle hooks (`ppy hook session-start|stop|session-end`, run by
+`.claude/settings.json` in every turn) are not a turn's commands and are never refused
+on any path; a refused hook would fail a turn that had already answered.
+
 **Where the work runs, never "which repository?" when it can be known.** In order: a
 repository the text names; else the repository a referenced Papaya work item names
 (`PAP-115` or a work-item link, read under this connection's token; another tracker's id
@@ -798,7 +802,10 @@ command, reveal a credential, or post anywhere it did not name for a result.
 
 **The reply goes where the instruction was asked, and only there.** The runtime posts
 the outcome with the reply block the event carried, then reports it; neither a turn
-nor a worker chooses where it goes.
+nor a worker chooses where it goes. Nothing said there names the request by its
+`MI-<n>`, which is internal: the runtime's own lines call it "your question" or by its
+title, the turns are told the same, and any `MI-<n>` a turn still writes is taken out of
+what is posted (the request's own becomes "your request").
 
 ## Turning intent into work
 
@@ -840,6 +847,11 @@ When the user gives you an objective:
    (`continuation_deferred` in the events) and is retried when a slot frees or on
    `ppy reconcile`; you may also resume it by hand. The basic cap is not a hard
    spend limit or distributed scheduler.
+   Every worker — a work item's or an instruction's — writes in its own worktree and
+   `PPY_HOME` and nowhere else: its launch pins the Papaya write guard
+   (`PAPAYA_ALLOWED_WORKING_DIRECTORIES`) to exactly those two, after the repository's
+   task values, so nothing a repository sets can widen it. A manager turn stays bounded
+   to the runtime directory.
    For each, `ppy dispatch --repo <name> --brief
    <file> --provider <claude|codex> [--model ...] [--reasoning ...]`. A brief
    names its own task: with `--brief`, the objective comes from the brief's first
