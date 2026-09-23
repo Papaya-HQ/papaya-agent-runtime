@@ -10,6 +10,7 @@ whichever serve holds it — asked first, then SIGTERM, then SIGKILL — or does
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -37,11 +38,21 @@ globals().update(
     }
 )
 
-_ENV = {**os.environ, "PYTHONPATH": os.path.join(checkout_root(), "src")}
+
+def _env() -> dict[str, str]:
+    """A child's environment, built per call with this test's temporary home."""
+    return {
+        **os.environ,
+        "PYTHONPATH": os.path.join(checkout_root(), "src"),
+        "PPY_HOME": _home(),
+    }
+
 
 # A serve reduced to its lock: take it the way `serve` does, say so, hold it. `mode`
 # is how it ends: `hold` (until SIGTERM, which it handles as serve does), `deaf`
-# (ignores SIGTERM), or an exit path — `exit`, `raise`, `default-term`, `sigkill`.
+# (ignores SIGTERM), `grandchild` (starts a long-lived child that could inherit the
+# lock, prints its pid, then is SIGKILLed), or an exit path — `exit`, `raise`,
+# `default-term`, `sigkill`.
 _HOLDER = r"""
 import os, signal, sys, time
 from papaya_agent_runtime import takeover
@@ -81,6 +92,13 @@ if mode == "default-term":
     os.kill(os.getpid(), signal.SIGTERM)
 if mode == "sigkill":
     os.kill(os.getpid(), signal.SIGKILL)
+if mode == "grandchild":
+    import subprocess
+    # close_fds=False: only the lock's own O_CLOEXEC keeps it out of this child.
+    kept = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                            close_fds=False, start_new_session=True)
+    print(kept.pid, flush=True)
+    os.kill(os.getpid(), signal.SIGKILL)
 time.sleep(120)
 """
 
@@ -94,7 +112,7 @@ def _home() -> str:
 def _holder(home: str, log: Path, name: str, mode: str = "hold") -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, "-c", _HOLDER, home, str(log), name, mode],
-        env=_ENV,
+        env=_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -379,7 +397,11 @@ def test_retiring_a_serve_that_holds_a_ticket_leaves_it_for_the_reclaim(
     thread.join(timeout=scale(60))
     try:
         assert "error" not in retirer, retirer.get("error")
-        assert status == 0, stderr.getvalue()
+        # The retired serve exits with the status that tells its launcher not to restart it.
+        assert status == takeover.EXIT_RETIRED, stderr.getvalue()
+        assert "ppy serve: retired: another `ppy serve` on this home took over" in (
+            stderr.getvalue()
+        )
         assert retirer["status"] is None and retirer["lock"] is not None
         (line,) = retirer["lines"]
         assert line.startswith("ppy serve: Took over from the runtime")
@@ -426,7 +448,9 @@ def test_a_crashed_serves_lock_is_taken_with_one_line(ppy_home) -> None:
             f"ppy serve: took the serve lock from pid {gone.pid} (the runtime connected as "
             "@engineering_agent), which is no longer running"
         ]
-        assert (run / "serve.lock").read_text() == str(os.getpid())
+        holder = takeover.read_lock_holder(_home())
+        assert holder is not None and holder.pid == os.getpid()
+        assert holder.started == takeover.process_started(os.getpid()) != ""
         assert takeover.read_serve_record(_home())["pid"] == os.getpid()
     finally:
         assert lock is not None
@@ -476,3 +500,208 @@ def test_serve_lets_go_of_the_lock_when_it_returns_or_raises(ppy_home, monkeypat
     assert _lock_free(_home())
     assert takeover.read_serve_record(_home()) is None
     assert Path(takeover.serve_lock_path(_home())).read_text() == ""
+
+
+def test_a_long_lived_child_of_the_holder_does_not_keep_the_lock(ppy_home, tmp_path) -> None:
+    home = _home()
+    holder = _holder(home, tmp_path / "serves.log", "engineering_agent", "grandchild")
+    kept = None
+    try:
+        _held(holder)
+        assert holder.stdout is not None
+        kept = int(holder.stdout.readline())
+        holder.wait(timeout=scale(20))
+        assert holder.returncode == -signal.SIGKILL
+        assert takeover.pid_alive(kept), "the child should outlive its parent for this test"
+        assert _lock_free(home), "a child the holder started kept serve.lock after it died"
+    finally:
+        _reap(holder)
+        if kept is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(kept, signal.SIGKILL)
+
+
+# ── never signal a pid that is not the holder ──────────────────────────────────
+
+
+def _write_lock_file(home: str, pid: int, started: str, taken_at: float) -> None:
+    """What a holder writes into ``serve.lock`` — or what a crashed or reused one left there."""
+    Path(takeover.serve_lock_path(home)).write_text(f"{pid}\n{started}\n{taken_at:.6f}\n")
+
+
+def _sleeper() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+
+
+def test_a_crashed_pid_left_in_the_lock_file_is_never_signalled_the_real_holder_is(
+    ppy_home, tmp_path
+) -> None:
+    """The window between a new holder's flock and its write: the file names a dead pid."""
+    home = _home()
+    holder = _holder(home, tmp_path / "serves.log", "engineering_agent")
+    try:
+        _held(holder)
+        written = Path(takeover.serve_lock_path(home)).read_text()
+        gone = subprocess.Popen(["true"])
+        gone.wait(timeout=10)
+        _write_lock_file(home, gone.pid, "Thu Jan  1 00:00:00 2026", time.time() - 60)
+        # The real holder's own line lands a moment later, as it would.
+        later = threading.Timer(
+            0.3, lambda: Path(takeover.serve_lock_path(home)).write_text(written)
+        )
+        later.start()
+        sent: list[tuple[int, int]] = []
+
+        def kill(pid: int, sig: int) -> None:
+            sent.append((pid, sig))
+            assert pid == holder.pid, f"signalled pid {pid}, which does not hold the lock"
+            os.kill(pid, sig)
+
+        taken = takeover.take_serve(
+            home,
+            {"agent_handle": "shanes_eng_assistant"},
+            timeout=5.0,
+            grace=5.0,
+            kill=kill,
+            shutdown=lambda _socket: False,
+        )
+        later.join()
+        try:
+            assert taken.ok, taken.line
+            assert sent == [(holder.pid, signal.SIGTERM)]
+            assert taken.line == (
+                f"Took over from the runtime connected as @engineering_agent (pid {holder.pid})."
+            )
+        finally:
+            assert taken.lock is not None
+            taken.lock.release()
+    finally:
+        _reap(holder)
+
+
+def test_a_reused_pid_is_never_signalled(ppy_home, tmp_path) -> None:
+    """The lock file names a live process that is not the one that took the lock."""
+    home = _home()
+    holder = _holder(home, tmp_path / "serves.log", "engineering_agent", "deaf")
+    stranger = _sleeper()
+    try:
+        _held(holder)
+        # Same pid as a real process, but not the start its holder recorded: reused.
+        _write_lock_file(home, stranger.pid, "Thu Jan  1 00:00:00 2026", time.time() - 60)
+        clock = Ticking()
+
+        taken = takeover.take_serve(
+            home,
+            {},
+            timeout=5.0,
+            grace=1.0,
+            clock=clock,
+            sleep=clock.sleep,
+            kill=_never_kill,
+            shutdown=lambda _socket: pytest.fail("asked a process that is not the holder"),
+        )
+
+        assert not taken.ok and taken.status == takeover.EXIT_CANNOT_START
+        assert "a process this runtime cannot verify" in taken.line
+        assert stranger.poll() is None and holder.poll() is None
+    finally:
+        _reap(holder, stranger)
+
+
+def test_a_start_that_loses_the_race_gives_way_without_a_blocker(
+    ppy_home, tmp_path, monkeypatch
+) -> None:
+    """Mid-retire the holder changes to a start newer than this one: that start won."""
+    home = _home()
+    old = _holder(home, tmp_path / "serves.log", "engineering_agent")
+    winner = _sleeper()
+    held_by_winner: list[int] = []
+    sent: list[tuple[int, int]] = []
+    try:
+        _held(old)
+
+        def kill(pid: int, sig: int) -> None:
+            sent.append((pid, sig))
+            assert pid == old.pid, f"signalled pid {pid}, the start that won"
+            os.kill(pid, sig)
+            old.wait(timeout=scale(10))
+            # Another start takes the lock the moment the old serve lets go.
+            import fcntl
+
+            fd = os.open(takeover.serve_lock_path(home), os.O_RDWR)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held_by_winner.append(fd)
+            started = takeover.process_started(winner.pid)
+            os.pwrite(fd, f"{winner.pid}\n{started}\n{time.time():.6f}\n".encode(), 0)
+            Path(takeover.serve_record_path(home)).write_text(
+                json.dumps({"pid": winner.pid, "agent_handle": "shanes_eng_assistant"})
+            )
+
+        clock = Ticking()
+        stderr = io.StringIO()
+        lock, status = serve.hold_serve(
+            stderr=stderr,
+            seams={"clock": clock, "sleep": clock.sleep, "kill": kill, "grace": 1.0},
+        )
+
+        assert (lock, status) == (None, takeover.EXIT_ANOTHER_START)
+        assert _lines(stderr) == [
+            f"ppy serve: Another start took over (@shanes_eng_assistant, pid {winner.pid}); "
+            "this one is not needed"
+        ]
+        assert sent == [(old.pid, signal.SIGTERM)]
+        assert winner.poll() is None
+        assert takeover.start_failure(home) is None
+        assert not Path(home, "blockers.json").exists()
+    finally:
+        for fd in held_by_winner:
+            os.close(fd)
+        _reap(old, winner)
+
+
+# ── a retired serve tells its launcher not to start it again ───────────────────
+
+
+def _protocol_supervisor(buffer: io.StringIO) -> Any:
+    from papaya_agent_client.supervisor import ProtocolWriter, Supervisor
+
+    return Supervisor(
+        writer=ProtocolWriter(buffer), client_version="test", agent={}, workspace={}, harness={}
+    )
+
+
+def test_a_retired_serve_sends_a_fatal_retired_error_and_exits_with_its_own_status(
+    ppy_home,
+) -> None:
+    home = _home()
+    me = takeover.LockHolder(os.getpid(), takeover.own_started(), time.time())
+    takeover.mark_retired(home, me, {"pid": 4242, "agent_handle": "engineering_agent"})
+    buffer = io.StringIO()
+    stderr = io.StringIO()
+
+    assert serve.retired_status(_protocol_supervisor(buffer), stderr=stderr) == 76
+    assert takeover.EXIT_RETIRED == 76
+
+    messages = [json.loads(line) for line in buffer.getvalue().splitlines()]
+    (error,) = [m for m in messages if m["type"] == "error"]
+    assert error["code"] == "retired" and error["fatal"] is True
+    assert "(the runtime connected as @engineering_agent, pid 4242)" in error["message"]
+    assert "must not be started again" in error["message"]
+    assert messages[-1] == {"type": "status", "phase": "error", "detail": "retired"}
+    (line,) = _lines(stderr)
+    assert line == f"ppy serve: {error['message']}"
+
+
+@pytest.mark.parametrize("whose", ["another pid", "a reused pid"])
+def test_a_serve_nobody_retired_exits_0(ppy_home, whose) -> None:
+    home = _home()
+    if whose == "another pid":
+        target = takeover.LockHolder(os.getpid() + 100000, takeover.own_started(), 0.0)
+    else:
+        target = takeover.LockHolder(os.getpid(), "Thu Jan  1 00:00:00 2026", 0.0)
+    takeover.mark_retired(home, target, {"pid": 4242})
+    buffer = io.StringIO()
+
+    assert serve.retired_status(_protocol_supervisor(buffer), stderr=io.StringIO()) == 0
+    assert buffer.getvalue() == ""
+    assert serve.retired_status(None, stderr=io.StringIO()) == 0

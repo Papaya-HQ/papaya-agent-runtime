@@ -510,6 +510,83 @@ def runtime_label(record: dict[str, Any] | None) -> str:
     return f"the runtime connected as @{handle}" if handle else "the runtime"
 
 
+def retired_path(home: str) -> str:
+    return os.path.join(home, "run", "serve-retired.json")
+
+
+#: `ppy serve`'s exit status when a newer start on this home retired it. Distinct, so
+#: a launcher (the desktop host) can tell "replaced, do not start me again" from a crash.
+EXIT_RETIRED = 76
+
+#: A start that lost the race to another start that is now serving: nothing is wrong.
+EXIT_ANOTHER_START = 75
+
+#: The supervised protocol's fatal `error` code a retired serve sends before it exits.
+RETIRED_CODE = "retired"
+
+
+def process_started(pid: int) -> str:
+    """When ``pid`` started, as `ps` says it; "" when it is not running or cannot be read.
+
+    Together with the pid this names one process: a pid the kernel has handed to
+    another process since has a different start.
+    """
+    if not pid or pid <= 0:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return " ".join(proc.stdout.split()) if proc.returncode == 0 else ""
+
+
+_OWN_STARTED: dict[int, str] = {}
+
+
+def own_started() -> str:
+    pid = os.getpid()
+    if pid not in _OWN_STARTED:
+        _OWN_STARTED[pid] = process_started(pid)
+    return _OWN_STARTED[pid]
+
+
+@dataclass(frozen=True)
+class LockHolder:
+    """What ``serve.lock`` itself says about who holds it: written by the holder, under the lock."""
+
+    pid: int
+    started: str
+    #: Wall-clock time the holder took the lock.
+    taken_at: float
+
+    def is_running(self, started_of: Callable[[int], str]) -> bool:
+        """Is this pid still the process that took the lock (not a pid reused since)?"""
+        return bool(self.started) and started_of(self.pid) == self.started
+
+
+def read_lock_holder(home: str) -> LockHolder | None:
+    """``serve.lock``'s pid, process start and take time; None while unwritten or unreadable."""
+    try:
+        with open(serve_lock_path(home), encoding="utf-8") as fh:
+            lines = fh.read(512).splitlines()
+    except OSError:
+        return None
+    if len(lines) < 3 or not lines[0].strip().isdigit():
+        return None
+    try:
+        taken_at = float(lines[2])
+    except ValueError:
+        return None
+    return LockHolder(int(lines[0]), lines[1].strip(), taken_at)
+
+
 @dataclass
 class ServeLock:
     """This process's hold on ``serve.lock``, and the ``serve.json`` that says who holds it."""
@@ -517,6 +594,11 @@ class ServeLock:
     home: str
     fd: int
     pid: int
+    started: str = ""
+
+    def retired_by(self) -> dict[str, Any] | None:
+        """Who retired this serve, if a newer start did: see :func:`retired_by`."""
+        return retired_by(self.home, self.pid, self.started)
 
     def release(self) -> None:
         """Let go: the record if it is still ours, the pid in the lock file, the lock."""
@@ -537,7 +619,11 @@ class ServeLock:
 
 
 def _try_serve_lock(home: str) -> tuple[int, int | None] | None:
-    """The lock's fd and the pid a previous holder left in it, or None while it is held."""
+    """The lock's fd and the crashed holder's pid left in it (if any), or None while it is held.
+
+    The lock is free, so whoever the file names no longer holds it; the pid is
+    returned only when that process is gone, by its recorded start where there is one.
+    """
     path = serve_lock_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # O_CLOEXEC: a worker or turn this serve starts must not inherit the lock and
@@ -548,10 +634,16 @@ def _try_serve_lock(home: str) -> tuple[int, int | None] | None:
     except OSError:
         os.close(fd)
         return None
-    left = _read_pid(path)
+    left = read_lock_holder(home)
+    if left is not None:
+        crashed = left.pid if not left.is_running(process_started) else None
+    else:
+        legacy = _read_pid(path)
+        crashed = legacy if legacy and not pid_alive(legacy) else None
     os.ftruncate(fd, 0)
-    os.pwrite(fd, str(os.getpid()).encode(), 0)
-    return fd, left
+    # One write, so a reader sees all three lines or none of them.
+    os.pwrite(fd, f"{os.getpid()}\n{own_started()}\n{time.time():.6f}\n".encode(), 0)
+    return fd, crashed
 
 
 def _write_serve_record(home: str, identity: dict[str, str]) -> None:
@@ -559,6 +651,7 @@ def _write_serve_record(home: str, identity: dict[str, str]) -> None:
         serve_record_path(home),
         {
             "pid": os.getpid(),
+            "proc_started": own_started(),
             "connection_id": identity.get("connection_id") or "",
             "agent_handle": (identity.get("agent_handle") or "").lstrip("@"),
             "started_at": _now(),
@@ -566,13 +659,41 @@ def _write_serve_record(home: str, identity: dict[str, str]) -> None:
     )
 
 
-def serve_holder_pid(home: str) -> int | None:
-    """The pid holding ``serve.lock``: the lock file names it, ``serve.json`` as a fallback."""
-    pid = _read_pid(serve_lock_path(home))
-    if pid:
-        return pid
-    record = read_serve_record(home) or {}
-    return record.get("pid") if isinstance(record.get("pid"), int) else None
+def mark_retired(home: str, target: LockHolder, by: dict[str, Any]) -> None:
+    """Tell the serve being retired that it is being replaced, before it is asked to stop.
+
+    It reads this as it stops (:func:`retired_by`) and exits :data:`EXIT_RETIRED`
+    with a fatal ``retired`` on the supervised protocol, so the launcher that
+    started it knows not to start it again.
+    """
+    os.makedirs(os.path.dirname(retired_path(home)), exist_ok=True)
+    _write_json(
+        retired_path(home),
+        {"pid": target.pid, "started": target.started, "by": by, "at": _now()},
+    )
+
+
+def retired_by(home: str, pid: int, started: str) -> dict[str, Any] | None:
+    """The newer start that retired the serve ``pid`` (started ``started``), or None."""
+    try:
+        with open(retired_path(home), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("pid") != pid or data.get("started") != started:
+        return None
+    by = data.get("by")
+    return by if isinstance(by, dict) else {}
+
+
+def retired_line(by: dict[str, Any]) -> str:
+    who = runtime_label(by)
+    pid = by.get("pid")
+    return (
+        f"retired: another `ppy serve` on this home took over ({who}"
+        + (f", pid {pid}" if pid else "")
+        + "); this one has stopped and must not be started again in its place"
+    )
 
 
 @dataclass
@@ -583,6 +704,9 @@ class ServeTaken:
     line: str = ""
     #: The pid that held the lock and had to be sent a signal or asked to stop.
     retired_pid: int | None = None
+    #: With no lock: the exit status. 1 = could not retire the holder (a blocker);
+    #: 75 = another start won and is serving (nothing to record).
+    status: int = EXIT_CANNOT_START
 
     @property
     def ok(self) -> bool:
@@ -600,6 +724,7 @@ def take_serve(
     kill: Callable[[int, int], None] = os.kill,
     shutdown: Callable[[str], bool] = request_shutdown,
     own_pid: int | None = None,
+    started_of: Callable[[int], str] = process_started,
 ) -> ServeTaken:
     """Take this home's serve lock, retiring whichever `serve` holds it.
 
@@ -613,21 +738,31 @@ def take_serve(
     it, so two starts racing each other end with exactly one holder. A holder that
     survives all of it leaves ``lock`` None and a one-sentence ``line``.
 
+    Nothing is ever sent to a pid that is not, at that moment, the lock's holder:
+    before every request and signal the lock must still be held, the lock file
+    itself (never ``serve.json``) must name the same pid, and that pid's process
+    start must be the one its holder wrote there when it took the lock. A holder
+    that changes mid-retire is retired in its turn if it held the lock before this
+    start began; one that took it since is another start that won, and this one
+    gives way with :data:`EXIT_ANOTHER_START`. A holder this cannot verify is
+    never signalled.
+
     ``timeout`` is ``supervisor.stop_timeout``: what an orderly stop may take.
     ``own_pid`` is for tests, whose holder is often the test process itself: this
-    never signals its own pid.
+    never signals its own pid. ``started_of`` is :func:`process_started`'s seam.
     """
     identity = identity or {}
     own = os.getpid() if own_pid is None else own_pid
+    began = time.time()
 
     def taken(result: tuple[int, int | None]) -> ServeLock:
         _write_serve_record(home, identity)
-        return ServeLock(home, result[0], os.getpid())
+        return ServeLock(home, result[0], os.getpid(), own_started())
 
     first = _try_serve_lock(home)
     if first is not None:
         left = first[1]
-        if left and left != os.getpid() and not pid_alive(left):
+        if left and left != os.getpid():
             stale = runtime_label(read_serve_record_of(home, left))
             return ServeTaken(
                 taken(first),
@@ -649,34 +784,80 @@ def take_serve(
                 return False
             sleep(0.1)
 
-    # A holder that has only just taken the lock may not have written its pid yet.
-    pid = serve_holder_pid(home)
-    if pid is None and not wait(min(grace, 2.0)):
-        pid = serve_holder_pid(home)
-    record = read_serve_record_of(home, pid) if pid else None
-    if got is None:
+    def holder_now() -> LockHolder | None:
+        """The verified holder, waiting briefly for one that has only just taken the lock
+        (and not yet written itself) or whose file still names a crashed predecessor."""
+        deadline = clock() + min(grace, 2.0)
+        while True:
+            holder = read_lock_holder(home)
+            if holder is not None and holder.is_running(started_of):
+                return holder
+            if wait(0) or clock() >= deadline:
+                return None
+            sleep(0.1)
+
+    def still_holder(target: LockHolder) -> bool:
+        """Checked right before every request and signal: is ``target`` the holder now?"""
+        if wait(0):
+            return False  # it let go, and the lock is ours
+        return read_lock_holder(home) == target and target.is_running(started_of)
+
+    def another_start(holder: LockHolder) -> ServeTaken:
+        handle = str((read_serve_record_of(home, holder.pid) or {}).get("agent_handle") or "")
+        who = f"@{handle.lstrip('@')}" if handle else "the runtime"
+        return ServeTaken(
+            None,
+            f"Another start took over ({who}, pid {holder.pid}); this one is not needed",
+            status=EXIT_ANOTHER_START,
+        )
+
+    def retire_one(target: LockHolder) -> None:
         supervisor = read_record(home) or {}
         asked = False
-        if pid is not None and supervisor.get("pid") == pid:
+        if supervisor.get("pid") == target.pid and still_holder(target):
             asked = shutdown(supervisor.get("socket") or default_socket_path(home))
             if asked:
                 how.append("asked it to stop")
-        if not (asked and wait(timeout + 5.0)):
-            for sig, name, seconds in (
-                (signal.SIGTERM, "SIGTERM", grace if asked else timeout + 5.0),
-                (signal.SIGKILL, "SIGKILL", grace),
-            ):
-                if pid is None or pid == own:
-                    wait(grace)
-                    break
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    kill(pid, sig)
-                how.append(f"sent {name}")
-                if wait(seconds):
-                    break
+                if wait(timeout + 5.0):
+                    return
+        if target.pid == own:
+            wait(grace)  # never signalled; tests hold the lock in their own process
+            return
+        for sig, name, seconds in (
+            (signal.SIGTERM, "SIGTERM", grace if asked else timeout + 5.0),
+            (signal.SIGKILL, "SIGKILL", grace),
+        ):
+            if not still_holder(target):
+                return
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                kill(target.pid, sig)
+            how.append(f"sent {name}")
+            if wait(seconds):
+                return
+
+    target: LockHolder | None = None
+    record: dict[str, Any] | None = None
+    for _holder in range(4):
+        holder = holder_now()
+        if got is not None or holder is None:
+            break
+        # The first holder found is retired, however recently it took the lock: it
+        # holds it, and this is the newer start. One that took it while this start
+        # was retiring another is a newer start still, and it wins.
+        if target is not None and holder.taken_at > began:
+            return another_start(holder)
+        if holder == target:
+            break  # it outlasted everything it was sent
+        target = holder
+        record = read_serve_record_of(home, target.pid)
+        mark_retired(home, target, {"pid": os.getpid(), **identity})
+        retire_one(target)
+        if got is not None:
+            break
+    pid = target.pid if target else None
     who = runtime_label(record)
     if got is None:
-        named = f"pid {pid}" if pid else "a process this runtime cannot name"
+        named = f"pid {pid}" if pid else "a process this runtime cannot verify"
         return ServeTaken(
             None,
             f"cannot start: {who} ({named}) still holds {serve_lock_path(home)} after "

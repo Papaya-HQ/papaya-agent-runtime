@@ -5875,7 +5875,7 @@ async def _run(
         # only way that run's lease is let go rather than left to expire.
         if built.loop.running_subjects:
             await built.loop.shutdown()
-    return 0
+    return await asyncio.to_thread(retired_status, built.supervisor, stderr=stderr)
 
 
 @dataclass
@@ -5985,7 +5985,30 @@ async def _run_standalone(
                 await background
         await manager_rounds.close()
         await watch.close()
-    return 0
+    return await asyncio.to_thread(retired_status, None, stderr=stderr)
+
+
+def retired_status(supervisor: Any, *, stderr) -> int:
+    """How a stopped serve exits: 0, or :data:`takeover.EXIT_RETIRED` if a newer start retired it.
+
+    A launcher that restarts what exits (the desktop host restarts its client, which
+    runs this serve) would otherwise start the retired serve again and retire the
+    newer one in turn. So a retired serve says so where its launcher reads: a fatal
+    ``retired`` error on the supervised protocol, naming who took over, and a status
+    of its own.
+    """
+    home = str(ppy_home().resolve())
+    if not os.path.exists(takeover.retired_path(home)):
+        return 0
+    by = takeover.retired_by(home, os.getpid(), takeover.own_started())
+    if by is None:
+        return 0
+    line = takeover.retired_line(by)
+    if supervisor is not None:
+        with contextlib.suppress(Exception):
+            supervisor.error(takeover.RETIRED_CODE, line, fatal=True)
+    _say(line, stderr=stderr)
+    return takeover.EXIT_RETIRED
 
 
 def serve(
@@ -6115,6 +6138,8 @@ def hold_serve(
     it took over from or which crashed holder it cleared. Returns ``(None, 1)`` when
     the holder would not let go even to SIGKILL, having said so in one sentence and
     recorded it for the blockers ledger: two serves never run over one state.
+    Returns ``(None, 75)`` when another start won the race and is serving: said in
+    one line, and nothing recorded, because nothing is wrong.
     `seams` are :func:`takeover.take_serve`'s keyword seams for tests.
     """
     home = str(ppy_home().resolve())
@@ -6128,6 +6153,8 @@ def hold_serve(
         _say(taken.line, stderr=stderr)
     if taken.lock is not None:
         return taken.lock, None
+    if taken.status == takeover.EXIT_ANOTHER_START:
+        return None, takeover.EXIT_ANOTHER_START
     pid = taken.retired_pid
     takeover.record_start_failure(
         home, taken.line, [f"kill -9 {pid}" if pid else "ppy supervisor stop"]

@@ -498,11 +498,17 @@ quietly; do not narrate the steps or report diagnostics.
    held tickets are left `released` for the rounds' reclaim, its workers recorded
    stopped with their sessions kept, exactly as a supervisor retire leaves them. The
    owner switches agents by starting `ppy serve` again, which is why the newest wins
-   and why nothing (no launchd `KeepAlive`) restarts the old one. A lock whose pid is
-   gone is taken with one line. A start that cannot retire the holder exits 1 with one
-   sentence and a `serve_cannot_start` blocker, and never runs beside it: two serves
-   over one state work every ticket twice and hand tickets to themselves
-   (2026-09-22). One runtime per `PPY_HOME`; separate homes are separate runtimes.
+   and why nothing (no launchd `KeepAlive`) restarts the old one. The retired serve
+   exits 76 and, supervised, sends the fatal error `retired` naming who took over, so
+   its launcher does not start it again. Nothing is signalled that is not the holder
+   at that moment: the lock file names the holder's pid and process start, and both
+   are checked before every request and signal. A lock whose holder is gone is taken
+   with one line. A start that loses the race to a newer one says "Another start took
+   over" and exits 75 with nothing recorded. A start that cannot retire the holder
+   exits 1 with one sentence and a `serve_cannot_start` blocker, and never runs beside
+   it: two serves over one state work every ticket twice and hand tickets to
+   themselves (2026-09-22). One runtime per `PPY_HOME`; separate homes are separate
+   runtimes.
 4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single
