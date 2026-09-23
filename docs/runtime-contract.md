@@ -775,10 +775,13 @@ reply is those words and then "Pull request open: <url>", the only time that lin
 said. A review block that says `failed` is reported failed. A worker that found rather
 than built (no commits, nothing to review) gets one instruction turn instead, which reads
 its report fenced as data (`prompts.FINDINGS_SUMMARY_RULE`) and writes the `OUTCOME:`
-block. Any such summary is cut to 1,200 characters, and one carrying a commit SHA, a
-`ppy/task-…` branch, an evidence path or an absolute path is not posted: the runtime's
-one plain sentence goes instead, as it does when no block was written. The worker's
-closeout never reaches the person. A progress reply Papaya
+block. Any such summary is cut to 1,200 characters, and one carrying a commit SHA (hex
+with a digit and a letter; a date or a number is not one), a `ppy/task-…` branch, an
+evidence path or an absolute file path (not an `/api/…` route) is not posted: the
+runtime's one plain sentence goes instead, as it does when no block was written, and it
+says what the block's status says (a `failed` review never reads "done and reviewed").
+A retried turn keeps what it was told the first time; the retry note is added to it. The
+worker's closeout never reaches the person. A progress reply Papaya
 refuses is logged once and the work goes on; once the hold is over (a lost lease, a
 stop) nothing more is said from this machine. `kind: progress|final` is sent on replies
 only when the event carried an `intent` key — an older DM route refuses the field.
@@ -830,10 +833,18 @@ its title, with its ticket's `task-<id>` as the identifier (`about.short_id`, `r
 hold the listener cancelled at shutdown (`released`, marked `instructions.SHUTDOWN`) or
 one a crash left in a holding phase with nobody holding it (`instructions.live`). A lost
 lease — Papaya took it back, or a person released it in the app — is never taken back,
-nor is a decline or anything answered. The rounds (at start and every round) first read
-the request from Papaya (`GET .../machine-instructions/<ref>`): one Papaya has closed
-(done, failed, cancelled, never picked up) is closed here without a word; one that
-cannot be read waits for the next round. An open one is offered back as the
+nor is a decline or anything answered. The client's stop is written down the moment it
+is set (`instruction_lease_lost`, by the hold's keep-alive, which waits on it), so a
+crash before the hold notices it is still not taken back, and a hold stopped first and
+then cancelled by a shutdown gets a plain `released`, not the shutdown mark. A later
+hold on the same request (`instruction_held`) speaks for it again. The one gap left is
+a crash in the moment between the client setting the stop and that write; closing it
+needs the client to persist the loss itself, which is the client's to do. The rounds (at
+start and every round) first read the request from Papaya
+(`GET .../machine-instructions/<ref>`): one Papaya has closed (done, failed, cancelled,
+never picked up) is closed here without a word; one that cannot be read waits for the
+next round, except that three 404s in a row close it here, silently, with one log line.
+An open one is offered back as the
 `machine.instruction` it came as: re-reserved, it lands on the same ticket and resumes
 from its state (its worker watched, reviewed and delivered; nothing said twice). Only a
 reserve Papaya refused, naming a holder, is told to the person at its origin, once, as

@@ -889,3 +889,246 @@ def test_a_reply_only_about_other_requests_is_never_posted_empty() -> None:
         instructions.for_person("MI-7 is waiting on its gate.", _instruction(), allow_empty=True)
         == ""
     )
+
+
+# ── review delta: a stop before the shutdown, and a lost lease before a crash ─────
+
+
+class Stop:
+    """A job's stop signal as the client's is: set, read, and awaited."""
+
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self.reason: str | None = None
+
+    def set(self) -> None:
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    async def wait(self) -> bool:
+        return await self._event.wait()
+
+
+def _held(task_id: int, run_id: int, instruction: papaya_events.Instruction) -> serve.Ticket:
+    held = serve.Held(
+        task_id=task_id,
+        run_id=run_id,
+        repo=None,
+        event=papaya_events.PapayaEvent(
+            id="301", kind=papaya_events.MACHINE_INSTRUCTION, subject=tis.SUBJECT, payload={}
+        ),
+        instruction=instruction,
+        classification=instructions.Classification(instructions.ANSWER, reason="answered"),
+        reclaimed=True,
+    )
+    job = SimpleNamespace(stop=Stop(), env=dict(tis.JOB_ENV), job_id="job-1", subject=tis.SUBJECT)
+    return serve.Ticket(held=held, job=job)
+
+
+@pytest.mark.parametrize("stopped_first", [False, True], ids=["shutdown", "stopped-then-shutdown"])
+def test_a_hold_stopped_before_the_shutdowns_cancel_is_not_taken_back(
+    ppy_home, monkeypatch, stopped_first
+) -> None:
+    """Review delta 1: a lost lease or a person's release, then a graceful shutdown."""
+    found = instructions.Classification(instructions.ANSWER, reason="answered")
+    task_id, run_id, instruction = _seed(
+        "What are you working on?", found, phases=(serve.PHASE_PICKED_UP,)
+    )
+    the_runner = tis.runner(FakeTurns(), Routes())
+    ticket = _held(task_id, run_id, instruction)
+
+    async def scenario() -> None:
+        answering = asyncio.Event()
+
+        async def forever(_ticket: Any) -> tuple[str, str]:
+            answering.set()
+            await asyncio.Event().wait()
+            return "done", ""
+
+        monkeypatch.setattr(the_runner, "_instruction_answer", forever)
+        hold = asyncio.create_task(the_runner._hold_instruction(ticket))
+        await answering.wait()
+        if stopped_first:
+            ticket.job.stop.set()
+        hold.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hold
+
+    asyncio.run(scenario())
+    assert _phase(task_id) == serve.PHASE_RELEASED
+    assert _unfinished() == ([] if stopped_first else [task_id])
+
+
+def test_a_lost_lease_is_on_the_ledger_before_the_hold_notices_it(ppy_home) -> None:
+    """Review delta 3: a crash between losing the lease and the hold noticing it."""
+    found = instructions.Classification(instructions.ANSWER, reason="answered")
+    task_id, run_id, instruction = _seed(
+        "What are you working on?", found, phases=(serve.PHASE_PICKED_UP,)
+    )
+    conn = init_db()
+    try:
+        instructions.record_held(conn, task_id)
+    finally:
+        conn.close()
+    the_runner = tis.runner(FakeTurns(), Routes())
+    ticket = _held(task_id, run_id, instruction)
+    ticket.job.stop.set()  # the renew loop found the lease gone
+    # The keep-alive wakes on the stop and writes it down; the process then dies, so
+    # the phase is still `picked_up`, and it is still not taken back.
+    asyncio.run(the_runner._keep_alive(ticket))
+    assert _phase(task_id) == serve.PHASE_PICKED_UP
+    assert _unfinished() == []
+    # A later hold on it (Papaya offered it again) speaks for it once more.
+    conn = init_db()
+    try:
+        instructions.record_held(conn, task_id)
+    finally:
+        conn.close()
+    assert _unfinished() == [task_id]
+
+
+def test_a_shutdown_writes_no_lost_lease(ppy_home) -> None:
+    found = instructions.Classification(instructions.ANSWER, reason="answered")
+    task_id, run_id, instruction = _seed(
+        "What are you working on?", found, phases=(serve.PHASE_PICKED_UP,)
+    )
+    the_runner = tis.runner(FakeTurns(), Routes())
+    ticket = _held(task_id, run_id, instruction)
+
+    async def scenario() -> None:
+        alive = asyncio.create_task(the_runner._keep_alive(ticket))
+        await asyncio.sleep(0.05)
+        alive.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await alive
+
+    asyncio.run(scenario())
+    assert _unfinished() == [task_id]
+
+
+# ── review delta: the runtime's own sentence follows the status ───────────────
+
+
+@pytest.mark.parametrize(
+    ("status", "said"),
+    [
+        ("done", f'The work on "{SPIKE}" is done and reviewed.'),
+        ("failed", f'The review of "{SPIKE}" found problems that are not fixed yet.'),
+    ],
+)
+def test_a_refused_review_summary_falls_back_in_words_that_match_its_status(
+    ppy_home, client_home, ready, registered_repo, status, said
+) -> None:
+    routes, _titles = _serve_spike(client_home, _delivers(f"OUTCOME: {status}\n{CLOSEOUT}"), "x")
+    assert tis.contents(routes)[-1] == f"{said}\n\nPull request open: {PR}"
+    assert routes.results()[0]["status"] == status
+
+
+@pytest.mark.parametrize(
+    ("status", "said"),
+    [
+        ("done", "and made no changes, but couldn't put what I found into a short answer"),
+        ("failed", "but couldn't finish it this time. Send it again, or ask something narrower."),
+    ],
+)
+def test_a_refused_findings_summary_falls_back_in_words_that_match_its_status(
+    ppy_home, client_home, ready, registered_repo, status, said
+) -> None:
+    runs: list[int] = []
+    turns = FakeTurns(lambda _turn: f"OUTCOME: {status}\n{CLOSEOUT}")
+    routes = Routes()
+    harness = tis.InstructionHarness(
+        FakeEvents([tis.instruction_event("Investigate why the export is slow in runtime")])
+    )
+    the_runner = tis.runner(
+        turns, routes, instruction_dispatch=tis.dispatcher(runs, []), branch_ahead=lambda _t: False
+    )
+    tis.serve_work(harness, client_home, the_runner, runs, CLOSEOUT)
+    assert said in tis.contents(routes)[-1]
+    assert routes.results()[0]["status"] == status
+
+
+def test_the_findings_rule_holds_on_the_second_attempt(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """Review delta 4: the retry note is added to the addendum, never in its place."""
+    runs: list[int] = []
+    turns = FakeTurns(lambda _turn: "no outcome block")
+    routes = Routes()
+    harness = tis.InstructionHarness(
+        FakeEvents([tis.instruction_event("Investigate why the export is slow in runtime")])
+    )
+    the_runner = tis.runner(
+        turns, routes, instruction_dispatch=tis.dispatcher(runs, []), branch_ahead=lambda _t: False
+    )
+    tis.serve_work(harness, client_home, the_runner, runs, "Root cause found.")
+    first, second = turns.calls
+    assert prompts.FINDINGS_SUMMARY_RULE in first.prompt
+    assert prompts.FINDINGS_SUMMARY_RULE in second.prompt
+    assert "Your last turn ended without an OUTCOME: block" in second.prompt
+
+
+# ── review delta: the scrub, tighter ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Shipped on 20260923; it reads 1200000 rows.",
+        "It now calls /api/v1/workspaces/ws-1/machine-instructions for the list.",
+        "The defaced cache is gone.",
+    ],
+    ids=["date-and-number", "api-route", "a-word-of-hex-letters"],
+)
+def test_the_scrub_lets_dates_numbers_words_and_api_routes_through(text) -> None:
+    shown = instructions.person_summary(instructions.Outcome("done", text))
+    assert shown is not None and shown.text == text
+
+
+# ── review delta: a request Papaya never heard of ────────────────────────────
+
+
+def test_a_request_papaya_answers_404_for_three_times_is_closed_here_silently(
+    ppy_home, caplog
+) -> None:
+    task_id = _shut_down()
+    loop, routes = OfferLoop(sweep.OFFER_PENDING), Routes()
+    missing = papaya_events.PapayaHTTPError("not found", code=404)
+    walker = _walker(loop, routes, status=missing)
+    caplog.set_level("WARNING", logger="papaya_agent_runtime.rounds")
+    assert asyncio.run(walker._reclaim_instructions()) == []
+    assert asyncio.run(walker._reclaim_instructions()) == []
+    assert _unfinished() == [task_id]
+    (part,) = asyncio.run(walker._reclaim_instructions())
+    assert part == (
+        f'closed ticket task {task_id} for request "What are you working on?": Papaya has '
+        "no record of it (3 reads in a row)"
+    )
+    assert loop.offered == [] and routes.calls == []
+    assert _phase(task_id) == serve.PHASE_DONE and _unfinished() == []
+    warned = [r for r in caplog.records if "Closing ticket task" in r.getMessage()]
+    assert len(warned) == 1
+    assert not [r for r in caplog.records if "Could not read request" in r.getMessage()]
+
+
+def test_a_404_run_is_broken_by_any_other_answer(ppy_home) -> None:
+    task_id = _shut_down()
+    loop, routes = OfferLoop(sweep.OFFER_BLOCKED), Routes()
+    answers: list[Any] = [
+        papaya_events.PapayaHTTPError("not found", code=404),
+        papaya_events.PapayaHTTPError("not found", code=404),
+        papaya_events.PapayaHTTPError("unavailable", code=503),
+        papaya_events.PapayaHTTPError("not found", code=404),
+        papaya_events.PapayaHTTPError("not found", code=404),
+    ]
+
+    def read(_reply: Any, **_kwargs: Any) -> str:
+        raise answers.pop(0)
+
+    walker = _walker(loop, routes)
+    walker._read_instruction = read
+    for _round in range(5):
+        asyncio.run(walker._reclaim_instructions())
+    assert _unfinished() == [task_id]

@@ -1041,6 +1041,9 @@ CLOSED_NOT_RECLAIMED = "not_reclaimed"
 CLOSED_AT_PAPAYA = "closed_at_papaya"
 #: What an offer answers when it raised: nothing is known, so the next round tries again.
 OFFER_FAILED = "failed"
+#: A request Papaya answered 404 for this many reads in a row: closed here, silently.
+NOT_FOUND_AFTER = 3
+NOT_FOUND = "not_found"
 
 
 @dataclass(frozen=True)
@@ -1394,6 +1397,8 @@ class Rounds:
         #: Papaya's status for an instruction before it is taken back up:
         #: ``(reply block, environ=) -> status | None`` (`read_instruction_status`).
         self._read_instruction = read_instruction
+        #: Ticket task -> how many reads in a row Papaya answered 404 for its request.
+        self._not_found: dict[int, int] = {}
         self._last_deficiencies: datetime | None = None
         #: Subjects whose reserve Papaya refused during a reclaim, with the holder.
         self._refused: dict[str, dict[str, Any]] = {}
@@ -1777,21 +1782,31 @@ class Rounds:
             if status is None:
                 continue
             if status not in papaya_events.INSTRUCTION_OPEN:
+                why = (
+                    f"Papaya has no record of it ({NOT_FOUND_AFTER} reads in a row)"
+                    if status == NOT_FOUND
+                    else f"Papaya has it {status}"
+                )
+                if status == NOT_FOUND:
+                    log.warning(
+                        "[rounds] Closing ticket task %d for request %s: %s",
+                        request.task_id,
+                        named,
+                        why,
+                    )
                 await store.run_in_thread(
                     functools.partial(
                         close_instruction,
                         ticket=request,
-                        why=f"Papaya has it {status}",
+                        why=why,
                         environ=self._papaya_env(),
                         post=None,
                         report=None,
                         tell=False,
                     )
                 )
-                parts.append(
-                    f"closed ticket task {request.task_id} for request {named}: Papaya has "
-                    f"it {status}"
-                )
+                self._not_found.pop(request.task_id, None)
+                parts.append(f"closed ticket task {request.task_id} for request {named}: {why}")
                 continue
             envelope = request.envelope(
                 agent_id=str(agent_config.get("agent_id") or ""),
@@ -1831,7 +1846,11 @@ class Rounds:
         return parts
 
     def _instruction_status(self, request: InstructionTicket) -> str | None:
-        """Papaya's status for a request, or ``None``: not connected, or not readable now."""
+        """Papaya's status for a request, or ``None``: not connected, or not readable now.
+
+        A 404 is read again, quietly, and only :data:`NOT_FOUND_AFTER` in a row make it
+        :data:`NOT_FOUND`: Papaya has no such request, so nothing will ever answer it.
+        """
         read = self._read_instruction or functools.partial(
             papaya_events.read_instruction_status,
             **(
@@ -1841,14 +1860,30 @@ class Rounds:
             ),
         )
         try:
-            return read(request.instruction.reply, environ=self._papaya_env())
-        except Exception as exc:  # noqa: BLE001 - an unread request waits for the next round
-            log.warning(
-                "[rounds] Could not read request %s from Papaya; trying again next round: %s",
-                instructions.named(request.instruction),
-                exc,
-            )
+            status = read(request.instruction.reply, environ=self._papaya_env())
+        except papaya_events.PapayaHTTPError as exc:
+            if exc.code != 404:
+                return self._unread_request(request, exc)
+            count = self._not_found.get(request.task_id, 0) + 1
+            self._not_found[request.task_id] = count
+            if count >= NOT_FOUND_AFTER:
+                return NOT_FOUND
+            log.debug("[rounds] Request %d is not found at Papaya (%d)", request.task_id, count)
             return None
+        except Exception as exc:  # noqa: BLE001 - an unread request waits for the next round
+            return self._unread_request(request, exc)
+        self._not_found.pop(request.task_id, None)
+        return status
+
+    def _unread_request(self, request: InstructionTicket, exc: Exception) -> None:
+        # Anything but a 404 breaks a run of them: "not found" means in a row.
+        self._not_found.pop(request.task_id, None)
+        log.warning(
+            "[rounds] Could not read request %s from Papaya; trying again next round: %s",
+            instructions.named(request.instruction),
+            exc,
+        )
+        return None
 
     def _post_seam(self) -> Callable[..., str | None] | None:
         """How the rounds post at an instruction's origin: their seam, else the runner's."""

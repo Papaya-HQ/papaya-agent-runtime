@@ -718,10 +718,12 @@ SUMMARY_MAX = 1200
 #: evidence path, an absolute file path. A summary with one is the worker's report
 #: leaking through, and the runtime's own sentence is posted instead.
 _NOT_FOR_A_PERSON = (
-    re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b"),
+    # A SHA has a digit and a letter: a date or a long number is not one.
+    re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"),
     re.compile(r"\bppy/task-\S+"),
     re.compile(r"\.ppy-evidence\S*"),
-    re.compile(r"(?<![\w.:/~-])/[\w.-]+/[\w./-]+"),
+    # A file path, not an API route (`/api/v1/...`) or a link's path.
+    re.compile(r"(?<![\w.:/~-])/(?!api/)[\w.-]+/[\w./-]+"),
 )
 
 
@@ -1046,14 +1048,36 @@ def released_at_shutdown(conn: sqlite3.Connection, task_id: int) -> bool:
     return payload.get("phase") == "released" and payload.get("detail") == SHUTDOWN
 
 
+#: A hold began on the ticket; the client stopped a hold on it (its lease was lost, a
+#: person released it, it was handed back). The newer of the two says whether the
+#: ticket was let go, whatever phase a crash left it in.
+HELD = "instruction_held"
+LEASE_LOST = "instruction_lease_lost"
+
+
+def record_held(conn: sqlite3.Connection, task_id: int) -> None:
+    _event(conn, task_id, HELD, {})
+
+
+def record_lease_lost(conn: sqlite3.Connection, task_id: int) -> None:
+    _event(conn, task_id, LEASE_LOST, {})
+
+
+def _let_go(conn: sqlite3.Connection, task_id: int) -> bool:
+    row = _newest(conn, task_id, (HELD, LEASE_LOST))
+    return row is not None and row["kind"] == LEASE_LOST
+
+
 def live(conn: sqlite3.Connection, task_id: int) -> bool:
     """Is this request still this machine's to answer? Not answered, not over, and not
     let go: a hold is on it, or this process lost it to its own shutdown or a crash.
 
     What the rounds take back up after a restart (`rounds.unfinished_instructions`)
     and what an ask may be said at the origin for (`outreach.instruction_ticket_of`).
+    A lost lease recorded since the last hold began is a release, even when a crash
+    kept the hold from writing its `released`.
     """
-    if stage(conn, task_id) != "new":
+    if stage(conn, task_id) != "new" or _let_go(conn, task_id):
         return False
     row = conn.execute("SELECT phase FROM tasks WHERE id = ?", (task_id,)).fetchone()
     phase = row["phase"] if row is not None else None
@@ -1378,6 +1402,10 @@ __all__ = [
     "chosen_repository",
     "classify",
     "close_waits",
+    "HELD",
+    "LEASE_LOST",
+    "record_held",
+    "record_lease_lost",
     "live",
     "ONLY_OTHER_REQUESTS",
     "person_summary",

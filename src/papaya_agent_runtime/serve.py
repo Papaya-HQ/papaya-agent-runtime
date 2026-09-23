@@ -1519,6 +1519,24 @@ class TicketRunner:
             ticket.liveness_at = self._clock()
             await self._say_alive(ticket)
             await self.keep_status_line(ticket)
+        await self._note_lease_lost(ticket)
+
+    async def _note_lease_lost(self, ticket: Ticket) -> None:
+        """The client stopped an instruction's hold: on the ledger at once.
+
+        The stop is the lease-loss path's (the renew loop found the lease gone, a person
+        released it, or the client handed it back), and this wakes on it straight away,
+        before the hold itself gets round to it. A crash in between would otherwise
+        leave the ticket in a holding phase, which the next start takes for its own and
+        offers back (`instructions.live`). A shutdown cancels this task instead and
+        writes nothing here.
+        """
+        if ticket.held.instruction is None or ticket.cancelled or not ticket.job.stop.is_set():
+            return
+        try:
+            await store.run_in_thread(instructions.record_lease_lost, ticket.held.task_id)
+        except sqlite3.Error as exc:
+            log.warning("[serve] Could not record %s's lost lease: %s", ticket.job.subject, exc)
 
     async def keep_status_line(self, ticket: Ticket) -> bool:
         """Bring the work item's living status line up to date. Returns whether it wrote.
@@ -1751,6 +1769,9 @@ class TicketRunner:
         if held.reclaimed:
             # Taken back up after a restart: what the earlier hold said stays said.
             ticket.said = await store.run_in_thread(instructions.last_said, held.task_id)
+        # This hold is on it now: a lost lease an earlier hold recorded no longer speaks
+        # for it (`instructions.live`).
+        await store.run_in_thread(instructions.record_held, held.task_id)
         await self._start_listening(ticket)
         url: str | None = None
         try:
@@ -1781,10 +1802,16 @@ class TicketRunner:
         except asyncio.CancelledError:
             # The listener cancels a hold only when this process shuts down: marked so,
             # the rounds of the next start take it back up (`instructions.live`). A lost
-            # lease stops the hold instead (`_Stopped`) and is never taken back.
+            # lease stops the hold instead (`_Stopped`) and is never taken back — nor is
+            # one whose lease was lost, or released by a person, before the shutdown's
+            # cancel reached it: the stop was set first, so the release is plain.
+            stopped_first = ticket.job.stop.is_set()
             ticket.cancelled = True
             await asyncio.to_thread(
-                self._record_phase, held.task_id, PHASE_RELEASED, instructions.SHUTDOWN
+                self._record_phase,
+                held.task_id,
+                PHASE_RELEASED,
+                "" if stopped_first else instructions.SHUTDOWN,
             )
             raise
         except _Stopped:
@@ -2106,12 +2133,16 @@ class TicketRunner:
             if outcome is not None:
                 return outcome
             if attempt + 1 < TURN_ATTEMPTS:
+                # Added to what the turn was already told, never in its place: the
+                # findings turn's rule has to hold on the second attempt too.
+                retry = (
+                    "Your last turn ended without an OUTCOME: block, so nothing reached "
+                    "the person. Answer again and end with it."
+                )
+                earlier = str(facts.get(prompts.ADDENDUM_FACT) or "").strip()
                 facts = {
                     **facts,
-                    prompts.ADDENDUM_FACT: (
-                        "Your last turn ended without an OUTCOME: block, so nothing reached "
-                        "the person. Answer again and end with it."
-                    ),
+                    prompts.ADDENDUM_FACT: f"{earlier}\n\n{retry}" if earlier else retry,
                 }
         return None
 
@@ -2213,14 +2244,17 @@ class TicketRunner:
         # are for the reviewer, and its words about other requests are not theirs.
         outcome = ticket.summary
         shown = instructions.person_summary(outcome)
-        summary = (
-            shown.text
-            if shown is not None
-            else f"The work on {instructions.named(instruction)} is done and reviewed."
-        )
-        line = delivery_line(delivery) if delivery else "Delivered."
-        # A review that said it failed is reported failed, whatever was delivered.
+        # A review that said it failed is reported failed, whatever was delivered, and
+        # the runtime's own sentence, when it stands in, says the same thing.
         status = outcome.status if outcome is not None else "done"
+        named = instructions.named(instruction)
+        if shown is not None:
+            summary = shown.text
+        elif status == "failed":
+            summary = f"The review of {named} found problems that are not fixed yet."
+        else:
+            summary = f"The work on {named} is done and reviewed."
+        line = delivery_line(delivery) if delivery else "Delivered."
         return status, f"{summary}\n\n{line}", url
 
     async def _findings_answer(self, ticket: Ticket, worker: Worker) -> tuple[str, str]:
@@ -2247,9 +2281,15 @@ class TicketRunner:
         status = outcome.status if outcome is not None else "done"
         if shown is not None:
             return status, shown.text
+        named = instructions.named(instruction)
+        if status == "failed":
+            return status, (
+                f"I looked into {named} but couldn't finish it this time. Send it again, "
+                "or ask something narrower."
+            )
         return status, (
-            f"I looked into {instructions.named(instruction)} and made no changes, but "
-            "couldn't put what I found into a short answer this time. Ask me about it again."
+            f"I looked into {named} and made no changes, but couldn't put what I found "
+            "into a short answer this time. Ask me about it again."
         )
 
     def _has_commits(self, worker: Worker) -> bool:
