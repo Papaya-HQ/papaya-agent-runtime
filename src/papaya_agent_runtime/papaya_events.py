@@ -715,6 +715,73 @@ def report_instruction_result(
     return True
 
 
+#: How many follow-ups one read asks for: the route's ceiling (its default is 100).
+FOLLOW_UPS_LIMIT = 200
+
+
+def follow_up_as_comment(follow_up: Mapping[str, Any]) -> dict[str, Any]:
+    """A follow-up (`{id, body, author, created_at}`) in the shape a comment has.
+
+    So the comment cursor, dedupe and authorship rule apply unchanged. A person's
+    follow-up never carries `author_actor`: that key alone makes a comment an agent's
+    (`sweep.is_agent_comment`), and an agent's comment is never woken for.
+    """
+    author = follow_up.get("author")
+    who: Mapping[str, Any] = author if isinstance(author, Mapping) else {}
+    kind = str(who.get("type") or who.get("kind") or "").strip().lower()
+    name = (
+        _clean(who.get("display_name"))
+        or _clean(who.get("name"))
+        or _clean(who.get("handle"))
+        or (_clean(author) if isinstance(author, str) else None)
+    )
+    comment: dict[str, Any] = {
+        "id": follow_up.get("id"),
+        "body": str(follow_up.get("body") or ""),
+        "created_at": follow_up.get("created_at"),
+        "author_type": "agent" if kind == "agent" else (kind or "user"),
+        "author_id": _clean(who.get("id")),
+        "author_name": name,
+    }
+    if kind == "agent":
+        comment["author_actor"] = {"name": name} if name else {"agent": True}
+    return comment
+
+
+def list_instruction_follow_ups(
+    reply: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> list[dict[str, Any]] | None:
+    """What the person added to an instruction since sending it, oldest first, as comments.
+
+    Read beside the instruction's result route (`.../machine-instructions/<ref>/follow-ups`),
+    checked against this workspace the same way. ``None`` when there is nothing to call
+    with (not connected). A refusal raises :class:`PapayaHTTPError` — a 404 is a Papaya
+    that has no follow-ups yet, which the caller reads as none.
+    """
+    env = os.environ if environ is None else environ
+    _path, result_path = reply_paths(reply, env)
+    url = _api_url(env, result_path.removesuffix("/result") + "/follow-ups")
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    answer = _papaya_request(
+        f"{url}?limit={FOLLOW_UPS_LIMIT}",
+        token,
+        what="follow-up list",
+        opener=opener,
+        shape=object,
+    )
+    if isinstance(answer, Mapping):
+        # A page rather than a bare list; an empty body is no follow-ups.
+        answer = answer.get("items", answer.get("follow_ups", [])) if answer else []
+    if not isinstance(answer, list):
+        raise PapayaEventError("Papaya returned an invalid follow-up list; retry")
+    return [follow_up_as_comment(item) for item in answer if isinstance(item, Mapping)]
+
+
 def put_connection_status(
     snapshot: Mapping[str, Any],
     *,
@@ -894,7 +961,10 @@ __all__ = [
     "REPLY_PROGRESS",
     "Instruction",
     "PapayaHTTPError",
+    "FOLLOW_UPS_LIMIT",
+    "follow_up_as_comment",
     "instruction_from",
+    "list_instruction_follow_ups",
     "read_work_item_ref",
     "work_item_repository",
     "parse_instruction",

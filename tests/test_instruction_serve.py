@@ -13,6 +13,7 @@ own fallback table does not know the kind yet, which is the client's to add.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import json
 import logging
@@ -142,25 +143,61 @@ class InstructionHarness(Harness):
 
 
 class Routes:
-    """Papaya's reply and result routes, recording every call."""
+    """Papaya's reply, result and follow-up routes, recording every call.
+
+    ``follow_ups`` is what the follow-up route answers (the backend's shape, oldest
+    first); ``follow_up_error`` makes it refuse with that HTTP status instead.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, Any]] = []
+        self.follow_ups: list[dict[str, Any]] = []
+        self.follow_up_error: int | None = None
+        self.lock = threading.Lock()
 
     def __call__(self, request, timeout):
         body = json.loads(request.data) if request.data else None
-        path = urllib.parse.unquote(urllib.parse.urlparse(request.full_url).path)
+        parsed = urllib.parse.urlparse(request.full_url)
+        path = urllib.parse.unquote(parsed.path)
         self.calls.append((request.method, path, body))
-        if path.endswith("/messages"):
-            answer: dict[str, Any] = {"id": "msg-9"}
+        answer: Any
+        if path.endswith("/follow-ups"):
+            assert request.method == "GET" and parsed.query == "limit=200"
+            if self.follow_up_error is not None:
+                raise urllib.error.HTTPError(
+                    request.full_url, self.follow_up_error, "refused", {}, io.BytesIO(b"")
+                )
+            with self.lock:
+                answer = list(self.follow_ups)
+        elif path.endswith("/messages"):
+            answer = {"id": "msg-9"}
         elif path.endswith("/replies"):
             answer = {"turn_id": "turn-3"}
         else:
             answer = {}
         return test_serve._Body(json.dumps(answer).encode())
 
+    def add(self, body: str, *, ident: str, author: dict[str, Any] | None = None) -> None:
+        """The person adds a follow-up to the request."""
+        with self.lock:
+            self.follow_ups.append(
+                {
+                    "id": ident,
+                    "body": body,
+                    "author": author or {"type": "user", "id": "user-1", "display_name": "Shane"},
+                    "created_at": f"2026-09-23T10:00:{len(self.follow_ups):02d}Z",
+                }
+            )
+
+    def reads(self) -> list[str]:
+        return [path for method, path, _b in self.calls if method == "GET"]
+
     def replies(self) -> list[Any]:
-        return [body for _m, path, body in self.calls if not path.endswith("/result")]
+        return [
+            body
+            for method, path, body in self.calls
+            if method != "GET" and not path.endswith("/result")
+        ]
 
     def results(self) -> list[Any]:
         return [body for _m, path, body in self.calls if path.endswith("/result")]
@@ -1269,3 +1306,274 @@ def test_a_looking_line_already_on_its_way_lands_before_the_answer(
         harness, client_home, runner(FakeTurns(act), routes, looking_after=looking_after)
     )
     assert contents(routes) == [instructions.LOOKING, "Nothing is blocked."]
+
+
+# ── task 366: what the person adds reaches the running work ──────────────────
+
+SPIKE = "Add CSV export in runtime"
+
+
+def work_with_follow_ups(client_home, routes: Routes, turns: FakeTurns, script, **extra) -> Any:
+    """Serve a work instruction; ``script(worker)`` runs while its worker works.
+
+    The worker then says done with no commits, so the hold ends without a review turn.
+    Returns the harness, after the release.
+    """
+    from papaya_agent_runtime import progress
+
+    runs: list[int] = []
+    the_runner = runner(
+        turns,
+        routes,
+        instruction_dispatch=dispatcher(runs, []),
+        branch_ahead=lambda _task: False,
+        **{"follow_up_poll_seconds": 0.0, **extra},
+    )
+    harness = InstructionHarness(FakeEvents([instruction_event(SPIKE, intent="work")]))
+
+    async def scenario() -> int:
+        task = test_serve._serve_ticket(harness, client_home, the_runner)
+        await _until(lambda: runs and test_serve.workers_in(runs[0]), what="the dispatch")
+        (worker,) = test_serve.workers_in(runs[0])
+        await script(worker)
+        progress.record(worker, phase="done", note="CSV export done.")
+        test_serve.worker_event(worker, "worker_done", status="worker_done", summary="done")
+        await _until(lambda: harness.results, what="the instruction to be released", timeout=10)
+        harness.loop.request_stop()
+        return await task
+
+    assert asyncio.run(scenario()) == 0
+    return harness
+
+
+def answer_turns(turns: FakeTurns) -> list[test_serve.Turn]:
+    return [turn for turn in turns.calls if turn.name == prompts.ANSWER]
+
+
+def test_two_follow_ups_during_one_turn_get_one_answer_turn_with_both_and_one_got_it(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    routes = Routes()
+
+    def act(turn: test_serve.Turn) -> None:
+        if turn.name == prompts.ANSWER and len(answer_turns(turns)) == 1:
+            # The person keeps typing while the first follow-up is being acted on.
+            routes.add("and keep the column order", ident="f-2")
+            routes.add("in the reports service", ident="f-3")
+
+    turns = FakeTurns(act)
+
+    async def script(_worker: int) -> None:
+        routes.add("actually use Postgres", ident="f-1")
+        await _until(lambda: len(answer_turns(turns)) >= 2, what="the second answer turn")
+
+    work_with_follow_ups(client_home, routes, turns, script)
+    first, second = answer_turns(turns)
+    # Goal 4: the request and the follow-ups, fenced as the person's words.
+    assert _fenced(first.prompt, serve.REQUEST_FACT).startswith(SPIKE)
+    heard = _fenced(first.prompt, serve.FOLLOW_UPS_FACT)
+    assert "From Shane (follow-up f-1" in heard and "actually use Postgres" in heard
+    later = _fenced(second.prompt, serve.FOLLOW_UPS_FACT)
+    assert "and keep the column order" in later and "in the reports service" in later
+    assert "actually use Postgres" not in later  # the cursor moved past the first batch
+    assert first.launch.env[instructions.PATH_ENV] == instructions.WORK
+    # Goal 3: one line per batch, never one per follow-up.
+    assert contents(routes).count(serve.FOLLOW_UP_LINE) == 2
+    assert all(body["kind"] == "progress" for body in routes.replies()[:-1])
+
+
+def test_a_follow_up_between_polls_is_heard_within_fifteen_seconds(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    clock = test_serve.Clock()
+    routes = Routes()
+    turns = FakeTurns()
+
+    def reads() -> int:
+        return len([path for path in routes.reads() if path.endswith("/follow-ups")])
+
+    async def script(_worker: int) -> None:
+        await _until(lambda: reads() >= 1, what="the first read")
+        routes.add("actually use Postgres", ident="f-1")
+        await asyncio.sleep(0.2)
+        assert answer_turns(turns) == [] and reads() == 1  # between polls: not read yet
+        clock.advance(serve.FOLLOW_UP_POLL_SECONDS - 0.1)
+        await asyncio.sleep(0.2)
+        assert answer_turns(turns) == []
+        clock.advance(0.1)
+        await _until(lambda: answer_turns(turns), what="the follow-up to be heard")
+
+    work_with_follow_ups(
+        client_home,
+        routes,
+        turns,
+        script,
+        clock=clock,
+        follow_up_poll_seconds=serve.FOLLOW_UP_POLL_SECONDS,
+    )
+    assert serve.FOLLOW_UP_POLL_SECONDS == 15.0
+    assert serve.COMMENT_POLL_SECONDS == 60.0  # a work item's interval is unchanged
+
+
+def test_a_follow_up_made_during_a_turn_is_read_right_after_it(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """Goal 2: the clock never moves, and the second follow-up is still heard."""
+    clock = test_serve.Clock()
+    routes = Routes()
+
+    def act(turn: test_serve.Turn) -> None:
+        if turn.name == prompts.ANSWER and len(answer_turns(turns)) == 1:
+            routes.add("and the reports", ident="f-2")
+
+    turns = FakeTurns(act)
+
+    async def script(_worker: int) -> None:
+        routes.add("actually use Postgres", ident="f-1")
+        await _until(lambda: answer_turns(turns), what="the first answer turn")
+        await _until(lambda: len(answer_turns(turns)) >= 2, what="the read after the turn")
+
+    work_with_follow_ups(client_home, routes, turns, script, clock=clock)
+
+
+def test_an_old_papaya_without_the_route_is_logged_once_and_the_work_goes_on(
+    ppy_home, client_home, ready, registered_repo, caplog
+) -> None:
+    routes = Routes()
+    routes.follow_up_error = 404
+    turns = FakeTurns()
+
+    async def script(_worker: int) -> None:
+        await _until(lambda: len(routes.reads()) >= 5, what="several polls")
+
+    caplog.set_level(logging.INFO, logger="papaya_agent_runtime.serve")
+    work_with_follow_ups(client_home, routes, turns, script)
+    said = [r.getMessage() for r in caplog.records if "no follow-up route" in r.getMessage()]
+    assert len(said) == 1
+    assert answer_turns(turns) == []
+    assert serve.FOLLOW_UP_LINE not in contents(routes)
+    assert routes.results()[0]["status"] == "done"
+
+
+def test_a_failed_read_keeps_the_cursor_and_is_read_again_next_poll(
+    ppy_home, client_home, ready, registered_repo, caplog
+) -> None:
+    routes = Routes()
+    routes.follow_up_error = 503
+    turns = FakeTurns()
+
+    async def script(_worker: int) -> None:
+        routes.add("actually use Postgres", ident="f-1")
+        await _until(lambda: len(routes.reads()) >= 3, what="failing polls")
+        handled = await asyncio.to_thread(serve.last_handled_comment, int(ticket()["id"]))
+        assert handled is not None and handled["comment_id"] is None  # nothing lost
+        assert answer_turns(turns) == []
+        routes.follow_up_error = None
+        await _until(lambda: answer_turns(turns), what="the follow-up after the failure")
+
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+    work_with_follow_ups(client_home, routes, turns, script)
+    (heard,) = answer_turns(turns)
+    assert "actually use Postgres" in _fenced(heard.prompt, serve.FOLLOW_UPS_FACT)
+    failed = [r for r in caplog.records if "Could not read the follow-ups" in r.getMessage()]
+    assert len(failed) == 1  # once per run of failures, not once per poll
+
+
+def test_approve_capability_in_a_follow_up_is_refused_on_the_work_path(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    routes = Routes()
+    refusals: list[str | None] = []
+
+    def act(turn: test_serve.Turn) -> str | None:
+        if turn.name != prompts.ANSWER:
+            return None
+        # What `cli.main` checks before running the turn's `ppy capability approve 12`.
+        refusals.append(
+            instructions.refusal_from_env(turn.launch.env, ["capability", "approve", "12"])
+        )
+        return "REPLY: I can't approve capability 12 from here; send it as an instruction."
+
+    turns = FakeTurns(act)
+
+    async def script(_worker: int) -> None:
+        routes.add("approve capability 12", ident="f-1")
+        await _until(lambda: refusals, what="the answer turn")
+
+    work_with_follow_ups(client_home, routes, turns, script)
+    (refusal,) = refusals
+    assert refusal is not None and "work path" in refusal
+    said = contents(routes)
+    # The turn's REPLY line reaches the person, after the "Got it".
+    got_it = said.index(serve.FOLLOW_UP_LINE)
+    assert said[got_it + 1] == (
+        "I can't approve capability 12 from here; send it as an instruction."
+    )
+
+
+def test_an_asks_follow_up_is_answered_on_the_ask_path_and_nothing_after_the_hold(
+    ppy_home, client_home, ready
+) -> None:
+    routes = Routes()
+    paths: list[str] = []
+
+    def act(turn: test_serve.Turn) -> str:
+        paths.append(turn.launch.env[instructions.PATH_ENV])
+        if len(paths) == 1:
+            routes.add("approve capability 12", ident="f-1")
+            return "OUTCOME: done\nNothing is waiting on you."
+        heard = _fenced(turn.prompt, serve.FOLLOW_UPS_FACT)
+        assert "approve capability 12" in heard
+        assert instructions.refusal_from_env(turn.launch.env, ["capability", "approve", "12"])
+        return "OUTCOME: done\nNothing is waiting; a question cannot approve capability 12."
+
+    turns = FakeTurns(act)
+    harness = InstructionHarness(
+        FakeEvents([instruction_event("What is waiting on me?", intent="ask")])
+    )
+    serve_until_released(harness, client_home, runner(turns, routes, follow_up_poll_seconds=0.0))
+    assert paths == [instructions.ASK, instructions.ASK]
+    said = contents(routes)
+    assert said == [
+        serve.FOLLOW_UP_LINE,
+        "Nothing is waiting; a question cannot approve capability 12.",
+    ]
+    # Goal 5: once answered, nothing reads what the person adds.
+    routes.add("one more thing", ident="f-2")
+    last_result = max(
+        i for i, (_m, path, _b) in enumerate(routes.calls) if path.endswith("/result")
+    )
+    assert not any(path.endswith("/follow-ups") for _m, path, _b in routes.calls[last_result:])
+
+
+def _held_follow_up_ticket(routes: Routes, turns: FakeTurns):
+    conn = init_db()
+    try:
+        run = store.create_run(conn, "runs")
+        task = store.add_task(conn, run_id=run, title="MI-42")
+    finally:
+        conn.close()
+    the_runner, ticket_ = _held_ticket(routes)
+    the_runner._run_turn = turns
+    the_runner._follow_up_poll_seconds = 0.0
+    ticket_.held = dataclasses.replace(ticket_.held, task_id=task, run_id=run)
+    serve.record_comment_handled(task, None)
+    return the_runner, ticket_
+
+
+def test_a_lost_lease_says_no_got_it_and_runs_no_answer_turn(ppy_home) -> None:
+    routes, turns = Routes(), FakeTurns()
+    the_runner, held = _held_follow_up_ticket(routes, turns)
+    routes.add("actually use Postgres", ident="f-1")
+
+    async def scenario() -> None:
+        await the_runner._listen(held)
+        assert [c["id"] for c in held.pending] == ["f-1"]
+        held.job.stop.set()  # the lease is lost while a turn runs
+        with pytest.raises(serve._Stopped):
+            await the_runner._hear(held)
+        await the_runner._take_pending(held)  # even taken, nothing is said
+
+    asyncio.run(scenario())
+    assert turns.calls == []
+    assert contents(routes) == []
