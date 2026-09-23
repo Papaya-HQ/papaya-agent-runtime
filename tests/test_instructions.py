@@ -371,6 +371,17 @@ def test_the_choice_turn_may_only_look_at_repositories(argv, allowed) -> None:
     assert (refusal is None) == allowed, refusal
 
 
+def test_ppy_answer_is_refused_on_the_ask_path_by_ppy_itself(ppy_home, monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, instructions.ASK)
+    assert cli.main(["answer", "41", "use the staging database"]) == 2
+    err = capsys.readouterr().err
+    assert "refused on this instruction's path" in err and "`ppy answer`" in err
+    # The answer path itself still answers a worker when the person said to.
+    assert instructions.command_refusal(ANSWER, ["answer", "41", "go"]) is None
+
+
 def test_the_choice_path_is_enforced_by_ppy_itself(ppy_home, monkeypatch, capsys) -> None:
     from papaya_agent_runtime import cli
 
@@ -382,7 +393,16 @@ def test_the_choice_path_is_enforced_by_ppy_itself(ppy_home, monkeypatch, capsys
 ASK_COMMANDS = [
     (["status", "--team"], True),
     (["task", "show", "41"], True),
-    (["todo", "add", "look at it", "--blocked-on", "user"], True),
+    (["todo", "list", "--all"], True),
+    (["memory", "show", "--repo", "runtime"], True),
+    (["outreach", "--json"], True),
+    (["board"], True),
+    # Nothing that acts: steering a waiting worker is work, and so is any write.
+    (["answer", "41", "use the staging database"], False),
+    (["todo", "add", "look at it", "--blocked-on", "user"], False),
+    (["todo", "done", "3"], False),
+    (["memory", "init"], False),
+    (["outreach", "run"], False),
     (["capability", "approve", "12"], False),
     (["capability", "deny", "12"], False),
     (["deliver", "41"], False),

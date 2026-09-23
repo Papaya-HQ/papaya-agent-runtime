@@ -704,8 +704,10 @@ no `intent` key (an older Papaya), the words decide, as before.
   manager's own commands run on this path: reads, `ppy capability approve|deny`,
   `ppy todo`, `ppy deliver`, and `ppy stack merge` only where this install may merge.
   Anything else is refused by `ppy` itself. An `ask` runs on the narrower `ask` path:
-  words that read like a command ("should I merge #12?") stay a question, and
-  `ppy capability`, `ppy deliver` and `ppy stack merge` are refused on it. An `ask`
+  words that read like a command ("should I merge #12?") stay a question, and nothing
+  that acts runs on it: `ppy capability`, `ppy deliver`, `ppy stack merge` and
+  `ppy answer` (replying to a waiting worker is work) are refused, and `memory`,
+  `outreach` and `todo` run only their reads. An `ask`
   that would need work is answered from the record and says, in one sentence, to ask
   the machine to do it. No
   acknowledgement on this path; if the turn has not answered after 20 seconds, one

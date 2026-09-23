@@ -534,13 +534,21 @@ ANSWER_ALLOWED: dict[str, frozenset[str] | None] = {
     # Merging a pull request, only where this install lets the runtime merge.
     "stack": frozenset({"merge"}),
 }
-#: An asked question's commands: the answer path's reads and records, without the three
-#: that decide something (a capability, a delivery, a merge). The words of a question
-#: ("should I merge #12?") never become the act.
+#: An asked question's commands: the answer path's reads, and nothing that acts. Not a
+#: capability, a delivery or a merge, not `ppy answer` (it steers a waiting worker:
+#: replying to a needs-you row is work), and only the read subcommands of the rest —
+#: `memory init`, `outreach run` (it posts) and every `todo` write are refused. The words
+#: of a question ("should I merge #12?") never become the act.
 ASK_ALLOWED: dict[str, frozenset[str] | None] = {
-    command: allowed
-    for command, allowed in ANSWER_ALLOWED.items()
-    if command not in ("capability", "deliver", "stack")
+    **{
+        command: allowed
+        for command, allowed in ANSWER_ALLOWED.items()
+        if command not in ("capability", "deliver", "stack", "answer")
+    },
+    "memory": frozenset({"show", "path"}),
+    # A bare `ppy outreach` lists what waits on a person; `run` says it to them.
+    "outreach": frozenset({""}),
+    "todo": frozenset({"list"}),
 }
 #: The repository-choice turn's commands: looking at the registered repositories and
 #: their notes, nothing else.
