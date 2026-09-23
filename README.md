@@ -38,7 +38,9 @@ The contract it runs on is [`docs/runtime-contract.md`](docs/runtime-contract.md
 
 The runtime has **no persona of its own**. Connecting pins this machine to one of
 your workspace's agents — either from the Papaya desktop app or with
-`papaya-agent connect` in a terminal; the runtime finds either one. From then on
+`papaya-agent connect` in a terminal; the runtime finds either one. (A machine with no
+app or no browser connects with a device code: see
+[Run it on a machine without the app](#run-it-on-a-machine-without-the-app).) From then on
 the session *is* that agent:
 persona, objective, rules and memories are loaded from Papaya and treated as
 standing instructions. `ppy papaya status` says who you're connected as.
@@ -308,8 +310,11 @@ talks to a tracker itself; it records which record a task belongs to and renders
 
 It installs what it can, but these have to exist:
 
-- **macOS or Linux.** Windows is out of scope for v1.
-- **Python 3.13+**, **Git**, and **[uv](https://docs.astral.sh/uv/)**.
+- **macOS or Linux.** On Windows, only inside WSL2: native Windows is not supported,
+  because the runtime locks its state with `fcntl`. See
+  [Run it on a machine without the app](#run-it-on-a-machine-without-the-app).
+- **Python 3.13+** (uv fetches it when it is missing), **Git**, and
+  **[uv](https://docs.astral.sh/uv/)**.
 - **Node 22+** and the **`gh` CLI** — for companions, discovery, and PR delivery.
 - **A signed-in Claude Code and/or Codex CLI.** It never logs you in. One is enough;
   two lets you run one as the driver and cap workers at the other.
@@ -365,6 +370,161 @@ restart: an unchanged situation stays quiet, and a new one speaks however soon i
 appears. Having no repositories registered isn't one of those things and never
 stops it working: a work item that names a repository registers it on pick-up, and
 `ppy repo add` is for getting ahead of that.
+
+### Run it on a machine without the app
+
+The desktop app is one way to keep a machine connected and its runtime running. A
+machine with no app does the same with a few commands: a Linux box, a server you SSH
+into, or a Windows PC through WSL2. This section is the whole procedure. Every other
+page that mentions it links here.
+
+**What the machine needs**
+
+- **Linux or macOS natively. Windows only inside WSL2**, with this repository cloned
+  in the Linux filesystem (`~/`, not `/mnt/c/…`). Native Windows is not supported: the
+  runtime locks its state with `fcntl`, which Windows does not have.
+- **git** and **[uv](https://docs.astral.sh/uv/)**. uv fetches the Python this checkout
+  pins (`.python-version`) when the machine has none.
+- **Claude Code, signed in**, as the user that will run the runtime: run `claude` once
+  and finish its sign-in. If you connect with Codex instead, `codex login`.
+- **`gh`, signed in** to the forge your repositories live on: `gh auth login`, then
+  `gh auth setup-git` so `git push` uses it.
+- Node 22+ if a repository you register needs it. Readiness tells you when one does.
+
+**Set it up**
+
+```bash
+git clone https://github.com/Papaya-HQ/papaya-agent-runtime
+cd papaya-agent-runtime
+./bin/ppy env sync       # builds .venv, and with it the Papaya client, papaya-agent
+
+# Connect this machine as one of your workspace's agents, with a device code:
+.venv/bin/papaya-agent connect --device --workspace <workspace> --agent <handle> --no-install
+# ...or with a connection token the Papaya app generated for a headless machine:
+#    .venv/bin/papaya-agent login --token-stdin
+
+./bin/ppy repo add https://github.com/you/your-repo    # once per repository
+./bin/ppy serve --working-directory "$PWD"
+```
+
+- `connect --device` prints a code and a link. Approve it on any device where you are
+  signed in to Papaya. `--workspace` (id, slug or name) and `--agent` (the agent's
+  handle) choose without a prompt. Leave them out and it lists the choices.
+  `--no-install` leaves your own Claude Code's plugins alone: the runtime's turns get
+  the agent's Papaya tools from the client directly. Add `--harness codex` if Codex is
+  the harness you connect with. The connection is stored in `~/.papaya-agent/`.
+- Pass `--working-directory` to `ppy serve`, as above, and not to `connect`. The client
+  takes it on `connect` only with `--access-token-stdin` (the desktop app's path) and
+  exits 2 otherwise. The directory is this checkout, the same folder the app would be
+  pointed at.
+- `login --token-stdin` reads the token from stdin, as a hidden prompt on a terminal.
+  Never pass it as an argument, where other processes can read it.
+- Do not run `papaya-agent listen`. `ppy serve` runs the client's listener inside itself.
+- A work item or request that names a repository registers it on pick-up, so
+  `ppy repo add` just gets ahead of that.
+- `ppy serve` sets the runtime up on its first start, exactly as it does for the app,
+  and then listens. `./bin/ppy papaya status` says which agent it is connected as.
+  `./bin/ppy blockers` lists anything it needs from you, and the agent also sends it to
+  you as a DM.
+
+**Keep it running**
+
+`ppy serve` runs in the foreground until it is stopped. On SIGTERM it stops its workers
+itself and keeps their sessions for a resume, so let a service manager stop it rather
+than killing everything it started. On Linux, use a systemd user unit,
+`~/.config/systemd/user/papaya-runtime.service`:
+
+```ini
+[Unit]
+Description=Papaya Agent Runtime (ppy serve)
+
+[Service]
+WorkingDirectory=%h/papaya-agent-runtime
+ExecStart=%h/papaya-agent-runtime/bin/ppy serve --working-directory %h/papaya-agent-runtime
+# Where uv, claude, gh and node live. A unit does not read your shell profile.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=30
+# 76: a newer start took over. 75: another start is already serving. Never fight either.
+RestartPreventExitStatus=75 76
+# SIGTERM to serve alone, so it stops its workers and keeps their sessions.
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now papaya-runtime
+sudo loginctl enable-linger "$USER"     # start at boot, and keep running after you log out
+journalctl --user -u papaya-runtime -f  # what it says
+```
+
+Exit **76** means another start took over. A newer `ppy serve` on this checkout retired
+this one: the desktop app, or you in a terminal switching agents. That start is now the
+runtime, and restarting the old one would retire it in turn, so the two would keep
+taking the machine back from each other. Exit 75 is the same situation seen from a
+start that lost the race. `Restart=on-failure` restarts every other failure. To stop it
+on purpose, run `systemctl --user stop papaya-runtime`.
+
+**On WSL2**, two more things:
+
+- Turn systemd on. Put this in `/etc/wsl.conf`, then run `wsl.exe --shutdown` from
+  Windows and open the distribution again:
+
+  ```ini
+  [boot]
+  systemd=true
+  ```
+
+- Start the distribution when you log in to Windows, and keep it open. WSL starts a
+  distribution only when something asks for it, and stops it once nothing holds it
+  open. A Task Scheduler task at log on does both. Use your distribution's name from
+  `wsl.exe -l`:
+
+  ```bat
+  schtasks /Create /TN "Papaya runtime" /SC ONLOGON /TR "wsl.exe -d Ubuntu --exec sleep infinity"
+  ```
+
+**On macOS without the app**, launchd's `KeepAlive` cannot exclude an exit status, so it
+would fight a takeover. Run `ppy serve` in `tmux`, or from a launch agent with
+`RunAtLoad` and no `KeepAlive`.
+
+**One runtime per machine, and one machine per agent**
+
+- **One runtime per machine.** A second `ppy serve` on the same checkout takes over from
+  the first, and the first exits 76. That is also how you switch the agent a machine
+  runs as: connect as the other agent, then start `ppy serve` again. A second checkout
+  on the same machine would be a second runtime on the same Papaya connection. Don't.
+- **One machine per agent is recommended.** Every machine connected as one agent sweeps
+  for that agent's assigned work. Reservations stop two machines working the same
+  ticket, but you no longer choose which machine gets a ticket or a request.
+
+**What it does for you once it runs**
+
+- **"Ask my machine …"** is a question with no work item (`intent: ask`). One manager
+  turn answers it from the runtime's own state: what it is working on, the board,
+  blockers, a task, a pull request. It runs on the read-only `ask` path, which can read
+  and record but cannot approve a capability, deliver or merge. "Should I merge #12?"
+  gets an answer, never a merge. The answer is posted where you asked. Papaya sends a
+  question only to a connection that says it takes one, so `ppy serve` registers
+  `instruction_intents: ["ask", "work"]` with its connection. A Papaya client too old
+  to register that gets one log line at start instead: Papaya will refuse to send this
+  machine questions until the client is updated.
+- **"Have my machine …"** is work (`intent: work`). One worker runs on one repository:
+  the one the request names, the work item's, the only one registered, or the one a
+  short choice turn picks. If none of those settles it, you are asked which. The work is
+  reviewed and delivered like any ticket. Progress notes arrive where you asked, and it
+  ends with one summary and the pull request link. When there was nothing to build, it
+  ends with what the worker found instead.
+- **Follow-ups.** A reply you send in a request's thread while the machine holds the
+  request is read within about fifteen seconds. It is handled like a comment on a
+  ticket, so it can be answered or steer the worker. A request the machine was holding
+  when it restarted is taken up again after the restart.
+
+The details are in [Asking the machine from Papaya](#asking-the-machine-from-papaya).
 
 ### The control plane, if you want to look
 
@@ -481,7 +641,9 @@ Papaya as `papaya-agent-runtime` whatever `--harness` says, so the app can tell 
 machine running the manager from one running a bare harness.
 
 Run it yourself with `./bin/ppy serve` (add `--working-directory <path>` if the
-connection has no directory stored). Only one `serve` or `supervisor serve` may own a
+connection has no directory stored). To keep one running on a machine with no app, see
+[Run it on a machine without the app](#run-it-on-a-machine-without-the-app). Only one
+`serve` or `supervisor serve` may own a
 `PPY_HOME`, and a new `serve` takes over from whatever holds it without a person. The
 owner records its build in `.ppy/run/supervisor.json` (git head, package version, start
 time). A new start that finds a live supervisor **of this checkout's build adopts it**:
@@ -1077,6 +1239,17 @@ and runs it one of three ways, chosen by rule and said in its first progress not
   request reaches you in the snapshot, and you can send it back as an instruction.
 - **unanswerable**: no ask, or no single repository. The one question (which repository?
   what do you want done?) goes back, and the result is reported `failed` with it.
+
+When Papaya says what the person meant, that decides it. `intent: work` is the work
+path. `intent: ask` is a question: it is always answered, whatever its words, by a turn
+on the read-only `ask` command set, which can approve, deliver or merge nothing. Papaya
+routes a question with no work item only to a connection that registered
+`instruction_intents` including `ask`. `ppy serve` registers `["ask", "work"]` when its
+Papaya client can register extra capabilities (`extra_capabilities` on the client's
+embed builders). With an older client it registers nothing new and logs one line at
+start: Papaya will refuse to send this machine questions until the client is updated.
+A reply in the request's thread while it is held is read about every fifteen seconds
+and handled like a comment on a ticket.
 
 The answer is posted where the instruction was asked, using only the reply block the
 event carried, then reported to Papaya; a reply that fails is retried once, and then the

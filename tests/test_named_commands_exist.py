@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from papaya_agent_runtime import cli
+from papaya_agent_runtime import cli, serve
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -445,6 +445,22 @@ def _refuses(argv: tuple[str, ...]) -> str | None:
     return None
 
 
+def _serve_refuses(argv: tuple[str, ...]) -> str | None:
+    """Why `ppy serve`'s own parser refuses these arguments, or None.
+
+    `cli.main` hands `serve` its arguments before the main parser runs, because the
+    main parser's `REMAINDER` cannot hold one that starts with a flag: there,
+    `ppy serve --working-directory x` reads as refused although `serve` takes it. A
+    flag `serve` would only ignore with a warning is still a refusal here, since no
+    page should tell a person to type it.
+    """
+    try:
+        _known, unknown = serve._parser().parse_known_args(list(argv))
+    except serve._ParseFailed as exc:
+        return str(exc)
+    return f"unrecognized arguments: {' '.join(unknown)}" if unknown else None
+
+
 def parse_failure(argv: tuple[str, ...]) -> str | None:
     """Why the real parser refuses this argv, or None when it accepts it."""
     if not argv:
@@ -452,6 +468,8 @@ def parse_failure(argv: tuple[str, ...]) -> str | None:
         return None
     if any(tuple(argv[: len(key)]) == key for key in LAUNCHER_ONLY):
         return None
+    if argv[0] == "serve":
+        return _serve_refuses(argv[1:])
     resolved, depth = _resolve(_parser(), argv)
     sub = _subparsers(resolved)
     if depth == len(argv) and sub is not None and sub.required:
@@ -502,6 +520,14 @@ def test_the_corpus_is_really_being_read() -> None:
     assert len(found) > 200, len(found)
     by_file = {inv.path for inv in found}
     assert set(CORPUS) - by_file == set(), set(CORPUS) - by_file
+
+
+def test_serve_is_held_to_its_own_parser() -> None:
+    """The flags `serve` takes pass; a flag it does not take is still a dead command."""
+    assert parse_failure(("serve", "--working-directory", "$PWD")) is None
+    assert parse_failure(("serve", "--supervised", "--harness", "codex")) is None
+    assert parse_failure(("serve",)) is None
+    assert "--no-such-flag" in (parse_failure(("serve", "--no-such-flag")) or "")
 
 
 def test_the_launcher_only_commands_are_really_in_the_launcher() -> None:

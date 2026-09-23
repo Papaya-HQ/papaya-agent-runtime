@@ -82,6 +82,11 @@ person's to see.
   2 minutes) for `.ppy/run/supervisor.json` to show `git_head` equal to the new
   `HEAD`. If it does not come back, ask the person to restart the runtime from the
   Papaya app (or quit and reopen it). That is the one click this needs.
+- **Kept running by a service manager** (a machine without the app, set up from the
+  README's "Run it on a machine without the app"): `systemctl --user restart
+  papaya-runtime`, which starts it on the new build whether or not it is still up.
+  Never start a second `ppy serve` beside the unit's: the newest start takes over, and
+  the unit's serve exits 76 and stays down.
 - **Run from a terminal** (`ppy serve` without `--supervised`, or no Papaya
   connection): start `./bin/ppy serve` again in the background the way it was run.
 - Start the heartbeat again: `./bin/ppy watch --follow` as a background monitor, then

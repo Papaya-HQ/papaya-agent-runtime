@@ -429,7 +429,12 @@ quietly; do not narrate the steps or report diagnostics.
    case no browser opened. When the account has several workspaces or agents it
    exits listing them: ask the person which one in the conversation, then re-run with
    the `--workspace` or `--agent` it names — never guess. With neither Node nor `uv`
-   on the machine it says which to install. Once connected, run `ppy papaya tools`
+   on the machine it says which to install. On a machine with no browser (SSH, a
+   server, WSL2), add `--device`: the person approves a code from any device. The
+   whole setup for a machine without the desktop app, including keeping `ppy serve`
+   running, is the README's
+   [Run it on a machine without the app](../README.md#run-it-on-a-machine-without-the-app);
+   point a person there rather than restating it. Once connected, run `ppy papaya tools`
    and ask them to run `/mcp`. A connection made mid-session is picked up by the next
    `ppy serve` start, with no restart
    demanded. A task you create locally has no work item, so the ticket steps (status
@@ -500,8 +505,10 @@ quietly; do not narrate the steps or report diagnostics.
    owner switches agents by starting `ppy serve` again, which is why the newest wins
    and why nothing (no launchd `KeepAlive`) restarts the old one. The retired serve
    exits 76 and, supervised, sends the fatal error `retired` naming who took over, so
-   its launcher does not start it again. Nothing is signalled that is not the holder
-   at that moment: the lock file names the holder's pid and process start, and both
+   its launcher does not start it again. A service manager that keeps `ppy serve`
+   running on a machine without the app must not restart it on 76 or 75 either (the
+   README's systemd unit sets `RestartPreventExitStatus=75 76`). Nothing is
+   signalled that is not the holder at that moment: the lock file names the holder's pid and process start, and both
    are checked before every request and signal. A lock whose holder is gone is taken
    with one line. A start that loses the race to a newer one says "Another start took
    over" and exits 75 with nothing recorded. A start that cannot retire the holder
@@ -512,7 +519,9 @@ quietly; do not narrate the steps or report diagnostics.
 4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single
-   thing to install/sign into, plainly, and stop until it's handled.
+   thing to install/sign into, plainly, and stop until it's handled. On Windows the
+   runtime runs only inside WSL2 (it needs `fcntl`); a native Windows checkout is not
+   something to repair, it is a machine to move into WSL2.
 5. **Config.** If none exists, configure it yourself (see below). If it exists,
    you're ready. `ppy health` also prints the tool profile Claude workers launch
    with: the code's profile plus `claude.extra_tools` minus `claude.dropped_tools`.

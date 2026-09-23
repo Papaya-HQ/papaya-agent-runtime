@@ -116,6 +116,7 @@ import asyncio
 import contextlib
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -5547,6 +5548,35 @@ def _worker_facts(worker: Worker | None) -> dict[str, object]:
 
 # ── running ─────────────────────────────────────────────────────────────────
 
+#: What this connection tells Papaya it does with a person's instruction, on top of
+#: the capabilities the client registers itself. Papaya routes a question with no work
+#: item (`intent: ask`) only to a connection that lists `ask` here, and this runtime
+#: answers one on the read-only `ask` path, which can approve, deliver or merge nothing.
+INSTRUCTION_INTENTS = (papaya_events.INTENT_ASK, papaya_events.INTENT_WORK)
+#: The embed builders' keyword for them. A client that predates it has none.
+EXTRA_CAPABILITIES = "extra_capabilities"
+OLD_CLIENT_CAPABILITIES = (
+    "[serve] This Papaya client cannot register extra capabilities, so Papaya will "
+    "refuse to send questions to this machine until the client is updated."
+)
+
+
+def extra_capabilities(builder: Callable[..., Any]) -> dict[str, Any]:
+    """The keyword arguments that register this runtime's own capabilities with `builder`.
+
+    Empty for a client whose builder has no such keyword: its builders take keywords
+    only and would raise on an unknown one, and a machine that still does work is worth
+    more than one that refuses to start over the questions it cannot be sent.
+    """
+    try:
+        accepts = EXTRA_CAPABILITIES in inspect.signature(builder).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if not accepts:
+        log.warning(OLD_CLIENT_CAPABILITIES)
+        return {}
+    return {EXTRA_CAPABILITIES: {"instruction_intents": list(INSTRUCTION_INTENTS)}}
+
 
 async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str, Any]):
     """The embedded listener for these options, supervised or not."""
@@ -5575,6 +5605,8 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         # whatever the config said, and it declared that to Papaya in `hello`.
         "max_concurrent": await asyncio.to_thread(configured_workers),
     }
+    builder = build_supervised_listener if options.supervised else build_listener
+    shared.update(extra_capabilities(builder))
     # `extra` is applied last throughout, so a caller holding a seam (the tests
     # hold `events_factory` and `loop_factory`) can also replace anything above it.
     if not options.supervised:
