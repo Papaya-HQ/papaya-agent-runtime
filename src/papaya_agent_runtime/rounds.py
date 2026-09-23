@@ -175,6 +175,16 @@ HYGIENE_EVENT = "worktree_hygiene"
 #: The hand-back reason the runner gives when a turn missed its job (PAP-213).
 _TURN_MISSED = "the manager turn ended"
 
+#: The event a ticket task gets when a missed-turn re-offer finds its work item is no
+#: longer this agent's to run, with the reason; its phase becomes `done` in the same step.
+TICKET_CLOSED = "ticket_closed"
+#: Papaya has the item done or cancelled.
+CLOSED_ITEM_CLOSED = "item_closed"
+#: Papaya has the item owned by somebody other than the agent this runtime is connected as.
+CLOSED_NOT_AGENTS_ITEM = "not_agents_item"
+#: The work item statuses that end it in Papaya.
+_ITEM_ENDED = (papaya_events.STATUS_DONE, "cancelled")
+
 #: How long one `git fetch --prune` may take before hygiene moves on.
 FETCH_TIMEOUT_SECONDS = 120.0
 
@@ -972,6 +982,49 @@ def declined_for_a_missed_turn(tickets: list[Ticket]) -> list[Ticket]:
         conn.close()
 
 
+def closing_reason(item: dict[str, Any], agent_id: str) -> str | None:
+    """Why Papaya's current record of a work item says it is not this agent's to run.
+
+    ``None`` when it still is: open, and unowned or owned by ``agent_id``. Ownership
+    is compared by id, never by handle or name; with no agent id to compare, only the
+    status decides.
+    """
+    if str(item.get("status") or "") in _ITEM_ENDED:
+        return CLOSED_ITEM_CLOSED
+    owner = str(item.get("owner_id") or "")
+    if owner and agent_id and owner != agent_id:
+        return CLOSED_NOT_AGENTS_ITEM
+    return None
+
+
+def close_ticket(ticket: Ticket, reason: str, item: dict[str, Any]) -> None:
+    """Close a ticket in the ledger: the reason on the record, then the phase `done`."""
+    status, owner = str(item.get("status") or ""), str(item.get("owner_id") or "")
+    conn = db.init_db()
+    try:
+        store.append_event(
+            conn,
+            kind=TICKET_CLOSED,
+            payload={
+                "task_id": ticket.task_id,
+                "work_item_id": ticket.work_item_id,
+                "reason": reason,
+                "status": status,
+                "owner_id": owner,
+            },
+            run_id=ticket.run_id,
+            task_id=ticket.task_id,
+        )
+        detail = (
+            f"closed ({reason}): the work item is {status}"
+            if reason == CLOSED_ITEM_CLOSED
+            else f"closed ({reason}): the work item is owned by {owner}"
+        )
+        serve.record_phase(conn, ticket.task_id, serve.PHASE_DONE, detail)
+    finally:
+        conn.close()
+
+
 def observe_ci(worker_task_id: int, seconds: float, outcome: str) -> None:
     """Keep a delivered pull request's CI wall time once, however many rounds see it."""
     from papaya_agent_runtime import budgets
@@ -1161,6 +1214,7 @@ class Rounds:
         status_publisher: machine_status.Publisher | None = None,
         change_sleep: Callable[[float], Awaitable[None]] | None = None,
         instruction_report: Callable[..., bool] | None = None,
+        read_item: Callable[[Ticket], dict[str, Any] | None] | None = None,
     ) -> None:
         self._built = built
         #: What the process running the rounds checks of its own each round (`serve`:
@@ -1214,6 +1268,10 @@ class Rounds:
         self._watched: Any = None
         #: Work items this process already re-offered after a missed turn.
         self._reoffered: set[str] = set()
+        #: How a missed-turn re-offer reads Papaya's current record of the work item.
+        self._read_item = read_item or self._read_work_item
+        #: Missed-turn tickets whose work item could not be read: tried again next round.
+        self._unread: set[str] = set()
         self._last_hygiene: datetime | None = None
         #: Kept slot path -> how many hygiene runs in a row have kept it.
         self._kept_runs: dict[str, int] = {}
@@ -1281,7 +1339,12 @@ class Rounds:
         parts = await self._on_round() if self._on_round is not None else []
         parts += await self._pull_requests(now)
         if not self._standalone():
-            parts += await self._reclaim(await asyncio.to_thread(ticket_tasks))
+            tickets = await asyncio.to_thread(ticket_tasks)
+            parts += await self._reclaim(tickets)
+            if self._unread:
+                # Only the re-offers a failed read held back at start; nothing new.
+                unread = [t for t in tickets if t.work_item_id in self._unread]
+                parts += await self._reoffer_missed(unread)
             # Work items no held ticket listens to: the same check a session's heartbeat
             # runs while no serve does (`workitems.check_untracked`).
             parts += await asyncio.to_thread(
@@ -1441,6 +1504,33 @@ class Rounds:
                 continue
             if ticket.task_id in held:
                 continue
+            # The ledger outlives the item: Papaya's record now decides, read once
+            # per ticket per round (PAP-255 was offered four days after it was done,
+            # and under a different agent).
+            try:
+                item = await asyncio.to_thread(self._read_item, ticket)
+            except Exception as exc:  # noqa: BLE001 - one bad read must not end the round
+                item, why = None, str(exc)
+            else:
+                why = "not connected"
+            if not isinstance(item, dict):
+                self._unread.add(ticket.work_item_id)
+                log.warning(
+                    "[rounds] Not offering ticket task %d again yet: could not read %s (%s)",
+                    ticket.task_id,
+                    ticket.work_item_id,
+                    why,
+                )
+                continue
+            self._unread.discard(ticket.work_item_id)
+            reason = closing_reason(item, self._agent_id())
+            if reason is not None:
+                await asyncio.to_thread(close_ticket, ticket, reason, item)
+                parts.append(
+                    f"closed ticket task {ticket.task_id} instead of offering it again "
+                    f"({ticket.work_item_id}): {reason}"
+                )
+                continue
             self._reoffered.add(ticket.work_item_id)
             await asyncio.to_thread(sweep.forget_declined, ticket.work_item_id)
             if await self._offer(ticket) == sweep.OFFER_PENDING:
@@ -1449,6 +1539,19 @@ class Rounds:
                     f"({ticket.work_item_id})"
                 )
         return parts
+
+    def _read_work_item(self, ticket: Ticket) -> dict[str, Any] | None:
+        return papaya_events.read_work_item(ticket.event(), environ=self._papaya_env())
+
+    def _agent_id(self) -> str:
+        """The id of the agent this runtime's connection speaks for: the listener's own,
+        else the pinned connection (`papaya.identity`). Never a handle or a name."""
+        agent_config = getattr(self._built, "agent_config", None) or {}
+        found = str(agent_config.get("agent_id") or "")
+        if not found:
+            own = getattr(self._runner, "_own_agent_id", None)
+            found = str((own() if own is not None else None) or "")
+        return found
 
     async def _offer(self, ticket: Ticket) -> str | dict[str, Any]:
         """Offer a ticket back to the loop, on its own task. A refusal returns its holder."""

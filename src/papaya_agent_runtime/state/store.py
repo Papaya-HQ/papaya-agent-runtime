@@ -165,7 +165,8 @@ def set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None
 #: the hold ended, in the client's own vocabulary rather than a second one
 #: invented here — the reason on `Job.stop` chooses between the first three. The
 #: last two are what the manager's rounds found afterwards: somebody else holds
-#: the ticket now (`handed_over`), or its pull request merged (`done`).
+#: the ticket now (`handed_over`), or its pull request merged or its work item is no
+#: longer this agent's to run (`done`).
 TASK_PHASES = (
     "picked_up",
     "briefing",

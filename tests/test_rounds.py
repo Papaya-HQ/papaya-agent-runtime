@@ -1829,3 +1829,280 @@ def test_a_merged_pr_with_no_ticket_is_recorded_and_a_handed_over_tickets_red_on
     assert store.task_phase(conn, ticket) == serve.PHASE_HANDED_OVER
     assert events_of(red_worker, serve.PR_ATTENTION)
     assert all(e.get("ticket_task_id") is None for e in events_of(red_worker, reconcile.STARTED))
+
+
+# ── a missed-turn re-offer re-reads the item first ──────────────────────────────
+
+OURS = "agent-1"
+OUR_HANDLE = "shanes_eng_assistant"
+MISSED = "the manager turn ended 2 times without approving and delivering, or steering"
+
+
+def _missed_turn_ticket(item: str) -> int:
+    """A ticket handed back for a missed turn, as task 123 was on 2026-09-19."""
+    conn = init_db()
+    try:
+        run_id = store.create_run(conn, f"Item {item}")
+        ticket = store.add_task(conn, run_id=run_id, title=f"Item {item}")
+        event = papaya_events.PapayaEvent(
+            id=f"event-{item}",
+            kind="work_item.assigned",
+            subject=f"work_item:{item}",
+            payload={},
+            work_item_id=item,
+        )
+        papaya_events.record_task(conn, ticket, event)
+        for phase in (serve.PHASE_PICKED_UP, serve.PHASE_BRIEFING, serve.PHASE_REVIEWING):
+            serve.record_phase(conn, ticket, phase)
+        serve.record_phase(conn, ticket, serve.PHASE_DECLINED, MISSED)
+        return ticket
+    finally:
+        conn.close()
+
+
+class OfferLoop:
+    """The client loop a re-offer goes to; an offer is where the reserve would happen."""
+
+    def __init__(self) -> None:
+        self.offered: list[str] = []
+        self.running_subjects: set[str] = set()
+
+    async def offer(self, envelope: dict[str, Any]) -> str:
+        self.offered.append(envelope["payload"]["work_item"]["id"])
+        return "pending"
+
+
+class Items:
+    """Papaya's current record of each work item, counting every read."""
+
+    def __init__(self, **items: dict[str, Any] | Exception) -> None:
+        self.items = items
+        self.reads: list[str] = []
+
+    def __call__(self, ticket: rounds.Ticket) -> dict[str, Any] | None:
+        self.reads.append(ticket.work_item_id)
+        found = self.items[ticket.work_item_id]
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+
+def _item(status: str = "in_progress", owner: str | None = OURS, **fields: Any) -> dict[str, Any]:
+    return {"status": status, "owner_type": "agent", "owner_id": owner, **fields}
+
+
+def _reoffering(
+    items: Items, *, agent_config: dict[str, Any] | None = None, runner: Any = None
+) -> tuple[rounds.Rounds, OfferLoop]:
+    loop = OfferLoop()
+
+    async def published(_why: str) -> None:
+        return None
+
+    walker = rounds.Rounds(
+        SimpleNamespace(
+            loop=loop,
+            agent_config={"agent_id": OURS} if agent_config is None else agent_config,
+        ),
+        runner or SimpleNamespace(held={}),
+        clock=WallClock(),
+        forge=lambda _conn: [],
+        prune=lambda _task_id: {"removed": [], "skipped": [], "reclaimed_bytes": 0},
+        git=lambda *_a, **_k: 0,
+        papaya_env=dict,
+        status_publisher=SimpleNamespace(publish=published),
+        read_item=items,
+    )
+    return walker, loop
+
+
+def _closed(ticket: int) -> list[dict[str, Any]]:
+    return events_of(ticket, rounds.TICKET_CLOSED)
+
+
+def _phase(ticket: int) -> str | None:
+    conn = init_db()
+    try:
+        return store.task_phase(conn, ticket)
+    finally:
+        conn.close()
+
+
+def test_an_open_item_this_agent_owns_is_offered_again_after_a_missed_turn(ppy_home) -> None:
+    ticket = _missed_turn_ticket("item-open")
+    items = Items(**{"item-open": _item()})
+    walker, loop = _reoffering(items)
+
+    parts = asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == ["item-open"]
+    assert items.reads == ["item-open"]
+    assert parts == [f"offered ticket task {ticket} again after a missed turn (item-open)"]
+    assert _closed(ticket) == [] and _phase(ticket) == serve.PHASE_DECLINED
+
+
+def test_an_unowned_open_item_is_offered_as_before(ppy_home) -> None:
+    _missed_turn_ticket("item-unowned")
+    walker, loop = _reoffering(Items(**{"item-unowned": _item(owner=None)}))
+
+    asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == ["item-unowned"]
+
+
+@pytest.mark.parametrize("status", ["done", "cancelled"])
+def test_a_done_or_cancelled_item_closes_its_ticket_and_is_never_offered(ppy_home, status) -> None:
+    ticket = _missed_turn_ticket("PAP-255")
+    walker, loop = _reoffering(Items(**{"PAP-255": _item(status)}))
+
+    parts = asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == [], "no offer, so no reserve"
+    (closed,) = _closed(ticket)
+    assert closed["reason"] == rounds.CLOSED_ITEM_CLOSED == "item_closed"
+    assert closed["status"] == status and closed["work_item_id"] == "PAP-255"
+    assert _phase(ticket) == serve.PHASE_DONE
+    assert parts == [
+        f"closed ticket task {ticket} instead of offering it again (PAP-255): item_closed"
+    ]
+    # Closed in the ledger: no later start finds it to offer again.
+    assert rounds.declined_for_a_missed_turn(rounds.ticket_tasks()) == []
+    assert rounds.reclaimable(rounds.ticket_tasks()) == []
+
+
+def test_an_item_owned_by_another_agent_closes_its_ticket_and_is_never_offered(
+    ppy_home,
+) -> None:
+    ticket = _missed_turn_ticket("PAP-255")
+    walker, loop = _reoffering(Items(**{"PAP-255": _item("in_progress", owner="agent-eng")}))
+
+    asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == []
+    (closed,) = _closed(ticket)
+    assert closed["reason"] == rounds.CLOSED_NOT_AGENTS_ITEM == "not_agents_item"
+    assert closed["owner_id"] == "agent-eng"
+    assert _phase(ticket) == serve.PHASE_DONE
+    assert rounds.declined_for_a_missed_turn(rounds.ticket_tasks()) == []
+
+
+def test_ownership_is_the_connections_agent_id_never_its_handle_or_name(ppy_home) -> None:
+    ours = _missed_turn_ticket("item-ours")
+    theirs = _missed_turn_ticket("item-theirs")
+    items = Items(
+        **{
+            # Our id under somebody else's name: ours.
+            "item-ours": _item(owner=OURS, owner_display_name="Engineering Agent"),
+            # Our handle and name under another id: not ours.
+            "item-theirs": _item(
+                owner="agent-eng",
+                owner_display_name="Middle Manager",
+                owner_actor={"handle": OUR_HANDLE},
+            ),
+        }
+    )
+    walker, loop = _reoffering(
+        items,
+        agent_config={"agent_id": OURS, "agent_handle": OUR_HANDLE, "agent_name": "Middle Manager"},
+    )
+
+    asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == ["item-ours"]
+    assert _closed(ours) == []
+    assert [c["reason"] for c in _closed(theirs)] == [rounds.CLOSED_NOT_AGENTS_ITEM]
+
+
+def test_with_no_listener_agent_id_the_pinned_connections_id_decides(ppy_home) -> None:
+    ticket = _missed_turn_ticket("item-x")
+    runner = SimpleNamespace(held={}, _own_agent_id=lambda: "agent-pinned")
+    walker, loop = _reoffering(
+        Items(**{"item-x": _item(owner="agent-other")}), agent_config={}, runner=runner
+    )
+
+    asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == []
+    assert [c["reason"] for c in _closed(ticket)] == [rounds.CLOSED_NOT_AGENTS_ITEM]
+
+
+def test_a_failed_read_offers_nothing_keeps_the_ticket_and_is_retried_next_round(
+    ppy_home, caplog
+) -> None:
+    ticket = _missed_turn_ticket("item-flaky")
+    items = Items(**{"item-flaky": papaya_events.PapayaEventError("Papaya could not be reached")})
+    walker, loop = _reoffering(items)
+
+    with caplog.at_level("WARNING", logger=rounds.log.name):
+        parts = asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert parts == [] and loop.offered == []
+    assert _phase(ticket) == serve.PHASE_DECLINED and _closed(ticket) == []
+    (line,) = [r.getMessage() for r in caplog.records if "could not read" in r.getMessage()]
+    assert f"ticket task {ticket}" in line and "item-flaky" in line
+
+    # Papaya answers by the next round, which offers it exactly as a start would have.
+    items.items["item-flaky"] = _item()
+    parts = asyncio.run(walker.round_once())
+
+    assert loop.offered == ["item-flaky"]
+    assert f"offered ticket task {ticket} again after a missed turn (item-flaky)" in parts
+    assert items.reads == ["item-flaky", "item-flaky"]
+
+
+def test_a_start_with_no_connection_to_read_through_offers_nothing(ppy_home) -> None:
+    ticket = _missed_turn_ticket("item-y")
+    items = Items(**{"item-y": None})  # type: ignore[arg-type]
+    walker, loop = _reoffering(items)
+
+    asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+
+    assert loop.offered == [] and _phase(ticket) == serve.PHASE_DECLINED
+
+
+def test_the_re_read_is_once_per_ticket_per_round_and_not_again_once_settled(ppy_home) -> None:
+    for item in ("a", "b", "c"):
+        _missed_turn_ticket(item)
+    items = Items(a=_item(), b=_item("done"), c=_item(owner="agent-eng"))
+    walker, loop = _reoffering(items)
+
+    asyncio.run(walker.start())
+    assert sorted(items.reads) == ["a", "b", "c"]
+    assert loop.offered == ["a"]
+
+    # Later rounds and a second start read nothing: one was offered, two are closed.
+    asyncio.run(walker.round_once())
+    asyncio.run(walker.round_once())
+    asyncio.run(walker._reoffer_missed(rounds.ticket_tasks()))
+    assert sorted(items.reads) == ["a", "b", "c"]
+    assert loop.offered == ["a"]
+
+
+def test_the_real_read_is_papayas_work_item_route(ppy_home) -> None:
+    requests: list[Any] = []
+
+    class Response(io.BytesIO):
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    def opener(request: Any, timeout: float) -> Response:
+        requests.append(request)
+        return Response(json.dumps(_item("done")).encode())
+
+    event = papaya_events.PapayaEvent(
+        id="e", kind="work_item.assigned", subject="work_item:i", payload={}, work_item_id="i"
+    )
+    env = {
+        "PAPAYA_API_URL": "https://papaya.test",
+        "PAPAYA_WORKSPACE_ID": "ws",
+        "PAPAYA_AGENT_TOKEN": "tok",
+    }
+
+    assert papaya_events.read_work_item(event, environ=env, opener=opener)["status"] == "done"
+    (request,) = requests
+    assert request.get_method() == "GET"
+    assert request.full_url == "https://papaya.test/api/v1/workspaces/ws/work-items/i"
+    assert papaya_events.read_work_item(event, environ={}, opener=opener) is None

@@ -181,7 +181,8 @@ PHASE_HANDED_BACK = "handed_back"
 PHASE_STALLED = "stalled"
 PHASE_DECLINED = "declined"
 #: What the manager's rounds find after a hold (`rounds.py`): the ticket is held
-#: by somebody else now, or its pull request merged.
+#: by somebody else now, or its pull request merged (or, at a missed-turn re-offer,
+#: Papaya has its item done, cancelled or another agent's: `rounds.TICKET_CLOSED`).
 PHASE_HANDED_OVER = "handed_over"
 PHASE_DONE = "done"
 #: The reconcile lane failed to fix the ticket's pull request twice at one head
