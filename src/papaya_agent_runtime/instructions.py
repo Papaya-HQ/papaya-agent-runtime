@@ -652,7 +652,8 @@ def compose_brief(instruction: papaya_events.Instruction, repo: str) -> str:
     requester = instruction.requester
     ident = str(who.get("id") or "").strip()
     origin = "a channel thread" if instruction.origin.get("kind") == "channel" else "a DM"
-    return f"""# {instruction.short_id}: {title}
+    # No `MI-<n>` anywhere in it: the brief's words reach the pull request a person reads.
+    return f"""# {title}
 
 ## Goals
 1. Do what the instruction below asks, in `{repo}` and nowhere else.
@@ -680,7 +681,7 @@ Pre-authorised adjacent changes: none beyond what the instruction names.
 {references}
 
 ## Requested by
-{requester}{f" (Papaya user {ident})" if ident else ""}, as {instruction.short_id}.
+{requester}{f" (Papaya user {ident})" if ident else ""}.
 
 ## Your agent's standing instructions
 The agent you work for has standing instructions (its persona). Follow them where they
@@ -774,6 +775,13 @@ _REQUEST_LABEL = re.compile(r"\bMI-\d+:\s+")
 _REQUEST_ID = re.compile(r"\bMI-\d+\b")
 
 
+def request_title(instruction: papaya_events.Instruction, limit: int = 120) -> str:
+    """The request's own title, on one line: what a task, a pull request and the status
+    report call it. Never its `MI-<n>`, which a person never sees."""
+    title = " ".join(without_ids(instruction.title or instruction.text).split())
+    return title[:limit] or "A request sent to this machine"
+
+
 def named(instruction: papaya_events.Instruction) -> str:
     """How a line the runtime writes names the request to the person: its title, quoted."""
     title = " ".join(str(instruction.title or instruction.text or "").split())
@@ -782,20 +790,54 @@ def named(instruction: papaya_events.Instruction) -> str:
     return f'"{title[:77]}…"' if len(title) > 80 else f'"{title}"'
 
 
+#: Where one sentence ends and the next begins: a stop, then space.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])(\s+)")
+
+
+def _without_other_requests(line: str, own: str) -> str:
+    """``line`` with every sentence that names another request's id dropped."""
+    if all(ident == own for ident in _REQUEST_ID.findall(line)):
+        return line
+    parts = _SENTENCE_BREAK.split(line)
+    # Sentences at even indexes, the space after each at the odd index that follows.
+    kept = []
+    for index in range(0, len(parts), 2):
+        sentence = parts[index]
+        if any(ident != own for ident in _REQUEST_ID.findall(sentence)):
+            continue
+        kept.append(sentence + (parts[index + 1] if index + 1 < len(parts) else ""))
+    return "".join(kept).rstrip()
+
+
 def for_person(text: str, instruction: papaya_events.Instruction) -> str:
     """``text`` as it may be posted where the person asked: no `MI-<n>` in it.
 
     The id is internal; the person never typed it and Papaya does not show it in the
     conversation. A label ahead of a title (`MI-42: What are you working on?`) is
     dropped and the title kept; this request's own id elsewhere becomes "your
-    request", and another request's "another request". The turns are told the same
+    request". A sentence naming another request's id is dropped whole: that request
+    is not this person's business here, and a noun swapped into the middle of a
+    worker's sentence reads as nonsense ("another request write guard did not block
+    this worktree", 2026-09-23). The turns are told the same
     (`prompts.NO_REQUEST_ID_RULE`); this is what holds when a turn does not listen.
     """
     own = str(instruction.short_id or "")
-    return _REQUEST_ID.sub(
-        lambda match: "your request" if match.group(0) == own else "another request",
-        _REQUEST_LABEL.sub("", str(text or "")),
-    )
+    unlabelled = _REQUEST_LABEL.sub("", str(text or ""))
+    lines = [_without_other_requests(line, own) for line in unlabelled.split("\n")]
+    kept = "\n".join(lines)
+    # A paragraph that was nothing but another request's sentences leaves no gap behind.
+    kept = re.sub(r"\n{3,}", "\n\n", kept).strip()
+    return _REQUEST_ID.sub("your request", kept)
+
+
+def without_ids(text: str) -> str:
+    """``text`` with no `MI-<n>` in it, for what no single request's person reads.
+
+    A pull request, the published status report: a label is dropped and any other
+    mention reads "a request". Nothing is dropped, since there is no one person whose
+    business the rest is not.
+    """
+    return _REQUEST_ID.sub("a request", _REQUEST_LABEL.sub("", str(text or "")))
 
 
 # ── the ticket on the ledger ────────────────────────────────────────────────
@@ -832,8 +874,7 @@ def record_ticket(
     existing = ticket_for(conn, instruction.subject)
     if existing is not None:
         return int(existing["id"]), int(existing["run_id"]), True
-    title = f"{instruction.short_id}: {instruction.title or instruction.text}"
-    title = " ".join(title.split())[:200]
+    title = request_title(instruction, 200)
     repo = store.get_repo(conn, repo_name) if repo_name else None
     run_id = store.create_run(conn, title)
     task_id = store.add_task(
@@ -970,6 +1011,7 @@ def finished_tickets(conn: sqlite3.Connection, *, limit: int = 10) -> list[dict[
         payload = _payload(replied)
         found.append(
             {
+                "task_id": int(row["id"]),
                 "short_id": str(row["short_id"]),
                 "title": str(row["title"]),
                 "outcome": "answered" if payload.get("status") == "done" else "could not answer",
@@ -1142,6 +1184,71 @@ def recover(
     return lines
 
 
+# ── said once, and what the ticket still waits on ───────────────────────────
+
+#: A progress line said at an instruction's origin, by its key: what a hold that comes
+#: back after a restart reads so it does not say the same thing twice.
+SAID = "instruction_said"
+
+
+def record_said(conn: sqlite3.Connection, task_id: int, key: str) -> None:
+    _event(conn, task_id, SAID, {"key": key})
+
+
+def said_before(conn: sqlite3.Connection, task_id: int, key: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE task_id = ? AND kind = ? "
+        "AND json_extract(payload, '$.key') = ? LIMIT 1",
+        (task_id, SAID, key),
+    ).fetchone()
+    return row is not None
+
+
+def last_said(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """The key of the last progress line said for this ticket, or ``None``."""
+    row = _newest(conn, task_id, (SAID,))
+    if row is None:
+        return None
+    return str(_payload(row).get("key") or "") or None
+
+
+def _waits(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    """The open todos that say something in this run is blocked or waits on someone."""
+    return conn.execute(
+        "SELECT todos.id, todos.text FROM todos JOIN tasks ON tasks.id = todos.task_id "
+        "WHERE tasks.run_id = ? AND todos.status = 'open' "
+        "AND todos.blocked_on IS NOT NULL AND todos.blocked_on != '' ORDER BY todos.id",
+        (run_id,),
+    ).fetchall()
+
+
+def open_waits(conn: sqlite3.Connection, run_id: int) -> list[str]:
+    return [" ".join(str(row["text"]).split()) for row in _waits(conn, run_id)]
+
+
+def close_waits(conn: sqlite3.Connection, run_id: int) -> int:
+    """Close what this run was blocked on or waiting for: its request is over.
+
+    A blocker recorded while the request ran does not outlive it. Left open it is read
+    again by outreach and by the published status report, long after it stopped being
+    true (MI-3's block, 2026-09-23).
+    """
+    from papaya_agent_runtime import board
+
+    rows = _waits(conn, run_id)
+    for row in rows:
+        board.done(int(row["id"]), conn=conn)
+    return len(rows)
+
+
+def not_finished(instruction: papaya_events.Instruction, why: str, waits: list[str]) -> str:
+    """What the person is told when their request cannot be picked back up."""
+    text = f"I couldn't finish {named(instruction)}: {why}."
+    if waits:
+        text += f" It was waiting on: {'; '.join(waits)}."
+    return text + " Send it again if you still want it done."
+
+
 def repo_refs(conn: sqlite3.Connection) -> list[RepoRef]:
     return [RepoRef(str(row["name"]), str(row["origin"] or "")) for row in store.list_repos(conn)]
 
@@ -1184,6 +1291,15 @@ __all__ = [
     "chosen",
     "chosen_repository",
     "classify",
+    "close_waits",
+    "last_said",
+    "not_finished",
+    "open_waits",
+    "record_said",
+    "request_title",
+    "SAID",
+    "said_before",
+    "without_ids",
     "command_refusal",
     "compose_brief",
     "finished_tickets",

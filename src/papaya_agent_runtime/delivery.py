@@ -295,6 +295,13 @@ def _pr_body(task_id: int, head: str, body_file: str | None) -> str:
         raise DeliveryError(f"refusing to deliver: {exc}") from exc
 
 
+def _pr_title(conn, task_id: int, title: str) -> str:
+    """The pull request's title: a person's request is named by its title, never its id."""
+    from papaya_agent_runtime import pr_body
+
+    return pr_body.for_request(conn, task_id, str(title or "")).strip() or str(title or "")
+
+
 def _forge_for_task(conn, task) -> tuple[str, str | None]:
     """The remote to push through and the ``owner/name`` to open the PR against.
 
@@ -430,7 +437,7 @@ def deliver(
                 "--head",
                 branch,
                 "--title",
-                title or task["title"],
+                _pr_title(conn, task_id, title or task["title"]),
                 "--body",
                 body,
             ]

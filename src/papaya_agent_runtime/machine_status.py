@@ -92,10 +92,13 @@ def clean(text: object, limit: int, *, fallback: str = "-") -> str:
 
     Never empty: the wire refuses an empty required string, so ``fallback`` stands
     in for one. Cutting is this side's job; a body is never refused locally.
-    """
-    from papaya_agent_runtime import blockers
 
-    one = " ".join(blockers.redact(str(text or "")).split())
+    No `MI-<n>` either: a request's id is internal, and the hosted agent reads this
+    snapshot to a person and quoted it (2026-09-23). A request is named by its title.
+    """
+    from papaya_agent_runtime import blockers, instructions
+
+    one = " ".join(instructions.without_ids(blockers.redact(str(text or ""))).split())
     if not one:
         one = fallback
     return one if len(one) <= limit else one[: limit - 1].rstrip() + ELLIPSIS
@@ -172,17 +175,39 @@ def _run_env(conn: sqlite3.Connection, run_id: int, key: str) -> str:
     return str(row[0]) if row is not None and row[0] else ""
 
 
+def _about_request(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
+    """A request a person sent this machine, named by its title, never its `MI-<n>`."""
+    from papaya_agent_runtime import instructions, papaya_events
+
+    title = ""
+    raw = _run_env(conn, run_id, instructions.INSTRUCTION)
+    if raw:
+        try:
+            title = instructions.request_title(papaya_events.instruction_from(json.loads(raw)))
+        except (ValueError, papaya_events.PapayaEventError):
+            title = ""
+    if not title:
+        # A ticket recorded before its instruction was kept whole: its task's title.
+        row = conn.execute(
+            "SELECT tasks.title FROM tasks JOIN task_env ON task_env.task_id = tasks.id "
+            "WHERE tasks.run_id = ? AND task_env.key = ? ORDER BY tasks.id LIMIT 1",
+            (run_id, instructions.INSTRUCTION_KEY),
+        ).fetchone()
+        title = str(row["title"] or "") if row is not None else ""
+    return {
+        "kind": "machine_instruction",
+        "short_id": clean(title, SHORT_ID_MAX, fallback="a request"),
+        "url": None,
+    }
+
+
 def about(conn: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     """What a task in ``run_id`` is for: its ticket's work item, or its instruction."""
     from papaya_agent_runtime import instructions, papaya_events
 
     short = _run_env(conn, run_id, instructions.INSTRUCTION_KEY)
     if short:
-        return {
-            "kind": "machine_instruction",
-            "short_id": clean(short, SHORT_ID_MAX),
-            "url": None,
-        }
+        return _about_request(conn, run_id)
     key = _run_env(conn, run_id, papaya_events.WORK_ITEM_KEY)
     item = ""
     metadata = _run_env(conn, run_id, papaya_events.PAPAYA_EVENT_METADATA)
@@ -238,13 +263,9 @@ def _in_flight(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
             continue
         found.append(
             {
-                "ref": clean(ticket["short_id"], REF_MAX),
+                "ref": clean(f"task-{ticket['task_id']}", REF_MAX),
                 "title": clean(ticket["title"], TITLE_MAX),
-                "about": {
-                    "kind": "machine_instruction",
-                    "short_id": clean(ticket["short_id"], SHORT_ID_MAX),
-                    "url": None,
-                },
+                "about": _about_request(conn, int(ticket["run_id"])),
                 "phase": clean(ticket["phase"], PHASE_MAX),
                 "since": stamp(ticket["since"], now),
             }
@@ -399,7 +420,7 @@ def _recently_finished(conn: sqlite3.Connection, now: datetime) -> list[dict[str
     for done in instructions.finished_tickets(conn, limit=FINISHED_MAX):
         found.append(
             {
-                "ref": clean(done["short_id"], REF_MAX),
+                "ref": clean(f"task-{done['task_id']}", REF_MAX),
                 "title": clean(done["title"], TITLE_MAX),
                 "outcome": clean(done["outcome"], TITLE_MAX),
                 "url": url_or_none(done.get("url")),

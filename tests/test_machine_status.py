@@ -246,9 +246,10 @@ def test_a_the_fixture_ledger_builds_a_snapshot_inside_every_wire_bound(ledger) 
         "short_id": "PPY-120",
         "url": "https://app.trypapaya.ai/w/ppy/items/PPY-120",
     }
+    # A request is named by its title: its `MI-7` is internal (task 372, Goal 4).
     assert about[f"task-{ledger['second']}"] == {
         "kind": "machine_instruction",
-        "short_id": "MI-7",
+        "short_id": "spike",
         "url": None,
     }
     assert about[f"task-{ledger['reviewable']}"] is None

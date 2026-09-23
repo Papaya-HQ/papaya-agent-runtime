@@ -68,8 +68,11 @@ VIA_DM = "dm"
 VIA_TICKET = "ticket"
 VIA_DESKTOP = "desktop"
 VIA_SESSION = "session"
+#: Where a person sent this machine an instruction (a DM or a channel thread): an ask
+#: about that request is said there, as a progress reply, and nowhere else.
+VIA_ORIGIN = "origin"
 #: The channels that reach a person who is not at a terminal.
-REMOTE = frozenset({VIA_DM, VIA_TICKET})
+REMOTE = frozenset({VIA_DM, VIA_TICKET, VIA_ORIGIN})
 
 #: The event recorded each time asks are said, for `ppy tail` and the tests.
 SAID_EVENT = "outreach_said"
@@ -120,6 +123,9 @@ class Ask:
     task_id: int | None = None
     work_item_id: str | None = None
     since: str | None = None
+    #: The instruction ticket this ask belongs to, when a person's request is behind it:
+    #: the ask is said where they asked (:data:`VIA_ORIGIN`).
+    instruction_task_id: int | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -138,6 +144,7 @@ class Ask:
             "task_id": self.task_id,
             "work_item_id": self.work_item_id,
             "since": self.since,
+            "instruction_task_id": self.instruction_task_id,
         }
 
 
@@ -146,10 +153,12 @@ class Plan:
     """What one round says, and where. Empty when nothing is due."""
 
     due: list[Ask] = field(default_factory=list)
-    #: The DM text, one message for every ask due.
+    #: The DM text, one message for every ask due that no request's origin carries.
     dm: str = ""
     #: Work item id -> the comment for the asks on it.
     tickets: dict[str, str] = field(default_factory=dict)
+    #: Instruction ticket task id -> the progress reply for the asks about that request.
+    origins: dict[int, str] = field(default_factory=dict)
     #: One line for a desktop notification.
     headline: str = ""
 
@@ -186,6 +195,21 @@ def work_item_of(conn: sqlite3.Connection, task_id: int | None) -> str | None:
     return None
 
 
+def instruction_ticket_of(conn: sqlite3.Connection, task_id: int | None) -> int | None:
+    """The instruction ticket a task belongs to (its own, or its run's), or ``None``."""
+    if task_id is None:
+        return None
+    from papaya_agent_runtime import instructions
+
+    row = conn.execute(
+        "SELECT tasks.id FROM tasks JOIN task_env ON task_env.task_id = tasks.id "
+        "WHERE tasks.run_id = (SELECT run_id FROM tasks WHERE id = ?) AND task_env.key = ? "
+        "ORDER BY tasks.id LIMIT 1",
+        (task_id, instructions.INSTRUCTION_SUBJECT),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
 def _decisions(conn: sqlite3.Connection) -> list[Ask]:
     rows = conn.execute(
         "SELECT id, task_id, text, blocked_on, created_at FROM todos WHERE status = 'open' "
@@ -208,6 +232,7 @@ def _decisions(conn: sqlite3.Connection) -> list[Ask]:
                 task_id=task_id,
                 work_item_id=work_item_of(conn, task_id),
                 since=row["created_at"],
+                instruction_task_id=instruction_ticket_of(conn, task_id),
             )
         )
     return found
@@ -242,6 +267,7 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
                 task_id=item.task_id,
                 work_item_id=work_item_of(conn, item.task_id),
                 since=since["created_at"] if since is not None else None,
+                instruction_task_id=instruction_ticket_of(conn, item.task_id),
             )
         )
     return found
@@ -268,6 +294,7 @@ def _pull_requests(conn: sqlite3.Connection) -> list[Ask]:
                 task_id=task_id,
                 work_item_id=work_item_of(conn, task_id),
                 since=marked["created_at"] if marked is not None else None,
+                instruction_task_id=instruction_ticket_of(conn, task_id),
             )
         )
     return found
@@ -347,21 +374,35 @@ def open_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def last_said_at(conn: sqlite3.Connection) -> datetime | None:
-    """When anything was last said to the person, open or since resolved."""
-    stamps = [_parse(r[0]) for r in conn.execute("SELECT said_at FROM outreach").fetchall()]
+    """When anything was last said to the person, open or since resolved.
+
+    Not counting what was said only where a request was asked: that is its own
+    conversation, and the owner's DM keeps its own interval.
+    """
+    stamps = [
+        _parse(r[0])
+        for r in conn.execute("SELECT said_at, said_via FROM outreach").fetchall()
+        if r[1] != json.dumps([VIA_ORIGIN])
+    ]
     known = [s for s in stamps if s is not None]
     return max(known) if known else None
 
 
 def due(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -> list[Ask]:
-    """The asks to say now: new or changed since last said, at most once per interval."""
+    """The asks to say now: new or changed since last said, at most once per interval.
+
+    An ask about a person's request is not held to the interval: they are in the
+    conversation they sent it from, waiting on it, and it is said there once per
+    change of what it asks, never twice unchanged.
+    """
     said = {str(row["key"]): row["said_fingerprint"] for row in open_rows(conn)}
     fresh = [ask for ask in asks if said.get(ask.key) != ask.fingerprint]
     if not fresh:
         return []
+    at_origin = [ask for ask in fresh if ask.instruction_task_id is not None]
     last = last_said_at(conn)
     if last is not None and (now - last).total_seconds() < repeat_after_seconds():
-        return []
+        return at_origin
     return fresh
 
 
@@ -465,6 +506,38 @@ def ticket_bodies(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -
     return bodies
 
 
+def _origin_how(ask: Ask) -> str:
+    """What unblocks an ask, said to a person in Papaya rather than at a terminal."""
+    if ask.kind == CAPABILITY:
+        ident = ask.key.rsplit(":", 1)[-1]
+        return f"Reply here: approve capability {ident} (or: deny capability {ident} because …)"
+    if ask.kind == PULL_REQUEST:
+        return "Look at the pull request; I pick it up again once it changes."
+    return "Reply here with your answer."
+
+
+def origin_bodies(asks: list[Ask]) -> dict[int, str]:
+    """One progress reply per request, for the asks about it, said where it was asked."""
+    from papaya_agent_runtime import blockers
+
+    by_request: dict[int, list[Ask]] = {}
+    for ask in asks:
+        if ask.instruction_task_id is not None:
+            by_request.setdefault(ask.instruction_task_id, []).append(ask)
+    bodies: dict[int, str] = {}
+    for request, group in by_request.items():
+        lines = [
+            "This needs you before I can go on:"
+            if len(group) == 1
+            else f"{len(group)} things need you before I can go on:"
+        ]
+        for ask in group:
+            lines.append(f"- {ask.text}")
+            lines.append(f"  {_origin_how(ask)}")
+        bodies[request] = blockers.redact("\n".join(lines))
+    return bodies
+
+
 def headline(asks: list[Ask]) -> str:
     if not asks:
         return ""
@@ -481,12 +554,15 @@ def plan(conn: sqlite3.Connection, *, now: datetime, host: str) -> tuple[Plan, l
     wanted = due(conn, asks, now=now)
     if not wanted:
         return Plan(), lines
+    # An ask about a person's request is said where they asked, not in the owner's DM.
+    elsewhere = [ask for ask in wanted if ask.instruction_task_id is None]
     return (
         Plan(
             due=wanted,
-            dm=message(conn, wanted, now=now, host=host),
-            tickets=ticket_bodies(conn, wanted, now=now),
-            headline=headline(wanted),
+            dm=message(conn, elsewhere, now=now, host=host),
+            tickets=ticket_bodies(conn, elsewhere, now=now),
+            origins=origin_bodies(wanted),
+            headline=headline(elsewhere),
         ),
         lines,
     )
@@ -608,6 +684,45 @@ def post_ticket(
         return False
 
 
+def post_origin(
+    ticket_task_id: int,
+    body: str,
+    *,
+    environ: dict[str, str] | None = None,
+    post=None,
+) -> bool:
+    """Say ``body`` where a person sent the request, as a progress reply. Never raises.
+
+    The reply block is the one the instruction's event carried, recorded on its ticket:
+    never one from anywhere else. No `MI-<n>` in it (`instructions.for_person`).
+    """
+    from papaya_agent_runtime import instructions, papaya, papaya_events
+    from papaya_agent_runtime.state import init_db
+
+    try:
+        env = environ if environ is not None else papaya.agent_env()
+        conn = init_db()
+        try:
+            instruction = instructions.instruction_of(conn, ticket_task_id)
+        finally:
+            conn.close()
+        if instruction is None:
+            return False
+        text = instructions.for_person(body, instruction)
+        if not text:
+            return False
+        kind = {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}
+        posted = (post or papaya_events.post_instruction_reply)(
+            instruction.reply, text, environ=env, **kind
+        )
+        return posted is not None
+    except Exception as exc:  # noqa: BLE001 - an ask that did not land is said next round
+        log.warning(
+            "[outreach] Could not reply where request %d was asked: %s", ticket_task_id, exc
+        )
+        return False
+
+
 #: Set to ``1`` to also raise a macOS desktop notification for what is due. Off by
 #: default: `osascript`'s notifications are attributed to Script Editor, so clicking one
 #: opens Script Editor rather than the ask (Shane, 2026-09-17) — noise, not a channel.
@@ -647,6 +762,7 @@ def deliver(
     dm=None,
     ticket=None,
     desktop=None,
+    origin=None,
     session: bool = False,
 ) -> list[str]:
     """Say the plan through every channel that lands; record it; the lines of what happened.
@@ -656,9 +772,45 @@ def deliver(
     with no terminal open is never marked told by a line they could not read. The
     channels default to this module's at call time, so a test that replaces one
     replaces it everywhere.
+
+    An ask about a person's request goes only where they asked (``origin``): said
+    there, it is recorded said; not, it is due again next round.
     """
     if not found:
         return []
+    origin = origin or post_origin
+    lines: list[str] = []
+    at_origin = [ask for ask in found.due if ask.instruction_task_id is not None]
+    landed = {request: origin(request, body) for request, body in found.origins.items()}
+    reached_origin = [ask for ask in at_origin if landed.get(ask.instruction_task_id)]
+    record_said(conn, reached_origin, [VIA_ORIGIN], now=now)
+    for ask in at_origin:
+        where = VIA_ORIGIN if ask in reached_origin else "nowhere it could reach; again next round"
+        lines.append(f"said to a person ({where}): {ask.text}")
+    rest = Plan(
+        due=[ask for ask in found.due if ask.instruction_task_id is None],
+        dm=found.dm,
+        tickets=found.tickets,
+        headline=found.headline,
+    )
+    if not rest:
+        return lines
+    return lines + _deliver_elsewhere(
+        conn, rest, now=now, dm=dm, ticket=ticket, desktop=desktop, session=session
+    )
+
+
+def _deliver_elsewhere(
+    conn: sqlite3.Connection,
+    found: Plan,
+    *,
+    now: datetime,
+    dm=None,
+    ticket=None,
+    desktop=None,
+    session: bool = False,
+) -> list[str]:
+    """The asks no request's origin carries: the ticket comments, the DM, the desktop."""
     dm = dm or post_dm
     ticket = ticket or post_ticket
     desktop = desktop or notify_desktop
@@ -692,6 +844,7 @@ def step(
     dm=None,
     ticket=None,
     desktop=None,
+    origin=None,
     session: bool = False,
 ) -> list[str]:
     """The whole procedure for a session: read, reconcile, say what is due, record it."""
@@ -700,7 +853,14 @@ def step(
     now = now or datetime.now(UTC)
     found, lines = plan(conn, now=now, host=host or blockers.short_hostname())
     return lines + deliver(
-        conn, found, now=now, dm=dm, ticket=ticket, desktop=desktop, session=session
+        conn,
+        found,
+        now=now,
+        dm=dm,
+        ticket=ticket,
+        desktop=desktop,
+        origin=origin,
+        session=session,
     )
 
 
@@ -767,6 +927,7 @@ __all__ = [
     "SAID_EVENT",
     "VIA_DESKTOP",
     "VIA_DM",
+    "VIA_ORIGIN",
     "VIA_SESSION",
     "VIA_TICKET",
     "Ask",
@@ -776,7 +937,10 @@ __all__ = [
     "desktop_enabled",
     "due",
     "headline",
+    "instruction_ticket_of",
     "last_said_at",
+    "origin_bodies",
+    "post_origin",
     "lines",
     "message",
     "notify_desktop",

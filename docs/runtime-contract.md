@@ -764,9 +764,16 @@ up. An item that could not be read is said in the question, never guessed around
 
 **Seen being worked, in the conversation.** The moment the work path knows its
 repository it posts "On it — working in <repo>." where the instruction was asked. Every
-line a work item would get as a comment (dispatched, reviewing, sent back, blocked,
-pull request opened, delivered) is posted there instead, deduped by phase exactly as
-comments are; the final reply carries the pull-request link. A progress reply Papaya
+line a work item would get as a comment (dispatched, reviewing, sent back, blocked) is
+posted there instead, deduped by phase exactly as comments are, and what was said is
+kept on the ticket, so a hold taken back up after a restart says none of it again ("On
+it" is said once per request, ever). Nothing reads or reports on a work item: there is
+none. When the work is delivered, the review turn ends with an `OUTCOME: done` block of
+two to four sentences for the person — what changed, what the tests show; no branch,
+SHA, evidence path or worker report (`prompts.INSTRUCTION_SUMMARY_RULE`) — and the final
+reply is those words and then "Pull request open: <url>", the only time that line is
+said. A review turn that wrote no block gets the runtime's one plain sentence instead;
+the worker's closeout never reaches the person. A progress reply Papaya
 refuses is logged once and the work goes on; once the hold is over (a lost lease, a
 stop) nothing more is said from this machine. `kind: progress|final` is sent on replies
 only when the event carried an `intent` key — an older DM route refuses the field.
@@ -805,7 +812,28 @@ the outcome with the reply block the event carried, then reports it; neither a t
 nor a worker chooses where it goes. Nothing said there names the request by its
 `MI-<n>`, which is internal: the runtime's own lines call it "your question" or by its
 title, the turns are told the same, and any `MI-<n>` a turn still writes is taken out of
-what is posted (the request's own becomes "your request").
+what is posted: the request's own becomes "your request", and a sentence naming another
+request is dropped whole, never garbled into "another request …". The ticket and its
+worker are titled with the request's title, so neither a pull request's title nor its
+body carries an `MI-<n>` either, and the status report this machine publishes names a
+request by its title (`task-<id>` as its ref), never its id.
+
+**A restart never loses a request.** An instruction ticket a hold took and nobody
+answered — released by a shutdown, or left `picked_up` by a crash — is offered back by the
+rounds (at start and every round) as the `machine.instruction` it came as: re-reserved, it
+lands on the same ticket and resumes from its state (its worker watched, reviewed and
+delivered; nothing said twice). One that cannot be taken back up — Papaya refuses the
+reserve, or it is not this loop's any more — is told to the person at its origin, once,
+as not finished with what it was waiting on, reported `failed`, and closed (`done`), so
+it never lingers `picked_up` with nobody holding it. A busy loop is tried again next
+round. Whenever a request's ticket ends (answered, declined, closed), what its run was
+blocked on or waiting for is closed with it, so no report or outreach says it again.
+
+**What waits on the person is said where they asked.** A decision, capability request or
+pull request waiting on a person, when a request is behind it, is said at that request's
+origin as a progress reply — once per change of what it asks, not held to the owner's DM
+interval — and not in the owner's DM or on any work item. Unlanded, it is due again the
+next round.
 
 ## Turning intent into work
 

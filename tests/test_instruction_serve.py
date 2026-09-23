@@ -274,7 +274,8 @@ def test_c_an_instruction_with_no_work_item_is_taken(ppy_home, client_home, read
     assert harness.events.reserves[0][0] == SUBJECT
     assert harness.events.releases == [(SUBJECT, harness.loop.session_id, False)]
     task = ticket()
-    assert task is not None and task["title"].startswith("MI-42: ")
+    # Titled as the person titled it: its `MI-42` is internal (Goal 4, task 372).
+    assert task is not None and task["title"] == "What are you working on?"
     assert turns.names() == [prompts.INSTRUCTION]
 
 
@@ -489,10 +490,12 @@ def test_f_a_work_instruction_dispatches_one_worker_and_replies_with_its_pr(
         briefs.append((repo, brief, run_id))
         test_serve.dispatch_worker(run_id, repo=repo)
 
-    def act(turn: test_serve.Turn) -> None:
+    def act(turn: test_serve.Turn) -> str:
         assert turn.name == prompts.REVIEW
         assert turn.launch.env[instructions.PATH_ENV] == instructions.WORK
         assert "- instruction: MI-42" in turn.prompt
+        # The review turn is told the answer to the person is its to write.
+        assert prompts.INSTRUCTION_SUMMARY_RULE in turn.prompt
         (worker,) = test_serve.workers_in(turn.run_id)
         test_serve.worker_event(worker, "reviewed", verdict="approved")
         test_serve.worker_event(
@@ -501,6 +504,10 @@ def test_f_a_work_instruction_dispatches_one_worker_and_replies_with_its_pr(
             status="delivered",
             branch=f"ppy/task-{worker}",
             pr_url="https://github.com/acme/runtime/pull/7",
+        )
+        return (
+            "Approved and delivered.\n"
+            "OUTCOME: done\nCSV export is in, off by default; its tests pass."
         )
 
     turns, routes = FakeTurns(act), Routes()
@@ -548,8 +555,14 @@ def test_f_a_work_instruction_dispatches_one_worker_and_replies_with_its_pr(
     assert said[1].startswith("Dispatched")
     assert "Reviewing the work." in said
     reply = routes.replies()[-1]
-    assert "https://github.com/acme/runtime/pull/7" in reply["content"]
-    assert "CSV export behind a flag, with tests." in reply["content"]
+    # Goals 3 and 5 (task 372): the review turn's summary for the person, then the pull
+    # request once. Not the worker's closeout, and no second "Pull request open" line.
+    assert reply["content"] == (
+        "CSV export is in, off by default; its tests pass.\n\n"
+        "Pull request open: https://github.com/acme/runtime/pull/7"
+    )
+    assert sum(line.count("Pull request open") for line in said) == 1
+    assert not any("CSV export behind a flag, with tests." in line for line in said)
     assert len(said) == len(set(said))  # no line said twice
     assert all(r["parent_id"] == "root-1" for r in routes.replies())
     (result,) = routes.results()
@@ -1783,10 +1796,18 @@ def test_a_progress_line_naming_the_request_id_is_posted_without_it() -> None:
 
     async def scenario() -> None:
         await the_runner._instruction_progress(held, "Dispatching MI-42 in runtime.")
-        await the_runner._say(held, serve.PHASE_REVIEWING, "Reviewing MI-42 beside MI-9.")
+        await the_runner._say(
+            held,
+            serve.PHASE_REVIEWING,
+            "Reviewing MI-42. MI-9 write guard did not block this worktree.",
+        )
+        # A line about another request alone is not said at all.
+        await the_runner._instruction_progress(held, "MI-9 is waiting on its gate.")
 
     asyncio.run(scenario())
+    # Task 372, Goal 5: another request's sentence is dropped whole, never garbled into
+    # "another request write guard did not block this worktree".
     assert _no_request_ids(routes) == [
         "Dispatching your request in runtime.",
-        "Reviewing your request beside another request.",
+        "Reviewing your request.",
     ]

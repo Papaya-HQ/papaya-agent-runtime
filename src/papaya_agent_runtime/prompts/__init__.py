@@ -113,6 +113,19 @@ NO_REQUEST_ID_RULE = (
     '"your question", "your request", or by its title.'
 )
 
+#: What a review turn on a person's request (an instruction, not a work item) is told
+#: about its answer. The runtime posts it at the origin with the pull request after
+#: it; the worker's closeout never reaches the person (2026-09-23: a raw closeout with
+#: a SHA, a branch, an evidence path and another request's id did).
+INSTRUCTION_SUMMARY_RULE = (
+    "There is no work item: the person who asked reads your answer where they asked. "
+    "When you approve and deliver, end your turn with an `OUTCOME: done` block of two to "
+    "four short sentences written for them: what changed and what the tests show. No "
+    "branch names, commit SHAs, evidence paths or worker task ids, and do not paste the "
+    "worker's report. Do not name the pull request: the runtime adds its link after your "
+    "words. " + NO_REQUEST_ID_RULE
+)
+
 #: The rule every brief, environment block and command-rules block gives a worker
 #: about when its work reaches the remote. A worker once held two hours of finished
 #: work in its worktree for one commit after a green full suite, and a restart would
@@ -274,6 +287,7 @@ __all__ = [
     "LEDGER",
     "MEMORY_RULE",
     "NO_REQUEST_ID_RULE",
+    "INSTRUCTION_SUMMARY_RULE",
     "REPOSITORY_CANNOT_TELL",
     "REPOSITORY_PREFIX",
     "REPO_CHOICE",

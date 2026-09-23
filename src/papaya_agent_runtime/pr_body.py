@@ -319,7 +319,7 @@ def compose(task_id: int, *, head_sha: str = "", conn: sqlite3.Connection | None
             f"{sections} — or pass `ppy deliver {task_id} --body-file <file>` with a body "
             "you wrote yourself"
         )
-    return (
+    body = (
         "\n\n".join(
             [
                 description.strip(),
@@ -331,6 +331,22 @@ def compose(task_id: int, *, head_sha: str = "", conn: sqlite3.Connection | None
         ).rstrip()
         + "\n"
     )
+    return for_request(conn, task_id, body)
+
+
+def for_request(conn: sqlite3.Connection, task_id: int, text: str) -> str:
+    """``text`` with no `MI-<n>` in it when the task works a person's request.
+
+    The id is internal to the runtime and Papaya; a reviewer reading the pull request
+    never saw it (MI-4's pull request was titled with it, 2026-09-23). Only for such a
+    task: elsewhere `MI-12` may be a tracker's key, and it stays.
+    """
+    from papaya_agent_runtime import instructions
+    from papaya_agent_runtime.state import store
+
+    if not store.get_task_env(conn, task_id, instructions.INSTRUCTION_KEY):
+        return text
+    return instructions.without_ids(text)
 
 
 __all__ = [

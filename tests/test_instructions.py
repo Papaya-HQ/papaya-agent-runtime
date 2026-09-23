@@ -536,10 +536,12 @@ def test_f_the_composed_brief_has_the_four_instruction_sections_and_lints_clean(
         assert heading in brief, heading
     assert "> Investigate JIRA-4411\n> and tell me what broke." in brief
     assert f"- {JIRA}" in brief
-    assert "Shane (Papaya user user-1), as MI-42." in brief
+    assert "Shane (Papaya user user-1)." in brief
+    # The brief reaches the pull request: no request id in it (task 372, Goal 4).
+    assert "MI-42" not in brief
     assert "> You are the Engineering Agent." in brief
     assert brief_lint.lint_brief(brief) == []
-    assert brief.startswith("# MI-42: Investigate JIRA-4411")
+    assert brief.startswith("# Investigate JIRA-4411")
 
 
 def test_persona_text_is_quoted_data_in_the_brief_and_never_a_command() -> None:

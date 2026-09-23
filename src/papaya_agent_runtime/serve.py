@@ -121,6 +121,7 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -280,6 +281,8 @@ SENT_BACK_DETAIL = "sent back with findings."
 SENT_BACK_LINE = "Sent the worker back with findings; still working."
 #: `_say`'s key for that comment, which is not a phase of its own.
 SAID_SENT_BACK = "sent_back"
+#: The work path's acknowledgement at an instruction's origin: said once per request.
+SAID_ON_IT = "on_it"
 
 ACTED_KINDS = (
     "answer",
@@ -744,6 +747,9 @@ class Ticket:
     follow_ups_failing: bool = False
     #: The follow-up batches already acknowledged at the origin (by their newest id).
     follow_ups_said: set[str] = field(default_factory=set)
+    #: An instruction's review turn that delivered: its `OUTCOME:` block, the summary the
+    #: person reads in the final reply. ``None`` when it wrote none.
+    summary: instructions.Outcome | None = None
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -1740,6 +1746,9 @@ class TicketRunner:
                 )
             await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
             return _result(job, 0, f"{instruction.short_id} already answered")
+        if held.reclaimed:
+            # Taken back up after a restart: what the earlier hold said stays said.
+            ticket.said = await store.run_in_thread(instructions.last_said, held.task_id)
         await self._start_listening(ticket)
         url: str | None = None
         try:
@@ -1761,7 +1770,7 @@ class TicketRunner:
                 status, text = await self._instruction_answer(ticket)
             elif found.path == instructions.WORK:
                 assert found.repo is not None
-                await self._instruction_progress(ticket, instructions.on_it(found.repo))
+                await self._say_once(ticket, SAID_ON_IT, instructions.on_it(found.repo))
                 status, text, url = await self._instruction_work(ticket)
             else:
                 # A question back to the person is an answer, not a failure: the
@@ -1775,6 +1784,8 @@ class TicketRunner:
             return await self._stopped(ticket)
         await self._instruction_reply(ticket, status, text, url=url)
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_REPORTED, status)
+        # Answered: nothing the request was blocked on or waiting for is still so.
+        await store.run_in_thread(instructions.close_waits, held.run_id)
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
         log.info("[serve] Answered %s (%s)", instruction.short_id, status)
         return _result(job, 0, f"{instruction.short_id} {status}")
@@ -1853,6 +1864,7 @@ class TicketRunner:
         """A held instruction whose chosen repository meets a setup blocker: declined."""
         log.info("[serve] Declining %s: %s", ticket.job.subject, reason)
         await asyncio.to_thread(self._record_phase, ticket.held.task_id, PHASE_DECLINED, reason)
+        await store.run_in_thread(instructions.close_waits, ticket.held.run_id)
         ticket.job.decline(reason)
         return _result(ticket.job, _declined_exit_code(), reason)
 
@@ -2102,11 +2114,26 @@ class TicketRunner:
         instruction = held.instruction
         assert instruction is not None and held.repo is not None
         worker = await asyncio.to_thread(find_worker, held)
+        phase: HandBack | str
+        if worker is not None and held.reclaimed:
+            # Taken back up after a restart with its worker already out: resumed from
+            # where the last hold was, and nothing it said is said again.
+            resume = await store.run_in_thread(resumable_phase, held.task_id)
+            ticket.worker = worker
+            # A worker is out, so a hold that stopped while briefing is past its brief.
+            phase = resume if resume not in (None, PHASE_BRIEFING) else PHASE_DISPATCHED
+            await self._enter(ticket, phase, f"Resuming worker task {worker.task_id} from {phase}.")
+            await store.run_in_thread(
+                instructions.mark_worker, worker.task_id, instruction.short_id
+            )
+            return await self._instruction_steps(ticket, worker, phase)
         if worker is None:
             await self._wait_for_slot(ticket)
             brief = instructions.compose_brief(instruction, held.repo)
             await self._enter(
-                ticket, PHASE_BRIEFING, f"Dispatching {instruction.short_id} in {held.repo}."
+                ticket,
+                PHASE_BRIEFING,
+                f"Dispatching {instructions.named(instruction)} in {held.repo}.",
             )
             try:
                 await asyncio.to_thread(
@@ -2114,7 +2141,7 @@ class TicketRunner:
                     held.repo,
                     brief,
                     held.run_id,
-                    f"{instruction.short_id}: {instruction.title or instruction.text}"[:120],
+                    instructions.request_title(instruction),
                 )
             except Exception as exc:  # noqa: BLE001 - said to the person, not raised
                 return (
@@ -2132,7 +2159,15 @@ class TicketRunner:
                     None,
                 )
         await store.run_in_thread(instructions.mark_worker, worker.task_id, instruction.short_id)
-        phase: HandBack | str = await self._dispatched(ticket, worker)
+        phase = await self._dispatched(ticket, worker)
+        return await self._instruction_steps(ticket, worker, phase)
+
+    async def _instruction_steps(
+        self, ticket: Ticket, worker: Worker, phase: HandBack | str
+    ) -> tuple[str, str, str | None]:
+        """The work path from ``phase`` on: watch, review, deliver, then the answer."""
+        instruction = ticket.held.instruction
+        assert instruction is not None
         while True:
             self._check_stop(ticket)
             if phase in (PHASE_DISPATCHED, PHASE_BLOCKED):
@@ -2164,9 +2199,13 @@ class TicketRunner:
         current = ticket.worker or worker
         delivery = await asyncio.to_thread(latest_delivery, current.task_id)
         url = delivery.get("pr_url") or None
-        note = await asyncio.to_thread(findings_of, current)
-        head = f"{delivery_line(delivery)}" if delivery else "Delivered."
-        return "done", f"{head}\n\n{note}" if note else head, url
+        # The person reads the review turn's summary, written for them, and the pull
+        # request once. Never the worker's closeout: branches, SHAs and evidence paths
+        # are for the reviewer, and its words about other requests are not theirs.
+        summary = ticket.summary.text if ticket.summary is not None else ""
+        summary = summary or f"The work on {instructions.named(instruction)} is done and reviewed."
+        line = delivery_line(delivery) if delivery else "Delivered."
+        return "done", f"{summary}\n\n{line}", url
 
     def _has_commits(self, worker: Worker) -> bool:
         """Whether the worker's branch holds commits; unknown counts as yes (review it)."""
@@ -2807,12 +2846,18 @@ class TicketRunner:
             # Taken before the turn and after the runner's own comment: nothing but
             # the turn writes on the item while it runs, so a new agent comment
             # after it is the turn's report.
-            before = await asyncio.to_thread(self._comments, ticket)
+            # An instruction has no work item to read: its report is the answer at the
+            # origin, which the review turn's summary becomes (`_instruction_steps`).
+            instruction = held.instruction is not None
+            before = None if instruction else await asyncio.to_thread(self._comments, ticket)
             ticket.review_base = await asyncio.to_thread(self._review_base, worker_id)
             result = await self._turn(ticket, prompts.REVIEW, self._review_facts(ticket, tail))
             if await asyncio.to_thread(delivered_since, worker_id, mark, by_status):
                 ticket.trigger = None
-                ticket.reported = await self._check_reported(ticket, before)
+                if instruction:
+                    ticket.summary = instructions.outcome_of(_transcript_of(result))
+                else:
+                    ticket.reported = await self._check_reported(ticket, before)
                 return PHASE_DELIVERING
             if await asyncio.to_thread(acted_since, worker_id, mark):
                 ticket.trigger = None
@@ -2875,6 +2920,14 @@ class TicketRunner:
         delivery = await asyncio.to_thread(latest_delivery, worker.task_id) if worker else {}
         pr_url = delivery.get("pr_url") or None
         opened = delivery_line(delivery)
+        if held.instruction is not None:
+            # No work item to move or report on, and nothing said here: the answer at
+            # the origin names the pull request, once (`_instruction_steps`).
+            await self._enter(ticket, PHASE_DELIVERING, opened)
+            await self._enter(
+                ticket, PHASE_REPORTED, "delivered; the answer names the pull request"
+            )
+            return PHASE_REPORTED
         # The ticket's last agent comment should be the turn's own report. Only
         # when the report could not be checked does the runner name the pull
         # request, and only when it is missing does it post the fallback.
@@ -3641,6 +3694,10 @@ class TicketRunner:
         trigger = ticket.trigger
         return {
             **_ticket_facts(ticket.held),
+            # A person's request: what they read when it is delivered is this turn's.
+            "the answer to the person": (
+                prompts.INSTRUCTION_SUMMARY_RULE if ticket.held.instruction is not None else ""
+            ),
             **_worker_facts(ticket.worker),
             "what stopped the worker": trigger.detail if trigger and trigger.failure else "",
             "the worker's recorded gate at its head": ticket.recorded_gate,
@@ -3706,8 +3763,10 @@ class TicketRunner:
         ticket.said = phase
         if ticket.held.instruction is not None:
             # No work item to comment on: the person follows it in the conversation
-            # they sent it from, deduped the same way.
+            # they sent it from, deduped the same way, and on the record, so a hold
+            # taken back up after a restart starts from what was said last.
             await self._instruction_progress(ticket, line)
+            await self._note_said(ticket, phase)
             return
         try:
             await asyncio.to_thread(
@@ -3719,6 +3778,27 @@ class TicketRunner:
             )
         except papaya_events.PapayaEventError as exc:
             log.warning("[serve] Could not comment on %s: %s", ticket.job.subject, exc)
+
+    async def _say_once(self, ticket: Ticket, key: str, text: str) -> None:
+        """One progress line at an instruction's origin, once per ticket, ever.
+
+        Kept on the ledger, not the hold: a request taken back up after a restart
+        was acknowledged already, and "On it" twice reads as two requests.
+        """
+        task_id = ticket.held.task_id
+        if await store.run_in_thread(instructions.said_before, task_id, key):
+            return
+        await self._instruction_progress(ticket, text)
+        await self._note_said(ticket, key)
+
+    async def _note_said(self, ticket: Ticket, key: str) -> None:
+        """Record a line said at an instruction's origin. Never fatal: it was said."""
+        try:
+            await store.run_in_thread(instructions.record_said, ticket.held.task_id, key)
+        except sqlite3.Error as exc:
+            log.warning(
+                "[serve] Could not record what was said for %s: %s", ticket.job.subject, exc
+            )
 
     # -- how a hold ends -------------------------------------------------------
 
@@ -5043,6 +5123,11 @@ def dispatch_instruction(repo: str, brief: str, run_id: int, title: str) -> None
     if done.returncode != 0:
         said = [line for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
         raise RuntimeError(said[-1] if said else f"ppy dispatch exited {done.returncode}")
+
+
+def _transcript_of(result: Any) -> str:
+    """A turn's transcript, from a turn result or the text a test's turn returned."""
+    return result.transcript if hasattr(result, "transcript") else str(result or "")
 
 
 def pull_request_url(worker_id: int) -> str | None:
