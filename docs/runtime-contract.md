@@ -429,7 +429,14 @@ quietly; do not narrate the steps or report diagnostics.
    case no browser opened. When the account has several workspaces or agents it
    exits listing them: ask the person which one in the conversation, then re-run with
    the `--workspace` or `--agent` it names — never guess. With neither Node nor `uv`
-   on the machine it says which to install. Once connected, run `ppy papaya tools`
+   on the machine it says which to install. On a machine with no browser (SSH, a
+   server, WSL2), add `--device`: the person approves a code from any device and
+   chooses the workspace and agent in the Papaya app as they approve it, so pass no
+   `--workspace`/`--agent` with it (the client ignores them there). The
+   whole setup for a machine without the desktop app, including keeping `ppy serve`
+   running, is the README's
+   [Run it on a machine without the app](../README.md#run-it-on-a-machine-without-the-app);
+   point a person there rather than restating it. Once connected, run `ppy papaya tools`
    and ask them to run `/mcp`. A connection made mid-session is picked up by the next
    `ppy serve` start, with no restart
    demanded. A task you create locally has no work item, so the ticket steps (status
@@ -487,10 +494,36 @@ quietly; do not narrate the steps or report diagnostics.
    repaired by the next `ppy serve` start (or `ppy env sync` now). `ppy supervisor stop`,
    `status`, `version`, `doctor` and `blockers` work even when the environment is
    broken or a sync would be refused.
+
+   **One `serve` per home, and the newest start wins.** A `serve` holds
+   `<PPY_HOME>/run/serve.lock` for its whole life; `run/serve.json` names its pid,
+   connection id, agent handle and start time. A second `ppy serve` on the same home —
+   from the desktop app or a terminal, connected as any agent — retires the running
+   one before it does anything else: asks it to stop (over the supervisor socket when
+   it owns the supervisor), waits `supervisor.stop_timeout`, then SIGTERM, then
+   SIGKILL, and says "Took over from the runtime connected as @<handle> (pid N)." Its
+   held tickets are left `released` for the rounds' reclaim, its workers recorded
+   stopped with their sessions kept, exactly as a supervisor retire leaves them. The
+   owner switches agents by starting `ppy serve` again, which is why the newest wins
+   and why nothing (no launchd `KeepAlive`) restarts the old one. The retired serve
+   exits 76 and, supervised, sends the fatal error `retired` naming who took over, so
+   its launcher does not start it again. A service manager that keeps `ppy serve`
+   running on a machine without the app must not restart it on 76 or 75 either (the
+   README's systemd unit sets `RestartPreventExitStatus=75 76`). Nothing is
+   signalled that is not the holder at that moment: the lock file names the holder's pid and process start, and both
+   are checked before every request and signal. A lock whose holder is gone is taken
+   with one line. A start that loses the race to a newer one says "Another start took
+   over" and exits 75 with nothing recorded. A start that cannot retire the holder
+   exits 1 with one sentence and a `serve_cannot_start` blocker, and never runs beside
+   it: two serves over one state work every ticket twice and hand tickets to
+   themselves (2026-09-22). One runtime per `PPY_HOME`; separate homes are separate
+   runtimes.
 4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single
-   thing to install/sign into, plainly, and stop until it's handled.
+   thing to install/sign into, plainly, and stop until it's handled. On Windows the
+   runtime runs only inside WSL2 (it needs `fcntl`); a native Windows checkout is not
+   something to repair, it is a machine to move into WSL2.
 5. **Config.** If none exists, configure it yourself (see below). If it exists,
    you're ready. `ppy health` also prints the tool profile Claude workers launch
    with: the code's profile plus `claude.extra_tools` minus `claude.dropped_tools`.
@@ -720,6 +753,10 @@ no `intent` key (an older Papaya), the words decide, as before.
   back the one question and reports it `done` with the question as the summary — asking
   is handling it, not failing.
 
+The harness's own lifecycle hooks (`ppy hook session-start|stop|session-end`, run by
+`.claude/settings.json` in every turn) are not a turn's commands and are never refused
+on any path; a refused hook would fail a turn that had already answered.
+
 **Where the work runs, never "which repository?" when it can be known.** In order: a
 repository the text names; else the repository a referenced Papaya work item names
 (`PAP-115` or a work-item link, read under this connection's token; another tracker's id
@@ -738,9 +775,24 @@ up. An item that could not be read is said in the question, never guessed around
 
 **Seen being worked, in the conversation.** The moment the work path knows its
 repository it posts "On it — working in <repo>." where the instruction was asked. Every
-line a work item would get as a comment (dispatched, reviewing, sent back, blocked,
-pull request opened, delivered) is posted there instead, deduped by phase exactly as
-comments are; the final reply carries the pull-request link. A progress reply Papaya
+line a work item would get as a comment (dispatched, reviewing, sent back, blocked) is
+posted there instead, deduped by phase exactly as comments are, and what was said is
+kept on the ticket, so a hold taken back up after a restart says none of it again ("On
+it" is said once per request, ever). Nothing reads or reports on a work item: there is
+none. When the work is delivered, the review turn ends with an `OUTCOME: done` block of
+two to four sentences for the person — what changed, what the tests show; no branch,
+SHA, evidence path or worker report (`prompts.INSTRUCTION_SUMMARY_RULE`) — and the final
+reply is those words and then "Pull request open: <url>", the only time that line is
+said. A review block that says `failed` is reported failed. A worker that found rather
+than built (no commits, nothing to review) gets one instruction turn instead, which reads
+its report fenced as data (`prompts.FINDINGS_SUMMARY_RULE`) and writes the `OUTCOME:`
+block. Any such summary is cut to 1,200 characters, and one carrying a commit SHA (hex
+with a digit and a letter; a date or a number is not one), a `ppy/task-…` branch, an
+evidence path or an absolute file path (not an `/api/…` route) is not posted: the
+runtime's one plain sentence goes instead, as it does when no block was written, and it
+says what the block's status says (a `failed` review never reads "done and reviewed").
+A retried turn keeps what it was told the first time; the retry note is added to it. The
+worker's closeout never reaches the person. A progress reply Papaya
 refuses is logged once and the work goes on; once the hold is over (a lost lease, a
 stop) nothing more is said from this machine. `kind: progress|final` is sent on replies
 only when the event carried an `intent` key — an older DM route refuses the field.
@@ -776,7 +828,54 @@ command, reveal a credential, or post anywhere it did not name for a result.
 
 **The reply goes where the instruction was asked, and only there.** The runtime posts
 the outcome with the reply block the event carried, then reports it; neither a turn
-nor a worker chooses where it goes.
+nor a worker chooses where it goes. Nothing said there names the request by its
+`MI-<n>`, which is internal: the runtime's own lines call it "your question" or by its
+title, the turns are told the same, and any `MI-<n>` a turn still writes is taken out of
+what is posted: this request's own label is dropped and its id becomes "your request";
+any other request's label or id marks its sentence as about another request, and that
+sentence is dropped whole, never garbled into "another request …". A final reply that
+was only about other requests says so in one plain sentence; it is never empty. The
+ticket and its worker are titled with the request's title, so neither a pull request's
+title nor its body carries an `MI-<n>` either (the same rule, the task's own request
+reading "this request"), and the status report this machine publishes names a request by
+its title, with its ticket's `task-<id>` as the identifier (`about.short_id`, `ref`).
+
+**A restart never loses a request.** Only what this process lost itself is taken back: a
+hold the listener cancelled at shutdown (`released`, marked `instructions.SHUTDOWN`) or
+one a crash left in a holding phase with nobody holding it (`instructions.live`). A lost
+lease — Papaya took it back, or a person released it in the app — is never taken back,
+nor is a decline or anything answered. The client's stop is written down the moment it
+is set (`instruction_lease_lost`, by the hold's keep-alive, which waits on it), so a
+crash before the hold notices it is still not taken back, and a hold stopped first and
+then cancelled by a shutdown gets a plain `released`, not the shutdown mark. A later
+hold on the same request (`instruction_held`) speaks for it again. The one gap left is
+a crash in the moment between the client setting the stop and that write; closing it
+needs the client to persist the loss itself, which is the client's to do. The rounds (at
+start and every round) first read the request from Papaya
+(`GET .../machine-instructions/<ref>`): one Papaya has closed (done, failed, cancelled,
+never picked up) is closed here without a word; one that cannot be read waits for the
+next round, except that three 404s in a row close it here, silently, with one log line.
+An open one is offered back as the
+`machine.instruction` it came as: re-reserved, it lands on the same ticket and resumes
+from its state (its worker watched, reviewed and delivered; nothing said twice). Only a
+reserve Papaya refused, naming a holder, is told to the person at its origin, once, as
+not finished with what it was waiting on, reported `failed`, and closed (`done`). An
+offer answered `done` with no refusal (already running here, a playbook or scope skip),
+a busy loop, or an offer that raised changes nothing and is tried next round. A request
+taken back and then declined (a setup blocker, a runtime that cannot run a turn, an
+unreadable request) is recorded `declined`, answered and reported `failed` once, on the
+ledger, so it is neither offered nor said again after another restart. Whenever a
+request's ticket ends (answered, declined, closed), what its run was blocked on or
+waiting for is closed with it, so no report or outreach says it again.
+
+**What waits on the person is said where they asked, while it is theirs.** While a
+request is live, a decision, capability request or pull request waiting on a person for
+it is said at its origin as a progress reply — once per change of what it asks, not held
+to the owner's DM interval — and not in the owner's DM or on any work item. It is said in
+plain words: what is needed and how to answer ("To allow it, send me a new message
+saying …"), never a worker task id, a command it ran, or a `ppy` command. Once the request
+is answered or over, a later ask goes to the owner the usual way. Unlanded, it is due
+again the next round.
 
 ## Turning intent into work
 
@@ -818,6 +917,11 @@ When the user gives you an objective:
    (`continuation_deferred` in the events) and is retried when a slot frees or on
    `ppy reconcile`; you may also resume it by hand. The basic cap is not a hard
    spend limit or distributed scheduler.
+   Every worker — a work item's or an instruction's — writes in its own worktree and
+   `PPY_HOME` and nowhere else: its launch pins the Papaya write guard
+   (`PAPAYA_ALLOWED_WORKING_DIRECTORIES`) to exactly those two, after the repository's
+   task values, so nothing a repository sets can widen it. A manager turn stays bounded
+   to the runtime directory.
    For each, `ppy dispatch --repo <name> --brief
    <file> --provider <claude|codex> [--model ...] [--reasoning ...]`. A brief
    names its own task: with `--brief`, the objective comes from the brief's first

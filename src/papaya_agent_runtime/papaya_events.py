@@ -795,6 +795,36 @@ def list_instruction_follow_ups(
     return [follow_up_as_comment(item) for item in answer if isinstance(item, Mapping)]
 
 
+#: An instruction Papaya still has open: offered to a machine, or held by one.
+INSTRUCTION_OPEN = ("routed", "picked_up")
+
+
+def read_instruction_status(
+    reply: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> str | None:
+    """Where Papaya has an instruction now: `routed`, `picked_up`, `done`, `failed`,
+    `not_picked_up` or `cancelled` (`GET .../machine-instructions/<ref>`).
+
+    The route is the one beside its result route, checked against this workspace the
+    same way. ``None`` when there is nothing to call with (not connected). A refusal,
+    or an answer with no status, raises :class:`PapayaEventError`.
+    """
+    env = os.environ if environ is None else environ
+    _path, result_path = reply_paths(reply, env)
+    url = _api_url(env, result_path.removesuffix("/result"))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    answer = _papaya_request(url, token, what="instruction read", opener=opener)
+    status = str(answer.get("status") or "").strip().lower()
+    if not status:
+        raise PapayaEventError("Papaya returned an instruction with no status; retry")
+    return status
+
+
 def put_connection_status(
     snapshot: Mapping[str, Any],
     *,
@@ -978,6 +1008,8 @@ __all__ = [
     "follow_up_as_comment",
     "instruction_from",
     "list_instruction_follow_ups",
+    "read_instruction_status",
+    "INSTRUCTION_OPEN",
     "read_work_item_ref",
     "work_item_repository",
     "parse_instruction",

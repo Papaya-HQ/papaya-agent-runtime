@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import io
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -888,6 +889,99 @@ def test_the_listener_declares_the_configured_worker_count_as_its_subjects(
 
     assert harness.events.connection[0]["capabilities"]["max_concurrent_subjects"] == workers
     assert harness.loop.max_concurrent == workers
+
+
+def _listen_briefly(harness: Harness, client_home: ClientHome) -> int:
+    """Run `serve` until its connection has announced itself, then stop it."""
+    options = serve.parse_args(["--working-directory", str(client_home.work_dir)])
+
+    async def scenario() -> int:
+        runner = asyncio.create_task(
+            serve.run(options, stdout=io.StringIO(), stderr=io.StringIO(), extra=harness.extra())
+        )
+        await _until(lambda: harness.events.connection, what="the capabilities to be announced")
+        harness.loop.request_stop()
+        return await runner
+
+    return asyncio.run(scenario())
+
+
+def test_a_client_that_takes_extra_capabilities_is_told_this_runtime_answers_questions(
+    ppy_home, client_home, ready, monkeypatch, caplog
+) -> None:
+    """Papaya routes a no-card question only to a connection that says it takes `ask`.
+
+    This runtime answers one read-only, so it says so, next to `work`, whenever the
+    client has a way to register it.
+    """
+    from papaya_agent_client import embed
+
+    original = embed.build_listener
+    registered: list[Any] = []
+
+    async def build_listener(*, extra_capabilities: dict[str, Any] | None = None, **kwargs):
+        registered.append(extra_capabilities)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(embed, "build_listener", build_listener)
+    harness = Harness(FakeEvents([]))
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+
+    assert _listen_briefly(harness, client_home) == 0
+
+    assert registered == [{"instruction_intents": ["ask", "work"]}]
+    assert serve.OLD_CLIENT_CAPABILITIES not in caplog.text
+
+
+def test_a_client_with_no_extra_capabilities_still_listens_and_says_questions_are_refused(
+    ppy_home, client_home, ready, monkeypatch, caplog
+) -> None:
+    """A client older than the parameter would raise on it: nothing new is passed.
+
+    The machine still starts and still does work; one line says why Papaya will not
+    send it questions yet.
+    """
+    from papaya_agent_client import embed
+
+    original = embed.build_listener
+    passed: list[dict[str, Any]] = []
+
+    async def build_listener(**kwargs):
+        passed.append(kwargs)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(embed, "build_listener", build_listener)
+    harness = Harness(FakeEvents([]))
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+
+    assert _listen_briefly(harness, client_home) == 0
+
+    assert len(passed) == 1 and serve.EXTRA_CAPABILITIES not in passed[0]
+    assert "instruction_intents" not in harness.events.connection[0]["capabilities"]
+    said = [r for r in caplog.records if r.getMessage() == serve.OLD_CLIENT_CAPABILITIES]
+    assert len(said) == 1
+    assert "refuse to send questions" in said[0].getMessage()
+
+
+def test_extra_capabilities_are_offered_to_either_builder_only_when_it_names_them(
+    caplog,
+) -> None:
+    """Supervised or not, the check is the builder's own signature, never its version."""
+
+    async def supervised(writer, *, stdin_fd=None, extra_capabilities=None, runner=None):
+        return None
+
+    async def old_supervised(writer, *, stdin_fd=None, runner=None):
+        return None
+
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+
+    assert serve.extra_capabilities(supervised) == {
+        "extra_capabilities": {"instruction_intents": ["ask", "work"]}
+    }
+    assert caplog.records == []
+    assert serve.extra_capabilities(old_supervised) == {}
+    assert [r.getMessage() for r in caplog.records] == [serve.OLD_CLIENT_CAPABILITIES]
 
 
 def test_a_machine_with_no_harness_still_listens_and_dms_what_needs_the_user(

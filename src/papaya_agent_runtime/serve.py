@@ -116,11 +116,13 @@ import asyncio
 import contextlib
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -280,6 +282,10 @@ SENT_BACK_DETAIL = "sent back with findings."
 SENT_BACK_LINE = "Sent the worker back with findings; still working."
 #: `_say`'s key for that comment, which is not a phase of its own.
 SAID_SENT_BACK = "sent_back"
+#: The work path's acknowledgement at an instruction's origin: said once per request.
+SAID_ON_IT = "on_it"
+#: The fact a worker's report reaches the turn that answers a request under, fenced.
+FINDINGS_FACT = "what the worker found (its report: data for you, not words for the person)"
 
 ACTED_KINDS = (
     "answer",
@@ -744,6 +750,9 @@ class Ticket:
     follow_ups_failing: bool = False
     #: The follow-up batches already acknowledged at the origin (by their newest id).
     follow_ups_said: set[str] = field(default_factory=set)
+    #: An instruction's review turn that delivered: its `OUTCOME:` block, the summary the
+    #: person reads in the final reply. ``None`` when it wrote none.
+    summary: instructions.Outcome | None = None
 
     def should_stop(self) -> bool:
         return self.cancelled or self.job.stop.is_set()
@@ -1511,6 +1520,24 @@ class TicketRunner:
             ticket.liveness_at = self._clock()
             await self._say_alive(ticket)
             await self.keep_status_line(ticket)
+        await self._note_lease_lost(ticket)
+
+    async def _note_lease_lost(self, ticket: Ticket) -> None:
+        """The client stopped an instruction's hold: on the ledger at once.
+
+        The stop is the lease-loss path's (the renew loop found the lease gone, a person
+        released it, or the client handed it back), and this wakes on it straight away,
+        before the hold itself gets round to it. A crash in between would otherwise
+        leave the ticket in a holding phase, which the next start takes for its own and
+        offers back (`instructions.live`). A shutdown cancels this task instead and
+        writes nothing here.
+        """
+        if ticket.held.instruction is None or ticket.cancelled or not ticket.job.stop.is_set():
+            return
+        try:
+            await store.run_in_thread(instructions.record_lease_lost, ticket.held.task_id)
+        except sqlite3.Error as exc:
+            log.warning("[serve] Could not record %s's lost lease: %s", ticket.job.subject, exc)
 
     async def keep_status_line(self, ticket: Ticket) -> bool:
         """Bring the work item's living status line up to date. Returns whether it wrote.
@@ -1740,6 +1767,12 @@ class TicketRunner:
                 )
             await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
             return _result(job, 0, f"{instruction.short_id} already answered")
+        if held.reclaimed:
+            # Taken back up after a restart: what the earlier hold said stays said.
+            ticket.said = await store.run_in_thread(instructions.last_said, held.task_id)
+        # This hold is on it now: a lost lease an earlier hold recorded no longer speaks
+        # for it (`instructions.live`).
+        await store.run_in_thread(instructions.record_held, held.task_id)
         await self._start_listening(ticket)
         url: str | None = None
         try:
@@ -1761,20 +1794,33 @@ class TicketRunner:
                 status, text = await self._instruction_answer(ticket)
             elif found.path == instructions.WORK:
                 assert found.repo is not None
-                await self._instruction_progress(ticket, instructions.on_it(found.repo))
+                await self._say_once(ticket, SAID_ON_IT, instructions.on_it(found.repo))
                 status, text, url = await self._instruction_work(ticket)
             else:
                 # A question back to the person is an answer, not a failure: the
                 # instruction was handled, and their reply is what comes next.
                 status, text = "done", found.question
         except asyncio.CancelledError:
+            # The listener cancels a hold only when this process shuts down: marked so,
+            # the rounds of the next start take it back up (`instructions.live`). A lost
+            # lease stops the hold instead (`_Stopped`) and is never taken back — nor is
+            # one whose lease was lost, or released by a person, before the shutdown's
+            # cancel reached it: the stop was set first, so the release is plain.
+            stopped_first = ticket.job.stop.is_set()
             ticket.cancelled = True
-            await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
+            await asyncio.to_thread(
+                self._record_phase,
+                held.task_id,
+                PHASE_RELEASED,
+                "" if stopped_first else instructions.SHUTDOWN,
+            )
             raise
         except _Stopped:
             return await self._stopped(ticket)
         await self._instruction_reply(ticket, status, text, url=url)
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_REPORTED, status)
+        # Answered: nothing the request was blocked on or waiting for is still so.
+        await store.run_in_thread(instructions.close_waits, held.run_id)
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_RELEASED)
         log.info("[serve] Answered %s (%s)", instruction.short_id, status)
         return _result(job, 0, f"{instruction.short_id} {status}")
@@ -1853,6 +1899,7 @@ class TicketRunner:
         """A held instruction whose chosen repository meets a setup blocker: declined."""
         log.info("[serve] Declining %s: %s", ticket.job.subject, reason)
         await asyncio.to_thread(self._record_phase, ticket.held.task_id, PHASE_DECLINED, reason)
+        await store.run_in_thread(instructions.close_waits, ticket.held.run_id)
         ticket.job.decline(reason)
         return _result(ticket.job, _declined_exit_code(), reason)
 
@@ -1864,8 +1911,11 @@ class TicketRunner:
         ticket and the work goes on; the final reply is posted regardless.
         """
         instruction = ticket.held.instruction
-        line = str(text or "").strip()
-        if instruction is None or not line or ticket.lease_lost:
+        if instruction is None:
+            return
+        # A line only about another request is not said at all.
+        line = instructions.for_person(str(text or "").strip(), instruction, allow_empty=True)
+        if not line or ticket.lease_lost:
             return
         post = self._instruction_post or functools.partial(
             papaya_events.post_instruction_reply, **self._opener_kwargs()
@@ -2047,7 +2097,7 @@ class TicketRunner:
         )
         return (
             "failed",
-            f"I could not put an answer to {instruction.short_id} together this time. "
+            "I could not put an answer to your question together this time. "
             "Send it again, or ask something narrower.",
         )
 
@@ -2084,12 +2134,16 @@ class TicketRunner:
             if outcome is not None:
                 return outcome
             if attempt + 1 < TURN_ATTEMPTS:
+                # Added to what the turn was already told, never in its place: the
+                # findings turn's rule has to hold on the second attempt too.
+                retry = (
+                    "Your last turn ended without an OUTCOME: block, so nothing reached "
+                    "the person. Answer again and end with it."
+                )
+                earlier = str(facts.get(prompts.ADDENDUM_FACT) or "").strip()
                 facts = {
                     **facts,
-                    prompts.ADDENDUM_FACT: (
-                        "Your last turn ended without an OUTCOME: block, so nothing reached "
-                        "the person. Answer again and end with it."
-                    ),
+                    prompts.ADDENDUM_FACT: f"{earlier}\n\n{retry}" if earlier else retry,
                 }
         return None
 
@@ -2100,11 +2154,26 @@ class TicketRunner:
         instruction = held.instruction
         assert instruction is not None and held.repo is not None
         worker = await asyncio.to_thread(find_worker, held)
+        phase: HandBack | str
+        if worker is not None and held.reclaimed:
+            # Taken back up after a restart with its worker already out: resumed from
+            # where the last hold was, and nothing it said is said again.
+            resume = await store.run_in_thread(resumable_phase, held.task_id)
+            ticket.worker = worker
+            # A worker is out, so a hold that stopped while briefing is past its brief.
+            phase = resume if resume not in (None, PHASE_BRIEFING) else PHASE_DISPATCHED
+            await self._enter(ticket, phase, f"Resuming worker task {worker.task_id} from {phase}.")
+            await store.run_in_thread(
+                instructions.mark_worker, worker.task_id, instruction.short_id
+            )
+            return await self._instruction_steps(ticket, worker, phase)
         if worker is None:
             await self._wait_for_slot(ticket)
             brief = instructions.compose_brief(instruction, held.repo)
             await self._enter(
-                ticket, PHASE_BRIEFING, f"Dispatching {instruction.short_id} in {held.repo}."
+                ticket,
+                PHASE_BRIEFING,
+                f"Dispatching {instructions.named(instruction)} in {held.repo}.",
             )
             try:
                 await asyncio.to_thread(
@@ -2112,12 +2181,12 @@ class TicketRunner:
                     held.repo,
                     brief,
                     held.run_id,
-                    f"{instruction.short_id}: {instruction.title or instruction.text}"[:120],
+                    instructions.request_title(instruction),
                 )
             except Exception as exc:  # noqa: BLE001 - said to the person, not raised
                 return (
                     "failed",
-                    f"I could not start work on {instruction.short_id} in {held.repo}: "
+                    f"I could not start work on {instructions.named(instruction)} in {held.repo}: "
                     f"{_one_line(exc)}",
                     None,
                 )
@@ -2125,11 +2194,20 @@ class TicketRunner:
             if worker is None:
                 return (
                     "failed",
-                    f"The dispatch for {instruction.short_id} in {held.repo} left no worker.",
+                    f"The dispatch for {instructions.named(instruction)} in {held.repo} "
+                    "left no worker.",
                     None,
                 )
         await store.run_in_thread(instructions.mark_worker, worker.task_id, instruction.short_id)
-        phase: HandBack | str = await self._dispatched(ticket, worker)
+        phase = await self._dispatched(ticket, worker)
+        return await self._instruction_steps(ticket, worker, phase)
+
+    async def _instruction_steps(
+        self, ticket: Ticket, worker: Worker, phase: HandBack | str
+    ) -> tuple[str, str, str | None]:
+        """The work path from ``phase`` on: watch, review, deliver, then the answer."""
+        instruction = ticket.held.instruction
+        assert instruction is not None
         while True:
             self._check_stop(ticket)
             if phase in (PHASE_DISPATCHED, PHASE_BLOCKED):
@@ -2138,7 +2216,8 @@ class TicketRunner:
                 current = ticket.worker or worker
                 failed = ticket.trigger is not None and ticket.trigger.failure
                 if not failed and not await asyncio.to_thread(self._has_commits, current):
-                    return "done", await asyncio.to_thread(findings_of, current), None
+                    status, text = await self._findings_answer(ticket, current)
+                    return status, text, None
                 # Said in the conversation only: on a work item, reviewing is no comment.
                 await self._say(ticket, PHASE_REVIEWING, "Reviewing the work.")
                 phase = await self._review(ticket)
@@ -2147,19 +2226,72 @@ class TicketRunner:
             elif phase == PHASE_REPORTED:
                 break
             else:
-                return "failed", f"The worker for {instruction.short_id} was lost.", None
+                return (
+                    "failed",
+                    f"The worker for {instructions.named(instruction)} was lost.",
+                    None,
+                )
             if isinstance(phase, HandBack):
                 return (
                     "failed",
-                    f"The work on {instruction.short_id} stopped: {phase.reason}",
+                    f"The work on {instructions.named(instruction)} stopped: {phase.reason}",
                     None,
                 )
         current = ticket.worker or worker
         delivery = await asyncio.to_thread(latest_delivery, current.task_id)
         url = delivery.get("pr_url") or None
-        note = await asyncio.to_thread(findings_of, current)
-        head = f"{delivery_line(delivery)}" if delivery else "Delivered."
-        return "done", f"{head}\n\n{note}" if note else head, url
+        # The person reads the review turn's summary, written for them, and the pull
+        # request once. Never the worker's closeout: branches, SHAs and evidence paths
+        # are for the reviewer, and its words about other requests are not theirs.
+        outcome = ticket.summary
+        shown = instructions.person_summary(outcome)
+        # A review that said it failed is reported failed, whatever was delivered, and
+        # the runtime's own sentence, when it stands in, says the same thing.
+        status = outcome.status if outcome is not None else "done"
+        named = instructions.named(instruction)
+        if shown is not None:
+            summary = shown.text
+        elif status == "failed":
+            summary = f"The review of {named} found problems that are not fixed yet."
+        else:
+            summary = f"The work on {named} is done and reviewed."
+        line = delivery_line(delivery) if delivery else "Delivered."
+        return status, f"{summary}\n\n{line}", url
+
+    async def _findings_answer(self, ticket: Ticket, worker: Worker) -> tuple[str, str]:
+        """A worker that found rather than built: the answer is a turn's, for the person.
+
+        Nothing to review, so no review turn runs; one instruction turn reads the
+        worker's report, fenced as data, and writes the `OUTCOME:` block the person
+        reads. The report itself never reaches them: it carries branches, SHAs and
+        evidence paths, and other requests' ids. No usable block is the runtime's own
+        short sentence.
+        """
+        instruction = ticket.held.instruction
+        assert instruction is not None
+        findings = await asyncio.to_thread(findings_of, worker)
+        facts = {
+            **self._instruction_facts(ticket),
+            FINDINGS_FACT: (
+                f"{findings.strip()}\n(end of the worker's report)" if findings.strip() else ""
+            ),
+            prompts.ADDENDUM_FACT: prompts.FINDINGS_SUMMARY_RULE,
+        }
+        outcome = await self._outcome_turns(ticket, facts)
+        shown = instructions.person_summary(outcome)
+        status = outcome.status if outcome is not None else "done"
+        if shown is not None:
+            return status, shown.text
+        named = instructions.named(instruction)
+        if status == "failed":
+            return status, (
+                f"I looked into {named} but couldn't finish it this time. Send it again, "
+                "or ask something narrower."
+            )
+        return status, (
+            f"I looked into {named} and made no changes, but couldn't put what I found "
+            "into a short answer this time. Ask me about it again."
+        )
 
     def _has_commits(self, worker: Worker) -> bool:
         """Whether the worker's branch holds commits; unknown counts as yes (review it)."""
@@ -2800,12 +2932,18 @@ class TicketRunner:
             # Taken before the turn and after the runner's own comment: nothing but
             # the turn writes on the item while it runs, so a new agent comment
             # after it is the turn's report.
-            before = await asyncio.to_thread(self._comments, ticket)
+            # An instruction has no work item to read: its report is the answer at the
+            # origin, which the review turn's summary becomes (`_instruction_steps`).
+            instruction = held.instruction is not None
+            before = None if instruction else await asyncio.to_thread(self._comments, ticket)
             ticket.review_base = await asyncio.to_thread(self._review_base, worker_id)
             result = await self._turn(ticket, prompts.REVIEW, self._review_facts(ticket, tail))
             if await asyncio.to_thread(delivered_since, worker_id, mark, by_status):
                 ticket.trigger = None
-                ticket.reported = await self._check_reported(ticket, before)
+                if instruction:
+                    ticket.summary = instructions.outcome_of(_transcript_of(result))
+                else:
+                    ticket.reported = await self._check_reported(ticket, before)
                 return PHASE_DELIVERING
             if await asyncio.to_thread(acted_since, worker_id, mark):
                 ticket.trigger = None
@@ -2868,6 +3006,14 @@ class TicketRunner:
         delivery = await asyncio.to_thread(latest_delivery, worker.task_id) if worker else {}
         pr_url = delivery.get("pr_url") or None
         opened = delivery_line(delivery)
+        if held.instruction is not None:
+            # No work item to move or report on, and nothing said here: the answer at
+            # the origin names the pull request, once (`_instruction_steps`).
+            await self._enter(ticket, PHASE_DELIVERING, opened)
+            await self._enter(
+                ticket, PHASE_REPORTED, "delivered; the answer names the pull request"
+            )
+            return PHASE_REPORTED
         # The ticket's last agent comment should be the turn's own report. Only
         # when the report could not be checked does the runner name the pull
         # request, and only when it is missing does it post the fallback.
@@ -3634,6 +3780,10 @@ class TicketRunner:
         trigger = ticket.trigger
         return {
             **_ticket_facts(ticket.held),
+            # A person's request: what they read when it is delivered is this turn's.
+            "the answer to the person": (
+                prompts.INSTRUCTION_SUMMARY_RULE if ticket.held.instruction is not None else ""
+            ),
             **_worker_facts(ticket.worker),
             "what stopped the worker": trigger.detail if trigger and trigger.failure else "",
             "the worker's recorded gate at its head": ticket.recorded_gate,
@@ -3699,8 +3849,10 @@ class TicketRunner:
         ticket.said = phase
         if ticket.held.instruction is not None:
             # No work item to comment on: the person follows it in the conversation
-            # they sent it from, deduped the same way.
+            # they sent it from, deduped the same way, and on the record, so a hold
+            # taken back up after a restart starts from what was said last.
             await self._instruction_progress(ticket, line)
+            await self._note_said(ticket, phase)
             return
         try:
             await asyncio.to_thread(
@@ -3712,6 +3864,27 @@ class TicketRunner:
             )
         except papaya_events.PapayaEventError as exc:
             log.warning("[serve] Could not comment on %s: %s", ticket.job.subject, exc)
+
+    async def _say_once(self, ticket: Ticket, key: str, text: str) -> None:
+        """One progress line at an instruction's origin, once per ticket, ever.
+
+        Kept on the ledger, not the hold: a request taken back up after a restart
+        was acknowledged already, and "On it" twice reads as two requests.
+        """
+        task_id = ticket.held.task_id
+        if await store.run_in_thread(instructions.said_before, task_id, key):
+            return
+        await self._instruction_progress(ticket, text)
+        await self._note_said(ticket, key)
+
+    async def _note_said(self, ticket: Ticket, key: str) -> None:
+        """Record a line said at an instruction's origin. Never fatal: it was said."""
+        try:
+            await store.run_in_thread(instructions.record_said, ticket.held.task_id, key)
+        except sqlite3.Error as exc:
+            log.warning(
+                "[serve] Could not record what was said for %s: %s", ticket.job.subject, exc
+            )
 
     # -- how a hold ends -------------------------------------------------------
 
@@ -3898,12 +4071,26 @@ class TicketRunner:
         try:
             instruction = papaya_events.parse_instruction(event)
         except papaya_events.PapayaEventError as exc:
-            return Declined(f"this instruction could not be read: {exc}")
+            return self._decline_ticket(
+                job,
+                event.subject,
+                None,
+                f"this instruction could not be read: {exc}",
+                "I couldn't read your request back on this machine. Send it again.",
+            )
         verdict = self._check_readiness()
         blocked = verdict.state == readiness.BLOCKED
         if blocked and readiness.setup_blocker(verdict) is None:
             # Not something a person set up wrong: the runtime cannot run a turn.
-            return Declined(readiness.headline(verdict))
+            headline = readiness.headline(verdict)
+            return self._decline_ticket(
+                job,
+                instruction.subject,
+                instruction,
+                headline,
+                f"I can't work on {instructions.named(instruction)} on this machine right "
+                f"now: {headline}",
+            )
         conn = db.init_db()
         try:
             refs = instructions.repo_refs(conn)
@@ -3933,9 +4120,13 @@ class TicketRunner:
             try:
                 ensured = papaya_events.ensure_spec(found.spec)
             except papaya_events.PapayaEventError as exc:
-                return Declined(
-                    f"{instruction.short_id} names {found.spec}, which this machine cannot "
-                    f"register: {exc}"
+                reason = f"the request names {found.spec}, which this machine cannot register"
+                return self._decline_ticket(
+                    job,
+                    instruction.subject,
+                    instruction,
+                    f"{reason}: {exc}",
+                    f"I can't work on {instructions.named(instruction)}: {reason}.",
                 )
             found = replace(found, repo=ensured.name, spec=None)
             blocker = readiness.setup_blocker(verdict, found.repo)
@@ -3980,6 +4171,14 @@ class TicketRunner:
         and backend, and Papaya's own "your machine declined this" names none.
         """
         reason = instructions.setup_reason(blocker)
+        said = (
+            f"I can't take {instructions.named(instruction)} on this machine: "
+            f"{reason}. Its owner has been told what to do."
+        )
+        if self._has_ticket(instruction.subject):
+            # Already this machine's ticket (taken back up after a restart, or declined
+            # mid-hold): recorded, answered and reported once, on the ledger.
+            return self._decline_ticket(job, instruction.subject, instruction, reason, said)
         if instruction.subject not in self._declines_said:
             self._declines_said.add(instruction.subject)
             post = self._instruction_post or functools.partial(
@@ -3989,13 +4188,67 @@ class TicketRunner:
             try:
                 post(
                     instruction.reply,
-                    f"I can't take {instruction.short_id} on this machine: {reason}. "
-                    "Its owner has been told what to do.",
+                    instructions.for_person(said, instruction),
                     environ=job.env,
                     **kind,
                 )
             except papaya_events.PapayaEventError as exc:
                 log.warning("[serve] Could not say why %s was declined: %s", job.subject, exc)
+        return Declined(reason)
+
+    @staticmethod
+    def _has_ticket(subject: str) -> bool:
+        conn = db.init_db()
+        try:
+            return instructions.ticket_for(conn, subject) is not None
+        finally:
+            conn.close()
+
+    def _decline_ticket(
+        self,
+        job: Any,
+        subject: str,
+        instruction: papaya_events.Instruction | None,
+        reason: str,
+        said: str,
+    ) -> Declined:
+        """Decline an instruction; one that is already this machine's ticket, for good.
+
+        With no ticket, only the decline (as before: Papaya's fall-back tells the
+        person). With one — a request the rounds offered back after a restart — the
+        ticket is recorded `declined`, the person is answered with ``said`` and the
+        result reported `failed`, once, on the ledger: never offered again, never said
+        again after another restart. What its run waited on is closed with it.
+        """
+        conn = db.init_db()
+        try:
+            row = instructions.ticket_for(conn, subject)
+            if row is None:
+                return Declined(reason)
+            task_id, run_id = int(row["id"]), int(row["run_id"])
+            instruction = instruction or instructions.instruction_of(conn, task_id)
+            if store.task_phase(conn, task_id) != PHASE_DECLINED:
+                record_phase(conn, task_id, PHASE_DECLINED, reason)
+            if instruction is not None and instructions.stage(conn, task_id) == "new":
+                instructions.answer(
+                    conn,
+                    task_id,
+                    instruction,
+                    "failed",
+                    said,
+                    environ=job.env,
+                    post=self._instruction_post
+                    or functools.partial(
+                        papaya_events.post_instruction_reply, **self._opener_kwargs()
+                    ),
+                    report=self._instruction_report
+                    or functools.partial(
+                        papaya_events.report_instruction_result, **self._opener_kwargs()
+                    ),
+                )
+            instructions.close_waits(conn, run_id)
+        finally:
+            conn.close()
         return Declined(reason)
 
     def _setup_comment(
@@ -5036,6 +5289,11 @@ def dispatch_instruction(repo: str, brief: str, run_id: int, title: str) -> None
         raise RuntimeError(said[-1] if said else f"ppy dispatch exited {done.returncode}")
 
 
+def _transcript_of(result: Any) -> str:
+    """A turn's transcript, from a turn result or the text a test's turn returned."""
+    return result.transcript if hasattr(result, "transcript") else str(result or "")
+
+
 def pull_request_url(worker_id: int) -> str | None:
     return latest_delivery(worker_id).get("pr_url") or None
 
@@ -5290,6 +5548,35 @@ def _worker_facts(worker: Worker | None) -> dict[str, object]:
 
 # ── running ─────────────────────────────────────────────────────────────────
 
+#: What this connection tells Papaya it does with a person's instruction, on top of
+#: the capabilities the client registers itself. Papaya routes a question with no work
+#: item (`intent: ask`) only to a connection that lists `ask` here, and this runtime
+#: answers one on the read-only `ask` path, which can approve, deliver or merge nothing.
+INSTRUCTION_INTENTS = (papaya_events.INTENT_ASK, papaya_events.INTENT_WORK)
+#: The embed builders' keyword for them. A client that predates it has none.
+EXTRA_CAPABILITIES = "extra_capabilities"
+OLD_CLIENT_CAPABILITIES = (
+    "[serve] This Papaya client cannot register extra capabilities, so Papaya will "
+    "refuse to send questions to this machine until the client is updated."
+)
+
+
+def extra_capabilities(builder: Callable[..., Any]) -> dict[str, Any]:
+    """The keyword arguments that register this runtime's own capabilities with `builder`.
+
+    Empty for a client whose builder has no such keyword: its builders take keywords
+    only and would raise on an unknown one, and a machine that still does work is worth
+    more than one that refuses to start over the questions it cannot be sent.
+    """
+    try:
+        accepts = EXTRA_CAPABILITIES in inspect.signature(builder).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if not accepts:
+        log.warning(OLD_CLIENT_CAPABILITIES)
+        return {}
+    return {EXTRA_CAPABILITIES: {"instruction_intents": list(INSTRUCTION_INTENTS)}}
+
 
 async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str, Any]):
     """The embedded listener for these options, supervised or not."""
@@ -5318,6 +5605,8 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         # whatever the config said, and it declared that to Papaya in `hello`.
         "max_concurrent": await asyncio.to_thread(configured_workers),
     }
+    builder = build_supervised_listener if options.supervised else build_listener
+    shared.update(extra_capabilities(builder))
     # `extra` is applied last throughout, so a caller holding a seam (the tests
     # hold `events_factory` and `loop_factory`) can also replace anything above it.
     if not options.supervised:
@@ -5875,7 +6164,7 @@ async def _run(
         # only way that run's lease is let go rather than left to expire.
         if built.loop.running_subjects:
             await built.loop.shutdown()
-    return 0
+    return await asyncio.to_thread(retired_status, built.supervisor, stderr=stderr)
 
 
 @dataclass
@@ -5985,7 +6274,30 @@ async def _run_standalone(
                 await background
         await manager_rounds.close()
         await watch.close()
-    return 0
+    return await asyncio.to_thread(retired_status, None, stderr=stderr)
+
+
+def retired_status(supervisor: Any, *, stderr) -> int:
+    """How a stopped serve exits: 0, or :data:`takeover.EXIT_RETIRED` if a newer start retired it.
+
+    A launcher that restarts what exits (the desktop host restarts its client, which
+    runs this serve) would otherwise start the retired serve again and retire the
+    newer one in turn. So a retired serve says so where its launcher reads: a fatal
+    ``retired`` error on the supervised protocol, naming who took over, and a status
+    of its own.
+    """
+    home = str(ppy_home().resolve())
+    if not os.path.exists(takeover.retired_path(home)):
+        return 0
+    by = takeover.retired_by(home, os.getpid(), takeover.own_started())
+    if by is None:
+        return 0
+    line = takeover.retired_line(by)
+    if supervisor is not None:
+        with contextlib.suppress(Exception):
+            supervisor.error(takeover.RETIRED_CODE, line, fatal=True)
+    _say(line, stderr=stderr)
+    return takeover.EXIT_RETIRED
 
 
 def serve(
@@ -5994,16 +6306,16 @@ def serve(
     stdout=None,
     stderr=None,
     takeover_seams: dict[str, Any] | None = None,
+    serve_seams: dict[str, Any] | None = None,
     **extra: Any,
 ) -> int:
     """Run the manager until it is told to stop. The whole of `ppy serve`.
 
     `extra` is passed straight through to the client's builders; the tests use its
     `events_factory` and `loop_factory` seams, and nothing else should.
-    `takeover_seams` reach :func:`takeover.retire` when a supervisor has to be retired.
+    `takeover_seams` reach :func:`takeover.retire` when a supervisor has to be retired;
+    `serve_seams` reach :func:`takeover.take_serve` when another serve holds this home.
     """
-    from papaya_agent_runtime.supervisor import lifeline
-
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     options = parse_args(list(argv or []))
@@ -6022,6 +6334,32 @@ def serve(
     # Logs on stderr, always: under `--supervised` stdout carries the protocol and
     # one stray log line on it is a parse error in the host.
     logging.basicConfig(stream=stderr, level=logging.INFO, format="%(message)s")
+
+    # One serve per home, before anything else: a second one listening beside this
+    # would work every ticket twice over the same state.
+    lock, status = hold_serve(stderr=stderr, seams=serve_seams)
+    if lock is None:
+        return status if status is not None else takeover.EXIT_CANNOT_START
+    try:
+        return _serve_holding(
+            options, stdout=stdout, stderr=stderr, extra=extra, takeover_seams=takeover_seams
+        )
+    finally:
+        # Every exit that runs Python lets go here; one that does not (SIGKILL) has
+        # its `flock` dropped by the kernel, and the pid it leaves reads as stale.
+        lock.release()
+
+
+def _serve_holding(
+    options: ServeOptions,
+    *,
+    stdout,
+    stderr,
+    extra: dict[str, Any],
+    takeover_seams: dict[str, Any] | None,
+) -> int:
+    """`serve` once it holds this home's serve lock: its supervisor, then the manager."""
+    from papaya_agent_runtime.supervisor import lifeline
 
     server, status = take_supervisor(stderr=stderr, seams=takeover_seams)
     if status is not None:
@@ -6067,6 +6405,50 @@ def serve(
 def _say(line: str, *, stderr) -> None:
     log.info("[serve] %s", line)
     print(f"ppy serve: {line}", file=stderr, flush=True)
+
+
+def serve_identity() -> dict[str, str]:
+    """Who this serve says it is in ``serve.json``: the Papaya connection, when there is one."""
+    try:
+        identity = papaya.identity()
+    except Exception:  # noqa: BLE001 - who we are is a label; a start must not fail on it
+        identity = None
+    if identity is None:
+        return {}
+    return {"connection_id": identity.connection_id, "agent_handle": identity.handle}
+
+
+def hold_serve(
+    *, stderr, seams: dict[str, Any] | None = None
+) -> tuple[takeover.ServeLock | None, int | None]:
+    """Take this home's serve lock, retiring the `serve` that holds it (newest wins).
+
+    Returns ``(lock, None)`` once this process holds it, having said in one line whom
+    it took over from or which crashed holder it cleared. Returns ``(None, 1)`` when
+    the holder would not let go even to SIGKILL, having said so in one sentence and
+    recorded it for the blockers ledger: two serves never run over one state.
+    Returns ``(None, 75)`` when another start won the race and is serving: said in
+    one line, and nothing recorded, because nothing is wrong.
+    `seams` are :func:`takeover.take_serve`'s keyword seams for tests.
+    """
+    home = str(ppy_home().resolve())
+    taken = takeover.take_serve(
+        home,
+        serve_identity(),
+        timeout=takeover.stop_timeout(home),
+        **(seams or {}),
+    )
+    if taken.line:
+        _say(taken.line, stderr=stderr)
+    if taken.lock is not None:
+        return taken.lock, None
+    if taken.status == takeover.EXIT_ANOTHER_START:
+        return None, takeover.EXIT_ANOTHER_START
+    pid = taken.retired_pid
+    takeover.record_start_failure(
+        home, taken.line, [f"kill -9 {pid}" if pid else "ppy supervisor stop"]
+    )
+    return None, takeover.EXIT_CANNOT_START
 
 
 def close_dead_runners_adopted() -> list[Any]:

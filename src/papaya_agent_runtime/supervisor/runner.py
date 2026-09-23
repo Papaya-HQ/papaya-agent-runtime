@@ -9,6 +9,7 @@ without a result event is a failure to be reconciled, not a silent success.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import threading
@@ -71,9 +72,16 @@ def _finalize_worktree(spec: TaskSpec, summary: str) -> Finalized:
 
 _TERMINAL_STATUS = {"completed": "worker_done", "blocked": "blocked", "failed": "failed"}
 
+#: The Papaya plugin's write-guard roots (`papaya_agent_client.write_boundary`), named
+#: here so the supervisor does not import the client to launch a worker.
+WRITE_ROOTS_ENV = "PAPAYA_ALLOWED_WORKING_DIRECTORIES"
+
 
 def worker_env(
-    base: dict[str, str] | None = None, *, task_values: dict[str, str] | None = None
+    base: dict[str, str] | None = None,
+    *,
+    task_values: dict[str, str] | None = None,
+    worktree: str | None = None,
 ) -> dict[str, str]:
     """Environment for a worker process: it can call ``ppy``, and it can install things.
 
@@ -88,6 +96,12 @@ def worker_env(
     sandbox's writable root, and it is shared rather than per-task on purpose —
     the cost being paid was re-downloading the same wheels for every dispatch, so
     a cold cache per task would give back nothing.
+
+    With ``worktree``, the Papaya plugin's write guard is pinned to exactly that
+    worktree and ``PPY_HOME``, after the task's values so nothing a repository sets
+    can widen it. Unset, the guard falls back to the connection's
+    ``allowed_working_directories`` — the runtime directory `connect` recorded — and
+    refuses every write in the worktree (seen 2026-09-22 on the owner's runtime).
     """
     from papaya_agent_runtime.manager.launch import repo_root
     from papaya_agent_runtime.paths import ppy_home, uv_cache_dir
@@ -113,6 +127,8 @@ def worker_env(
                 Path(configured).mkdir(parents=True, exist_ok=True)
     bin_dir = os.path.join(repo_root(), "bin")
     env["PATH"] = os.pathsep.join([bin_dir, env.get("PATH", "")])
+    if worktree:
+        env[WRITE_ROOTS_ENV] = json.dumps([str(worktree), str(home)])
     return env
 
 
@@ -163,6 +179,7 @@ class RunnerGuardian:
         env = worker_env(
             self.adapter.child_env() if hasattr(self.adapter, "child_env") else None,
             task_values=spec.process_env,
+            worktree=spec.worktree_path,
         )
 
         session_started = time.monotonic()

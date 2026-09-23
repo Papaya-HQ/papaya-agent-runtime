@@ -17,8 +17,13 @@ hands authentication steps back to the user.
 
 ## First run
 
-1. Run `./bin/install`. It verifies Git, uv, Python 3.12+, and warns about Node
-   and `gh`. It is idempotent and safe to rerun after a partial failure.
+1. Run `./bin/install`. It verifies Git, uv and a `python3`, and warns about Node
+   and `gh`; the interpreter the runtime runs on is the series `.python-version`
+   pins (3.13), which uv fetches when it is missing. It is idempotent and safe to
+   rerun after a partial failure. Linux and macOS run natively; Windows only inside
+   WSL2 (the runtime needs `fcntl`). For a machine with no desktop app — a server,
+   SSH, WSL2 — the whole procedure, including keeping `ppy serve` running, is the
+   README's "Run it on a machine without the app"; follow and link it, don't restate it.
 2. Run `ppy doctor` (or `ppy doctor --json`). Read the harness, requirement, and
    companion-tool sections.
 3. If a harness is installed but unauthenticated, hand the exact login step to
@@ -46,7 +51,10 @@ hands authentication steps back to the user.
    with a timeout of at least ten minutes: it installs the client when there is none
    (`npx papaya-agent`, or `uv` on a machine without Node), opens a sign-in link, pins
    the machine and installs the harness plugin; their only step is clicking Approve.
-   Relay the link it prints. If it exits listing several workspaces or agents, ask the
+   Relay the link it prints; on a machine with no browser, add `--device` so they
+   approve a code from another device, choosing the workspace and agent in the Papaya
+   app as they approve (`--workspace`/`--agent` are ignored with `--device`). If the
+   browser flow exits listing several workspaces or agents, ask the
    person which in the conversation and re-run with `--workspace`/`--agent`; if it says
    there is neither Node nor `uv`, tell them which to install. Then `ppy papaya tools`
    and `/mcp`.

@@ -104,6 +104,39 @@ TEN_MINUTE_RULE = (
     "use `ppy gate run`, or push and let the hook run it. Never background a gate and wait."
 )
 
+#: What an instruction's turns are told about its `MI-<n>`: an internal id, never said to
+#: the person (a reply once read "(MI-1, "What are you working on right now?")"). The
+#: instruction and answer prompts carry it verbatim; `instructions.for_person` also takes
+#: any that slips through out of what is posted.
+NO_REQUEST_ID_RULE = (
+    "Never name the request's `MI-<n>` to the person: it is an internal id. Call it "
+    '"your question", "your request", or by its title.'
+)
+
+#: What a review turn on a person's request (an instruction, not a work item) is told
+#: about its answer. The runtime posts it at the origin with the pull request after
+#: it; the worker's closeout never reaches the person (2026-09-23: a raw closeout with
+#: a SHA, a branch, an evidence path and another request's id did).
+INSTRUCTION_SUMMARY_RULE = (
+    "There is no work item: the person who asked reads your answer where they asked. "
+    "When you approve and deliver, end your turn with an `OUTCOME: done` block of two to "
+    "four short sentences written for them: what changed and what the tests show. No "
+    "branch names, commit SHAs, evidence paths or worker task ids, and do not paste the "
+    "worker's report. Do not name the pull request: the runtime adds its link after your "
+    "words. " + NO_REQUEST_ID_RULE
+)
+
+#: What the instruction turn is told when a worker finished with nothing to review (an
+#: investigation, a spike that found rather than built): its report is data, and the
+#: answer to the person is this turn's to write.
+FINDINGS_SUMMARY_RULE = (
+    "The worker finished and changed nothing; its report is above. Do not start, steer "
+    "or stop any work. End your turn with an `OUTCOME: done` block written for the "
+    "person who asked: what was found and what you propose, in a few plain sentences. "
+    "No branch names, commit SHAs, evidence paths or worker task ids, and do not paste "
+    "the worker's report. " + NO_REQUEST_ID_RULE
+)
+
 #: The rule every brief, environment block and command-rules block gives a worker
 #: about when its work reaches the remote. A worker once held two hours of finished
 #: work in its worktree for one commit after a green full suite, and a restart would
@@ -264,6 +297,9 @@ __all__ = [
     "INSTRUCTION",
     "LEDGER",
     "MEMORY_RULE",
+    "NO_REQUEST_ID_RULE",
+    "INSTRUCTION_SUMMARY_RULE",
+    "FINDINGS_SUMMARY_RULE",
     "REPOSITORY_CANNOT_TELL",
     "REPOSITORY_PREFIX",
     "REPO_CHOICE",

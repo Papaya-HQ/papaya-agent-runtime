@@ -87,15 +87,20 @@ ELLIPSIS = "…"
 # ── strings, as the wire takes them ─────────────────────────────────────────
 
 
-def clean(text: object, limit: int, *, fallback: str = "-") -> str:
+def clean(text: object, limit: int, *, fallback: str = "-", own: str | None = None) -> str:
     """``text`` redacted, on one line, and cut to ``limit`` characters with an ellipsis.
 
     Never empty: the wire refuses an empty required string, so ``fallback`` stands
     in for one. Cutting is this side's job; a body is never refused locally.
-    """
-    from papaya_agent_runtime import blockers
 
-    one = " ".join(blockers.redact(str(text or "")).split())
+    No `MI-<n>` either: a request's id is internal, and the hosted agent reads this
+    snapshot to a person and quoted it (2026-09-23). A request is named by its title;
+    ``own`` is the request the row is about, whose id reads "this request", and a
+    sentence about any other request is dropped (`instructions.without_ids`).
+    """
+    from papaya_agent_runtime import blockers, instructions
+
+    one = " ".join(instructions.without_ids(blockers.redact(str(text or "")), own).split())
     if not one:
         one = fallback
     return one if len(one) <= limit else one[: limit - 1].rstrip() + ELLIPSIS
@@ -172,17 +177,49 @@ def _run_env(conn: sqlite3.Connection, run_id: int, key: str) -> str:
     return str(row[0]) if row is not None and row[0] else ""
 
 
+def _about_request(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
+    """A request a person sent this machine: by its ticket's task, never its `MI-<n>`.
+
+    The wire's `short_id` is an identifier ("the identifier a person reads and says",
+    `SnapshotAbout`), not a title: the request's title is the row's `title`. Its
+    `MI-<n>` is internal (quoted to a person by the hosted agent, 2026-09-23), so the
+    identifier is the ticket's task, as every other row's `ref` is.
+    """
+    from papaya_agent_runtime import instructions
+
+    row = conn.execute(
+        "SELECT tasks.id FROM tasks JOIN task_env ON task_env.task_id = tasks.id "
+        "WHERE tasks.run_id = ? AND task_env.key = ? ORDER BY tasks.id LIMIT 1",
+        (run_id, instructions.INSTRUCTION_KEY),
+    ).fetchone()
+    return {
+        "kind": "machine_instruction",
+        "short_id": clean(f"task-{int(row['id'])}" if row is not None else "", SHORT_ID_MAX),
+        "url": None,
+    }
+
+
+def _request_of(conn: sqlite3.Connection, run_id: int) -> str | None:
+    """The `MI-<n>` of the request a run works, if one: what its rows' own id is."""
+    from papaya_agent_runtime import instructions
+
+    return _run_env(conn, run_id, instructions.INSTRUCTION_KEY) or None
+
+
+def _request_of_task(conn: sqlite3.Connection, task_id: object) -> str | None:
+    if task_id is None:
+        return None
+    row = conn.execute("SELECT run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return _request_of(conn, int(row["run_id"])) if row is not None else None
+
+
 def about(conn: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     """What a task in ``run_id`` is for: its ticket's work item, or its instruction."""
     from papaya_agent_runtime import instructions, papaya_events
 
     short = _run_env(conn, run_id, instructions.INSTRUCTION_KEY)
     if short:
-        return {
-            "kind": "machine_instruction",
-            "short_id": clean(short, SHORT_ID_MAX),
-            "url": None,
-        }
+        return _about_request(conn, run_id)
     key = _run_env(conn, run_id, papaya_events.WORK_ITEM_KEY)
     item = ""
     metadata = _run_env(conn, run_id, papaya_events.PAPAYA_EVENT_METADATA)
@@ -226,7 +263,7 @@ def _in_flight(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
         found.append(
             {
                 "ref": clean(f"task-{int(row['id'])}", REF_MAX),
-                "title": clean(row["title"], TITLE_MAX),
+                "title": clean(row["title"], TITLE_MAX, own=_request_of(conn, int(row["run_id"]))),
                 "about": about(conn, int(row["run_id"])),
                 "phase": clean(phase, PHASE_MAX),
                 "since": stamp(row["updated_at"] or row["created_at"], now),
@@ -238,13 +275,9 @@ def _in_flight(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
             continue
         found.append(
             {
-                "ref": clean(ticket["short_id"], REF_MAX),
-                "title": clean(ticket["title"], TITLE_MAX),
-                "about": {
-                    "kind": "machine_instruction",
-                    "short_id": clean(ticket["short_id"], SHORT_ID_MAX),
-                    "url": None,
-                },
+                "ref": clean(f"task-{ticket['task_id']}", REF_MAX),
+                "title": clean(ticket["title"], TITLE_MAX, own=ticket["short_id"]),
+                "about": _about_request(conn, int(ticket["run_id"])),
                 "phase": clean(ticket["phase"], PHASE_MAX),
                 "since": stamp(ticket["since"], now),
             }
@@ -311,7 +344,7 @@ def _needs_you(
             {
                 "kind": kind,
                 "ref": clean(ref, REF_MAX),
-                "text": clean(ask.text, TEXT_MAX),
+                "text": clean(ask.text, TEXT_MAX, own=_request_of_task(conn, ask.task_id)),
                 "how": clean(how_for(kind, ask.key, pr=pr, merge_allowed=merge_allowed), HOW_MAX),
                 "since": stamp(ask.since, now),
             }
@@ -341,7 +374,7 @@ def _blocked(conn: sqlite3.Connection, now: datetime, blockers_now: list[dict[st
             {
                 "kind": "blocker",
                 "ref": clean(f"todo-{int(row['id'])}", REF_MAX),
-                "text": clean(row["text"], TEXT_MAX),
+                "text": clean(row["text"], TEXT_MAX, own=_request_of_task(conn, row["task_id"])),
                 "how": clean(f"Waiting on {row['blocked_on']}; nothing for you yet", HOW_MAX),
                 "since": stamp(row["created_at"], now),
             }
@@ -357,7 +390,11 @@ def _blocked(conn: sqlite3.Connection, now: datetime, blockers_now: list[dict[st
             {
                 "kind": "question" if status == "blocked" else "blocker",
                 "ref": clean(f"task-{int(row['id'])}", REF_MAX),
-                "text": clean(f"{row['title']} ({status.replace('_', ' ')})", TEXT_MAX),
+                "text": clean(
+                    f"{row['title']} ({status.replace('_', ' ')})",
+                    TEXT_MAX,
+                    own=_request_of_task(conn, row["id"]),
+                ),
                 "how": clean(
                     f"The manager is taking it up; send me: what is task {int(row['id'])} "
                     "waiting on?",
@@ -390,7 +427,7 @@ def _recently_finished(conn: sqlite3.Connection, now: datetime) -> list[dict[str
         found.append(
             {
                 "ref": clean(f"task-{int(row['id'])}", REF_MAX),
-                "title": clean(row["title"], TITLE_MAX),
+                "title": clean(row["title"], TITLE_MAX, own=_request_of_task(conn, row["id"])),
                 "outcome": clean(outcome, TITLE_MAX),
                 "url": url_or_none(url),
                 "at": stamp(row["merged_at"] or row["updated_at"], now),
@@ -399,8 +436,8 @@ def _recently_finished(conn: sqlite3.Connection, now: datetime) -> list[dict[str
     for done in instructions.finished_tickets(conn, limit=FINISHED_MAX):
         found.append(
             {
-                "ref": clean(done["short_id"], REF_MAX),
-                "title": clean(done["title"], TITLE_MAX),
+                "ref": clean(f"task-{done['task_id']}", REF_MAX),
+                "title": clean(done["title"], TITLE_MAX, own=done["short_id"]),
                 "outcome": clean(done["outcome"], TITLE_MAX),
                 "url": url_or_none(done.get("url")),
                 "at": stamp(done["at"], now),

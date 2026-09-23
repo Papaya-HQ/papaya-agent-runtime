@@ -560,6 +560,10 @@ CHOICE_ALLOWED: dict[str, frozenset[str] | None] = {
 _ALLOWED = {ANSWER: ANSWER_ALLOWED, ASK: ASK_ALLOWED, CHOICE: CHOICE_ALLOWED}
 #: The work path's refusals: everything today's turns run, except approving a capability.
 WORK_REFUSED: frozenset[tuple[str, str]] = frozenset({("capability", "approve")})
+#: Commands the harness runs, not the turn: `.claude/settings.json` calls `ppy hook
+#: session-start|stop|session-end` in every turn, and a refused hook fails the turn
+#: whatever it answered. Never refused on any path.
+HARNESS_COMMANDS = frozenset({"hook"})
 
 
 def _words(argv: list[str]) -> list[str]:
@@ -575,6 +579,8 @@ def command_refusal(
     words = _words(list(argv))
     command = words[0] if words else ""
     sub = words[1] if len(words) > 1 else ""
+    if command in HARNESS_COMMANDS:
+        return None
     if command == "stack" and sub == "merge":
         if merge_allowed is None:
             from papaya_agent_runtime import machine_status
@@ -646,7 +652,8 @@ def compose_brief(instruction: papaya_events.Instruction, repo: str) -> str:
     requester = instruction.requester
     ident = str(who.get("id") or "").strip()
     origin = "a channel thread" if instruction.origin.get("kind") == "channel" else "a DM"
-    return f"""# {instruction.short_id}: {title}
+    # No `MI-<n>` anywhere in it: the brief's words reach the pull request a person reads.
+    return f"""# {title}
 
 ## Goals
 1. Do what the instruction below asks, in `{repo}` and nowhere else.
@@ -674,7 +681,7 @@ Pre-authorised adjacent changes: none beyond what the instruction names.
 {references}
 
 ## Requested by
-{requester}{f" (Papaya user {ident})" if ident else ""}, as {instruction.short_id}.
+{requester}{f" (Papaya user {ident})" if ident else ""}.
 
 ## Your agent's standing instructions
 The agent you work for has standing instructions (its persona). Follow them where they
@@ -703,6 +710,38 @@ class Outcome:
     status: str
     text: str
     also_sent: str = ""
+
+
+#: How long a summary the runtime posts for a turn may be.
+SUMMARY_MAX = 1200
+#: What a summary for a person never carries: a commit SHA, a worker's branch, an
+#: evidence path, an absolute file path. A summary with one is the worker's report
+#: leaking through, and the runtime's own sentence is posted instead.
+_NOT_FOR_A_PERSON = (
+    # A SHA has a digit and a letter: a date or a long number is not one.
+    re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"),
+    re.compile(r"\bppy/task-\S+"),
+    re.compile(r"\.ppy-evidence\S*"),
+    # A file path, not an API route (`/api/v1/...`) or a link's path.
+    re.compile(r"(?<![\w.:/~-])/(?!api/)[\w.-]+/[\w./-]+"),
+)
+
+
+def person_summary(outcome: Outcome | None) -> Outcome | None:
+    """A turn's `OUTCOME:` block as the person may read it, or ``None`` to fall back.
+
+    Cut to :data:`SUMMARY_MAX`; refused outright when it carries anything from
+    :data:`_NOT_FOR_A_PERSON`. Its status (`done` or `failed`) is kept either way by
+    the caller, from the block itself.
+    """
+    if outcome is None or not outcome.text.strip():
+        return None
+    if any(pattern.search(outcome.text) for pattern in _NOT_FOR_A_PERSON):
+        return None
+    text = outcome.text.strip()
+    if len(text) > SUMMARY_MAX:
+        text = text[: SUMMARY_MAX - 1].rstrip() + "…"
+    return replace(outcome, text=text)
 
 
 def outcome_of(transcript: str) -> Outcome | None:
@@ -763,6 +802,99 @@ def reply_text(
     return main[:room].rstrip() + "…" + where
 
 
+#: An instruction's internal id (`MI-<n>`), bare; and a label at the very start of a text.
+_REQUEST_ID = re.compile(r"\bMI-\d+\b")
+_LEADING_LABEL = re.compile(r"^\s*MI-\d+:\s+")
+
+
+def request_title(instruction: papaya_events.Instruction, limit: int = 120) -> str:
+    """The request's own title, on one line: what a task, a pull request and the status
+    report call it. Never its `MI-<n>`, which a person never sees."""
+    title = " ".join(without_ids(instruction.title or instruction.text).split())
+    return title[:limit] or "A request sent to this machine"
+
+
+def named(instruction: papaya_events.Instruction) -> str:
+    """How a line the runtime writes names the request to the person: its title, quoted."""
+    title = " ".join(str(instruction.title or instruction.text or "").split())
+    if not title:
+        return "your request"
+    return f'"{title[:77]}…"' if len(title) > 80 else f'"{title}"'
+
+
+#: Where one sentence ends and the next begins: a stop, then space.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])(\s+)")
+
+
+def _without_other_requests(line: str, own: str) -> str:
+    """``line`` with every sentence that names another request's id dropped."""
+    if all(ident == own for ident in _REQUEST_ID.findall(line)):
+        return line
+    parts = _SENTENCE_BREAK.split(line)
+    # Sentences at even indexes, the space after each at the odd index that follows.
+    kept = []
+    for index in range(0, len(parts), 2):
+        sentence = parts[index]
+        if any(ident != own for ident in _REQUEST_ID.findall(sentence)):
+            continue
+        kept.append(sentence + (parts[index + 1] if index + 1 < len(parts) else ""))
+    return "".join(kept).rstrip()
+
+
+def _scrub(text: str, own: str, own_word: str) -> str:
+    """``text`` with ``own``'s label dropped, its id read as ``own_word``, and every
+    sentence naming another request dropped whole. ``own`` empty: a label at the very
+    start is the text's own (a ticket title recorded as `MI-4: ...`)."""
+    label = re.compile(rf"\b{re.escape(own)}:\s+") if own else _LEADING_LABEL
+    text = label.sub("", str(text or ""))
+    lines = [_without_other_requests(line, own) for line in text.split("\n")]
+    # A paragraph that was nothing but another request's sentences leaves no gap behind.
+    kept = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    return re.sub(rf"\b{re.escape(own)}\b", own_word, kept) if own else kept
+
+
+#: What is posted when everything a turn wrote was about other requests.
+ONLY_OTHER_REQUESTS = (
+    "I couldn't say that here without naming another request's internal id; ask me "
+    "about that one by its title."
+)
+
+
+def for_person(
+    text: str, instruction: papaya_events.Instruction, *, allow_empty: bool = False
+) -> str:
+    """``text`` as it may be posted where the person asked: no `MI-<n>` in it.
+
+    The id is internal; the person never typed it and Papaya does not show it in the
+    conversation. This request's own label (`MI-42: What are you working on?`) is
+    dropped and the title kept; its own id elsewhere becomes "your request". Any other
+    request's label or id marks its sentence as about another request, and that
+    sentence is dropped whole: it is not this person's business here, and a noun
+    swapped into the middle of a worker's sentence reads as nonsense ("another request
+    write guard did not block this worktree", 2026-09-23). The turns are told the same
+    (`prompts.NO_REQUEST_ID_RULE`); this is what holds when a turn does not listen.
+
+    Never empty unless ``allow_empty`` (a progress line that is only about another
+    request is not said at all): an answer that was only about other requests becomes
+    :data:`ONLY_OTHER_REQUESTS`.
+    """
+    kept = _scrub(text, str(instruction.short_id or ""), "your request")
+    if kept or allow_empty or not str(text or "").strip():
+        return kept
+    return ONLY_OTHER_REQUESTS
+
+
+def without_ids(text: str, own: str | None = None) -> str:
+    """``text`` with no `MI-<n>` in it, for what no single conversation carries.
+
+    A pull request, the published status report. ``own`` is the request the text is
+    about, when known: its label is dropped and its id reads "this request". Any other
+    request's sentence is dropped whole, as :func:`for_person` does. May be empty; the
+    caller has its own fallback.
+    """
+    return _scrub(text, str(own or ""), "this request")
+
+
 # ── the ticket on the ledger ────────────────────────────────────────────────
 
 
@@ -797,8 +929,7 @@ def record_ticket(
     existing = ticket_for(conn, instruction.subject)
     if existing is not None:
         return int(existing["id"]), int(existing["run_id"]), True
-    title = f"{instruction.short_id}: {instruction.title or instruction.text}"
-    title = " ".join(title.split())[:200]
+    title = request_title(instruction, 200)
     repo = store.get_repo(conn, repo_name) if repo_name else None
     run_id = store.create_run(conn, title)
     task_id = store.add_task(
@@ -898,6 +1029,61 @@ def _tickets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 #: Phases after which an instruction ticket is not being worked.
 _ENDED = ("declined", "handed_back", "released", "reported", "done", "stalled")
+#: The phases a hold is in while it works: a ticket still in one when its process is
+#: gone was lost to a crash.
+_HOLDING = ("picked_up", "briefing", "dispatched", "blocked", "reviewing", "delivering")
+
+#: The detail on a `released` phase that says this process shut down under the hold (the
+#: listener cancelled it). A `released` without it is a lost lease — Papaya took the
+#: request back, or a person released it in the app — and is never taken back up.
+SHUTDOWN = "shutdown"
+
+
+def released_at_shutdown(conn: sqlite3.Connection, task_id: int) -> bool:
+    row = conn.execute(
+        "SELECT payload FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, store.TICKET_PHASE_EVENT),
+    ).fetchone()
+    payload = _payload(row) if row is not None else {}
+    return payload.get("phase") == "released" and payload.get("detail") == SHUTDOWN
+
+
+#: A hold began on the ticket; the client stopped a hold on it (its lease was lost, a
+#: person released it, it was handed back). The newer of the two says whether the
+#: ticket was let go, whatever phase a crash left it in.
+HELD = "instruction_held"
+LEASE_LOST = "instruction_lease_lost"
+
+
+def record_held(conn: sqlite3.Connection, task_id: int) -> None:
+    _event(conn, task_id, HELD, {})
+
+
+def record_lease_lost(conn: sqlite3.Connection, task_id: int) -> None:
+    _event(conn, task_id, LEASE_LOST, {})
+
+
+def _let_go(conn: sqlite3.Connection, task_id: int) -> bool:
+    row = _newest(conn, task_id, (HELD, LEASE_LOST))
+    return row is not None and row["kind"] == LEASE_LOST
+
+
+def live(conn: sqlite3.Connection, task_id: int) -> bool:
+    """Is this request still this machine's to answer? Not answered, not over, and not
+    let go: a hold is on it, or this process lost it to its own shutdown or a crash.
+
+    What the rounds take back up after a restart (`rounds.unfinished_instructions`)
+    and what an ask may be said at the origin for (`outreach.instruction_ticket_of`).
+    A lost lease recorded since the last hold began is a release, even when a crash
+    kept the hold from writing its `released`.
+    """
+    if stage(conn, task_id) != "new" or _let_go(conn, task_id):
+        return False
+    row = conn.execute("SELECT phase FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    phase = row["phase"] if row is not None else None
+    if phase in _HOLDING:
+        return True
+    return phase == "released" and released_at_shutdown(conn, task_id)
 
 
 def open_tickets(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -935,6 +1121,7 @@ def finished_tickets(conn: sqlite3.Connection, *, limit: int = 10) -> list[dict[
         payload = _payload(replied)
         found.append(
             {
+                "task_id": int(row["id"]),
                 "short_id": str(row["short_id"]),
                 "title": str(row["title"]),
                 "outcome": "answered" if payload.get("status") == "done" else "could not answer",
@@ -1019,6 +1206,7 @@ def answer(
     """
     post = post or papaya_events.post_instruction_reply
     report = report or papaya_events.report_instruction_result
+    text = for_person(text, instruction)
     message_id: str | None = None
     error = ""
     replied = False
@@ -1106,6 +1294,71 @@ def recover(
     return lines
 
 
+# ── said once, and what the ticket still waits on ───────────────────────────
+
+#: A progress line said at an instruction's origin, by its key: what a hold that comes
+#: back after a restart reads so it does not say the same thing twice.
+SAID = "instruction_said"
+
+
+def record_said(conn: sqlite3.Connection, task_id: int, key: str) -> None:
+    _event(conn, task_id, SAID, {"key": key})
+
+
+def said_before(conn: sqlite3.Connection, task_id: int, key: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE task_id = ? AND kind = ? "
+        "AND json_extract(payload, '$.key') = ? LIMIT 1",
+        (task_id, SAID, key),
+    ).fetchone()
+    return row is not None
+
+
+def last_said(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """The key of the last progress line said for this ticket, or ``None``."""
+    row = _newest(conn, task_id, (SAID,))
+    if row is None:
+        return None
+    return str(_payload(row).get("key") or "") or None
+
+
+def _waits(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    """The open todos that say something in this run is blocked or waits on someone."""
+    return conn.execute(
+        "SELECT todos.id, todos.text FROM todos JOIN tasks ON tasks.id = todos.task_id "
+        "WHERE tasks.run_id = ? AND todos.status = 'open' "
+        "AND todos.blocked_on IS NOT NULL AND todos.blocked_on != '' ORDER BY todos.id",
+        (run_id,),
+    ).fetchall()
+
+
+def open_waits(conn: sqlite3.Connection, run_id: int) -> list[str]:
+    return [" ".join(str(row["text"]).split()) for row in _waits(conn, run_id)]
+
+
+def close_waits(conn: sqlite3.Connection, run_id: int) -> int:
+    """Close what this run was blocked on or waiting for: its request is over.
+
+    A blocker recorded while the request ran does not outlive it. Left open it is read
+    again by outreach and by the published status report, long after it stopped being
+    true (MI-3's block, 2026-09-23).
+    """
+    from papaya_agent_runtime import board
+
+    rows = _waits(conn, run_id)
+    for row in rows:
+        board.done(int(row["id"]), conn=conn)
+    return len(rows)
+
+
+def not_finished(instruction: papaya_events.Instruction, why: str, waits: list[str]) -> str:
+    """What the person is told when their request cannot be picked back up."""
+    text = f"I couldn't finish {named(instruction)}: {why}."
+    if waits:
+        text += f" It was waiting on: {'; '.join(w.rstrip('.') for w in waits)}."
+    return text + " Send it again if you still want it done."
+
+
 def repo_refs(conn: sqlite3.Connection) -> list[RepoRef]:
     return [RepoRef(str(row["name"]), str(row["origin"] or "")) for row in store.list_repos(conn)]
 
@@ -1123,6 +1376,7 @@ __all__ = [
     "CLASSIFIED",
     "Classification",
     "EMPTY_QUESTION",
+    "HARNESS_COMMANDS",
     "INSTRUCTION",
     "INSTRUCTION_KEY",
     "INSTRUCTION_SUBJECT",
@@ -1147,12 +1401,33 @@ __all__ = [
     "chosen",
     "chosen_repository",
     "classify",
+    "close_waits",
+    "HELD",
+    "LEASE_LOST",
+    "record_held",
+    "record_lease_lost",
+    "live",
+    "ONLY_OTHER_REQUESTS",
+    "person_summary",
+    "released_at_shutdown",
+    "SHUTDOWN",
+    "SUMMARY_MAX",
+    "last_said",
+    "not_finished",
+    "open_waits",
+    "record_said",
+    "request_title",
+    "SAID",
+    "said_before",
+    "without_ids",
     "command_refusal",
     "compose_brief",
     "finished_tickets",
     "first_note",
+    "for_person",
     "instruction_of",
     "mark_worker",
+    "named",
     "on_it",
     "open_tickets",
     "outcome_of",
