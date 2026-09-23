@@ -487,6 +487,22 @@ quietly; do not narrate the steps or report diagnostics.
    repaired by the next `ppy serve` start (or `ppy env sync` now). `ppy supervisor stop`,
    `status`, `version`, `doctor` and `blockers` work even when the environment is
    broken or a sync would be refused.
+
+   **One `serve` per home, and the newest start wins.** A `serve` holds
+   `<PPY_HOME>/run/serve.lock` for its whole life; `run/serve.json` names its pid,
+   connection id, agent handle and start time. A second `ppy serve` on the same home —
+   from the desktop app or a terminal, connected as any agent — retires the running
+   one before it does anything else: asks it to stop (over the supervisor socket when
+   it owns the supervisor), waits `supervisor.stop_timeout`, then SIGTERM, then
+   SIGKILL, and says "Took over from the runtime connected as @<handle> (pid N)." Its
+   held tickets are left `released` for the rounds' reclaim, its workers recorded
+   stopped with their sessions kept, exactly as a supervisor retire leaves them. The
+   owner switches agents by starting `ppy serve` again, which is why the newest wins
+   and why nothing (no launchd `KeepAlive`) restarts the old one. A lock whose pid is
+   gone is taken with one line. A start that cannot retire the holder exits 1 with one
+   sentence and a `serve_cannot_start` blocker, and never runs beside it: two serves
+   over one state work every ticket twice and hand tickets to themselves
+   (2026-09-22). One runtime per `PPY_HOME`; separate homes are separate runtimes.
 4. **Missing prerequisites you can't fix.** A few things need the user: `uv`,
    `git`, Node, `gh`, and a signed-in harness (`claude` / `codex`). If one is
    genuinely missing, that's the *one* time preflight speaks up — name the single

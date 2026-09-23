@@ -474,6 +474,230 @@ def retire(
     return Retired(True, line, stopped)
 
 
+# ── one serve per home ─────────────────────────────────────────────────────
+#
+# On 2026-09-22 a `ppy serve` started from a terminal ran beside the one the desktop
+# app had started, over one state database: the second adopted the first's
+# supervisor, both listened, and for seven hours the machine worked every ticket
+# twice and handed tickets over to itself. The supervisor lock makes the supervisor
+# single; this lock makes `serve` single. A `serve` takes ``<PPY_HOME>/run/serve.lock``
+# before anything else and holds it for its whole life — the kernel drops a `flock`
+# however the process ends, SIGKILL included. The newest start wins: the owner
+# switches agents by starting `ppy serve` again, so a second start retires the
+# running one (whatever agent it is connected as) rather than giving way to it.
+
+
+def serve_lock_path(home: str) -> str:
+    return os.path.join(home, "run", "serve.lock")
+
+
+def serve_record_path(home: str) -> str:
+    return os.path.join(home, "run", "serve.json")
+
+
+def read_serve_record(home: str) -> dict[str, Any] | None:
+    try:
+        with open(serve_record_path(home), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def runtime_label(record: dict[str, Any] | None) -> str:
+    """ "the runtime connected as @handle", or as much of that as the record knows."""
+    handle = str((record or {}).get("agent_handle") or "").lstrip("@")
+    return f"the runtime connected as @{handle}" if handle else "the runtime"
+
+
+@dataclass
+class ServeLock:
+    """This process's hold on ``serve.lock``, and the ``serve.json`` that says who holds it."""
+
+    home: str
+    fd: int
+    pid: int
+
+    def release(self) -> None:
+        """Let go: the record if it is still ours, the pid in the lock file, the lock."""
+        if self.fd < 0:
+            return
+        record = read_serve_record(self.home)
+        if record is not None and record.get("pid") == self.pid:
+            with contextlib.suppress(OSError):
+                os.unlink(serve_record_path(self.home))
+        # An orderly exit leaves no pid behind, so the next start does not call it a crash.
+        with contextlib.suppress(OSError):
+            os.ftruncate(self.fd, 0)
+        with contextlib.suppress(OSError):
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(self.fd)
+        self.fd = -1
+
+
+def _try_serve_lock(home: str) -> tuple[int, int | None] | None:
+    """The lock's fd and the pid a previous holder left in it, or None while it is held."""
+    path = serve_lock_path(home)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # O_CLOEXEC: a worker or turn this serve starts must not inherit the lock and
+    # keep it after the serve has gone.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    left = _read_pid(path)
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, str(os.getpid()).encode(), 0)
+    return fd, left
+
+
+def _write_serve_record(home: str, identity: dict[str, str]) -> None:
+    _write_json(
+        serve_record_path(home),
+        {
+            "pid": os.getpid(),
+            "connection_id": identity.get("connection_id") or "",
+            "agent_handle": (identity.get("agent_handle") or "").lstrip("@"),
+            "started_at": _now(),
+        },
+    )
+
+
+def serve_holder_pid(home: str) -> int | None:
+    """The pid holding ``serve.lock``: the lock file names it, ``serve.json`` as a fallback."""
+    pid = _read_pid(serve_lock_path(home))
+    if pid:
+        return pid
+    record = read_serve_record(home) or {}
+    return record.get("pid") if isinstance(record.get("pid"), int) else None
+
+
+@dataclass
+class ServeTaken:
+    """What :func:`take_serve` did: the lock (None when it could not), and its one line."""
+
+    lock: ServeLock | None
+    line: str = ""
+    #: The pid that held the lock and had to be sent a signal or asked to stop.
+    retired_pid: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.lock is not None
+
+
+def take_serve(
+    home: str,
+    identity: dict[str, str] | None = None,
+    *,
+    timeout: float,
+    grace: float = SIGNAL_GRACE_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    kill: Callable[[int, int], None] = os.kill,
+    shutdown: Callable[[str], bool] = request_shutdown,
+    own_pid: int | None = None,
+) -> ServeTaken:
+    """Take this home's serve lock, retiring whichever `serve` holds it.
+
+    Free, it is taken with no line. Left by a pid that is no longer running, it is
+    taken with one line. Held, the holder is asked to stop the way a supervisor
+    retire asks (the supervisor socket's `shutdown`, when that serve owns the
+    supervisor: its listener stops, its workers are recorded stopped with their
+    sessions kept, and its tickets are left for the rounds' reclaim), then sent
+    SIGTERM — `serve`'s own orderly stop — then SIGKILL, each with a bounded wait.
+    Between every step this tries to take the lock rather than merely looking at
+    it, so two starts racing each other end with exactly one holder. A holder that
+    survives all of it leaves ``lock`` None and a one-sentence ``line``.
+
+    ``timeout`` is ``supervisor.stop_timeout``: what an orderly stop may take.
+    ``own_pid`` is for tests, whose holder is often the test process itself: this
+    never signals its own pid.
+    """
+    identity = identity or {}
+    own = os.getpid() if own_pid is None else own_pid
+
+    def taken(result: tuple[int, int | None]) -> ServeLock:
+        _write_serve_record(home, identity)
+        return ServeLock(home, result[0], os.getpid())
+
+    first = _try_serve_lock(home)
+    if first is not None:
+        left = first[1]
+        if left and left != os.getpid() and not pid_alive(left):
+            stale = runtime_label(read_serve_record_of(home, left))
+            return ServeTaken(
+                taken(first),
+                f"took the serve lock from pid {left} ({stale}), which is no longer running",
+            )
+        return ServeTaken(taken(first))
+
+    how: list[str] = []
+    got: tuple[int, int | None] | None = None
+
+    def wait(seconds: float) -> bool:
+        nonlocal got
+        deadline = clock() + seconds
+        while True:
+            got = _try_serve_lock(home)
+            if got is not None:
+                return True
+            if clock() >= deadline:
+                return False
+            sleep(0.1)
+
+    # A holder that has only just taken the lock may not have written its pid yet.
+    pid = serve_holder_pid(home)
+    if pid is None and not wait(min(grace, 2.0)):
+        pid = serve_holder_pid(home)
+    record = read_serve_record_of(home, pid) if pid else None
+    if got is None:
+        supervisor = read_record(home) or {}
+        asked = False
+        if pid is not None and supervisor.get("pid") == pid:
+            asked = shutdown(supervisor.get("socket") or default_socket_path(home))
+            if asked:
+                how.append("asked it to stop")
+        if not (asked and wait(timeout + 5.0)):
+            for sig, name, seconds in (
+                (signal.SIGTERM, "SIGTERM", grace if asked else timeout + 5.0),
+                (signal.SIGKILL, "SIGKILL", grace),
+            ):
+                if pid is None or pid == own:
+                    wait(grace)
+                    break
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    kill(pid, sig)
+                how.append(f"sent {name}")
+                if wait(seconds):
+                    break
+    who = runtime_label(record)
+    if got is None:
+        named = f"pid {pid}" if pid else "a process this runtime cannot name"
+        return ServeTaken(
+            None,
+            f"cannot start: {who} ({named}) still holds {serve_lock_path(home)} after "
+            + (", ".join(how) or "waiting for it to let go")
+            + "; stop it (`kill -9 "
+            + (str(pid) if pid else "<pid>")
+            + "`) and start `ppy serve` again",
+            retired_pid=pid,
+        )
+    line = f"Took over from {who}" + (f" (pid {pid})." if pid else ".")
+    if "sent SIGKILL" in how:
+        line = line[:-1] + "; it did not stop until SIGKILL."
+    return ServeTaken(taken(got), line, retired_pid=pid)
+
+
+def read_serve_record_of(home: str, pid: int) -> dict[str, Any] | None:
+    """``serve.json`` if it is ``pid``'s."""
+    record = read_serve_record(home)
+    return record if record is not None and record.get("pid") == pid else None
+
+
 # ── when it cannot start ───────────────────────────────────────────────────
 
 

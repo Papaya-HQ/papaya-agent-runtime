@@ -5994,16 +5994,16 @@ def serve(
     stdout=None,
     stderr=None,
     takeover_seams: dict[str, Any] | None = None,
+    serve_seams: dict[str, Any] | None = None,
     **extra: Any,
 ) -> int:
     """Run the manager until it is told to stop. The whole of `ppy serve`.
 
     `extra` is passed straight through to the client's builders; the tests use its
     `events_factory` and `loop_factory` seams, and nothing else should.
-    `takeover_seams` reach :func:`takeover.retire` when a supervisor has to be retired.
+    `takeover_seams` reach :func:`takeover.retire` when a supervisor has to be retired;
+    `serve_seams` reach :func:`takeover.take_serve` when another serve holds this home.
     """
-    from papaya_agent_runtime.supervisor import lifeline
-
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     options = parse_args(list(argv or []))
@@ -6022,6 +6022,32 @@ def serve(
     # Logs on stderr, always: under `--supervised` stdout carries the protocol and
     # one stray log line on it is a parse error in the host.
     logging.basicConfig(stream=stderr, level=logging.INFO, format="%(message)s")
+
+    # One serve per home, before anything else: a second one listening beside this
+    # would work every ticket twice over the same state.
+    lock, status = hold_serve(stderr=stderr, seams=serve_seams)
+    if lock is None:
+        return status if status is not None else takeover.EXIT_CANNOT_START
+    try:
+        return _serve_holding(
+            options, stdout=stdout, stderr=stderr, extra=extra, takeover_seams=takeover_seams
+        )
+    finally:
+        # Every exit that runs Python lets go here; one that does not (SIGKILL) has
+        # its `flock` dropped by the kernel, and the pid it leaves reads as stale.
+        lock.release()
+
+
+def _serve_holding(
+    options: ServeOptions,
+    *,
+    stdout,
+    stderr,
+    extra: dict[str, Any],
+    takeover_seams: dict[str, Any] | None,
+) -> int:
+    """`serve` once it holds this home's serve lock: its supervisor, then the manager."""
+    from papaya_agent_runtime.supervisor import lifeline
 
     server, status = take_supervisor(stderr=stderr, seams=takeover_seams)
     if status is not None:
@@ -6067,6 +6093,46 @@ def serve(
 def _say(line: str, *, stderr) -> None:
     log.info("[serve] %s", line)
     print(f"ppy serve: {line}", file=stderr, flush=True)
+
+
+def serve_identity() -> dict[str, str]:
+    """Who this serve says it is in ``serve.json``: the Papaya connection, when there is one."""
+    try:
+        identity = papaya.identity()
+    except Exception:  # noqa: BLE001 - who we are is a label; a start must not fail on it
+        identity = None
+    if identity is None:
+        return {}
+    return {"connection_id": identity.connection_id, "agent_handle": identity.handle}
+
+
+def hold_serve(
+    *, stderr, seams: dict[str, Any] | None = None
+) -> tuple[takeover.ServeLock | None, int | None]:
+    """Take this home's serve lock, retiring the `serve` that holds it (newest wins).
+
+    Returns ``(lock, None)`` once this process holds it, having said in one line whom
+    it took over from or which crashed holder it cleared. Returns ``(None, 1)`` when
+    the holder would not let go even to SIGKILL, having said so in one sentence and
+    recorded it for the blockers ledger: two serves never run over one state.
+    `seams` are :func:`takeover.take_serve`'s keyword seams for tests.
+    """
+    home = str(ppy_home().resolve())
+    taken = takeover.take_serve(
+        home,
+        serve_identity(),
+        timeout=takeover.stop_timeout(home),
+        **(seams or {}),
+    )
+    if taken.line:
+        _say(taken.line, stderr=stderr)
+    if taken.lock is not None:
+        return taken.lock, None
+    pid = taken.retired_pid
+    takeover.record_start_failure(
+        home, taken.line, [f"kill -9 {pid}" if pid else "ppy supervisor stop"]
+    )
+    return None, takeover.EXIT_CANNOT_START
 
 
 def close_dead_runners_adopted() -> list[Any]:
