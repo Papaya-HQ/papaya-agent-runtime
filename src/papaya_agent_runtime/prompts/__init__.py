@@ -7,7 +7,9 @@ or take it to a person), ``review.md`` (review at head, deliver, report back),
 resume, said on one last line the runner acts on) and ``ledger.md`` (the next steps
 that sat in the ledger: do each, defer it with a reason, or drop it), and a sixth,
 ``instruction.md`` (answer an instruction a person sent this machine from its own state,
-ending in an `OUTCOME:` block the runner posts where they asked). The answer and
+ending in an `OUTCOME:` block the runner posts where they asked), and a seventh,
+``repo_choice.md`` (choose the repository an instruction's work runs in, or say it
+cannot tell, on one `REPOSITORY:` line). The answer and
 review turns run with a held Papaya work item or without one (a worker dispatched from
 a session, or whose ticket ended: `lanes`); the facts say which.
 
@@ -32,7 +34,26 @@ CHECKIN = "checkin"
 LEDGER = "ledger"
 #: The answer path of an instruction a person sent this machine (`instructions.py`).
 INSTRUCTION = "instruction"
-TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION)
+#: One short turn choosing the repository for an instruction's work path, when neither
+#: the text, a referenced work item nor a single registered repository settles it.
+REPO_CHOICE = "repo_choice"
+TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION, REPO_CHOICE)
+
+#: How the choice turn says what it chose: its last such line, then a candidate's name
+#: or `cannot tell`.
+REPOSITORY_PREFIX = "REPOSITORY:"
+REPOSITORY_CANNOT_TELL = "cannot tell"
+
+#: How a repository is chosen when nothing names it: the brief turn's layers 2 and 3,
+#: which the choice turn follows too. One rule, not two resolvers: `brief.md` and
+#: `repo_choice.md` carry it verbatim, and a test holds both to it.
+REPO_CHOICE_LAYERS = """\
+2. **You already know.** Your Papaya memories (through MCP), and the "What it is"
+   section of each registered repository's notes (`ppy repo list`, then
+   `ppy memory show --repo <name>`).
+3. **The code says.** `ppy repo locate "<terms>"` with the ticket's most distinctive
+   strings: UI copy, identifiers, error messages, file names. It reports hits per
+   registered repository. Read the hits before you trust them."""
 #: Not a manager turn: the scoped brief a reconciler worker starts from when the
 #: session that delivered a pull request cannot be resumed to fix it.
 RECONCILE = "reconcile"
@@ -232,6 +253,10 @@ __all__ = [
     "INSTRUCTION",
     "LEDGER",
     "MEMORY_RULE",
+    "REPOSITORY_CANNOT_TELL",
+    "REPOSITORY_PREFIX",
+    "REPO_CHOICE",
+    "REPO_CHOICE_LAYERS",
     "REVIEW",
     "PR_FOLLOW_RULE",
     "PUSH_MILESTONE_RULE",

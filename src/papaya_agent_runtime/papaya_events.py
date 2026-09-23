@@ -311,6 +311,44 @@ def read_work_item(
     return _papaya_request(url, token, what="read", opener=opener)
 
 
+def read_work_item_ref(
+    ref: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Papaya's record of the work item ``ref`` names: its short id (`PAP-115`) or UUID.
+
+    The work-item read takes either (the backend's `WorkItemPathRef`), so an
+    instruction's reference is read with the same route and token a ticket's is.
+    ``None`` when not connected; a refusal raises :class:`PapayaHTTPError` (a 404 is
+    an id this workspace does not have, e.g. another tracker's).
+    """
+    env = os.environ if environ is None else environ
+    api_url = _clean(env.get(_PAPAYA_API_ENV))
+    workspace = _clean(env.get(_PAPAYA_WORKSPACE_ENV))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if not api_url or not workspace or not token or not str(ref or "").strip():
+        return None
+    base = api_url.rstrip("/")
+    if not base.endswith("/api/v1"):
+        base += "/api/v1"
+    url = (
+        f"{base}/workspaces/{urllib.parse.quote(workspace, safe='')}"
+        f"/work-items/{urllib.parse.quote(str(ref).strip(), safe='')}"
+    )
+    return _papaya_request(url, token, what="read", opener=opener)
+
+
+def work_item_repository(item: Mapping[str, Any]) -> str | None:
+    """The repository a work item record names (its fields or metadata), or ``None``."""
+    try:
+        event = PapayaEvent(id=None, kind="", subject="", payload={"work_item": dict(item)})
+        return repository_spec(event)
+    except PapayaEventError:
+        return None
+
+
 #: The work-item statuses `ppy serve` sets while it holds a ticket. Status is
 #: *state*, not judgment: each of these follows mechanically from where the work
 #: has got to, and anything said in words on the item is a manager turn's to say.
@@ -457,6 +495,13 @@ REPLY_DM = "agent_dm_reply"
 #: Papaya's bounds on a result (`report_machine_instruction_result`).
 RESULT_SUMMARY_MAX = 10_000
 RESULT_MESSAGE_ID_MAX = 128
+#: What a person meant by an instruction, when Papaya says (`intent` on the payload).
+INTENT_ASK = "ask"
+INTENT_WORK = "work"
+INTENTS = (INTENT_ASK, INTENT_WORK)
+#: A reply's `kind`: a line said while the work goes on, or the answer itself.
+REPLY_PROGRESS = "progress"
+REPLY_FINAL = "final"
 
 
 @dataclass(frozen=True)
@@ -475,6 +520,20 @@ class Instruction:
     agent_instructions: str
     #: Where the answer goes, exactly as the event said: never taken from anything else.
     reply: dict[str, Any]
+    #: What the person meant, when Papaya said: `ask` or `work`. ``None`` when the event
+    #: carries no `intent` key at all — an older Papaya, whose reply routes also take
+    #: no `kind` (:attr:`speaks_kind`).
+    intent: str | None = None
+
+    @property
+    def speaks_kind(self) -> bool:
+        """Whether this Papaya takes a reply's `kind` (`progress`/`final`).
+
+        Feature-detected from the event: the backend change that added `intent` to the
+        payload added `kind` to the DM reply in the same release, and the DM reply
+        refuses a key it does not know (422).
+        """
+        return self.intent is not None
 
     @property
     def subject(self) -> str:
@@ -486,20 +545,20 @@ class Instruction:
         return str(who.get("display_name") or who.get("handle") or who.get("id") or "someone")
 
     def as_json(self) -> str:
-        return json.dumps(
-            {
-                "instruction_id": self.instruction_id,
-                "short_id": self.short_id,
-                "title": self.title,
-                "instruction": self.text,
-                "references": list(self.references),
-                "origin": self.origin,
-                "requested_by": self.requested_by,
-                "agent_instructions": self.agent_instructions,
-                "reply": self.reply,
-            },
-            sort_keys=True,
-        )
+        payload: dict[str, Any] = {
+            "instruction_id": self.instruction_id,
+            "short_id": self.short_id,
+            "title": self.title,
+            "instruction": self.text,
+            "references": list(self.references),
+            "origin": self.origin,
+            "requested_by": self.requested_by,
+            "agent_instructions": self.agent_instructions,
+            "reply": self.reply,
+        }
+        if self.intent is not None:
+            payload["intent"] = self.intent
+        return json.dumps(payload, sort_keys=True)
 
 
 def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instruction:
@@ -519,6 +578,11 @@ def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instructi
     references = payload.get("references")
     origin = payload.get("origin")
     who = payload.get("requested_by")
+    intent: str | None = None
+    if "intent" in payload:
+        # Present means this Papaya knows the key; a value it does not name is no intent.
+        intent = str(payload.get("intent") or "").strip().lower()
+        intent = intent if intent in INTENTS else ""
     return Instruction(
         instruction_id=ident,
         short_id=short_id,
@@ -531,6 +595,7 @@ def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instructi
         requested_by=dict(who) if isinstance(who, Mapping) else {},
         agent_instructions=str(payload.get("agent_instructions") or ""),
         reply=dict(reply),
+        intent=intent,
     )
 
 
@@ -589,6 +654,7 @@ def post_instruction_reply(
     *,
     environ: Mapping[str, str] | None = None,
     opener=urllib.request.urlopen,
+    kind: str | None = None,
 ) -> str | None:
     """Answer an instruction where it was asked. Returns the posted message's id.
 
@@ -596,6 +662,10 @@ def post_instruction_reply(
     message's ``id``; a DM posts ``{"text"}`` and answers with the ``turn_id`` the
     result route takes as ``result_message_id``. ``None`` when there is nothing to
     call with (not connected). A refusal raises :class:`PapayaHTTPError`.
+
+    ``kind`` (`progress` or `final`) is sent only when given, and a caller gives it
+    only when the event said this Papaya takes it (:attr:`Instruction.speaks_kind`):
+    an older DM route refuses the key outright.
     """
     env = os.environ if environ is None else environ
     path, _result = reply_paths(reply, env)
@@ -608,6 +678,8 @@ def post_instruction_reply(
         body = {"content": text, "parent_id": reply.get("parent_id")}
     else:
         body = {"text": text}
+    if kind is not None:
+        body["kind"] = kind
     answer = _papaya_request(
         url, token, method="POST", body=body, what="instruction reply", opener=opener
     )
@@ -815,9 +887,16 @@ __all__ = [
     "WORK_ITEM_KEY",
     "WORK_ITEM_TITLE",
     "WORK_ITEM_URL",
+    "INTENTS",
+    "INTENT_ASK",
+    "INTENT_WORK",
+    "REPLY_FINAL",
+    "REPLY_PROGRESS",
     "Instruction",
     "PapayaHTTPError",
     "instruction_from",
+    "read_work_item_ref",
+    "work_item_repository",
     "parse_instruction",
     "post_instruction_reply",
     "put_connection_status",

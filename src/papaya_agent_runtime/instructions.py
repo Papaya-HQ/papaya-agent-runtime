@@ -9,9 +9,13 @@ plumbing:
 
 - :func:`classify` decides, deterministically, which of three ways it runs:
   **answer** (one manager turn from the runtime's own state and tools, no worker),
-  **work** (one worker on exactly one named, registered repository), or
-  **unanswerable** (no ask, or no single repository: the one question to send back).
-  It never guesses a repository.
+  **work** (one worker on exactly one registered repository), or
+  **unanswerable** (no ask: the one question to send back). Papaya's `intent` on the
+  event, when it says one, decides answer or work outright. It never guesses a
+  repository: a work path the text does not place is placed by :func:`place` (a
+  referenced work item's repository, else the only registered one), else by one short
+  choice turn, and only when that cannot tell is the person asked, with the
+  candidates named (:func:`which_repository`).
 - :data:`ANSWER_ALLOWED` and :func:`command_refusal` are the commands each path may
   run, enforced in `cli.main` through :data:`PATH_ENV` in the turn's environment:
   the answer path runs only what a manager runs about its own state, the work path
@@ -31,7 +35,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from papaya_agent_runtime import papaya_events
@@ -50,6 +54,13 @@ ANSWER = "answer"
 WORK = "work"
 UNANSWERABLE = "unanswerable"
 PATHS = (ANSWER, WORK, UNANSWERABLE)
+#: Two more command sets a turn can run under (:data:`PATH_ENV`), neither a way an
+#: instruction runs: an answer Papaya said was asked (`intent: ask`), which may read
+#: and record but never approve, deliver or merge; and the repository-choice turn, which
+#: reads other people's work-item text and so may only look at repositories.
+ASK = "ask"
+CHOICE = "choice"
+TURN_PATHS = (*PATHS, ASK, CHOICE)
 
 #: The events an instruction ticket's task carries, in the order they happen.
 CLASSIFIED = "instruction_classified"
@@ -105,6 +116,24 @@ class Classification:
     #: A request the runtime answers without a turn: `merge`, `hold` (with ``number``).
     intent: str = ""
     number: str = ""
+    #: A work path whose repository is still to be chosen: the registered repositories
+    #: the choice is between (empty when none is registered). Only registered names:
+    #: the choice turn's answer is dispatched into as it stands.
+    candidates: tuple[str, ...] = ()
+    #: GitHub URLs the instruction or its items name that are not registered here. Never
+    #: chosen by a turn; named in the question so the person can pick one, and then
+    #: registered through `ensure_spec` like a URL the text names alone.
+    unregistered: tuple[str, ...] = ()
+    #: Work items the instruction references that could not be read, said in the
+    #: question rather than guessed around.
+    unread: tuple[str, ...] = ()
+    #: What the referenced work items say, for the choice turn: ``ref: title — text``.
+    items: tuple[str, ...] = ()
+
+    @property
+    def choosing(self) -> bool:
+        """A work path with no repository yet: the choice turn decides."""
+        return self.path == WORK and not self.repo and not self.spec
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +144,9 @@ class Classification:
             "question": self.question,
             "intent": self.intent,
             "number": self.number,
+            "candidates": list(self.candidates),
+            "unregistered": list(self.unregistered),
+            "unread": list(self.unread),
         }
 
 
@@ -186,26 +218,225 @@ def _has_ask(text: str) -> bool:
     return any(word not in _GREETINGS for word in words) or bool(_URL.search(text))
 
 
-def which_repository(repos: list[RepoRef], named: list[str] | None = None) -> str:
-    """The one question a work path with no single repository sends back."""
-    if named and len(named) > 1:
-        return f"Which repository should I work in: {' or '.join(named)}?"
-    names = ", ".join(sorted(r.name for r in repos)) if repos else "none yet"
+def _either(names: list[str]) -> str:
+    if len(names) <= 2:
+        return " or ".join(names)
+    return f"{', '.join(names[:-1])} or {names[-1]}"
+
+
+def which_repository(candidates: list[str] | tuple[str, ...], unread: tuple[str, ...] = ()) -> str:
+    """The one question a work path sends back when nothing could tell the repository.
+
+    It names the candidates, so the answer is one word, and says the answer is picked
+    straight up (Papaya forwards a direct reply to the machine that asked).
+    """
+    names = sorted(dict.fromkeys(candidates))
+    could_not = (
+        f"I could not read {_either(list(unread))}, so I can't tell from the ticket. "
+        if unread
+        else ""
+    )
+    if not names:
+        return (
+            f"{could_not}Which repository should I work in? None is registered on this machine "
+            "yet: reply with its GitHub URL and I'll pick it straight up."
+        )
     return (
-        "Which repository should I work in? Name it (or its GitHub URL) and send it again. "
-        f"Registered here: {names}."
+        f"{could_not}Which repository should I work in: {_either(names)}? "
+        "Reply with the name and I'll pick it straight up."
+    )
+
+
+#: A Papaya work item an instruction may reference: a short id in the text
+#: (`PAP-115`) or a Papaya link whose path names one (`.../work-items/<ref>`).
+_SHORT_ID = re.compile(r"(?<![\w/#-])([A-Z][A-Z0-9]{1,9}-\d+)(?![\w-])")
+_ITEM_PATH = re.compile(r"/work-items/([A-Za-z0-9-]+)", re.I)
+
+
+def work_item_refs(text: str, references: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """The Papaya work items an instruction references, in the order it names them.
+
+    A short id is taken from the words, never from inside another tracker's link: a
+    Jira URL's `JIRA-4411` is not this workspace's item.
+    """
+    found: list[str] = []
+    for source in [str(text or ""), *(str(r) for r in references)]:
+        for url in _URL.findall(source):
+            match = _ITEM_PATH.search(url)
+            if match:
+                found.append(match.group(1).upper())
+        found.extend(_SHORT_ID.findall(_URL.sub(" ", source)))
+    return list(dict.fromkeys(found))
+
+
+@dataclass(frozen=True)
+class ReadItem:
+    """A referenced work item as read: its repository if it names one, else its words."""
+
+    ref: str
+    repo: str | None = None
+    summary: str = ""
+
+
+#: How many referenced work items one instruction reads, at most.
+READ_MAX = 5
+#: How much of a referenced item's description the choice turn is given.
+ITEM_TEXT_MAX = 600
+
+
+def read_references(
+    text: str,
+    references: list[str] | tuple[str, ...],
+    read: Callable[[str], Mapping[str, Any] | None],
+) -> list[ReadItem]:
+    """Read each Papaya work item the instruction references. Never raises.
+
+    ``read`` is the work-item read under the connection's token
+    (`papaya_events.read_work_item_ref`). A 404 is an id this workspace does not
+    have (another tracker's), so it is dropped; any other refusal is kept as an item
+    that could not be read, which the question says. Not connected reads nothing.
+    """
+    found: list[ReadItem] = []
+    for ref in work_item_refs(text, references)[:READ_MAX]:
+        try:
+            record = read(ref)
+        except papaya_events.PapayaHTTPError as exc:
+            if exc.code != 404:
+                log.warning("[instruction] Could not read %s: %s", ref, exc)
+                found.append(ReadItem(ref))
+            continue
+        except papaya_events.PapayaEventError as exc:
+            log.warning("[instruction] Could not read %s: %s", ref, exc)
+            found.append(ReadItem(ref))
+            continue
+        if not record:
+            continue
+        title = " ".join(str(record.get("title") or "").split())
+        status = str(record.get("status") or "").strip()
+        words = " ".join(str(record.get("description") or "").split())[:ITEM_TEXT_MAX]
+        summary = f"{ref}: {title}" + (f" ({status})" if status else "")
+        found.append(
+            ReadItem(
+                ref,
+                repo=papaya_events.work_item_repository(record),
+                summary=f"{summary} — {words}" if words else summary,
+            )
+        )
+    return found
+
+
+def chosen_repository(transcript: str, candidates: tuple[str, ...]) -> str | None:
+    """The candidate a choice turn's `REPOSITORY:` line names, or ``None`` (cannot tell).
+
+    Only a candidate counts: a turn naming anything else has not chosen between them.
+    """
+    from papaya_agent_runtime import prompts
+
+    said = None
+    for line in str(transcript or "").splitlines():
+        stripped = line.strip().lstrip("*_`> ")
+        if stripped.startswith(prompts.REPOSITORY_PREFIX):
+            said = stripped.removeprefix(prompts.REPOSITORY_PREFIX).strip().strip("`*.")
+    if not said:
+        return None
+    by_name = {name.lower(): name for name in candidates}
+    return by_name.get(said.lower())
+
+
+def cannot_tell(found: Classification, why: str) -> Classification:
+    """A work path nothing could place: the one question, naming the candidates."""
+    return replace(
+        found,
+        path=UNANSWERABLE,
+        reason=f"the repository could not be told: {why}",
+        question=which_repository((*found.candidates, *found.unregistered), found.unread),
+    )
+
+
+def chosen(found: Classification, repo: str) -> Classification:
+    return replace(found, repo=repo, reason=f"work in {repo}: chosen from the instruction")
+
+
+def _match_repo(spec: str, repos: list[RepoRef]) -> str | None:
+    """The registered repository ``spec`` names (a name, slug or GitHub URL), if one."""
+    text = spec.strip().lower().removesuffix(".git").rstrip("/")
+    for repo in repos:
+        if text == repo.name.lower() or (repo.slug and text.endswith(repo.slug)):
+            return repo.name
+    return None
+
+
+def place(
+    found: Classification, repos: list[RepoRef], read: list[ReadItem] | tuple[ReadItem, ...] = ()
+) -> Classification:
+    """Where a work path runs, when the text named no single repository.
+
+    The precedence after the text: the repository a referenced work item names (one
+    registered, or one URL to register); else the only registered repository; else a
+    choice between the candidates, which the choice turn makes. Two referenced items
+    naming different repositories are a choice between those two. Never a guess.
+    """
+    if not found.choosing:
+        return found
+    names = [r.name for r in repos]
+    unread = tuple(item.ref for item in read if item.repo is None and not item.summary)
+    items = tuple(item.summary for item in read if item.summary)
+    named = list(dict.fromkeys(item.repo for item in read if item.repo))
+    # The text named several (registered or not): the choice is between those alone.
+    text_named = bool(found.candidates or found.unregistered)
+    if not text_named and len(named) == 1:
+        registered = _match_repo(named[0], repos)
+        via = f"the work item {next(i.ref for i in read if i.repo)} names it"
+        if registered is not None:
+            return replace(found, repo=registered, reason=f"work in {registered}: {via}")
+        return replace(found, spec=named[0], reason=f"work in {named[0]} (to register): {via}")
+    if not text_named and not named and len(names) == 1:
+        return replace(
+            found, repo=names[0], reason=f"work in {names[0]}: the only registered repository"
+        )
+    candidates, unregistered = found.candidates, found.unregistered
+    if not text_named and len(named) > 1:
+        matched = [(spec, _match_repo(spec, repos)) for spec in named]
+        candidates = tuple(dict.fromkeys(name for _spec, name in matched if name))
+        unregistered = tuple(spec for spec, name in matched if name is None)
+    elif not text_named:
+        candidates = tuple(names)
+    return replace(
+        found,
+        candidates=candidates,
+        unregistered=unregistered,
+        unread=unread,
+        items=items,
+        reason=f"work; the repository is chosen between {len(candidates)} registered candidates"
+        if candidates
+        else "work; no registered repository to choose",
     )
 
 
 def classify(
-    text: str, references: list[str] | tuple[str, ...] = (), repos: list[RepoRef] | None = None
+    text: str,
+    references: list[str] | tuple[str, ...] = (),
+    repos: list[RepoRef] | None = None,
+    *,
+    intent: str | None = None,
 ) -> Classification:
-    """Which way an instruction runs, by rule. Never guesses a repository."""
+    """Which way an instruction runs, by rule. Never guesses a repository.
+
+    ``intent`` is what Papaya said the person meant: `ask` runs only the answer path,
+    `work` only the work path; ``None`` or empty is today's reading of the words. A
+    work path whose repository the text does not settle comes back :attr:`choosing`,
+    for :func:`place` and then the choice turn.
+    """
     repos = list(repos or [])
     references = [str(r) for r in references]
     body = str(text or "").strip()
     if not _has_ask(body) and not references:
         return Classification(UNANSWERABLE, reason="it asks nothing", question=EMPTY_QUESTION)
+    if intent == papaya_events.INTENT_ASK:
+        # Asked, not sent as work or as a command: answered from the runtime's own state,
+        # whatever the words. "Should I merge #12?" is a question, never a merge; the
+        # turn runs on the `ask` path, which cannot approve, deliver or merge.
+        return Classification(ANSWER, reason="asked as a question: answered from its own state")
     capability = _CAPABILITY_CMD.search(body)
     if capability:
         verb = capability.group(1).lower()
@@ -226,7 +457,12 @@ def classify(
         url for url in _URL.findall(" ".join([body, *references])) if not _FORGE_URL.match(url)
     ]
     answerish = bool(_ANSWER.search(body)) or body.endswith("?")
-    if _WORK.search(body) or (tickets and not answerish):
+    work = (
+        intent == papaya_events.INTENT_WORK
+        or bool(_WORK.search(body))
+        or bool(tickets and not answerish)
+    )
+    if work:
         named, unregistered = _named_repos(body, references, repos)
         if len(named) == 1 and not unregistered:
             return Classification(WORK, repo=named[0], reason=f"work in {named[0]}")
@@ -235,12 +471,14 @@ def classify(
                 WORK, spec=unregistered[0], reason=f"work in {unregistered[0]} (to register)"
             )
         every = named + unregistered
-        return Classification(
-            UNANSWERABLE,
-            reason="it needs a repository and names "
-            + ("none" if not every else f"{len(every)}: {', '.join(every)}"),
-            question=which_repository(repos, every),
-        )
+        if every:
+            return Classification(
+                WORK,
+                candidates=tuple(named),
+                unregistered=tuple(unregistered),
+                reason=f"work; it names {len(every)} repositories: {', '.join(every)}",
+            )
+        return Classification(WORK, reason="work; it names no repository")
     if answerish or _QUESTION_START.search(body):
         return Classification(ANSWER, reason="the runtime answers it from its own state")
     return Classification(
@@ -251,6 +489,25 @@ def classify(
 def first_note(instruction: papaya_events.Instruction, found: Classification) -> str:
     """The ticket's first progress note: which path, and why."""
     return f"{instruction.short_id}: {found.path} path — {found.reason}."
+
+
+#: The progress line an answer turn still running after :data:`LOOKING_AFTER` posts, once.
+LOOKING = "Looking…"
+LOOKING_AFTER = 20.0
+
+
+def on_it(repo: str) -> str:
+    """The work path's acknowledgement, in the conversation, as soon as it is placed."""
+    return f"On it — working in {repo}."
+
+
+def setup_reason(problem: Any) -> str:
+    """A setup blocker as the plain-words reason a work instruction is declined."""
+    from papaya_agent_runtime import blockers
+
+    what = str(getattr(problem, "title", "") or getattr(problem, "summary", "") or "").strip()
+    what = blockers.redact(" ".join(what.split())).rstrip(".")
+    return f"this machine needs setup: {what}" if what else blockers.DECLINE_REASON
 
 
 # ── what each path may run ──────────────────────────────────────────────────
@@ -277,6 +534,30 @@ ANSWER_ALLOWED: dict[str, frozenset[str] | None] = {
     # Merging a pull request, only where this install lets the runtime merge.
     "stack": frozenset({"merge"}),
 }
+#: An asked question's commands: the answer path's reads, and nothing that acts. Not a
+#: capability, a delivery or a merge, not `ppy answer` (it steers a waiting worker:
+#: replying to a needs-you row is work), and only the read subcommands of the rest —
+#: `memory init`, `outreach run` (it posts) and every `todo` write are refused. The words
+#: of a question ("should I merge #12?") never become the act.
+ASK_ALLOWED: dict[str, frozenset[str] | None] = {
+    **{
+        command: allowed
+        for command, allowed in ANSWER_ALLOWED.items()
+        if command not in ("capability", "deliver", "stack", "answer")
+    },
+    "memory": frozenset({"show", "path"}),
+    # A bare `ppy outreach` lists what waits on a person; `run` says it to them.
+    "outreach": frozenset({""}),
+    "todo": frozenset({"list"}),
+}
+#: The repository-choice turn's commands: looking at the registered repositories and
+#: their notes, nothing else.
+CHOICE_ALLOWED: dict[str, frozenset[str] | None] = {
+    "repo": frozenset({"list", "show", "locate"}),
+    "memory": frozenset({"show"}),
+    "version": None,
+}
+_ALLOWED = {ANSWER: ANSWER_ALLOWED, ASK: ASK_ALLOWED, CHOICE: CHOICE_ALLOWED}
 #: The work path's refusals: everything today's turns run, except approving a capability.
 WORK_REFUSED: frozenset[tuple[str, str]] = frozenset({("capability", "approve")})
 
@@ -304,15 +585,19 @@ def command_refusal(
                 "this install does not let the runtime merge pull requests "
                 "(authority.merge is off); say so in the outcome and who can merge"
             )
-    if path == ANSWER:
-        if command not in ANSWER_ALLOWED:
-            return (
-                f"`ppy {command}` is not one the answer path runs: it answers from the "
-                "runtime's own state and never starts or steers a worker"
-            )
-        allowed = ANSWER_ALLOWED[command]
+    if path in _ALLOWED:
+        table = _ALLOWED[path]
+        what = {
+            ANSWER: "the answer path runs: it answers from the runtime's own state and "
+            "never starts or steers a worker",
+            ASK: "an asked question runs: it answers, and never approves, delivers or merges",
+            CHOICE: "the repository-choice turn runs: it only looks at the registered repositories",
+        }[path]
+        if command not in table:
+            return f"`ppy {command}` is not one {what}"
+        allowed = table[command]
         if allowed is not None and sub not in allowed:
-            return f"`ppy {command} {sub}` is not one the answer path runs"
+            return f"`ppy {command} {sub}` is not one {what}"
         return None
     if path == WORK and (command, sub) in WORK_REFUSED:
         return (
@@ -322,10 +607,20 @@ def command_refusal(
     return None
 
 
+def turn_path(
+    found: Classification, instruction: papaya_events.Instruction | None, *, choosing: bool
+) -> str:
+    """The command set (:data:`PATH_ENV`) one of an instruction's turns runs under."""
+    if choosing:
+        return CHOICE
+    asked = instruction is not None and instruction.intent == papaya_events.INTENT_ASK
+    return ASK if found.path == ANSWER and asked else found.path
+
+
 def refusal_from_env(environ: Mapping[str, str], argv: list[str]) -> str | None:
     """:func:`command_refusal` for the path this process's environment names."""
     path = str(environ.get(PATH_ENV) or "").strip()
-    if path not in PATHS:
+    if path not in TURN_PATHS:
         return None
     return command_refusal(path, argv)
 
@@ -567,6 +862,9 @@ def classification_of(conn: sqlite3.Connection, task_id: int) -> Classification 
         question=str(payload.get("question") or ""),
         intent=str(payload.get("intent") or ""),
         number=str(payload.get("number") or ""),
+        candidates=tuple(str(c) for c in payload.get("candidates") or ()),
+        unregistered=tuple(str(c) for c in payload.get("unregistered") or ()),
+        unread=tuple(str(c) for c in payload.get("unread") or ()),
     )
 
 
@@ -724,9 +1022,10 @@ def answer(
     message_id: str | None = None
     error = ""
     replied = False
+    kind = {"kind": papaya_events.REPLY_FINAL} if instruction.speaks_kind else {}
     for _attempt in range(2):
         try:
-            message_id = post(instruction.reply, text, environ=environ)
+            message_id = post(instruction.reply, text, environ=environ, **kind)
         except papaya_events.PapayaEventError as exc:
             error = str(exc)
             continue
@@ -815,25 +1114,38 @@ __all__ = [
     "ALSO_SENT_PREFIX",
     "ANSWER",
     "ANSWER_ALLOWED",
+    "ASK",
+    "ASK_ALLOWED",
+    "CHOICE",
+    "CHOICE_ALLOWED",
+    "TURN_PATHS",
+    "turn_path",
     "CLASSIFIED",
     "Classification",
     "EMPTY_QUESTION",
     "INSTRUCTION",
     "INSTRUCTION_KEY",
     "INSTRUCTION_SUBJECT",
+    "LOOKING",
+    "LOOKING_AFTER",
     "OUTCOME_PREFIX",
     "Outcome",
     "PATHS",
     "PATH_ENV",
+    "READ_MAX",
     "REPLIED",
     "REPLY_MAX",
     "REPORTED",
     "REPORT_ABANDONED",
+    "ReadItem",
     "RepoRef",
     "UNANSWERABLE",
     "WORK",
     "WORK_REFUSED",
     "answer",
+    "cannot_tell",
+    "chosen",
+    "chosen_repository",
     "classify",
     "command_refusal",
     "compose_brief",
@@ -841,15 +1153,20 @@ __all__ = [
     "first_note",
     "instruction_of",
     "mark_worker",
+    "on_it",
     "open_tickets",
     "outcome_of",
+    "place",
+    "read_references",
     "record_classified",
     "record_ticket",
     "recover",
     "refusal_from_env",
     "repo_refs",
     "reply_text",
+    "setup_reason",
     "stage",
     "ticket_for",
     "which_repository",
+    "work_item_refs",
 ]

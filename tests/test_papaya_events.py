@@ -375,3 +375,88 @@ def test_recorded_event_is_findable_without_dispatching_twice(ppy_home) -> None:
         "subject": "work_item:item-9",
         "work_item_id": "item-9",
     }
+
+
+CONNECTED = {
+    "PAPAYA_API_URL": "https://papaya.example",
+    "PAPAYA_AGENT_TOKEN": "secret-token",
+    "PAPAYA_WORKSPACE_ID": "ws-1",
+}
+
+
+def test_a_referenced_work_item_is_read_by_its_short_id_with_the_same_route() -> None:
+    calls = []
+
+    def open_request(request, timeout):
+        calls.append(request)
+        return _Response({"id": "item-115", "short_id": "PAP-115", "status": "done"})
+
+    record = papaya_events.read_work_item_ref("PAP-115", environ=CONNECTED, opener=open_request)
+    assert record == {"id": "item-115", "short_id": "PAP-115", "status": "done"}
+    assert calls[0].method == "GET"
+    assert calls[0].full_url == "https://papaya.example/api/v1/workspaces/ws-1/work-items/PAP-115"
+    assert papaya_events.read_work_item_ref("PAP-115", environ={}, opener=open_request) is None
+    assert len(calls) == 1
+
+
+def test_a_refused_reference_read_raises_with_its_code() -> None:
+    def open_request(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    with pytest.raises(papaya_events.PapayaHTTPError) as raised:
+        papaya_events.read_work_item_ref("JIRA-4411", environ=CONNECTED, opener=open_request)
+    assert raised.value.code == 404
+
+
+@pytest.mark.parametrize(
+    ("item", "repo"),
+    [
+        ({"metadata": {"repository": "acme/web"}}, "acme/web"),
+        ({"repo": {"url": "https://github.com/acme/web"}}, "https://github.com/acme/web"),
+        ({"metadata": {}}, None),
+        ({}, None),
+    ],
+)
+def test_a_work_item_record_names_its_repository_only_where_a_ticket_would(item, repo) -> None:
+    assert papaya_events.work_item_repository(item) == repo
+
+
+def _reply(kind: str) -> dict:
+    if kind == "dm":
+        return {
+            "kind": "agent_dm_reply",
+            "method": "POST",
+            "path": "/api/v1/workspaces/ws-1/polyweave-agents/me/dm-conversations/c-1/replies",
+            "result_path": "/api/v1/workspaces/ws-1/machine-instructions/MI-1/result",
+        }
+    return {
+        "kind": "thread_reply",
+        "method": "POST",
+        "path": "/api/v1/workspaces/ws-1/channels/chan-1/messages",
+        "parent_id": "root-1",
+        "result_path": "/api/v1/workspaces/ws-1/machine-instructions/MI-1/result",
+    }
+
+
+@pytest.mark.parametrize("origin", ["dm", "channel"])
+def test_an_instruction_reply_carries_kind_only_when_given(origin) -> None:
+    bodies = []
+
+    def open_request(request, timeout):
+        bodies.append(json.loads(request.data))
+        return _Response({"id": "m-1", "turn_id": "t-1"})
+
+    reply = _reply(origin)
+    papaya_events.post_instruction_reply(reply, "Done.", environ=CONNECTED, opener=open_request)
+    papaya_events.post_instruction_reply(
+        reply, "On it.", environ=CONNECTED, opener=open_request, kind="progress"
+    )
+    assert "kind" not in bodies[0]
+    assert bodies[1]["kind"] == "progress"
+
+
+def test_intent_is_kept_only_when_the_event_carries_the_key() -> None:
+    base = {"instruction_id": "i-1", "short_id": "MI-1", "reply": _reply("dm")}
+    assert papaya_events.instruction_from(base).intent is None
+    assert papaya_events.instruction_from({**base, "intent": "WORK"}).intent == "work"
+    assert papaya_events.instruction_from({**base, "intent": None}).intent == ""

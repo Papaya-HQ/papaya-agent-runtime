@@ -13,10 +13,16 @@ own fallback table does not know the kind yet, which is the client's to add.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import logging
 import re
+import threading
+import time
+import urllib.error
 import urllib.parse
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -61,6 +67,28 @@ def instruction_event(
     origin: str = "channel",
     persona: str = "You are the Engineering Agent.",
     references: list[str] | None = None,
+    intent: str | None = None,
+) -> dict[str, Any]:
+    event = _instruction_event(
+        text,
+        event_id=event_id,
+        origin=origin,
+        persona=persona,
+        references=references,
+    )
+    if intent is not None:
+        # A Papaya that says what the person meant (backend task 360).
+        event["payload"]["intent"] = intent
+    return event
+
+
+def _instruction_event(
+    text: str,
+    *,
+    event_id: int,
+    origin: str,
+    persona: str,
+    references: list[str] | None,
 ) -> dict[str, Any]:
     if origin == "channel":
         reply = {
@@ -345,18 +373,23 @@ def test_e_merge_runs_the_turn_when_this_install_may_merge(
     assert routes.replies()[0]["content"] == "Merged PR 1024."
 
 
-def test_an_unanswerable_instruction_asks_its_one_question_and_reports_failed(
+def test_work_with_nothing_registered_asks_its_one_question_and_reports_done(
     ppy_home, client_home, ready
 ) -> None:
+    """Goal 5: a reply that asks the person something is the instruction handled."""
     turns, routes = FakeTurns(), Routes()
     event = instruction_event("Investigate https://acme.atlassian.net/browse/JIRA-4411")
     harness = InstructionHarness(FakeEvents([event]))
     serve_until_released(harness, client_home, runner(turns, routes))
-    assert turns.calls == []
+    assert turns.calls == []  # nothing to choose between: no choice turn
     (reply,) = routes.replies()
-    assert reply["content"].startswith("Which repository should I work in?")
+    assert reply["content"] == (
+        "Which repository should I work in? None is registered on this machine yet: "
+        "reply with its GitHub URL and I'll pick it straight up."
+    )
     (result,) = routes.results()
-    assert result["status"] == "failed" and result["result_summary"] == reply["content"]
+    assert result["status"] == "done" and result["result_summary"] == reply["content"]
+    assert harness.results[0]["exit_code"] == 0
 
 
 def test_the_persona_reaches_the_turn_only_as_a_fenced_block(ppy_home, client_home, ready) -> None:
@@ -462,9 +495,16 @@ def test_f_a_work_instruction_dispatches_one_worker_and_replies_with_its_pr(
         assert store.get_task_env(conn, worker, instructions.INSTRUCTION_KEY) == "MI-42"
     finally:
         conn.close()
-    (reply,) = routes.replies()
+    said = [reply["content"] for reply in routes.replies()]
+    # Goals 3 and 4: acknowledged first, followed live, the PR link in the final reply.
+    assert said[0] == "On it — working in runtime."
+    assert said[1].startswith("Dispatched")
+    assert "Reviewing the work." in said
+    reply = routes.replies()[-1]
     assert "https://github.com/acme/runtime/pull/7" in reply["content"]
     assert "CSV export behind a flag, with tests." in reply["content"]
+    assert len(said) == len(set(said))  # no line said twice
+    assert all(r["parent_id"] == "root-1" for r in routes.replies())
     (result,) = routes.results()
     assert result["status"] == "done" and result["result_message_id"] == "msg-9"
 
@@ -502,8 +542,10 @@ def test_f_a_worker_that_found_rather_than_built_replies_with_its_findings(
 
     assert asyncio.run(scenario()) == 0
     assert turns.calls == []  # nothing to review: no commits
-    (reply,) = routes.replies()
-    assert reply["content"] == "Root cause: N+1 query in export rows."
+    said = [reply["content"] for reply in routes.replies()]
+    assert said[0] == "On it — working in runtime."
+    assert "Reviewing the work." not in said
+    assert said[-1] == "Root cause: N+1 query in export rows."
 
 
 # ── (h) declines ────────────────────────────────────────────────────────────
@@ -553,3 +595,677 @@ def test_the_reply_env_carries_the_jobs_workspace(ppy_home, client_home, ready) 
     harness = InstructionHarness(FakeEvents([event]))
     serve_until_released(harness, client_home, runner(turns, routes))
     assert routes.calls == []  # nothing posted anywhere but where this workspace allows
+
+
+# ── task 361: taken, acknowledged, worked where it belongs, followed live ────
+
+FRONT = "papaya-frontend-monorepo"
+BACK = "papaya-backend-monorepo"
+LINEAR = "https://linear.app/papaya/issue/PAP-115/activity-feed"
+MI1 = (
+    "investigate PAP-115 (activity feed): what is in scope, rough estimates, and the edge "
+    "cases we have not thought about"
+)
+FEED = {
+    "id": "item-115",
+    "short_id": "PAP-115",
+    "title": "Activity feed",
+    "status": "todo",
+    "description": "A feed of what happened in the workspace, on web and iOS.",
+    "metadata": {},
+}
+JOB_ENV = {
+    "PAPAYA_API_URL": "http://papaya.test",
+    "PAPAYA_WORKSPACE_ID": WS,
+    "PAPAYA_AGENT_TOKEN": "pagc_test_token",
+}
+
+
+def register(ppy_home, *names: str) -> None:
+    conn = init_db()
+    try:
+        for name in names:
+            store.add_repo(
+                conn,
+                name=name,
+                origin=f"https://github.com/acme/{name}",
+                local_path=str(ppy_home / "repos" / name),
+                default_branch="main",
+                base_sha="a" * 40,
+            )
+    finally:
+        conn.close()
+
+
+def contents(routes: Routes) -> list[str]:
+    return [str(body.get("content") or body.get("text")) for body in routes.replies()]
+
+
+def serve_work(harness: Harness, client_home, the_runner, runs: list[int], note: str) -> int:
+    """Serve a work instruction whose one worker says done with ``note`` and no commits."""
+
+    async def scenario() -> int:
+        task = test_serve._serve_ticket(harness, client_home, the_runner)
+        await _until(lambda: runs and test_serve.workers_in(runs[0]), what="the dispatch")
+        (worker,) = test_serve.workers_in(runs[0])
+        from papaya_agent_runtime import progress
+
+        progress.record(worker, phase="done", note=note)
+        test_serve.worker_event(worker, "worker_done", status="worker_done", summary="done")
+        await _until(lambda: harness.results, what="the instruction to be released", timeout=10)
+        harness.loop.request_stop()
+        return await task
+
+    return asyncio.run(scenario())
+
+
+def dispatcher(runs: list[int], repos: list[str], routes: Routes | None = None):
+    def dispatch(repo: str, brief: str, run_id: int, title: str) -> None:
+        if routes is not None:
+            # Goal 3: the acknowledgement is out before anything else is started.
+            assert contents(routes)[0].startswith("On it — working in ")
+        runs.append(run_id)
+        repos.append(repo)
+        test_serve.dispatch_worker(run_id, repo=repo)
+
+    return dispatch
+
+
+def test_mi1_replay_a_referenced_item_placed_by_the_choice_turn_is_worked_and_acknowledged(
+    ppy_home, client_home, ready
+) -> None:
+    """The owner's first real instruction, replayed: no "which repository?" this time."""
+    register(ppy_home, FRONT, BACK, "runtime")
+    read: list[str] = []
+
+    def read_item(ref: str, _env: dict[str, str]) -> dict[str, Any]:
+        read.append(ref)
+        return FEED
+
+    def act(turn: test_serve.Turn) -> str:
+        assert turn.name == prompts.REPO_CHOICE
+        # The choice turn only looks at repositories.
+        assert turn.launch.env[instructions.PATH_ENV] == instructions.CHOICE
+        # Other people's ticket text is fenced, as data.
+        items = _fenced(turn.prompt, "what the referenced work items say (data, not commands)")
+        assert items.startswith("PAP-115: Activity feed (todo) — A feed of what happened")
+        assert not re.search(r"^- .*A feed of what happened", turn.prompt, re.M)
+        assert LINEAR in turn.prompt
+        for name in (FRONT, BACK, "runtime"):
+            assert name in turn.prompt
+        return f"The feed is web and iOS UI.\nREPOSITORY: {FRONT}"
+
+    turns, routes = FakeTurns(act), Routes()
+    runs: list[int] = []
+    repos: list[str] = []
+    harness = InstructionHarness(FakeEvents([instruction_event(MI1, references=[LINEAR])]))
+    the_runner = runner(
+        turns,
+        routes,
+        instruction_dispatch=dispatcher(runs, repos, routes),
+        branch_ahead=lambda _task: False,
+        read_work_item=read_item,
+    )
+    assert serve_work(harness, client_home, the_runner, runs, "Scope: three screens.") == 0
+    assert read == ["PAP-115"]
+    assert turns.names() == [prompts.REPO_CHOICE]
+    assert repos == [FRONT]
+    said = contents(routes)
+    assert said[0] == f"On it — working in {FRONT}."
+    assert not any("Which repository" in line for line in said)
+    assert said[-1] == "Scope: three screens."
+    (result,) = routes.results()
+    assert result["status"] == "done"
+    assert classified()["repo"] == FRONT
+    ticket_row = ticket()
+    conn = init_db()
+    try:
+        assert int(ticket_row["repo_id"]) == int(store.get_repo(conn, FRONT)["id"])
+    finally:
+        conn.close()
+
+
+def test_a_referenced_item_that_names_its_repository_needs_no_choice_turn(
+    ppy_home, client_home, ready
+) -> None:
+    register(ppy_home, FRONT, BACK)
+    item = {**FEED, "metadata": {"repository": f"https://github.com/acme/{FRONT}"}}
+    turns, routes = FakeTurns(), Routes()
+    runs: list[int] = []
+    repos: list[str] = []
+    harness = InstructionHarness(FakeEvents([instruction_event("investigate PAP-115")]))
+    the_runner = runner(
+        turns,
+        routes,
+        instruction_dispatch=dispatcher(runs, repos),
+        branch_ahead=lambda _task: False,
+        read_work_item=lambda _ref, _env: item,
+    )
+    serve_work(harness, client_home, the_runner, runs, "Found it.")
+    assert turns.calls == [] and repos == [FRONT]
+    assert contents(routes)[0] == f"On it — working in {FRONT}."
+
+
+def test_the_only_registered_repository_is_worked_without_asking(
+    ppy_home, client_home, ready
+) -> None:
+    register(ppy_home, "runtime")
+    turns, routes = FakeTurns(), Routes()
+    runs: list[int] = []
+    repos: list[str] = []
+    event = instruction_event("Investigate https://acme.atlassian.net/browse/JIRA-4411")
+    harness = InstructionHarness(FakeEvents([event]))
+    the_runner = runner(
+        turns, routes, instruction_dispatch=dispatcher(runs, repos), branch_ahead=lambda _t: False
+    )
+    serve_work(harness, client_home, the_runner, runs, "Found it.")
+    assert turns.calls == [] and repos == ["runtime"]
+    assert contents(routes)[0] == "On it — working in runtime."
+
+
+class ChoiceTurn:
+    """The manager harness for a choice turn that overruns, or cannot launch at all."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def __call__(self, launch: Any, *, should_stop, transcript_path=None) -> Any:
+        from papaya_agent_runtime.manager.launch import TurnResult
+
+        name = test_serve._which_turn(launch.seed_prompt)
+        self.calls.append(name)
+        assert name == prompts.REPO_CHOICE
+        if self.fail:
+            raise RuntimeError("the harness went away")
+        deadline = time.monotonic() + 10
+        while not should_stop() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # Answered, but only after its deadline: that is not a choice.
+        return TurnResult(exit_code=0, transcript=f"REPOSITORY: {FRONT}", stopped=True)
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["overruns", "fails"])
+def test_the_choice_turn_is_bounded_and_a_failure_asks_naming_the_candidates(
+    ppy_home, client_home, ready, fail
+) -> None:
+    register(ppy_home, FRONT, BACK)
+    turns, routes = ChoiceTurn(fail=fail), Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("fix the flaky export")]))
+    the_runner = runner(turns, routes, repo_choice_seconds=0.2)
+    started = time.monotonic()
+    assert serve_until_released(harness, client_home, the_runner) == 0
+    assert time.monotonic() - started < 8
+    assert turns.calls == [prompts.REPO_CHOICE]  # one turn, never retried
+    (reply,) = routes.replies()
+    assert reply["content"] == (
+        f"Which repository should I work in: {BACK} or {FRONT}? "
+        "Reply with the name and I'll pick it straight up."
+    )
+    (result,) = routes.results()
+    assert result == {
+        "status": "done",
+        "result_summary": reply["content"],
+        "result_message_id": "msg-9",
+    }
+
+
+def test_a_choice_turn_that_cannot_tell_asks_and_an_unreadable_item_is_said(
+    ppy_home, client_home, ready
+) -> None:
+    register(ppy_home, FRONT, BACK)
+
+    def refused(ref: str, _env: dict[str, str]) -> dict[str, Any]:
+        raise papaya_events.PapayaHTTPError("refused", code=403)
+
+    turns, routes = FakeTurns(lambda _turn: "REPOSITORY: cannot tell"), Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("investigate PAP-115")]))
+    serve_until_released(harness, client_home, runner(turns, routes, read_work_item=refused))
+    assert turns.names() == [prompts.REPO_CHOICE]
+    assert "- referenced work items that could not be read: PAP-115" in turns.calls[0].prompt
+    (reply,) = routes.replies()
+    assert reply["content"].startswith("I could not read PAP-115, so I can't tell")
+    assert f"{BACK} or {FRONT}?" in reply["content"]
+
+
+def test_an_ask_never_launches_work_even_when_it_says_fix(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """Goal 1: `intent: ask` runs the answer path only, and the turn is told to suggest work."""
+
+    def act(turn: test_serve.Turn) -> str:
+        assert turn.name == prompts.INSTRUCTION
+        # An asked question reads and records; it never approves, delivers or merges.
+        assert turn.launch.env[instructions.PATH_ENV] == instructions.ASK
+        assert "- asked as: a question" in turn.prompt
+        return (
+            "OUTCOME: done\nNothing is running on it. That needs a change in runtime: ask me "
+            "to fix it and I'll start a worker on it."
+        )
+
+    def dispatch(*_args: Any) -> None:
+        raise AssertionError("an ask dispatched a worker")
+
+    turns, routes = FakeTurns(act), Routes()
+    event = instruction_event("fix the bug in runtime", origin="dm", intent="ask")
+    harness = InstructionHarness(FakeEvents([event]))
+    serve_until_released(harness, client_home, runner(turns, routes, instruction_dispatch=dispatch))
+    assert turns.names() == [prompts.INSTRUCTION]
+    assert classified()["path"] == instructions.ANSWER
+    (reply,) = routes.replies()
+    # This Papaya said `intent`, so it takes `kind` on the DM reply.
+    assert reply["kind"] == "final" and "ask me to fix it" in reply["text"]
+    assert routes.results()[0]["status"] == "done"
+
+
+def test_an_old_papaya_gets_no_kind_on_any_reply(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """No `intent` key: today's classification, and no `kind` (the old DM route 422s it)."""
+    turns, routes = FakeTurns(), Routes()
+    runs: list[int] = []
+    event = instruction_event("Investigate the slow export in runtime", origin="dm")
+    harness = InstructionHarness(FakeEvents([event]))
+    the_runner = runner(
+        turns, routes, instruction_dispatch=dispatcher(runs, []), branch_ahead=lambda _t: False
+    )
+    serve_work(harness, client_home, the_runner, runs, "Found it.")
+    assert classified()["path"] == instructions.WORK
+    assert len(routes.replies()) >= 2
+    assert all(set(body) == {"text"} for body in routes.replies())
+
+
+class RefusingProgress(Routes):
+    """Papaya refusing every progress reply (409), and taking the final one."""
+
+    def __call__(self, request, timeout):
+        body = json.loads(request.data) if request.data else None
+        if isinstance(body, dict) and body.get("kind") == "progress":
+            self.calls.append(("REFUSED", request.full_url, body))
+            raise urllib.error.HTTPError(
+                request.full_url, 409, "Conflict", {}, io.BytesIO(b'{"detail": "no"}')
+            )
+        return super().__call__(request, timeout)
+
+    def replies(self) -> list[Any]:
+        return [body for m, path, body in self.calls if m != "REFUSED" and "/result" not in path]
+
+
+def test_a_refused_progress_reply_is_logged_once_and_the_work_goes_on(
+    ppy_home, client_home, ready, registered_repo, caplog
+) -> None:
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+    turns, routes = FakeTurns(), RefusingProgress()
+    runs: list[int] = []
+    event = instruction_event("Investigate the slow export in runtime", intent="work")
+    harness = InstructionHarness(FakeEvents([event]))
+    the_runner = runner(
+        turns, routes, instruction_dispatch=dispatcher(runs, []), branch_ahead=lambda _t: False
+    )
+    assert serve_work(harness, client_home, the_runner, runs, "Root cause found.") == 0
+    refused = [call for call in routes.calls if call[0] == "REFUSED"]
+    assert len(refused) >= 2  # "On it" and "Dispatched", at least
+    warned = [r for r in caplog.records if "Could not post progress" in r.getMessage()]
+    assert len(warned) == 1
+    (final,) = routes.replies()
+    assert final == {"content": "Root cause found.", "parent_id": "root-1", "kind": "final"}
+    assert routes.results()[0]["status"] == "done"
+
+
+def test_progress_lines_carry_kind_progress_when_papaya_speaks_it(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    turns, routes = FakeTurns(), Routes()
+    runs: list[int] = []
+    event = instruction_event("Investigate the slow export in runtime", intent="work")
+    harness = InstructionHarness(FakeEvents([event]))
+    the_runner = runner(
+        turns, routes, instruction_dispatch=dispatcher(runs, []), branch_ahead=lambda _t: False
+    )
+    serve_work(harness, client_home, the_runner, runs, "Root cause found.")
+    kinds = [body["kind"] for body in routes.replies()]
+    assert kinds[-1] == "final" and set(kinds[:-1]) == {"progress"} and len(kinds) >= 3
+
+
+@pytest.mark.parametrize(("answer_after", "lines"), [(5, 0), (25, 1)])
+def test_the_answer_path_says_looking_once_only_past_twenty_seconds(
+    ppy_home, client_home, ready, answer_after, lines
+) -> None:
+    """The timer is injected: it fires when the (fake) turn has run past 20 s."""
+    past_twenty = threading.Event()
+    routes = Routes()
+
+    async def looking_after() -> None:
+        while not past_twenty.is_set():
+            await asyncio.sleep(0.01)
+
+    def act(_turn: test_serve.Turn) -> str:
+        if answer_after > instructions.LOOKING_AFTER:
+            past_twenty.set()
+            deadline = time.monotonic() + 5
+            while instructions.LOOKING not in contents(routes) and time.monotonic() < deadline:
+                time.sleep(0.01)
+        return "OUTCOME: done\nNothing is blocked."
+
+    harness = InstructionHarness(FakeEvents([instruction_event("What is blocked?")]))
+    serve_until_released(
+        harness, client_home, runner(FakeTurns(act), routes, looking_after=looking_after)
+    )
+    said = contents(routes)
+    assert said.count(instructions.LOOKING) == lines
+    assert said[-1] == "Nothing is blocked."
+    assert len(said) == lines + 1
+
+
+def _held_ticket(routes: Routes) -> tuple[serve.TicketRunner, serve.Ticket]:
+    event = instruction_event("fix it in runtime", intent="work")
+    inst = papaya_events.instruction_from(event["payload"])
+    held = serve.Held(
+        task_id=1,
+        run_id=1,
+        repo="runtime",
+        event=papaya_events.PapayaEvent(
+            id="301", kind=papaya_events.MACHINE_INSTRUCTION, subject=SUBJECT, payload={}
+        ),
+        instruction=inst,
+        classification=instructions.Classification(instructions.WORK, repo="runtime"),
+    )
+    job = SimpleNamespace(
+        stop=threading.Event(), env=dict(JOB_ENV), job_id="job-1", subject=SUBJECT
+    )
+    return runner(FakeTurns(), routes), serve.Ticket(held=held, job=job)
+
+
+def test_a_repeated_phase_is_said_once_in_the_conversation() -> None:
+    routes = Routes()
+    the_runner, held = _held_ticket(routes)
+
+    async def scenario() -> None:
+        await the_runner._say(held, serve.PHASE_DISPATCHED, "Dispatched worker task 3.")
+        await the_runner._say(held, serve.PHASE_DISPATCHED, "Dispatched worker task 3.")
+        await the_runner._say(held, serve.PHASE_REVIEWING, "Reviewing the work.")
+        await the_runner._say(held, serve.PHASE_REVIEWING, "Reviewing the work.")
+
+    asyncio.run(scenario())
+    assert contents(routes) == ["Dispatched worker task 3.", "Reviewing the work."]
+    assert all(body["kind"] == "progress" for body in routes.replies())
+
+
+def test_a_lost_lease_ends_every_progress_line_from_this_machine() -> None:
+    routes = Routes()
+    the_runner, held = _held_ticket(routes)
+
+    async def scenario() -> None:
+        await the_runner._say(held, serve.PHASE_DISPATCHED, "Dispatched worker task 3.")
+        held.job.stop.set()  # the lease is gone
+        await the_runner._say(held, serve.PHASE_REVIEWING, "Reviewing the work.")
+        await the_runner._instruction_progress(held, "On it — working in runtime.")
+
+    asyncio.run(scenario())
+    assert contents(routes) == ["Dispatched worker task 3."]
+
+
+def _setup_blocked() -> readiness.Readiness:
+    return readiness.Readiness(
+        state=readiness.BLOCKED,
+        problems=[
+            readiness.Problem(
+                "forge_signed_out",
+                "GitHub is signed out on this machine",
+                "run gh auth login",
+                steps=("run `gh auth login`",),
+                title="GitHub is signed out",
+            )
+        ],
+    )
+
+
+def test_a_setup_blocker_never_declines_an_ask(ppy_home, client_home, ready) -> None:
+    """Goal 6: answering needs no worker, no clone and no forge."""
+    turns = FakeTurns(lambda _turn: "OUTCOME: done\nNothing is running.")
+    routes = Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("What are you working on?")]))
+    serve_until_released(
+        harness, client_home, runner(turns, routes, check_readiness=_setup_blocked)
+    )
+    assert harness.results[0]["exit_code"] == 0
+    assert harness.events.releases == [(SUBJECT, harness.loop.session_id, False)]
+    assert contents(routes) == ["Nothing is running."]
+
+
+def test_a_setup_blocker_declines_work_with_the_blocker_as_the_reason(
+    ppy_home, client_home, ready, registered_repo
+) -> None:
+    """Goals 5 and 6: declined in plain words, said once where the person asked."""
+    routes = Routes()
+    event = instruction_event("fix the flaky test in runtime", intent="work")
+    harness = InstructionHarness(FakeEvents([event]))
+    serve_until_released(
+        harness, client_home, runner(FakeTurns(), routes, check_readiness=_setup_blocked)
+    )
+    reason = "this machine needs setup: GitHub is signed out"
+    assert harness.results[0]["exit_code"] == 75
+    assert harness.results[0]["output"] == reason
+    assert harness.events.releases == [(SUBJECT, harness.loop.session_id, True)]
+    assert harness.events.hand_backs == []
+    assert routes.replies() == [
+        {
+            "content": f"I can't take MI-42 on this machine: {reason}. "
+            "Its owner has been told what to do.",
+            "parent_id": "root-1",
+            "kind": "final",
+        }
+    ]
+    assert routes.results() == []
+    assert ticket() is None
+
+
+# ── review round 1 (42dc1f9) ────────────────────────────────────────────────
+
+ELSEWHERE = "https://github.com/acme/elsewhere"
+
+
+@pytest.mark.parametrize(
+    ("answer", "dispatched"),
+    [(f"REPOSITORY: {ELSEWHERE}", None), ("REPOSITORY: runtime", "runtime")],
+    ids=["names-the-unregistered-url", "names-the-registered-one"],
+)
+def test_the_choice_turn_chooses_only_between_registered_repositories(
+    ppy_home, client_home, ready, answer, dispatched
+) -> None:
+    """Review 1: a turn's answer is dispatched into, so it may only name a registered repo."""
+    register(ppy_home, FRONT, "runtime")
+
+    def act(turn: test_serve.Turn) -> str:
+        assert "- candidate repositories: runtime\n" in turn.prompt
+        return answer
+
+    turns, routes = FakeTurns(act), Routes()
+    runs: list[int] = []
+    repos: list[str] = []
+    event = instruction_event(f"fix it in runtime or {ELSEWHERE}")
+    harness = InstructionHarness(FakeEvents([event]))
+    the_runner = runner(
+        turns, routes, instruction_dispatch=dispatcher(runs, repos), branch_ahead=lambda _t: False
+    )
+    if dispatched is None:
+        serve_until_released(harness, client_home, the_runner)
+        assert runs == []
+        (reply,) = routes.replies()
+        assert reply["content"].startswith(
+            f"Which repository should I work in: {ELSEWHERE} or runtime? "
+        )
+    else:
+        serve_work(harness, client_home, the_runner, runs, "Found it.")
+        assert repos == [dispatched]
+        assert contents(routes)[0] == "On it — working in runtime."
+
+
+def test_two_items_in_different_repositories_one_unregistered_offer_only_the_registered(
+    ppy_home, client_home, ready
+) -> None:
+    register(ppy_home, FRONT, BACK)
+    records = {
+        "PAP-1": {**FEED, "metadata": {"repository": f"https://github.com/acme/{FRONT}"}},
+        "PAP-2": {**FEED, "title": "Elsewhere", "metadata": {"repository": ELSEWHERE}},
+    }
+
+    def act(turn: test_serve.Turn) -> str:
+        assert f"- candidate repositories: {FRONT}\n" in turn.prompt
+        return "REPOSITORY: cannot tell"
+
+    turns, routes = FakeTurns(act), Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("fix PAP-1 and PAP-2")]))
+    the_runner = runner(turns, routes, read_work_item=lambda ref, _env: records[ref])
+    serve_until_released(harness, client_home, the_runner)
+    assert turns.names() == [prompts.REPO_CHOICE]
+    (reply,) = routes.replies()
+    assert reply["content"].startswith(
+        f"Which repository should I work in: {ELSEWHERE} or {FRONT}?"
+    )
+
+
+def test_an_item_naming_an_unregistered_repository_registers_it_like_a_named_url(
+    ppy_home, client_home, ready, monkeypatch
+) -> None:
+    """The only signal is an unregistered URL: `ensure_spec`, then the blocker check."""
+    register(ppy_home, FRONT, BACK)
+    ensured: list[str] = []
+
+    def ensure(spec: str, **_kwargs: Any) -> solicit.Ensured:
+        ensured.append(spec)
+        register(ppy_home, "elsewhere")
+        return solicit.Ensured("elsewhere", "acme/elsewhere", True, False, "")
+
+    monkeypatch.setattr(papaya_events.solicit, "ensure", ensure)
+    item = {**FEED, "metadata": {"repository": ELSEWHERE}}
+    turns, routes = FakeTurns(), Routes()
+    runs: list[int] = []
+    repos: list[str] = []
+    harness = InstructionHarness(FakeEvents([instruction_event("investigate PAP-115")]))
+    the_runner = runner(
+        turns,
+        routes,
+        instruction_dispatch=dispatcher(runs, repos),
+        branch_ahead=lambda _t: False,
+        read_work_item=lambda _ref, _env: item,
+    )
+    serve_work(harness, client_home, the_runner, runs, "Found it.")
+    assert ensured == [ELSEWHERE] and repos == ["elsewhere"] and turns.calls == []
+    assert contents(routes)[0] == "On it — working in elsewhere."
+
+
+def test_a_usage_limit_on_the_choice_turn_asks_at_once_and_is_not_waited_out(
+    ppy_home, client_home, ready
+) -> None:
+    from papaya_agent_runtime.manager.launch import TurnResult
+
+    register(ppy_home, FRONT, BACK)
+    launched: list[str] = []
+
+    def limited(launch: Any, *, should_stop, transcript_path=None) -> TurnResult:
+        launched.append(test_serve._which_turn(launch.seed_prompt))
+        return TurnResult(
+            exit_code=1,
+            transcript="You've hit your session limit · resets 12:30pm (America/Los_Angeles)\n",
+        )
+
+    routes = Routes()
+    harness = InstructionHarness(FakeEvents([instruction_event("fix the flaky export")]))
+    started = time.monotonic()
+    serve_until_released(harness, client_home, runner(limited, routes))
+    assert time.monotonic() - started < 8
+    assert launched == [prompts.REPO_CHOICE]
+    (reply,) = routes.replies()
+    assert reply["content"].startswith(f"Which repository should I work in: {BACK} or {FRONT}?")
+    assert routes.results()[0]["status"] == "done"
+
+
+def test_the_choice_deadline_ends_the_turn_and_never_the_hold(ppy_home, ready) -> None:
+    """Review 5: the keep-alive loops on the hold's own predicate, which a deadline never sets."""
+    register(ppy_home, FRONT, BACK)
+    event = instruction_event("fix the flaky export")
+    inst = papaya_events.instruction_from(event["payload"])
+    papaya_event = papaya_events.PapayaEvent(
+        id="301", kind=papaya_events.MACHINE_INSTRUCTION, subject=SUBJECT, payload=event["payload"]
+    )
+    conn = init_db()
+    try:
+        refs = instructions.repo_refs(conn)
+        task_id, run_id, _existed = instructions.record_ticket(conn, papaya_event, inst, None)
+    finally:
+        conn.close()
+    found = instructions.place(instructions.classify(inst.text, [], refs), refs, [])
+    held = serve.Held(
+        task_id=task_id,
+        run_id=run_id,
+        repo=None,
+        event=papaya_event,
+        instruction=inst,
+        classification=found,
+    )
+    turns = ChoiceTurn()
+    the_runner = runner(turns, Routes(), repo_choice_seconds=0.2)
+
+    async def scenario() -> tuple[instructions.Classification, bool, bool]:
+        job = SimpleNamespace(
+            stop=asyncio.Event(),
+            env=dict(JOB_ENV),
+            job_id="job-1",
+            subject=SUBJECT,
+            report_progress=lambda *_a: None,
+            touch_activity=lambda: None,
+        )
+        held_ticket = serve.Ticket(held=held, job=job)
+        alive = asyncio.create_task(the_runner._keep_alive(held_ticket))
+        placed = await the_runner._choose_repository(held_ticket)
+        await asyncio.sleep(0.1)
+        still_alive = not alive.done()
+        stopping = held_ticket.should_stop()
+        job.stop.set()
+        await asyncio.wait_for(alive, timeout=5)
+        return placed, still_alive, stopping
+
+    placed, still_alive, stopping = asyncio.run(scenario())
+    assert turns.calls == [prompts.REPO_CHOICE]
+    assert placed.path == instructions.UNANSWERABLE
+    assert "ran out of time" in placed.reason
+    assert still_alive and not stopping
+
+
+class SlowLooking(Routes):
+    """Papaya taking its time over the "Looking…" post, as a slow network would."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.looking_started = threading.Event()
+
+    def __call__(self, request, timeout):
+        body = json.loads(request.data) if request.data else {}
+        if body.get("content") == instructions.LOOKING:
+            self.looking_started.set()
+            time.sleep(0.3)
+        return super().__call__(request, timeout)
+
+
+def test_a_looking_line_already_on_its_way_lands_before_the_answer(
+    ppy_home, client_home, ready
+) -> None:
+    """Review 6: the 20 s boundary. The answer arrives while "Looking…" is being posted."""
+    past_twenty = threading.Event()
+    routes = SlowLooking()
+
+    async def looking_after() -> None:
+        while not past_twenty.is_set():
+            await asyncio.sleep(0.01)
+
+    def act(_turn: test_serve.Turn) -> str:
+        past_twenty.set()
+        assert routes.looking_started.wait(5)
+        return "OUTCOME: done\nNothing is blocked."
+
+    harness = InstructionHarness(FakeEvents([instruction_event("What is blocked?")]))
+    serve_until_released(
+        harness, client_home, runner(FakeTurns(act), routes, looking_after=looking_after)
+    )
+    assert contents(routes) == [instructions.LOOKING, "Nothing is blocked."]

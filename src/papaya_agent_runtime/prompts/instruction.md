@@ -39,6 +39,10 @@ is doing in those terms (its goals, its gate, its review), not in your own.
 
 This turn runs only the commands above and the reads in step 1. It never dispatches,
 steers or resumes a worker: work that needs a repository is a different instruction.
+When the facts say it was asked as a question and answering it would actually take work
+(a change, an investigation in code), answer what the record already says, then say so
+in one sentence and suggest they ask this machine to do it, for example "Ask me to
+investigate it and I'll start a worker on it."
 A command the runtime refuses on this path is refused on purpose; say what you could
 not do in the outcome instead of working around it.
 
