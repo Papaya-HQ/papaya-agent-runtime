@@ -120,6 +120,13 @@ reaching-out in code, the same way in both modes (`outreach.py`): every open ask
 said to the person where they are — a comment on its work item, one message in their
 DM with this agent (a macOS desktop notification too, only with `PPY_OUTREACH_DESKTOP=1`;
 by default none, since `osascript`'s notifications open Script Editor), never a channel.
+An agent in no DM channel with its owner still reaches them in the agent DM, where they
+already talk to it: outreach and the readiness report go through Papaya's owner-DM route
+(`POST .../polyweave-agents/me/owner-dm/messages`) in plain words — a `question` for an
+ask that needs their answer, a `notice` otherwise, keyed on the ask's fingerprint so a
+repeat is never posted twice. A Papaya without the route (404) is today's "nowhere it
+could reach", said once per start; any other failure is logged once and tried again next
+round.
 It is said once, and again only if what it asks changes; deliveries are at most one
 every six hours (`PPY_OUTREACH_REPEAT_SECONDS`), so a new or changed ask waits for the
 next window rather than adding a message. An unchanged ask is not repeated: it stays in

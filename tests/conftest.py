@@ -60,12 +60,16 @@ def _outreach_reaches_nobody_unless_a_test_asks(request, monkeypatch):
     """The outreach procedure (`outreach.py`) runs from the heartbeat, the hooks and
     serve's rounds and reaches a person through the workspace and the desktop; tests
     about other lines must neither post anywhere nor raise a notification on the
-    developer's screen. `tests/test_outreach.py` fakes the channels itself."""
-    if request.module.__name__.endswith("test_outreach"):
-        return
+    developer's screen. `tests/test_outreach.py` fakes the channels itself.
+
+    What a process learned about the owner-DM route (a 404, the lines it logged) is
+    forgotten between tests, as it is between starts."""
     from papaya_agent_runtime import outreach
 
-    monkeypatch.setattr(outreach, "post_dm", lambda text: False)
+    outreach.forget_owner_dm()
+    if request.module.__name__.endswith("test_outreach"):
+        return
+    monkeypatch.setattr(outreach, "post_dm", lambda text, **_: False)
     monkeypatch.setattr(outreach, "post_ticket", lambda item, body, environ=None: False)
     monkeypatch.setattr(outreach, "notify_desktop", lambda text: False)
 

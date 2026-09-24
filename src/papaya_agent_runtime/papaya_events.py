@@ -852,6 +852,54 @@ def put_connection_status(
     return True
 
 
+#: What a message to the owner is (`OwnerDmMessage.kind`): telling them, or asking them.
+OWNER_DM_NOTICE = "notice"
+OWNER_DM_QUESTION = "question"
+#: The route's limits: `body` 1-4000 characters, `dedupe_key` 1-128.
+OWNER_DM_MAX_CHARS = 4000
+OWNER_DM_KEY_MAX = 128
+
+
+def post_owner_dm(
+    body: str,
+    *,
+    kind: str,
+    dedupe_key: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Say ``body`` to the person who connected this machine, in their agent DM.
+
+    `POST .../polyweave-agents/me/owner-dm/messages` with the connection's own token
+    (backend PR #1042): the token is the connection and its owner, so nothing in the
+    request names a person or a conversation. The same ``dedupe_key`` within 24 hours
+    posts nothing and answers 200 with ``replayed: true``. Returns the answer, or
+    ``None`` when there is nothing to call with (not connected). A refusal raises
+    :class:`PapayaHTTPError`: a 404 is a Papaya that predates the route.
+    """
+    if kind not in (OWNER_DM_NOTICE, OWNER_DM_QUESTION):
+        raise PapayaEventError(f"a message to the owner is a notice or a question, not {kind!r}")
+    env = os.environ if environ is None else environ
+    workspace = _clean(env.get(_PAPAYA_WORKSPACE_ENV))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    text = str(body or "").strip()
+    if not workspace or not token or not text:
+        return None
+    url = _api_url(
+        env,
+        f"/api/v1/workspaces/{urllib.parse.quote(workspace, safe='')}"
+        "/polyweave-agents/me/owner-dm/messages",
+    )
+    if url is None:
+        return None
+    if len(text) > OWNER_DM_MAX_CHARS:
+        text = text[: OWNER_DM_MAX_CHARS - 1].rstrip() + "…"
+    payload: dict[str, Any] = {"body": text, "kind": kind}
+    if dedupe_key:
+        payload["dedupe_key"] = str(dedupe_key)[:OWNER_DM_KEY_MAX]
+    return _papaya_request(url, token, method="POST", body=payload, what="owner DM", opener=opener)
+
+
 def _repository_value(value: object) -> str | None:
     if isinstance(value, Mapping):
         for key in _REPOSITORY_VALUE_KEYS:
@@ -1013,7 +1061,12 @@ __all__ = [
     "read_work_item_ref",
     "work_item_repository",
     "parse_instruction",
+    "OWNER_DM_KEY_MAX",
+    "OWNER_DM_MAX_CHARS",
+    "OWNER_DM_NOTICE",
+    "OWNER_DM_QUESTION",
     "post_instruction_reply",
+    "post_owner_dm",
     "put_connection_status",
     "reply_paths",
     "report_instruction_result",

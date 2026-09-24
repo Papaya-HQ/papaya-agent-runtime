@@ -1587,9 +1587,9 @@ class Rounds:
 
         The same plan a session's heartbeat and hooks make; serve says it through its
         own connection: the work item comments with this connection's credentials, the
-        message through the listener's client (`outreach.say_in_workspace`: the DM, or a
-        channel with the owner mentioned). Never raises: a person who could not be
-        reached this round is reached the next.
+        message through the listener's client (`outreach.say_in_workspace`: the DM
+        channel, or Papaya's owner-DM route when the agent is in none). Never raises: a
+        person who could not be reached this round is reached the next.
         """
         try:
             found, lines = await asyncio.to_thread(_outreach_plan, now, serve._where())
@@ -1610,7 +1610,7 @@ class Rounds:
                     )
                 )
             dm_landed = bool(found.dm) and await outreach.say_in_workspace(
-                getattr(self._built, "api", None), found.dm
+                getattr(self._built, "api", None), found.dm, owner=found.owner, environ=env
             )
             return lines + await asyncio.to_thread(
                 _outreach_deliver, found, now, landed, dm_landed, origins

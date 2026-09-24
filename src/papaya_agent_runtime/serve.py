@@ -140,6 +140,7 @@ from papaya_agent_runtime import (
     instructions,
     limits,
     machine_status,
+    outreach,
     papaya,
     papaya_events,
     progress,
@@ -5834,7 +5835,8 @@ def dm_channel_id(channels: Any) -> str | None:
     person's session and writes as that person), so the DM is found rather than
     made. The agent's own DM with a person (`agent_private`) is preferred over a
     person-to-person `dm` it happens to be in. A workspace that shows this agent
-    no DM at all gets nothing posted rather than a report in a team channel.
+    no DM at all never gets a report in a team channel: it goes through Papaya's
+    owner-DM route instead (`outreach.say_in_workspace`).
     """
     if isinstance(channels, dict):  # a wrapped list is the other shape this can arrive in
         channels = channels.get("channels")
@@ -5862,31 +5864,27 @@ def _where() -> str:
     return blockers.short_hostname()
 
 
-async def _post_dm(built: Any, text: str) -> bool:
-    """Put `text` in the agent's DM, and say whether it got there."""
-    from papaya_agent_client import api_client
+#: Logged once per start when readiness reached neither a DM channel nor the owner-DM route.
+READINESS_UNREACHED = (
+    "[serve] This agent is in no DM channel (agent_private or dm), so readiness "
+    "was not posted; it is on stderr, and posted on the next start that finds one"
+)
 
-    api = getattr(built, "api", None)
-    if api is None:
+
+async def _post_dm(built: Any, text: str) -> bool:
+    """Put `text` in the agent's DM, and say whether it got there.
+
+    The same path outreach speaks through (`outreach.say_in_workspace`): the DM channel
+    when the agent is in one, else Papaya's owner-DM route as a notice, keyed on the
+    words so a start that says the same thing again posts nothing new.
+    """
+    if not text:
         return False
-    try:
-        channels = await api_client.list_agent_channels(api)
-    except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
-        log.warning("[serve] Could not read this agent's channels: %s", exc)
-        return False
-    channel_id = dm_channel_id(channels)
-    if channel_id is None:
-        log.warning(
-            "[serve] This agent is in no DM channel (agent_private or dm), so readiness "
-            "was not posted; it is on stderr, and posted on the next start that finds one"
-        )
-        return False
-    try:
-        await api_client.post_agent_channel_message(api, channel_id, text)
-    except Exception as exc:  # noqa: BLE001 - reporting must not stop the listener
-        log.warning("[serve] Could not post the readiness report: %s", exc)
-        return False
-    return True
+    key = "readiness:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    owner = outreach.OwnerMessage(body=text, kind=papaya_events.OWNER_DM_NOTICE, dedupe_key=key)
+    return await outreach.say_in_workspace(
+        getattr(built, "api", None), text, owner=owner, unreached=READINESS_UNREACHED
+    )
 
 
 async def report_readiness(verdict, built, watch: blockers.Watch | None = None) -> None:
