@@ -43,6 +43,14 @@ if [ "${1:-}" = "capabilities" ] && [ ! -d "$VENV" ]; then
     fi
 fi
 
+# `setup` is the first command on a fresh machine, and everything below needs uv,
+# so a machine without it hears the one line that installs it.
+if [ "${1:-}" = "setup" ] && ! command -v uv >/dev/null 2>&1; then
+    echo "uv is not installed. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    echo "then open a new shell and run ./bin/ppy setup again" >&2
+    exit 1
+fi
+
 # Does the runtime's dependency import from the environment? A refused or
 # interrupted sync used to leave it without the Papaya client (2026-09-16).
 environment_ok() {

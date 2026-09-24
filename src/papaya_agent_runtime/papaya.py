@@ -324,6 +324,23 @@ def identity() -> Identity | None:
     return found[0] if found is not None else None
 
 
+def stored_working_directory() -> str | None:
+    """The working folder the connection was made with, or None when it names none.
+
+    `papaya-agent connect --working-directory` (the desktop app's path) stores it on
+    the pinned agent's entry; a device-code connect never does.
+    """
+    found = _best()
+    if found is None:
+        return None
+    config = _read_config(found[1])
+    agents = config.get("agents") if isinstance(config.get("agents"), dict) else {}
+    entry = agents.get(found[0].agent_id) if found[0].agent_id else None
+    if not isinstance(entry, dict):
+        return None
+    return str(entry.get("working_directory") or "").strip() or None
+
+
 def signed_in() -> bool:
     """Is any candidate home authenticated, even with no agent pinned yet?"""
     for home in candidate_homes():

@@ -399,7 +399,11 @@ def _parser() -> argparse.ArgumentParser:
         "--working-directory",
         default=None,
         metavar="PATH",
-        help="run every job under this directory and allow no other",
+        help=(
+            "run every job under this directory and allow no other (default: the one "
+            "stored with the Papaya connection, else, unless --supervised, the current "
+            "directory)"
+        ),
     )
     parser.add_argument(
         "--sweep-interval",
@@ -5632,6 +5636,26 @@ def extra_capabilities(builder: Callable[..., Any]) -> dict[str, Any]:
     return {EXTRA_CAPABILITIES: {"instruction_intents": list(INSTRUCTION_INTENTS)}}
 
 
+def working_directory_for(
+    options: ServeOptions,
+    *,
+    stored: Callable[[], str | None] | None = None,
+    cwd: Callable[[], str] = os.getcwd,
+) -> str | None:
+    """Where jobs run: `--working-directory`, else the connection's, else here.
+
+    `./bin/ppy serve` in a terminal is started from the checkout, so with nothing
+    named the current directory is the answer a person means. A supervised start is
+    left to the client's own rule (the stored folder, or a refusal): the desktop app
+    execs from wherever it was launched, `/` from Finder, which is never a default.
+    """
+    if options.working_directory is not None:
+        return options.working_directory
+    if options.supervised:
+        return None
+    return (stored or papaya.stored_working_directory)() or cwd()
+
+
 async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str, Any]):
     """The embedded listener for these options, supervised or not."""
     from papaya_agent_client.embed import build_listener, build_supervised_listener
@@ -5651,7 +5675,7 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         # supervised host reads on `job.request`); only the runtime label is ours.
         "runtime_kind": capabilities.RUNTIME,
         "home": home,
-        "working_directory": options.working_directory,
+        "working_directory": working_directory_for(options),
         "session_id": session_id,
         # One subject per ticket, and a held ticket's worker takes a slot of
         # `worker.max_concurrent`, so the loop holds exactly as many tickets as

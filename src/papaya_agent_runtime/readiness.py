@@ -257,7 +257,10 @@ def _config_problems(problems: list[Problem]) -> None:
                 summary=(
                     "this runtime has never been set up: no driver profile and no worker ceiling"
                 ),
-                fix="`ppy setup` — `ppy serve` does this itself before it starts listening",
+                fix=(
+                    "`ppy setup --profile-only --non-interactive` — `ppy serve` does this "
+                    "itself before it starts listening"
+                ),
             )
         )
         return
@@ -268,7 +271,10 @@ def _config_problems(problems: list[Problem]) -> None:
             Problem(
                 code="config_invalid",
                 summary=f"the configuration cannot be read: {exc}",
-                fix="`ppy setup` to rewrite it, or `ppy config show` to see what is wrong",
+                fix=(
+                    "`ppy setup --profile-only --non-interactive` to rewrite it, or "
+                    "`ppy config show` to see what is wrong"
+                ),
             )
         )
         return
