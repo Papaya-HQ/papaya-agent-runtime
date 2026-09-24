@@ -179,6 +179,8 @@ def sync_worktree_with_remote(task_id: int) -> dict:
     that no longer exist upstream; resuming or delivering from there either
     force-pushes the cascade away or opens a pull request full of duplicates.
 
+    - Worktree ahead only by commits adding build artifacts -> back onto the pushed
+      head (:func:`drop_artifact_commits`), recorded as an event.
     - Remote moved, worktree has nothing of its own -> reset onto the remote and
       record it as an event.
     - Both sides have commits -> refuse, naming both commits. A force-push here
@@ -262,6 +264,9 @@ def _sync_worktree(conn, task) -> dict:
         return {"task_id": task_id, "action": "none", "note": "no readable worktree to compare"}
     if state is None or not state.on_remote:
         return {"task_id": task_id, "action": "none", "note": "no remote branch to compare with"}
+    dropped = _drop_artifact_commits(conn, task, state)
+    if dropped is not None:
+        return {"task_id": task_id, "action": "dropped", **dropped}
     if state.diverged:
         raise StackError(
             f"task {task_id}: the worktree and {state.remote}/{state.branch} have both moved "
@@ -302,6 +307,94 @@ def _sync_worktree(conn, task) -> dict:
         task_id=task_id,
     )
     return {"task_id": task_id, "action": "reset", **payload}
+
+
+#: The event recorded when a local commit of nothing but build artifacts is dropped.
+ARTIFACT_COMMIT_DROPPED = "artifact_commit_dropped"
+
+
+def drop_artifact_commits(conn, task) -> dict | None:
+    """Put the worktree back on its pushed head when all it adds is build artifacts.
+
+    On 2026-09-23 a worker pushed a clean branch, the runtime committed again on its
+    own and put ``__pycache__/*.pyc`` and ``uv.lock`` on top, and review — which reads
+    the worktree's head — sent the worker back to undo a commit it never made. The
+    worker cannot be the one to fix that, and review cannot either (it may not write
+    in the worktree); the runtime can.
+
+    Only when the pushed lease branch is an ancestor of the local head and every path
+    between them is *added* and is an artifact by :data:`autocommit.ARTIFACTS`. Any
+    real change — a modified file, a deletion, a source file — leaves the head alone.
+    The reset is ``--mixed``: the files stay in the worktree, untracked, so a
+    worker's environment is not taken from it. Returns the recorded payload, or
+    ``None`` when nothing was dropped. Never raises.
+    """
+    try:
+        state = task_branch_state(conn, task)
+    except StackError:
+        return None
+    if state is None or not state.on_remote:
+        return None
+    return _drop_artifact_commits(conn, task, state)
+
+
+def _drop_artifact_commits(conn, task, state: BranchState) -> dict | None:
+    from papaya_agent_runtime.supervisor import autocommit
+
+    worktree = task["worktree_path"]
+    pushed, local = state.remote_sha or "", state.local_sha
+    if not worktree or not pushed or pushed == local or state.behind:
+        return None
+    rc, _out = _git(worktree, "merge-base", "--is-ancestor", pushed, local)
+    if rc != 0:
+        return None
+    proc = subprocess.run(
+        ["git", "-C", worktree, "diff", "--name-status", "--no-renames", "-z", pushed, local],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    fields = [field for field in proc.stdout.split("\0") if field]
+    if not fields or len(fields) % 2:
+        return None
+    changes = list(zip(fields[::2], fields[1::2], strict=True))
+    if not all(code == "A" and autocommit.is_artifact(path) for code, path in changes):
+        return None
+    names: list[str] = []
+    for _code, path in changes:
+        root = autocommit.artifact_root(path) or path
+        if root not in names:
+            names.append(root)
+    rc, count = _git(worktree, "rev-list", "--count", f"{pushed}..{local}")
+    commits = int(count) if rc == 0 and count.isdigit() else 0
+    rc, _out = _git(worktree, "reset", "--mixed", "--quiet", pushed)
+    if rc != 0:
+        return None
+    task_id = int(task["id"])
+    payload = {
+        "task_id": task_id,
+        "branch": state.branch,
+        "remote": state.remote,
+        "from": local,
+        "to": pushed,
+        "commits": commits,
+        "paths": names,
+        "summary": (
+            f"dropped {commits} local commit(s) above {state.remote}/{state.branch} that only "
+            f"added build artifacts ({', '.join(names)}); the worktree is back on the pushed "
+            f"head {pushed[:8]}, which review and delivery use"
+        ),
+    }
+    store.append_event(
+        conn,
+        kind=ARTIFACT_COMMIT_DROPPED,
+        payload=payload,
+        run_id=task["run_id"],
+        task_id=task_id,
+    )
+    return payload
 
 
 # --------------------------------------------------------------------------- #
