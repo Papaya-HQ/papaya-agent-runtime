@@ -363,15 +363,19 @@ def test_the_sign_in_link_reaches_the_person_while_the_flow_waits(tmp_path, monk
 
 
 def test_connecting_through_uv_keeps_the_client_on_the_path_afterwards(
-    tmp_path, monkeypatch
+    client_home, monkeypatch
 ) -> None:
     """The npm shim installs the client after a connect; the uv path does the same."""
     calls: list[list[str]] = []
     monkeypatch.setattr(papaya, "installer", lambda: "uv")
     monkeypatch.setattr(papaya, "installed", lambda: None)
     monkeypatch.setattr(papaya, "connect_argv", lambda **_k: ["uv", "tool", "run", "connect"])
-    monkeypatch.setattr(papaya, "_stream", lambda argv, *, timeout, echo: (0, ["Connected."]))
-    monkeypatch.setattr(papaya, "status", lambda: {"state": "connected", "addressed": "@eng"})
+
+    def connected(argv, *, timeout, echo):
+        _write(client_home, _pinned_at("2026-09-24T12:00:00+00:00"))
+        return 0, ["Connected."]
+
+    monkeypatch.setattr(papaya, "_stream", connected)
 
     def run(argv, *, timeout, env=None, cwd=None):
         calls.append(argv)
@@ -420,6 +424,197 @@ def test_a_logged_api_call_is_never_mistaken_for_the_sign_in_link() -> None:
         papaya._first_link(lines)
         == "https://app.trypapaya.ai/cli/authorize?state=s&client_name=reptar"
     )
+
+
+def _pinned_at(stamp: str, agent: dict = AGENT) -> dict:
+    """A config as `papaya-agent connect` leaves it, pinned to ``agent`` at ``stamp``."""
+    return {
+        "agents": {agent["agent_id"]: {**agent, "client_token_updated_at": stamp}},
+        "connect": {"agent_id": agent["agent_id"], "harness": "claude", "updated_at": stamp},
+    }
+
+
+QA = {**AGENT, "agent_id": "a-2", "agent_name": "QA Agent", "agent_handle": "qa_agent"}
+
+
+def _client_pinning(agent: dict, *printed: str, code: int = 0) -> str:
+    """A fake client script that pins ``agent`` as a real connect does, then exits ``code``."""
+    config = json.dumps(_pinned_at("2026-09-24T12:00:00+00:00", agent))
+    lines = "".join(f"print({line!r})\n" for line in printed)
+    return (
+        "import os, pathlib, sys\n"
+        f"pathlib.Path(os.environ[{papaya.HOME_ENV!r}], 'config.json').write_text({config!r})\n"
+        f"{lines}sys.exit({code})\n"
+    )
+
+
+def test_a_connect_that_fails_over_an_old_connection_is_a_failure(
+    client_home, tmp_path, monkeypatch
+) -> None:
+    """The owner's switch, 2026-09-24: the second connect exited without connecting,
+    `status()` still read the old connection, and setup said "Connected as" the agent
+    that was already there. The connect itself is the judge now."""
+    _write(client_home, _pinned_at("2026-09-24T10:00:00+00:00"))
+    _fake_client(
+        tmp_path,
+        monkeypatch,
+        "import sys\nprint('Open https://app.trypapaya.ai/cli/authorize?state=s')\nsys.exit(1)\n",
+    )
+    result = papaya.connect(timeout=30)
+    assert result["ok"] is False
+    assert result["reason"] == "failed"
+    assert result["status"]["state"] == "connected"  # the old one, still there
+
+
+def test_exiting_zero_without_recording_a_connection_is_not_a_connect(
+    client_home, tmp_path, monkeypatch
+) -> None:
+    _write(client_home, _pinned_at("2026-09-24T10:00:00+00:00"))
+    _fake_client(tmp_path, monkeypatch, "print('Waiting for approval in Papaya...')\n")
+    result = papaya.connect(timeout=30)
+    assert result["ok"] is False
+    assert result["reason"] == "declined"
+
+
+def test_a_switch_that_records_a_new_connection_says_who_came_before(
+    client_home, tmp_path, monkeypatch
+) -> None:
+    _write(client_home, _pinned_at("2026-09-24T10:00:00+00:00"))
+    _fake_client(
+        tmp_path,
+        monkeypatch,
+        _client_pinning(QA, "Connected as QA Agent (@qa_agent) in Papaya HQ."),
+    )
+    result = papaya.connect(timeout=30)
+    assert result["ok"] is True
+    assert result["before"]["handle"] == "engineering_agent"
+    assert result["status"]["identity"]["handle"] == "qa_agent"
+    assert result["workspace"] == "Papaya HQ"
+
+
+def test_reconnecting_the_same_agent_is_still_a_connect(client_home, tmp_path, monkeypatch) -> None:
+    """Same agent, fresh stamps: the client did connect, so it is not a failure."""
+    _write(client_home, _pinned_at("2026-09-24T10:00:00+00:00"))
+    _fake_client(tmp_path, monkeypatch, _client_pinning(AGENT, "Agent: Engineering Agent"))
+    result = papaya.connect(timeout=30)
+    assert result["ok"] is True
+    assert result["agent_choice"] == "only"
+
+
+class _Spawned(Exception):
+    pass
+
+
+def _spy_popen(monkeypatch) -> list[dict]:
+    """Record how the client would be started, and start nothing."""
+    seen: list[dict] = []
+
+    def popen(argv, **kwargs):
+        seen.append(kwargs)
+        raise _Spawned
+
+    monkeypatch.setattr(papaya.subprocess, "Popen", popen)
+    return seen
+
+
+def test_an_interactive_connect_gives_the_client_the_persons_stdin(monkeypatch) -> None:
+    """The client asks the workspace and agent only when its stdin is a terminal."""
+    seen = _spy_popen(monkeypatch)
+    with pytest.raises(_Spawned):
+        papaya._attached(["papaya-agent", "connect"], timeout=5, echo=None)
+    assert seen[0]["stdin"] is None  # inherited, not DEVNULL and not a pipe
+
+
+def test_a_scripted_connect_still_has_no_stdin_and_is_captured(monkeypatch) -> None:
+    seen = _spy_popen(monkeypatch)
+    with pytest.raises(_Spawned):
+        papaya._stream(["papaya-agent", "connect"], timeout=5, echo=None)
+    assert seen[0]["stdin"] is papaya.subprocess.DEVNULL
+    assert seen[0]["stdout"] is papaya.subprocess.PIPE
+
+
+def test_interactive_picks_the_attached_runner_and_scripted_the_captured_one(
+    client_home, monkeypatch
+) -> None:
+    monkeypatch.setattr(papaya, "installed", lambda: "/usr/local/bin/papaya-agent")
+    used: list[str] = []
+    monkeypatch.setattr(
+        papaya, "_attached", lambda argv, *, timeout, echo: used.append("attached") or (1, [])
+    )
+    monkeypatch.setattr(
+        papaya, "_stream", lambda argv, *, timeout, echo: used.append("stream") or (1, [])
+    )
+    papaya.connect(interactive=True)
+    papaya.connect(agent="QA Agent")
+    assert used == ["attached", "stream"]
+
+
+def test_the_clients_question_shows_before_it_is_answered(tmp_path, monkeypatch) -> None:
+    """`Agent number: ` has no newline after it; a line-by-line echo would hold it back
+    until the answer came, and the person would be answering a question they cannot see."""
+    answered = tmp_path / "answered"
+    _fake_client(
+        tmp_path,
+        monkeypatch,
+        "import pathlib, sys, time\n"
+        "sys.stdout.write('Choose a agent:\\n  1. Ada\\n  2. Bea\\nAgent number: ')\n"
+        "sys.stdout.flush()\n"
+        f"marker = pathlib.Path({str(answered)!r})\n"
+        "for _ in range(200):\n"
+        "    if marker.exists():\n"
+        "        print('Connected as Bea (@bea) in Papaya HQ.')\n"
+        "        sys.exit(0)\n"
+        "    time.sleep(0.05)\n"
+        "sys.exit(3)\n",
+    )
+
+    class Terminal:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def write(self, text: str) -> int:
+            self.text += text
+            if self.text.endswith("Agent number: "):
+                answered.touch()
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    terminal = Terminal()
+    code, lines = papaya._attached([papaya.installed()], timeout=30, echo=terminal)
+    assert code == 0
+    assert "Agent number: Connected as Bea (@bea) in Papaya HQ." in terminal.text
+    assert papaya._agent_choice(lines) == "asked"
+    assert papaya._workspace_named(lines) == "Papaya HQ"
+
+
+@pytest.mark.parametrize(
+    ("lines", "choice", "workspace"),
+    [
+        (
+            ["Workspace: Papaya HQ (papaya-hq)", "Agent: Middle Manager @mm (assistant)"]
+            + ["Connected as Middle Manager (@mm) in Papaya HQ."]
+            + [
+                "Connected as Middle Manager in Papaya HQ. Open Claude Code in any "
+                "repository — the papaya tools are ready."
+            ],
+            "only",
+            "Papaya HQ",
+        ),
+        (
+            ["", "Choose a workspace:", "", "  1. A (a)", "  2. B (b)"]
+            + ["Workspace number: Agent: Ada @ada (assistant)", "Connected as Ada (@ada) in B."],
+            "only",
+            "B",
+        ),
+        (["", "Choose a agent:", "", "  1. Ada", "  2. Bea"], "asked", None),
+        (["Open https://x/device and approve code ABC"], None, None),
+    ],
+)
+def test_what_the_client_said_about_the_choice_is_read_back(lines, choice, workspace) -> None:
+    assert papaya._agent_choice(lines) == choice
+    assert papaya._workspace_named(lines) == workspace
 
 
 def test_the_client_runs_unbuffered_so_the_link_is_not_held_back(tmp_path, monkeypatch) -> None:

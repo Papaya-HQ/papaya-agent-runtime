@@ -259,6 +259,7 @@ def test_a_fully_set_up_machine_run_by_a_script_asks_nothing(world):
 
 
 def test_switching_agents_on_a_rerun_connects_again(world):
+    """Ending on the agent already connected is not reported as a new connection."""
     _set_up_fully(world)
     picker = ScriptedPicker(switch=True)
 
@@ -266,7 +267,86 @@ def test_switching_agents_on_a_rerun_connects_again(world):
 
     assert code == 0
     assert len(world.connects) == 1
-    assert lines.count("✓ Connected as Ada (@ada)") == 2
+    assert lines.count("✓ Connected as Ada (@ada)") == 1
+    assert "✓ Still connected as Ada (@ada)" in lines
+
+
+def test_an_interactive_switch_is_one_connect_on_the_terminal(world):
+    """The owner, 2026-09-24: two sign-ins, and no chance to pick the agent. On a
+    terminal the client asks the workspace and agent inside the one sign-in."""
+    _set_up_fully(world)
+
+    def connect(**kwargs):
+        world.connects.append(kwargs)
+        _write_connection(world.client, agent_id="a-2", name="Bea", handle="bea")
+        return {"ok": True, "agent_choice": "asked", "workspace": "Papaya HQ"}
+
+    picker = ScriptedPicker(switch=True)
+    code, lines = _setup(world, shell=_healthy(), picker=picker, connect=connect)
+
+    assert code == 0
+    assert len(world.connects) == 1
+    assert world.connects[0]["interactive"] is True
+    assert world.connects[0]["agent"] is None and world.connects[0]["workspace"] is None
+    assert picker.asked == ["Switch to another agent?"]  # no second picker of our own
+    assert lines[3:6] == [
+        "✓ Connected as Ada (@ada)",
+        "Connecting to Papaya: approve in the browser that opens.",
+        "✓ Connected as Bea (@bea)",
+    ]
+
+
+def test_a_switch_with_only_one_agent_says_so_instead_of_claiming_a_switch(world):
+    _set_up_fully(world)
+
+    def connect(**kwargs):
+        world.connects.append(kwargs)
+        _write_connection(world.client)  # the same agent, freshly pinned
+        return {"ok": True, "agent_choice": "only", "workspace": "Papaya HQ"}
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(switch=True), connect=connect
+    )
+
+    assert code == 0
+    assert (
+        "Ada (@ada) is the only agent you can connect in Papaya HQ. To use another, create it "
+        "in Papaya (Agents → New agent), then run ./bin/ppy setup again."
+    ) in lines
+    assert lines.count("✓ Connected as Ada (@ada)") == 1  # the "before" tick only
+    assert not any(line.startswith("✓ Still") for line in lines)
+
+
+def test_a_switch_that_does_not_finish_says_not_switched(world, capsys):
+    _set_up_fully(world)
+
+    def connect(**kwargs):
+        world.connects.append(kwargs)
+        return {"ok": False, "reason": "failed", "detail": "exit 1"}
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(switch=True), connect=connect
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Not switched: still connected as Ada (@ada) (exit 1)." in err
+    assert lines.count("✓ Connected as Ada (@ada)") == 1
+    assert guided.DONE not in lines
+
+
+def test_a_script_connects_captured_with_the_agent_it_was_given(world):
+    options = guided.Options(
+        interactive=False, agent="Bea", workspace="papaya-hq", repos=("acme/api",), skip_tools=True
+    )
+
+    code, _ = _setup(world, options, shell=_healthy(), picker=Silent())
+
+    assert code == 0
+    assert len(world.connects) == 1
+    call = world.connects[0]
+    assert call["interactive"] is False
+    assert (call["agent"], call["workspace"]) == ("Bea", "papaya-hq")
 
 
 # ── picking up where it stopped ─────────────────────────────────────────────

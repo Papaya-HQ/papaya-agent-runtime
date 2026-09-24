@@ -297,8 +297,8 @@ def _identity_in(config: dict) -> tuple[Identity, str] | None:
     return found, str(connect.get("updated_at") or "")
 
 
-def _best() -> tuple[Identity, Path] | None:
-    """The connection to act as, across every place one could have been made.
+def _pinned() -> tuple[str, Identity, Path] | None:
+    """The connection to act as, with when it was pinned and the home it lives in.
 
     A machine can hold a CLI connection and a desktop-app connection at once. The
     most recently pinned one wins, because that is the one the person last chose;
@@ -314,8 +314,30 @@ def _best() -> tuple[Identity, Path] | None:
     if not found:
         return None
     found.sort(key=lambda item: item[0], reverse=True)
-    _, who, home = found[0]
-    return who, home
+    return found[0]
+
+
+def _best() -> tuple[Identity, Path] | None:
+    """The connection to act as, across every place one could have been made."""
+    found = _pinned()
+    return (found[1], found[2]) if found is not None else None
+
+
+def _connection_mark() -> tuple[str, str] | None:
+    """What only a completed connect rewrites: the pin's stamp and the token's.
+
+    `papaya-agent connect` writes both when it records a connection, and nothing
+    else does — signing in rewrites the config too, so the file changing proves
+    nothing. ``None`` when nothing is pinned.
+    """
+    found = _pinned()
+    if found is None:
+        return None
+    updated_at, who, home = found
+    agents = _read_config(home).get("agents")
+    entry = agents.get(who.agent_id) if isinstance(agents, dict) else None
+    token_at = str(entry.get("client_token_updated_at") or "") if isinstance(entry, dict) else ""
+    return updated_at, token_at
 
 
 def identity() -> Identity | None:
@@ -505,6 +527,74 @@ def _stream(argv: list[str], *, timeout: int, echo: Any) -> tuple[int, list[str]
     return code, lines
 
 
+def _attached(argv: list[str], *, timeout: int, echo: Any) -> tuple[int, list[str]]:
+    """Run ``argv`` on the person's terminal: their stdin, and output shown as it comes.
+
+    The client asks which workspace and which agent only when its stdin is a
+    terminal, so inheriting stdin is what puts both questions inside the one
+    sign-in. Output still passes through here, a chunk at a time rather than a line
+    at a time, so a question with no newline after it (``Agent number:``) shows
+    before the answer is typed, and a copy is kept to read what the client said.
+    """
+    import codecs
+    import threading
+
+    env = client_env()
+    env["PYTHONUNBUFFERED"] = "1"
+    out = echo if echo is not None else sys.stdout
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        argv,
+        stdin=None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    said: list[str] = []
+
+    def pump() -> None:
+        assert proc.stdout is not None
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        fd = proc.stdout.fileno()
+        while True:
+            chunk = os.read(fd, 4096)
+            text = decoder.decode(chunk, final=not chunk)
+            if text:
+                said.append(text)
+                print(text, end="", file=out, flush=True)
+            if not chunk:
+                return
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        reader.join(timeout=5)
+        exc.output = "".join(said)
+        raise
+    except BaseException:
+        # Ctrl-C at the client's question: the client got it too; do not leave it behind.
+        proc.kill()
+        raise
+    reader.join(timeout=5)
+    return code, "".join(said).splitlines()
+
+
+#: Where a line of the client's starts. The answer typed at `Workspace number: ` is the
+#: terminal's echo, not the client's output, so in the copy the next line runs on
+#: from the question.
+_STARTS = r"(?:^|number: )"
+#: What the client prints once a connection is recorded:
+#: `Connected as Middle Manager (@handle) in Papaya HQ.`, and last of all the same
+#: with `. Open Claude Code in any repository …` after the workspace.
+_CONNECTED = re.compile(_STARTS + r"Connected as .+? in (?P<workspace>.+?)\.(?: Open .*)?$")
+#: The client's browser flow names a lone candidate instead of asking: `Agent: <label>`.
+_ONLY_AGENT = re.compile(_STARTS + r"Agent: \S")
+#: …and lists several before asking for a number.
+_ASKED_AGENT = re.compile(_STARTS + r"Choose an? agent:")
+
+
 def connect(
     *,
     harness: str = "claude",
@@ -514,13 +604,23 @@ def connect(
     no_browser: bool = False,
     timeout: int = CONNECT_TIMEOUT,
     echo: Any = None,
+    interactive: bool = False,
 ) -> dict:
     """Install the client if it is missing, run its connect flow, and say what happened.
 
     Never raises. The flow opens a sign-in link and waits for the person to click
     Approve: that is the one moment a person is in the loop, and it is a browser
-    click, never a command they type. ``reason`` on a failure is what the caller
-    branches on:
+    click, never a command they type. ``interactive`` runs it on the person's
+    terminal, so the client itself asks which workspace and agent inside that one
+    sign-in; without it, the client has no stdin and answers with its choices.
+
+    ``ok`` means this run connected: the client exited 0 *and* recorded a
+    connection. A connection that was already there says nothing about this run,
+    so a switch that fails part-way is a failure, never the old agent reported as
+    new. On success, ``before`` is who was connected before (or None), ``agent_choice``
+    is ``only`` when the client took the one agent there was and ``asked`` when it
+    offered several, and ``workspace`` is the name the client connected in, when it
+    said. ``reason`` on a failure is what the caller branches on:
 
     - ``choose`` — the account has several workspaces or agents; ``kind``, ``flag`` and
       ``choices`` say which, so the person picks in conversation and it is re-run with
@@ -541,9 +641,14 @@ def connect(
             "command": None,
         }
     how = installer()
+    before = identity()
+    mark = _connection_mark()
     lines: list[str] = []
     try:
-        code, lines = _stream(argv, timeout=timeout, echo=echo)
+        if interactive:
+            code, lines = _attached(argv, timeout=timeout, echo=echo)
+        else:
+            code, lines = _stream(argv, timeout=timeout, echo=echo)
     except subprocess.TimeoutExpired as exc:
         printed = exc.output if isinstance(exc.output, str) else ""
         return {
@@ -568,8 +673,19 @@ def connect(
                 "command": argv,
             }
     after = status()
-    if after["state"] == "connected":
-        result: dict[str, Any] = {"ok": True, "status": after, "command": argv, "via": how}
+    now = _connection_mark()
+    # A client too old to stamp the pin leaves ("", "") both times; exit 0 is all there is.
+    recorded = now is not None and (mark is None or now != mark or now == ("", ""))
+    if code == 0 and after["state"] == "connected" and recorded:
+        result: dict[str, Any] = {
+            "ok": True,
+            "status": after,
+            "command": argv,
+            "via": how,
+            "before": asdict(before) if before is not None else None,
+            "agent_choice": _agent_choice(lines),
+            "workspace": _workspace_named(lines),
+        }
         if how == "uv" and not installed():
             # The npm shim keeps the client on the PATH after a connect; do the same.
             try:
@@ -587,6 +703,28 @@ def connect(
         "status": after,
         "command": argv,
     }
+
+
+def _agent_choice(lines: list[str]) -> str | None:
+    """``only`` when the client took the lone agent, ``asked`` when it listed several.
+
+    None when it said neither: a device-code connect chooses in the app.
+    """
+    for line in lines:
+        text = line.strip()
+        if _ASKED_AGENT.search(text):
+            return "asked"
+        if _ONLY_AGENT.search(text):
+            return "only"
+    return None
+
+
+def _workspace_named(lines: list[str]) -> str | None:
+    for line in lines:
+        match = _CONNECTED.search(line.strip())
+        if match is not None:
+            return match["workspace"]
+    return None
 
 
 def _first_link(lines: list[str]) -> str | None:

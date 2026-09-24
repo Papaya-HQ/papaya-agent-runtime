@@ -4,7 +4,8 @@ Setting a machine up used to be a page of commands to copy: build the environmen
 sign in to Claude Code and `gh`, connect to Papaya, register each repository. This
 runs them in order and says nothing about what is already fine beyond one line per
 step, so a re-run on a finished machine is a short list of ticks. The only things a
-person answers are the agent (in the Papaya approval) and the repositories.
+person answers are the workspace and agent (asked by the Papaya client, or in the
+approval for a device code) and the repositories.
 
 Every step checks first and acts only when it has to:
 
@@ -12,7 +13,8 @@ Every step checks first and acts only when it has to:
    its current lockfile, with the picker's packages importing);
 2. Claude Code signed in (`claude auth login` with the terminal attached if not);
 3. GitHub signed in (`gh auth login`, then `gh auth setup-git`);
-4. Papaya connected (a device code over SSH or with no display);
+4. Papaya connected, on the terminal so the client asks the workspace and agent
+   inside one sign-in (a device code over SSH or with no display);
 5. at least one repository registered, chosen in a picker.
 
 A step that cannot finish stops the run with one line naming the one thing to do,
@@ -42,6 +44,11 @@ DONE = "Done. Start it with: ./bin/ppy serve"
 REPOS_LINE = "✓ {n} {noun} (./bin/ppy setup --repos to change)"
 #: Said when the picker leaves a registered repository unticked.
 KEPT_LINE = "Unticking a registered repository does not remove it; it stays registered."
+#: Said when a switch ends on the agent already connected because it is the only one.
+ONLY_AGENT = (
+    "{agent} is the only agent you can connect in {workspace}. To use another, create it "
+    "in Papaya (Agents → New agent), then run ./bin/ppy setup again."
+)
 #: Said when a question meets the end of stdin (no terminal, nothing piped in).
 NO_TERMINAL = (
     "Setup needs a terminal to answer its questions; from a script, run "
@@ -464,17 +471,22 @@ class Setup:
     def papaya(self) -> None:
         from papaya_agent_runtime import papaya
 
-        who = papaya.identity()
-        if who is not None:
-            self.say(f"✓ {connected_line(who)}")
+        before = papaya.identity()
+        if before is not None:
+            self.say(f"✓ {connected_line(before)}")
             if not (self.options.interactive and not self.options.pick_repos):
                 return
             if not self.picker.yes_no("Switch to another agent?", default=False):
                 return
-        who = self._connect_papaya()
-        self.say(f"✓ {connected_line(who)}")
+        who, result = self._connect_papaya(before=before)
+        if before is None or who.agent_id != before.agent_id:
+            self.say(f"✓ {connected_line(who)}")
+        elif result.get("agent_choice") == "only":
+            self.say(only_agent_line(who, result.get("workspace")))
+        else:
+            self.say(f"✓ Still connected as {agent_label(who)}")
 
-    def _connect_papaya(self, **chosen: str) -> Any:
+    def _connect_papaya(self, before: Any = None, **chosen: str) -> tuple[Any, dict]:
         from papaya_agent_runtime import papaya
 
         device = wants_device_code(self.env, self.platform)
@@ -488,6 +500,9 @@ class Setup:
             "agent": chosen.get("agent", self.options.agent),
             "device": device,
             "echo": self.out,
+            # On a terminal the client asks the workspace and agent itself, inside the
+            # one sign-in; a script gets its choices back and stops naming the flag.
+            "interactive": self.options.interactive,
         }
         result = (self._connect or papaya.connect)(**kwargs)
         if result.get("ok"):
@@ -496,9 +511,20 @@ class Setup:
                 raise Stop(
                     "Papaya said connected, but no agent is pinned: run ./bin/ppy setup again"
                 )
-            return who
+            return who, result
         reason = result.get("reason")
+        if before is not None and reason != "choose":
+            # A switch that did not finish leaves the old connection in place: say so,
+            # rather than let the old agent read as the new one.
+            why = str(result.get("detail") or reason or "").strip()
+            raise Stop(
+                f"Not switched: still connected as {agent_label(before)}"
+                + (f" ({why})" if why else "")
+                + ". Run ./bin/ppy setup again to try once more."
+            )
         if reason == "choose":
+            # Only when the client had no terminal to ask on (stdin piped in): the
+            # re-run with the answer is a second sign-in, which a terminal never needs.
             kind = str(result.get("kind") or "agent")
             flag = str(result.get("flag") or f"--{kind}")
             choices = list(result.get("choices") or [])
@@ -507,7 +533,7 @@ class Setup:
             picked = self.picker.one_of(kind, choices)
             if not picked:
                 raise Stop(f"No {kind} chosen: run ./bin/ppy setup again")
-            return self._connect_papaya(**{**chosen, kind: picked})
+            return self._connect_papaya(before, **{**chosen, kind: picked})
         if reason == "no_installer":
             raise Stop("The Papaya client cannot be installed here: install Node or uv first")
         if reason == "timeout":
@@ -657,13 +683,23 @@ class Setup:
                 )
 
 
-def connected_line(who: Any) -> str:
-    """``Connected as <Name> (@handle)``, with whichever half is known."""
+def agent_label(who: Any) -> str:
+    """``<Name> (@handle)``, with whichever half is known."""
     handle = f"@{who.handle.lstrip('@')}" if getattr(who, "handle", "") else ""
     name = getattr(who, "name", "") or ""
     if name and handle:
-        return f"Connected as {name} ({handle})"
-    return f"Connected as {name or handle or 'an unnamed Papaya agent'}"
+        return f"{name} ({handle})"
+    return name or handle or "an unnamed Papaya agent"
+
+
+def connected_line(who: Any) -> str:
+    """``Connected as <Name> (@handle)``."""
+    return f"Connected as {agent_label(who)}"
+
+
+def only_agent_line(who: Any, workspace: str | None) -> str:
+    """Said when a switch ends on the same agent because it was the only one there."""
+    return ONLY_AGENT.format(agent=agent_label(who), workspace=workspace or "this workspace")
 
 
 def repo_url(wanted: str) -> str:
