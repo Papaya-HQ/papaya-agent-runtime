@@ -214,13 +214,29 @@ def _set_up_fully(world):
     wizard.run_setup(non_interactive=True)
 
 
+def _ok(name: str, detail: str) -> str:
+    return guided.step_line(guided.OK, name, detail)
+
+
+def _doing(name: str, detail: str) -> str:
+    return guided.step_line(guided.DOING, name, detail)
+
+
+def _framed(label: str, *said: str) -> list[str]:
+    """What a child program's output looks like in setup's own output."""
+    return ["", guided.rule(label), *said, guided.rule(), ""]
+
+
+ADA = _ok(guided.PAPAYA, "Connected as Ada (@ada)")
+FINAL = ["", "Done. Start it with:", "  ./bin/ppy serve"]
+
 TICKS = [
-    "✓ macOS, git, uv and the runtime's environment",
-    "✓ Claude Code signed in",
-    "✓ GitHub signed in",
-    "✓ Connected as Ada (@ada)",
-    "✓ 1 repository (./bin/ppy setup --repos to change)",
-    guided.DONE,
+    "✓ Machine       macOS, git, uv and the runtime's environment",
+    "✓ Claude Code   Signed in",
+    "✓ GitHub        Signed in",
+    "✓ Papaya        Connected as Ada (@ada)",
+    "✓ Repositories  1 repository (./bin/ppy setup --repos to change)",
+    *FINAL,
 ]
 
 GH_HELPER = ("git", "config", "--global", "--get-all", "credential.https://github.com.helper")
@@ -267,8 +283,8 @@ def test_switching_agents_on_a_rerun_connects_again(world):
 
     assert code == 0
     assert len(world.connects) == 1
-    assert lines.count("✓ Connected as Ada (@ada)") == 1
-    assert "✓ Still connected as Ada (@ada)" in lines
+    assert lines.count(ADA) == 1
+    assert _ok(guided.PAPAYA, "Still connected as Ada (@ada)") in lines
 
 
 def test_an_interactive_switch_is_one_connect_on_the_terminal(world):
@@ -289,10 +305,11 @@ def test_an_interactive_switch_is_one_connect_on_the_terminal(world):
     assert world.connects[0]["interactive"] is True
     assert world.connects[0]["agent"] is None and world.connects[0]["workspace"] is None
     assert picker.asked == ["Switch to another agent?"]  # no second picker of our own
-    assert lines[3:6] == [
-        "✓ Connected as Ada (@ada)",
-        "Connecting to Papaya: approve in the browser that opens.",
-        "✓ Connected as Bea (@bea)",
+    assert lines[3:10] == [
+        ADA,
+        _doing(guided.PAPAYA, "Connecting: approve in the browser that opens…"),
+        *_framed("papaya-agent connect"),
+        _ok(guided.PAPAYA, "Connected as Bea (@bea)"),
     ]
 
 
@@ -310,11 +327,15 @@ def test_a_switch_with_only_one_agent_says_so_instead_of_claiming_a_switch(world
 
     assert code == 0
     assert (
-        "Ada (@ada) is the only agent you can connect in Papaya HQ. To use another, create it "
-        "in Papaya (Agents → New agent), then run ./bin/ppy setup again."
-    ) in lines
-    assert lines.count("✓ Connected as Ada (@ada)") == 1  # the "before" tick only
-    assert not any(line.startswith("✓ Still") for line in lines)
+        _ok(
+            guided.PAPAYA,
+            "Ada (@ada) is the only agent you can connect in Papaya HQ. To use another, create "
+            "it in Papaya (Agents → New agent), then run ./bin/ppy setup again.",
+        )
+        in lines
+    )
+    assert lines.count(ADA) == 1  # the "before" tick only
+    assert not any("Still connected" in line for line in lines)
 
 
 def test_a_switch_that_does_not_finish_says_not_switched(world, capsys):
@@ -330,8 +351,8 @@ def test_a_switch_that_does_not_finish_says_not_switched(world, capsys):
 
     assert code == 1
     err = capsys.readouterr().err
-    assert "Not switched: still connected as Ada (@ada) (exit 1)." in err
-    assert lines.count("✓ Connected as Ada (@ada)") == 1
+    assert "✗ Not switched: still connected as Ada (@ada) (exit 1)." in err
+    assert lines.count(ADA) == 1
     assert guided.DONE not in lines
 
 
@@ -347,6 +368,136 @@ def test_a_script_connects_captured_with_the_agent_it_was_given(world):
     call = world.connects[0]
     assert call["interactive"] is False
     assert (call["agent"], call["workspace"]) == ("Bea", "papaya-hq")
+
+
+def test_setup_asks_the_client_for_its_quiet_connect(world):
+    """Passed as asked; `papaya.connect_argv` drops it for a client that lacks it."""
+    world.registered.append({"name": "api", "forge_url": "https://github.com/acme/api"})
+    code, _ = _setup(world, shell=_healthy(), picker=ScriptedPicker())
+
+    assert code == 0
+    assert world.connects[0]["quiet"] is True
+
+
+# ── how it looks ────────────────────────────────────────────────────────────
+
+
+class Terminal(io.StringIO):
+    """Output that says it is a terminal."""
+
+    def isatty(self):
+        return True
+
+
+def _on(out, world, *, shell=None, env=None):
+    code = guided.Setup(
+        guided.Options(skip_tools=True),
+        shell=shell or _healthy(),
+        picker=ScriptedPicker(),
+        platform="darwin",
+        env={} if env is None else env,
+        out=out,
+        connect=world.connect,
+        wsl=lambda: False,
+    ).run()
+    return code, out.getvalue()
+
+
+def test_on_a_terminal_marks_are_coloured_names_bold_and_the_command_stands_out(world):
+    _set_up_fully(world)
+
+    code, text = _on(Terminal(), world)
+
+    assert code == 0
+    lines = text.splitlines()
+    assert lines[0] == (
+        "\x1b[32m✓\x1b[0m \x1b[1mMachine\x1b[0m       macOS, git, uv and the runtime's environment"
+    )
+    assert lines[3] == "\x1b[32m✓\x1b[0m \x1b[1mPapaya\x1b[0m        Connected as Ada (@ada)"
+    assert lines[-3:] == [
+        "",
+        "\x1b[1mDone.\x1b[0m Start it with:",
+        "  \x1b[1;36m./bin/ppy serve\x1b[0m",
+    ]
+
+
+def test_on_a_terminal_a_sign_in_is_yellow_and_its_output_sits_between_dim_rules(world):
+    _set_up_fully(world)
+    status = ("claude", "auth", "status")
+    shell = _healthy(
+        failing={status},
+        on_attach={("claude", "auth", "login"): lambda sh: sh.failing.discard(status)},
+    )
+
+    code, text = _on(Terminal(), world, shell=shell)
+
+    assert code == 0
+    assert text.splitlines()[1:7] == [
+        "\x1b[33m→\x1b[0m \x1b[1mClaude Code\x1b[0m   Not signed in; starting its sign-in…",
+        "",
+        f"\x1b[2m{guided.rule('claude auth login')}\x1b[0m",
+        f"\x1b[2m{guided.rule()}\x1b[0m",
+        "",
+        "\x1b[32m✓\x1b[0m \x1b[1mClaude Code\x1b[0m   Signed in",
+    ]
+
+
+def test_on_a_terminal_a_stop_is_a_red_cross(world, monkeypatch):
+    err = Terminal()
+    monkeypatch.setattr(sys, "stderr", err)
+
+    code, _ = _on(Terminal(), world, shell=_healthy(missing={"claude"}))
+
+    assert code == 1
+    assert err.getvalue().startswith("\x1b[31m✗\x1b[0m Claude Code is not installed.")
+
+
+def test_no_color_leaves_a_terminal_plain(world, monkeypatch):
+    _set_up_fully(world)
+    err = Terminal()
+    monkeypatch.setattr(sys, "stderr", err)
+
+    code, text = _on(Terminal(), world, env={"NO_COLOR": "1"})
+
+    assert code == 0
+    assert text.splitlines() == TICKS
+    assert "\x1b" not in text
+
+    code, _ = _on(Terminal(), world, shell=_healthy(missing={"claude"}), env={"NO_COLOR": "1"})
+    assert code == 1
+    assert err.getvalue().startswith("✗ Claude Code is not installed.")
+
+
+def test_piped_output_has_no_escape_codes_at_all(world, capsys):
+    """Every kind of line: a step under way, framed child output, ticks, the end, a stop."""
+    status = ("claude", "auth", "status")
+    shell = _healthy(
+        failing={status},
+        on_attach={("claude", "auth", "login"): lambda sh: sh.failing.discard(status)},
+    )
+    world.registered.append({"name": "api", "forge_url": "https://github.com/acme/api"})
+
+    code, text = _on(io.StringIO(), world, shell=shell)
+    assert code == 0
+    assert guided.rule("papaya-agent connect") in text and "Done." in text
+
+    code, _ = _on(io.StringIO(), world, shell=_healthy(missing={"claude"}))
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "\x1b" not in text + captured.out + captured.err
+    assert captured.err.startswith("✗ Claude Code is not installed.")
+
+
+def test_a_child_that_fails_still_closes_its_rule(world):
+    def boom(**kwargs):
+        raise RuntimeError("client crashed")
+
+    out = io.StringIO()
+    setup = guided.Setup(guided.Options(), shell=_healthy(), out=out, connect=boom, env={})
+    with pytest.raises(RuntimeError):
+        setup._connect_papaya()
+
+    assert out.getvalue().splitlines()[-2:] == [guided.rule(), ""]
 
 
 # ── picking up where it stopped ─────────────────────────────────────────────
@@ -377,9 +528,9 @@ def test_quitting_at_papaya_resumes_at_papaya(world, capsys):
     assert lines[:3] == TICKS[:3]  # the first three steps only tick
     assert shell.attached == []
     assert len(world.connects) == 2
-    assert "✓ Connected as Ada (@ada)" in lines
+    assert ADA in lines
     assert world.added == ["https://github.com/acme/api"]
-    assert lines[-1] == guided.DONE
+    assert lines[-3:] == FINAL
 
 
 # ── step 1: the machine ─────────────────────────────────────────────────────
@@ -422,7 +573,11 @@ def test_a_broken_environment_is_built(world, monkeypatch):
 
     assert code == 0
     assert built == [1]
-    assert lines[0] == "Building the runtime's environment…"
+    assert lines[:6] == [
+        "→ Machine       Building the runtime's environment…",
+        *_framed("uv sync"),
+        TICKS[0],
+    ]
 
 
 def test_an_environment_built_from_an_older_lockfile_is_updated_in_step_one(world, monkeypatch):
@@ -441,7 +596,8 @@ def test_an_environment_built_from_an_older_lockfile_is_updated_in_step_one(worl
 
     assert code == 0
     assert built == [1]
-    assert lines[:2] == ["Updating the runtime's environment…", TICKS[0]]
+    updating = _doing(guided.MACHINE, "Updating the runtime's environment…")
+    assert lines[:6] == [updating, *_framed("uv sync"), TICKS[0]]
 
 
 def test_a_stale_environment_held_by_a_running_serve_stops_step_one(world, monkeypatch, capsys):
@@ -452,7 +608,10 @@ def test_a_stale_environment_held_by_a_running_serve_stops_step_one(world, monke
     code, lines = _setup(world, shell=_healthy(), sync_env=lambda: envsync.REFUSED)
 
     assert code == 1
-    assert lines == ["Updating the runtime's environment…"]
+    assert lines == [
+        _doing(guided.MACHINE, "Updating the runtime's environment…"),
+        *_framed("uv sync"),
+    ]
     err = capsys.readouterr().err
     assert "./bin/ppy supervisor stop" in err and "./bin/ppy setup again" in err
 
@@ -468,7 +627,7 @@ def test_a_missing_picker_package_stops_in_step_one_not_at_a_prompt(world, monke
     assert lines == []
     err = capsys.readouterr().err.strip()
     assert err == (
-        "The runtime's environment is missing questionary: run ./bin/ppy env sync, "
+        "✗ The runtime's environment is missing questionary: run ./bin/ppy env sync, "
         "then ./bin/ppy setup again"
     )
 
@@ -498,7 +657,9 @@ def test_wsl_is_named(world):
         connect=world.connect,
         wsl=lambda: True,
     ).run()
-    assert out.getvalue().splitlines()[0] == "✓ Linux (WSL2), git, uv and the runtime's environment"
+    assert out.getvalue().splitlines()[0] == _ok(
+        guided.MACHINE, "Linux (WSL2), git, uv and the runtime's environment"
+    )
 
 
 def test_wsl_is_read_from_the_kernel_version():
@@ -521,7 +682,11 @@ def test_claude_code_not_signed_in_runs_its_sign_in_on_the_terminal(world):
 
     assert code == 0
     assert shell.attached == [["claude", "auth", "login"]]
-    assert "✓ Claude Code signed in" in lines
+    assert lines[1:7] == [
+        "→ Claude Code   Not signed in; starting its sign-in…",
+        *_framed("claude auth login"),
+        "✓ Claude Code   Signed in",
+    ]
 
 
 def test_claude_code_still_not_signed_in_stops(world, capsys):
@@ -545,7 +710,8 @@ def test_a_script_never_attaches_a_terminal(world, capsys):
 
     assert code == 1
     assert shell.attached == []
-    assert capsys.readouterr().err.strip() == "Claude Code is not signed in: run claude auth login"
+    err = capsys.readouterr().err.strip()
+    assert err == "✗ Claude Code is not signed in: run claude auth login"
 
 
 def test_github_not_signed_in_runs_gh_auth_login_then_setup_git(world):
@@ -559,7 +725,11 @@ def test_github_not_signed_in_runs_gh_auth_login_then_setup_git(world):
     assert code == 0
     assert shell.attached == [list(login)]
     assert ["gh", "auth", "setup-git", "--hostname", "github.com"] in shell.captured
-    assert "✓ GitHub signed in" in lines
+    assert lines[2:8] == [
+        _doing(guided.GITHUB, "Not signed in; starting gh auth login…"),
+        *_framed("gh auth login"),
+        _ok(guided.GITHUB, "Signed in"),
+    ]
 
 
 def test_git_already_pushing_with_gh_is_left_alone(world):
@@ -597,7 +767,11 @@ def test_over_ssh_setup_connects_with_a_device_code(world):
     )
     assert code == 0
     assert world.connects[0]["device"] is True
-    assert "✓ Connected as Ada (@ada)" in lines
+    assert (
+        _doing(guided.PAPAYA, "Connecting with a device code: open the link on any device…")
+        in lines
+    )
+    assert ADA in lines
 
 
 def test_several_agents_are_chosen_in_a_list_then_connected(world):
@@ -621,7 +795,7 @@ def test_several_agents_are_chosen_in_a_list_then_connected(world):
 
     assert code == 0
     assert [c["agent"] for c in world.connects] == [None, "Bea"]
-    assert "✓ Connected as Bea (@bea)" in lines
+    assert _ok(guided.PAPAYA, "Connected as Bea (@bea)") in lines
 
 
 def test_a_script_with_several_agents_stops_naming_the_flag(world, capsys):
@@ -678,7 +852,7 @@ def test_picking_across_owners_keeps_every_selection(world):
         "https://github.com/acme/web",
         "https://github.com/ada/site",
     ]
-    assert "✓ 3 repositories (./bin/ppy setup --repos to change)" in lines
+    assert "✓ Repositories  3 repositories (./bin/ppy setup --repos to change)" in lines
 
 
 def test_a_typed_url_is_registered_too(world):
@@ -739,8 +913,9 @@ def test_repos_reopens_the_picker_with_the_registered_ones_ticked(world):
     assert picker.shown_ticks == [("acme", {"acme/api"})]
     assert "Switch to another agent?" not in picker.asked
     assert world.added == ["https://github.com/acme/web"]
-    assert guided.KEPT_LINE in lines
-    assert "✓ 2 repositories (./bin/ppy setup --repos to change)" in lines
+    assert " " * 16 + guided.KEPT_LINE in lines  # under the detail column
+    assert "✓ Repositories  Registered web" in lines
+    assert "✓ Repositories  2 repositories (./bin/ppy setup --repos to change)" in lines
 
 
 def test_a_script_registers_its_repo_flags(world):
@@ -752,7 +927,7 @@ def test_a_script_registers_its_repo_flags(world):
 
     assert code == 0
     assert world.added == ["https://github.com/acme/api", "https://github.com/acme/web"]
-    assert lines[-1] == guided.DONE
+    assert lines[-3:] == FINAL
 
 
 def test_the_plain_picker_filters_and_ticks_by_number():
@@ -778,7 +953,7 @@ def test_no_terminal_to_answer_on_stops_with_one_line(world, capsys):
     code, _ = _setup(world, shell=shell, picker=guided.PlainPicker(ask=eof))
 
     assert code == 1
-    assert capsys.readouterr().err.strip() == guided.NO_TERMINAL
+    assert capsys.readouterr().err.strip() == f"✗ {guided.NO_TERMINAL}"
 
 
 # ── the command line ────────────────────────────────────────────────────────

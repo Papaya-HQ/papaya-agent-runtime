@@ -127,6 +127,92 @@ def test_connect_argv_falls_back_to_the_npm_shim(monkeypatch) -> None:
     assert argv[-2:] == ["--harness", "codex"]
 
 
+CLIENT = "/usr/local/bin/papaya-agent"
+#: `papaya-agent connect --help` from 0.18.0, trimmed: no --quiet.
+OLD_HELP = """usage: papaya-agent connect [-h] [--workspace WORKSPACE] [--agent AGENT]
+                            [--device] [--no-browser] [--no-install]
+  --device              Sign in with a device code, for a machine with no
+                        browser (SSH, headless).
+  --no-browser          Print the sign-in link instead of opening it.
+"""
+NEW_HELP = (
+    OLD_HELP.replace("[--no-install]", "[--no-install] [--quiet]")
+    + "  --quiet               Print only the sign-in, its questions and the result.\n"
+)
+
+
+def _client_help(monkeypatch, *, stdout: str = "", code: int = 0, raises=None) -> list:
+    import subprocess
+
+    asked: list[list[str]] = []
+
+    def run(argv, *, timeout, env=None, cwd=None):
+        asked.append(list(argv))
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(papaya, "installed", lambda: CLIENT)
+    monkeypatch.setattr(papaya, "_run", run)
+    return asked
+
+
+def test_quiet_is_passed_to_a_client_that_offers_it(monkeypatch) -> None:
+    asked = _client_help(monkeypatch, stdout=NEW_HELP)
+
+    argv = papaya.connect_argv(quiet=True)
+
+    assert argv == [CLIENT, "connect", "--harness", "claude", "--quiet"]
+    assert asked == [[CLIENT, "connect", "--help"]]
+
+
+@pytest.mark.parametrize(
+    "help_kwargs",
+    [
+        {"stdout": OLD_HELP},  # 0.18.0: no such flag
+        {"stdout": OLD_HELP.replace("[--no-install]", "[--quiet-mode]")},  # another flag
+        {"stdout": NEW_HELP, "code": 2},  # the help itself failed
+        {"raises": OSError("no such file")},
+    ],
+)
+def test_an_old_or_unreadable_client_is_run_without_quiet(monkeypatch, help_kwargs) -> None:
+    _client_help(monkeypatch, **help_kwargs)
+
+    assert papaya.connect_argv(quiet=True) == [CLIENT, "connect", "--harness", "claude"]
+
+
+def test_a_help_that_times_out_means_no_quiet(monkeypatch) -> None:
+    import subprocess
+
+    _client_help(monkeypatch, raises=subprocess.TimeoutExpired("papaya-agent", 30))
+
+    assert papaya.connect_argv(quiet=True) == [CLIENT, "connect", "--harness", "claude"]
+
+
+def test_the_client_is_not_probed_unless_quiet_is_wanted(monkeypatch) -> None:
+    """`ppy papaya connect` and every other caller run the client exactly as before."""
+    asked = _client_help(monkeypatch, stdout=NEW_HELP)
+
+    assert papaya.connect_argv() == [CLIENT, "connect", "--harness", "claude"]
+    assert asked == []
+
+
+def test_connect_passes_quiet_on_to_the_command(client_home, monkeypatch) -> None:
+    ran: list[list[str]] = []
+    _client_help(monkeypatch, stdout=NEW_HELP)
+
+    def stream(argv, *, timeout, echo):
+        ran.append(argv)
+        return 1, ["nope"]
+
+    monkeypatch.setattr(papaya, "_stream", stream)
+
+    result = papaya.connect(quiet=True)
+
+    assert result["ok"] is False
+    assert ran == [[CLIENT, "connect", "--harness", "claude", "--quiet"]]
+
+
 def test_connect_reports_a_timeout_without_raising(client_home, monkeypatch) -> None:
     """A person who never clicks Approve must degrade, not break the session."""
     import subprocess

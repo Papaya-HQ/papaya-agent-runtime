@@ -446,6 +446,25 @@ def installer() -> str | None:
     return None
 
 
+#: `connect --quiet` (client 0.18.1): the sign-in, its questions and the result, without
+#: the client's progress chatter. An older client refuses a flag it does not know.
+QUIET_FLAG = "--quiet"
+_QUIET = re.compile(r"(?<![\w-])--quiet(?![\w-])")
+
+
+def connect_takes_quiet(base: list[str]) -> bool:
+    """Whether the client ``base`` runs offers ``connect --quiet``: its own help says so.
+
+    A help that cannot be read (no client yet, a timeout) counts as no, so an old or
+    unreachable client is run exactly as before.
+    """
+    try:
+        proc = _run([*base, "connect", "--help"], timeout=PROBE_TIMEOUT, env=client_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and _QUIET.search(proc.stdout or "") is not None
+
+
 def connect_argv(
     *,
     harness: str = "claude",
@@ -453,12 +472,14 @@ def connect_argv(
     agent: str | None = None,
     device: bool = False,
     no_browser: bool = False,
+    quiet: bool = False,
 ) -> list[str] | None:
     """The exact command that establishes the connection, or None with no way to run one.
 
     Prefers an installed `papaya-agent`; then the npm shim (`npx papaya-agent`), which
     installs the client as a side effect so the next run takes the first branch; then
-    the same client through `uv` for a machine with no Node.
+    the same client through `uv` for a machine with no Node. ``quiet`` adds
+    :data:`QUIET_FLAG` only when that client offers it (:func:`connect_takes_quiet`).
     """
     how = installer()
     if how == "installed":
@@ -478,6 +499,8 @@ def connect_argv(
         argv.append("--device")
     if no_browser:
         argv.append("--no-browser")
+    if quiet and connect_takes_quiet(base):
+        argv.append(QUIET_FLAG)
     return argv
 
 
@@ -605,6 +628,7 @@ def connect(
     timeout: int = CONNECT_TIMEOUT,
     echo: Any = None,
     interactive: bool = False,
+    quiet: bool = False,
 ) -> dict:
     """Install the client if it is missing, run its connect flow, and say what happened.
 
@@ -613,6 +637,7 @@ def connect(
     click, never a command they type. ``interactive`` runs it on the person's
     terminal, so the client itself asks which workspace and agent inside that one
     sign-in; without it, the client has no stdin and answers with its choices.
+    ``quiet`` asks the client for less output where it offers that (`ppy setup`).
 
     ``ok`` means this run connected: the client exited 0 *and* recorded a
     connection. A connection that was already there says nothing about this run,
@@ -631,7 +656,12 @@ def connect(
     - ``unavailable``, ``failed``, ``declined`` — as the words say, with ``detail``.
     """
     argv = connect_argv(
-        harness=harness, workspace=workspace, agent=agent, device=device, no_browser=no_browser
+        harness=harness,
+        workspace=workspace,
+        agent=agent,
+        device=device,
+        no_browser=no_browser,
+        quiet=quiet,
     )
     if argv is None:
         return {
@@ -963,6 +993,7 @@ __all__ = [
     "HOME_ENV",
     "MEMORY_PAPAYA",
     "MEMORY_REPO_NOTES_ONLY",
+    "QUIET_FLAG",
     "AgentKind",
     "Identity",
     "agent_kind_of",
@@ -972,6 +1003,7 @@ __all__ = [
     "config_path",
     "connect",
     "connect_argv",
+    "connect_takes_quiet",
     "context",
     "identity",
     "installed",

@@ -25,6 +25,13 @@ process goes through three seams — :class:`Shell`, :class:`Picker` and the
 ``--non-interactive`` with ``--agent``/``--workspace``/``--repo`` runs the same steps
 with no prompts and never attaches a terminal. ``--non-interactive`` without them is
 the profile-only path scripts have always used (``wizard.run_setup``).
+
+Every line setup says is a step line (:func:`step_line`: a mark, the step's name,
+then what happened) so the eye can run down one column. Anything a child program
+prints (a sign-in, the Papaya connect, the environment build) sits between two rules
+with a blank line either side, and the run ends on the one command to type next.
+On a terminal the marks are coloured and the names bold (``team.Paint``); piped, or
+with ``NO_COLOR`` set, the same words come out with no escape codes at all.
 """
 
 from __future__ import annotations
@@ -33,15 +40,33 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-#: The last line of a finished setup.
-DONE = "Done. Start it with: ./bin/ppy serve"
+from papaya_agent_runtime.team import Paint, colour_wanted
+
+#: The steps' names, as the step lines show them.
+MACHINE = "Machine"
+CLAUDE_CODE = "Claude Code"
+GITHUB = "GitHub"
+PAPAYA = "Papaya"
+REPOSITORIES = "Repositories"
+#: The detail column starts after the widest name, so the details line up.
+NAME_WIDTH = max(len(n) for n in (MACHINE, CLAUDE_CODE, GITHUB, PAPAYA, REPOSITORIES))
+#: A step's mark: done, doing now, stopped; and each one's colour.
+OK, DOING, STOPPED = "✓", "→", "✗"
+MARK_STYLES = {OK: "green", DOING: "yellow", STOPPED: "red"}
+#: The rule a child program's output sits between.
+RULE_WIDTH = 60
+
+#: The last lines of a finished setup: ``Done.`` in bold, then the command on its own.
+DONE = "Done. Start it with:"
+START = "./bin/ppy serve"
 #: How a re-run with repositories already registered describes them.
-REPOS_LINE = "✓ {n} {noun} (./bin/ppy setup --repos to change)"
+REPOS_LINE = "{n} {noun} (./bin/ppy setup --repos to change)"
 #: Said when the picker leaves a registered repository unticked.
 KEPT_LINE = "Unticking a registered repository does not remove it; it stays registered."
 #: Said when a switch ends on the agent already connected because it is the only one.
@@ -361,8 +386,35 @@ class Setup:
             self._picker = default_picker()
         return self._picker
 
+    def _paint(self, stream: Any) -> Paint:
+        return Paint(colour_wanted(stream=stream, environ=self.env))
+
     def say(self, line: str) -> None:
         print(line, file=self.out, flush=True)
+
+    def step(self, mark: str, name: str, detail: str) -> None:
+        """One step line: ``✓ GitHub        Signed in``."""
+        self.say(step_line(mark, name, detail, self._paint(self.out)))
+
+    def note(self, text: str) -> None:
+        """A dim aside under the step lines' detail column."""
+        self.say(" " * (NAME_WIDTH + 4) + self._paint(self.out)(text, "dim"))
+
+    @contextmanager
+    def child_output(self, label: str) -> Iterator[None]:
+        """Set what a child program prints apart: a blank line and a dim rule either side."""
+        paint = self._paint(self.out)
+        self.say("")
+        self.say(paint(rule(label), "dim"))
+        try:
+            yield
+        finally:
+            self.say(paint(rule(), "dim"))
+            self.say("")
+
+    def _stopped(self, message: str) -> None:
+        paint = self._paint(sys.stderr)
+        print(f"{paint(STOPPED, MARK_STYLES[STOPPED])} {message}", file=sys.stderr, flush=True)
 
     def run(self) -> int:
         try:
@@ -373,12 +425,15 @@ class Setup:
             self.repositories()
             self.profile()
         except Stop as exc:
-            print(str(exc), file=sys.stderr, flush=True)
+            self._stopped(str(exc))
             return 1
         except EOFError:
-            print(NO_TERMINAL, file=sys.stderr, flush=True)
+            self._stopped(NO_TERMINAL)
             return 1
-        self.say(DONE)
+        paint = self._paint(self.out)
+        self.say("")
+        self.say(f"{paint('Done.', 'bold')}{DONE.removeprefix('Done.')}")
+        self.say(f"  {paint(START, 'bold', 'cyan')}")
         return 0
 
     # 1 ── the machine
@@ -395,10 +450,11 @@ class Setup:
         env = readiness.environment_path()
         if not readiness.environment_ready(env):
             if readiness.environment_imports(env):
-                self.say("Updating the runtime's environment…")
+                self.step(DOING, MACHINE, "Updating the runtime's environment…")
             else:
-                self.say("Building the runtime's environment…")
-            code = (self._sync_env or _sync_env)()
+                self.step(DOING, MACHINE, "Building the runtime's environment…")
+            with self.child_output("uv sync"):
+                code = (self._sync_env or _sync_env)()
             if code == envsync.REFUSED:
                 raise Stop(
                     "The runtime's environment is out of date and a running ppy serve holds "
@@ -415,7 +471,7 @@ class Setup:
         where = "macOS" if self.platform == "darwin" else "Linux"
         if where == "Linux" and self._wsl():
             where = "Linux (WSL2)"
-        self.say(f"✓ {where}, git, uv and the runtime's environment")
+        self.step(OK, MACHINE, f"{where}, git, uv and the runtime's environment")
 
     # 2 ── Claude Code
 
@@ -431,11 +487,12 @@ class Setup:
         if not self._claude_signed_in():
             if not self.options.interactive:
                 raise Stop("Claude Code is not signed in: run claude auth login")
-            self.say("Claude Code is not signed in; starting its sign-in.")
-            self.shell.attach(["claude", "auth", "login"])
+            self.step(DOING, CLAUDE_CODE, "Not signed in; starting its sign-in…")
+            with self.child_output("claude auth login"):
+                self.shell.attach(["claude", "auth", "login"])
             if not self._claude_signed_in():
                 raise Stop("Claude Code is still not signed in: run claude auth login")
-        self.say("✓ Claude Code signed in")
+        self.step(OK, CLAUDE_CODE, "Signed in")
 
     # 3 ── GitHub
 
@@ -450,10 +507,11 @@ class Setup:
         if not self._gh_signed_in():
             if not self.options.interactive:
                 raise Stop(f"GitHub is not signed in: run gh auth login --hostname {GITHUB_HOST}")
-            self.say("GitHub is not signed in; starting gh auth login.")
-            self.shell.attach(
-                ["gh", "auth", "login", "--hostname", GITHUB_HOST, "--git-protocol", "https"]
-            )
+            self.step(DOING, GITHUB, "Not signed in; starting gh auth login…")
+            with self.child_output("gh auth login"):
+                self.shell.attach(
+                    ["gh", "auth", "login", "--hostname", GITHUB_HOST, "--git-protocol", "https"]
+                )
             if not self._gh_signed_in():
                 raise Stop(
                     f"GitHub is still not signed in: run gh auth login --hostname {GITHUB_HOST}"
@@ -464,7 +522,7 @@ class Setup:
             code, _ = self.shell.capture(["gh", "auth", "setup-git", "--hostname", GITHUB_HOST])
             if code != 0:
                 raise Stop("git could not be set to push with gh: run gh auth setup-git")
-        self.say("✓ GitHub signed in")
+        self.step(OK, GITHUB, "Signed in")
 
     # 4 ── Papaya
 
@@ -473,27 +531,27 @@ class Setup:
 
         before = papaya.identity()
         if before is not None:
-            self.say(f"✓ {connected_line(before)}")
+            self.step(OK, PAPAYA, connected_line(before))
             if not (self.options.interactive and not self.options.pick_repos):
                 return
             if not self.picker.yes_no("Switch to another agent?", default=False):
                 return
         who, result = self._connect_papaya(before=before)
         if before is None or who.agent_id != before.agent_id:
-            self.say(f"✓ {connected_line(who)}")
+            self.step(OK, PAPAYA, connected_line(who))
         elif result.get("agent_choice") == "only":
-            self.say(only_agent_line(who, result.get("workspace")))
+            self.step(OK, PAPAYA, only_agent_line(who, result.get("workspace")))
         else:
-            self.say(f"✓ Still connected as {agent_label(who)}")
+            self.step(OK, PAPAYA, f"Still connected as {agent_label(who)}")
 
     def _connect_papaya(self, before: Any = None, **chosen: str) -> tuple[Any, dict]:
         from papaya_agent_runtime import papaya
 
         device = wants_device_code(self.env, self.platform)
         if device:
-            self.say("Connecting to Papaya with a device code: open the link on any device.")
+            self.step(DOING, PAPAYA, "Connecting with a device code: open the link on any device…")
         else:
-            self.say("Connecting to Papaya: approve in the browser that opens.")
+            self.step(DOING, PAPAYA, "Connecting: approve in the browser that opens…")
         kwargs: dict[str, Any] = {
             "harness": "claude",
             "workspace": chosen.get("workspace", self.options.workspace),
@@ -503,8 +561,11 @@ class Setup:
             # On a terminal the client asks the workspace and agent itself, inside the
             # one sign-in; a script gets its choices back and stops naming the flag.
             "interactive": self.options.interactive,
+            # Only the sign-in and its questions, where the client offers that.
+            "quiet": True,
         }
-        result = (self._connect or papaya.connect)(**kwargs)
+        with self.child_output("papaya-agent connect"):
+            result = (self._connect or papaya.connect)(**kwargs)
         if result.get("ok"):
             who = papaya.identity()
             if who is None:
@@ -561,7 +622,8 @@ class Setup:
         if not registered:
             raise Stop("At least one repository is needed: run ./bin/ppy setup again to pick one")
         n = len(registered)
-        self.say(REPOS_LINE.format(n=n, noun="repository" if n == 1 else "repositories"))
+        noun = "repository" if n == 1 else "repositories"
+        self.step(OK, REPOSITORIES, REPOS_LINE.format(n=n, noun=noun))
 
     def _pick(self, registered: list[dict]) -> None:
         before = {s for s in (_slug_of(row) for row in registered) if s}
@@ -593,7 +655,7 @@ class Setup:
         for wanted in sorted(t for t in ticked if t.lower() not in before):
             self._register(wanted, registered)
         if before - lowered:
-            self.say(KEPT_LINE)
+            self.note(KEPT_LINE)
 
     def _gh_json(self, args: list[str]) -> Any:
         code, out = self.shell.capture(["gh", *args])
@@ -655,7 +717,7 @@ class Setup:
             added = repos.add_repo(url)
         except repos.RepoError as exc:
             raise Stop(f"Could not register {wanted}: {exc}") from exc
-        self.say(f"✓ Registered {added.name}")
+        self.step(OK, REPOSITORIES, f"Registered {added.name}")
 
     # the manager profile, silently
 
@@ -677,10 +739,25 @@ class Setup:
             ensure_layout()
             failed = [r.name for r in provision_all() if r.status == "failed"]
             if failed:
-                self.say(
+                self.note(
                     f"Companion tools not installed ({', '.join(failed)}); "
                     "the runtime works without them. ./bin/ppy tools install retries."
                 )
+
+
+def step_line(mark: str, name: str, detail: str, paint: Paint | None = None) -> str:
+    """``✓ Papaya        Connected as …``: the mark in its colour, the name bold, aligned."""
+    paint = paint or Paint()
+    pad = " " * (NAME_WIDTH - len(name) + 2)
+    return f"{paint(mark, MARK_STYLES[mark])} {paint(name, 'bold')}{pad}{detail}"
+
+
+def rule(label: str = "") -> str:
+    """``── label ─────…``, or a plain rule, :data:`RULE_WIDTH` wide."""
+    if not label:
+        return "─" * RULE_WIDTH
+    head = f"── {label} "
+    return head + "─" * max(RULE_WIDTH - len(head), 3)
 
 
 def agent_label(who: Any) -> str:
