@@ -23,8 +23,9 @@ from papaya_agent_runtime.providers import capability
 def _heartbeat_upkeep_only_where_a_test_asks(request, monkeypatch):
     """The heartbeat's upkeep re-checks readiness, which names this machine's real
     blockers (CI has no signed-in harness); heartbeat tests about other lines should not
-    depend on the machine. `tests/test_supervision.py` exercises the real step."""
-    if request.module.__name__.endswith("test_supervision"):
+    depend on the machine. `tests/test_supervision.py` exercises the real step, and
+    `tests/test_update.py` its update check."""
+    if request.module.__name__.endswith(("test_supervision", "test_update")):
         return
     from papaya_agent_runtime import watch
 
@@ -67,6 +68,22 @@ def _environment_stamp_only_where_a_test_asks(request, monkeypatch):
     from papaya_agent_runtime import readiness
 
     monkeypatch.setattr(readiness, "environment_current", lambda env: True)
+
+
+@pytest.fixture(autouse=True)
+def _runtime_update_reads_no_real_checkout(request, monkeypatch):
+    """The update check (`update.py`) fetches this checkout's own remote from serve's
+    rounds and the heartbeat, and `ppy status` / `ppy setup` read how far behind the
+    checkout is. Unfaked, the suite would fetch GitHub and its status output would
+    depend on how current the developer's clone is. Every git call it makes answers as
+    "not a checkout", so nothing is said; `tests/test_update.py` fakes git itself."""
+    if request.module.__name__.endswith("test_update"):
+        return
+    from papaya_agent_runtime import update
+
+    monkeypatch.setattr(
+        update, "run_git", lambda root, args, timeout: (128, "", "not a git repository")
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -32,6 +32,14 @@ def _cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_update(args: argparse.Namespace) -> int:
+    """Fast-forward this checkout to its default branch, rebuild the environment, say how
+    to restart. Refuses in one line rather than touch local work (`update.run`)."""
+    from papaya_agent_runtime import update
+
+    return update.run()
+
+
 def _cmd_capabilities(args: argparse.Namespace) -> int:
     """What this runtime is, from local state only — the client's connect-time probe.
 
@@ -3148,6 +3156,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"repos:   {len(repos)} registered")
     except Exception:  # noqa: BLE001 - status must never crash
         print("repos:   (state not initialized)")
+    from papaya_agent_runtime import update
+
+    # What the last fetch left in the remote-tracking ref; status itself fetches nothing.
+    available = update.available_line()
+    if available:
+        print(available)
     try:
         from papaya_agent_runtime import board, health
         from papaya_agent_runtime.state import init_db, store
@@ -3244,6 +3258,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("version", help="print version").set_defaults(func=_cmd_version)
+
+    sub.add_parser(
+        "update",
+        help=(
+            "bring this runtime up to date: fast-forward the checkout to its default branch "
+            "and rebuild the environment (never restarts anything)"
+        ),
+    ).set_defaults(func=_cmd_update)
 
     caps = sub.add_parser(
         "capabilities",

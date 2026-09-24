@@ -297,6 +297,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         interactive=("papaya_agent_runtime.cli",),
     ),
     Capability(
+        "runtime_update_notice",
+        SHARED,
+        "every six hours this checkout's default branch is fetched, and the owner is told "
+        "once per upstream head when the runtime is behind it",
+        serve=("Rounds._update_lane",),
+        shared="papaya_agent_runtime.update",
+        # The heartbeat runs the same check when no serve does; `ppy status` and
+        # `ppy update` read and act on the last fetch.
+        interactive=("papaya_agent_runtime.watch", "papaya_agent_runtime.cli"),
+    ),
+    Capability(
         "machine_instructions",
         HOST,
         "an instruction a person sent this machine is taken on its subject, classified, run "

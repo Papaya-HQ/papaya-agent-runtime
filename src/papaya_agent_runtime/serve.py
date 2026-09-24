@@ -6412,7 +6412,7 @@ def serve(
 
     # One serve per home, before anything else: a second one listening beside this
     # would work every ticket twice over the same state.
-    lock, status = hold_serve(stderr=stderr, seams=serve_seams)
+    lock, status = hold_serve(stderr=stderr, seams=serve_seams, supervised=options.supervised)
     if lock is None:
         return status if status is not None else takeover.EXIT_CANNOT_START
     try:
@@ -6482,19 +6482,30 @@ def _say(line: str, *, stderr) -> None:
     print(f"ppy serve: {line}", file=stderr, flush=True)
 
 
-def serve_identity() -> dict[str, str]:
-    """Who this serve says it is in ``serve.json``: the Papaya connection, when there is one."""
+def serve_identity(*, supervised: bool = False) -> dict[str, str]:
+    """Who this serve says it is in ``serve.json``: the Papaya connection, when there is one,
+    and what started it — the desktop app (``--supervised``) or a terminal — which is
+    how `ppy update` knows which restart to name."""
+    from papaya_agent_runtime import update
+
+    launched_by = {
+        "launched_by": update.LAUNCHED_BY_APP if supervised else update.LAUNCHED_BY_TERMINAL
+    }
     try:
         identity = papaya.identity()
     except Exception:  # noqa: BLE001 - who we are is a label; a start must not fail on it
         identity = None
     if identity is None:
-        return {}
-    return {"connection_id": identity.connection_id, "agent_handle": identity.handle}
+        return launched_by
+    return {
+        "connection_id": identity.connection_id,
+        "agent_handle": identity.handle,
+        **launched_by,
+    }
 
 
 def hold_serve(
-    *, stderr, seams: dict[str, Any] | None = None
+    *, stderr, seams: dict[str, Any] | None = None, supervised: bool = False
 ) -> tuple[takeover.ServeLock | None, int | None]:
     """Take this home's serve lock, retiring the `serve` that holds it (newest wins).
 
@@ -6509,7 +6520,7 @@ def hold_serve(
     home = str(ppy_home().resolve())
     taken = takeover.take_serve(
         home,
-        serve_identity(),
+        serve_identity(supervised=supervised),
         timeout=takeover.stop_timeout(home),
         **(seams or {}),
     )

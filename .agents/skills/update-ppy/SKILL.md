@@ -69,11 +69,12 @@ person's to see.
 
 ## 5. Pull and sync
 
-- `git -C <runtime root> pull --ff-only origin main`. A pull that is not a
-  fast-forward means the checkout diverged: stop and ask.
-- `./bin/ppy doctor` — the launcher syncs the environment for the new lockfile before
-  it runs, and doctor reports the schema and config it migrated. A sync refusal or a
-  failed migration is a blocker: say it with its words and stop.
+- `./bin/ppy update`: it fetches, fast-forwards to the default branch, and rebuilds the
+  environment for the new lockfile (the supervisor is stopped, so nothing holds the
+  lock). A refusal (uncommitted changes, another branch, local commits that make a
+  fast-forward impossible) changes nothing: stop and ask, quoting its line.
+- `./bin/ppy doctor` reports the schema and config the new build migrated. A failed
+  migration is a blocker: say it in its own words and stop.
 
 ## 6. Start
 
