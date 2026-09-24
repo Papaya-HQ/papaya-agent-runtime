@@ -213,6 +213,34 @@ def test_connect_passes_quiet_on_to_the_command(client_home, monkeypatch) -> Non
     assert ran == [[CLIENT, "connect", "--harness", "claude", "--quiet"]]
 
 
+def test_setup_asks_the_pinned_client_for_quiet_and_it_says_yes(client_home, monkeypatch) -> None:
+    """The real client this checkout locks (0.18.1+) answers the probe, not a canned help.
+
+    `ppy setup` connects with ``quiet=True``; if the lock ever falls back to a client
+    without `connect --quiet`, setup silently shows the old output again.
+    """
+    import importlib.metadata
+    import sys
+    from pathlib import Path
+
+    version = importlib.metadata.version(papaya.CLIENT_PACKAGE)
+    assert tuple(int(part) for part in version.split(".")[:3]) >= (0, 18, 1), version
+    client = Path(sys.executable).parent / papaya.CLI
+    assert client.is_file(), f"{client} missing: the locked client installs this script"
+    monkeypatch.setattr(papaya, "installed", lambda: str(client))
+    ran: list[list[str]] = []
+
+    def stream(argv, *, timeout, echo):
+        ran.append(argv)
+        return 1, ["nope"]
+
+    monkeypatch.setattr(papaya, "_stream", stream)
+
+    papaya.connect(quiet=True)
+
+    assert ran == [[str(client), "connect", "--harness", "claude", "--quiet"]]
+
+
 def test_connect_reports_a_timeout_without_raising(client_home, monkeypatch) -> None:
     """A person who never clicks Approve must degrade, not break the session."""
     import subprocess
