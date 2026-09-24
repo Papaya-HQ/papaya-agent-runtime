@@ -47,11 +47,13 @@ class Channels:
     def __init__(self, *, dm: bool = True, ticket: bool = True, desktop: bool = False) -> None:
         self.dm_lands, self.ticket_lands, self.desktop_lands = dm, ticket, desktop
         self.dms: list[str] = []
+        self.owners: list[outreach.OwnerMessage | None] = []
         self.tickets: list[tuple[str, str]] = []
         self.desktop: list[str] = []
 
-    def post_dm(self, text: str) -> bool:
+    def post_dm(self, text: str, *, owner: outreach.OwnerMessage | None = None) -> bool:
         self.dms.append(text)
+        self.owners.append(owner)
         return self.dm_lands
 
     def post_ticket(self, item: str, body: str, *, environ=None) -> bool:
@@ -422,7 +424,7 @@ def test_the_stop_hook_bounces_once_with_what_nothing_remote_reached(home, monke
 def test_the_stop_hook_reason_reaches_the_harness(home, monkeypatch) -> None:
     conn = init_db()
     store.add_todo(conn, "which wording", blocked_on="user")
-    monkeypatch.setattr(outreach, "post_dm", lambda text: False)
+    monkeypatch.setattr(outreach, "post_dm", lambda text, **_: False)
     monkeypatch.setattr(outreach, "post_ticket", lambda item, body, environ=None: False)
     monkeypatch.setattr(hooks, "owed_stop_reasons", lambda conn: [])
     result = hooks.handle_hook("stop", {})
@@ -452,10 +454,11 @@ def test_serve_rounds_say_it_through_their_own_connection(home, monkeypatch) -> 
     conn = init_db()
     ticket = _ticket(conn)
     store.add_todo(conn, "confirm the pill copy table", task_id=ticket, blocked_on="user")
-    said: dict[str, list] = {"dm": [], "tickets": []}
+    said: dict[str, list] = {"dm": [], "tickets": [], "owner": []}
 
-    async def say(api, text):
+    async def say(api, text, *, owner=None, environ=None):
         said["dm"].append(text)
+        said["owner"].append((owner, environ))
         return True
 
     def post_ticket(item, body, *, environ=None):
@@ -477,6 +480,11 @@ def test_serve_rounds_say_it_through_their_own_connection(home, monkeypatch) -> 
     )
     lines = asyncio.run(lane._outreach_lane(NOW))
     assert said["dm"] and "Waiting on you (reptar)" in said["dm"][0]
+    # Without a DM channel, the owner-DM route gets the same ask on the same connection.
+    owner, environ = said["owner"][0]
+    assert owner.kind == papaya_events.OWNER_DM_QUESTION
+    assert owner.dedupe_key == outreach.collect(conn)[0].fingerprint
+    assert environ == {"PAPAYA_AGENT_TOKEN": "t"}
     assert said["tickets"][0][0] == "PAP-242"
     assert said["tickets"][0][2] == {"PAPAYA_AGENT_TOKEN": "t"}
     assert any(line.startswith("said to a person (dm, ticket)") for line in lines)
@@ -644,6 +652,289 @@ def test_the_desktop_notification_is_off_unless_asked_for(monkeypatch) -> None:
     monkeypatch.setenv(outreach.DESKTOP_ENV, "1")
     assert outreach.notify_desktop("Waiting on you: x") is True
     assert calls and calls[0][0] == "osascript"
+
+
+# ── the owner's agent DM, when the agent is in no DM channel ─────────────────
+#
+# 2026-09-23: the owner's runtime logged "This agent is in no DM channel ... readiness was
+# not posted" 753 times, and a local runtime "said to a person (nowhere it could reach):
+# Ask Shane whether machine-sandbox's gate should be 'uv run pytest'". The owner talks to
+# the agent in the agent DM, which Papaya's owner-DM route (backend PR #1042) reaches.
+
+OWNER_ENV = {
+    "PAPAYA_API_URL": "https://papaya.test",
+    "PAPAYA_WORKSPACE_ID": "ws",
+    "PAPAYA_AGENT_TOKEN": "pagc_token",
+}
+OWNER_DM_URL = "https://papaya.test/api/v1/workspaces/ws/polyweave-agents/me/owner-dm/messages"
+NO_DM_CHANNELS = [{"id": "c-team", "name": "team", "channel_type": "public", "is_member": True}]
+
+
+class ConnectedApi(FakeApi):
+    """A connection's client, carrying the url, workspace and token the `/me/` routes take."""
+
+    config = {"server_url": "https://papaya.test"}
+    agent_config = {"workspace_id": "ws", "client_token": "pagc_token"}
+
+
+class OwnerDm:
+    """Papaya's owner-DM route: every call it got, answered from a script (an exception
+    in the script is raised; an exhausted script answers 201)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.answers: list = []
+
+    def request(self, url, token, *, method="GET", body=None, what="read", **_kw):
+        self.calls.append({"url": url, "token": token, "method": method, "body": dict(body)})
+        answer = self.answers.pop(0) if self.answers else None
+        if isinstance(answer, Exception):
+            raise answer
+        return answer or {"conversation_id": "c1", "turn_id": "t1", "replayed": False}
+
+
+def _refused(code: int) -> papaya_events.PapayaHTTPError:
+    return papaya_events.PapayaHTTPError(f"Papaya refused (HTTP {code})", code=code)
+
+
+@pytest.fixture
+def owner_dm(monkeypatch) -> OwnerDm:
+    fake = OwnerDm()
+    monkeypatch.delenv("PAPAYA_API_URL", raising=False)
+    monkeypatch.setattr(papaya_events, "_papaya_request", fake.request)
+    return fake
+
+
+def _serve_lane(monkeypatch, channels) -> tuple[rounds.Rounds, ConnectedApi]:
+    """Serve's outreach lane on a connection whose agent is in ``channels``."""
+    from types import SimpleNamespace
+
+    api = ConnectedApi(channels)
+    monkeypatch.setattr(rounds.serve, "_where", lambda: "reptar")
+
+    class Runner:
+        held: dict = {}
+
+    lane = rounds.Rounds(
+        built=SimpleNamespace(api=api),
+        runner=Runner(),
+        clock=lambda: NOW,
+        papaya_env=lambda: dict(OWNER_ENV),
+    )
+    return lane, api
+
+
+GATE_ASK = "Ask Shane whether machine-sandbox's gate should be 'uv run pytest'"
+
+
+def test_without_a_dm_channel_an_open_ask_is_one_question_in_the_owner_dm(
+    home, monkeypatch, owner_dm
+) -> None:
+    conn = init_db()
+    store.add_todo(conn, GATE_ASK, blocked_on="user")
+    ask = outreach.collect(conn)[0]
+    lane, api = _serve_lane(monkeypatch, NO_DM_CHANNELS)
+
+    lines = asyncio.run(lane._outreach_lane(NOW))
+
+    assert api.posted == [], "said in a team channel"
+    assert len(owner_dm.calls) == 1
+    call = owner_dm.calls[0]
+    assert (call["method"], call["url"], call["token"]) == ("POST", OWNER_DM_URL, "pagc_token")
+    assert call["body"]["kind"] == "question"
+    assert call["body"]["dedupe_key"] == ask.fingerprint
+    assert GATE_ASK in call["body"]["body"]
+    assert "Reply here with your answer." in call["body"]["body"]
+    assert any(line.startswith("said to a person (dm)") for line in lines)
+    assert not any("nowhere it could reach" in line for line in lines)
+    assert outreach.open_rows(init_db())[0]["said_count"] == 1
+
+
+def test_the_same_ask_next_round_is_not_posted_again(home, monkeypatch, owner_dm) -> None:
+    conn = init_db()
+    store.add_todo(conn, GATE_ASK, blocked_on="user")
+    lane, _api = _serve_lane(monkeypatch, NO_DM_CHANNELS)
+
+    asyncio.run(lane._outreach_lane(NOW))
+    assert asyncio.run(lane._outreach_lane(NOW + timedelta(minutes=1))) == []
+    # Past the repeat interval too: an unchanged fingerprint is never said again.
+    later = NOW + timedelta(seconds=outreach.REPEAT_AFTER_SECONDS + 60)
+    asyncio.run(lane._outreach_lane(later))
+    assert len(owner_dm.calls) == 1
+
+
+def test_a_session_reaches_the_owner_dm_the_same_way(home, monkeypatch, owner_dm) -> None:
+    from papaya_agent_runtime import papaya
+
+    conn = init_db()
+    store.add_todo(conn, GATE_ASK, blocked_on="user")
+    monkeypatch.setattr(papaya, "agent_api", lambda: ConnectedApi(NO_DM_CHANNELS))
+
+    lines = outreach.step(conn, now=NOW, ticket=lambda item, body, environ=None: False)
+
+    assert [c["body"]["kind"] for c in owner_dm.calls] == ["question"]
+    assert owner_dm.calls[0]["url"] == OWNER_DM_URL
+    assert any(line.startswith("said to a person (dm)") for line in lines)
+
+
+def test_a_failed_post_is_logged_once_and_tried_again_next_round(
+    home, monkeypatch, owner_dm, caplog
+) -> None:
+    conn = init_db()
+    store.add_todo(conn, GATE_ASK, blocked_on="user")
+    lane, _api = _serve_lane(monkeypatch, NO_DM_CHANNELS)
+    owner_dm.answers = [_refused(502), _refused(502)]
+
+    first = asyncio.run(lane._outreach_lane(NOW))
+    second = asyncio.run(lane._outreach_lane(NOW + timedelta(minutes=1)))
+    assert any("nowhere it could reach" in line for line in first + second)
+    assert outreach.open_rows(init_db())[0]["said_count"] == 0
+    failed = [r for r in caplog.records if "Could not message the owner (HTTP 502)" in r.message]
+    assert len(failed) == 1, "a failure repeated every round"
+
+    asyncio.run(lane._outreach_lane(NOW + timedelta(minutes=2)))
+    assert len(owner_dm.calls) == 3
+    assert outreach.open_rows(init_db())[0]["said_count"] == 1
+
+
+def test_an_older_papaya_without_the_route_keeps_today_s_behaviour(
+    home, monkeypatch, owner_dm, caplog
+) -> None:
+    conn = init_db()
+    store.add_todo(conn, GATE_ASK, blocked_on="user")
+    lane, api = _serve_lane(monkeypatch, NO_DM_CHANNELS)
+    owner_dm.answers = [_refused(404)]
+
+    lines = asyncio.run(lane._outreach_lane(NOW))
+    assert any(line.startswith("said to a person (nowhere it could reach)") for line in lines)
+    assert outreach.open_rows(init_db())[0]["said_count"] == 0
+    # Not asked again this start, and said once.
+    asyncio.run(lane._outreach_lane(NOW + timedelta(minutes=1)))
+    assert len(owner_dm.calls) == 1 and api.posted == []
+    assert len([r for r in caplog.records if outreach.NO_DM in r.message]) == 1
+    # A new start asks again.
+    outreach.forget_owner_dm()
+    asyncio.run(lane._outreach_lane(NOW + timedelta(minutes=2)))
+    assert len(owner_dm.calls) == 2
+
+
+def test_a_dm_channel_keeps_today_s_path(home, monkeypatch, owner_dm) -> None:
+    conn = init_db()
+    store.add_todo(conn, GATE_ASK, blocked_on="user")
+    lane, api = _serve_lane(monkeypatch, [{"id": "dm1", "channel_type": "agent_private"}])
+
+    lines = asyncio.run(lane._outreach_lane(NOW))
+
+    assert owner_dm.calls == []
+    assert [path for path, _ in api.posted] == ["/workspaces/ws/channels/dm1/messages"]
+    assert "Waiting on you (reptar)" in api.posted[0][1]["content"]
+    assert any(line.startswith("said to a person (dm)") for line in lines)
+
+
+def test_readiness_without_a_dm_channel_is_a_notice_in_the_owner_dm(owner_dm) -> None:
+    from types import SimpleNamespace
+
+    from papaya_agent_runtime import serve
+
+    built = SimpleNamespace(api=ConnectedApi(NO_DM_CHANNELS))
+    text = "@tester is connected but **cannot take work yet**."
+    assert asyncio.run(serve._post_dm(built, text)) is True
+    assert asyncio.run(serve._post_dm(built, text)) is True
+    first, again = (call["body"] for call in owner_dm.calls)
+    assert first["kind"] == "notice" and first["body"] == text
+    # Keyed on the words: Papaya posts the same report once.
+    assert first["dedupe_key"].startswith("readiness:")
+    assert again["dedupe_key"] == first["dedupe_key"]
+    assert built.api.posted == []
+
+
+def test_readiness_on_an_older_papaya_is_today_s_one_line_per_start(owner_dm, caplog) -> None:
+    from types import SimpleNamespace
+
+    from papaya_agent_runtime import serve
+
+    built = SimpleNamespace(api=ConnectedApi(NO_DM_CHANNELS))
+    owner_dm.answers = [_refused(404)]
+    for _ in range(3):
+        assert asyncio.run(serve._post_dm(built, "Needs you: sign gh in")) is False
+    assert len(owner_dm.calls) == 1
+    said = [r for r in caplog.records if serve.READINESS_UNREACHED in r.message]
+    assert len(said) == 1, "the 753 lines again"
+
+
+def test_readiness_with_a_dm_channel_keeps_today_s_path(owner_dm) -> None:
+    from types import SimpleNamespace
+
+    from papaya_agent_runtime import serve
+
+    built = SimpleNamespace(api=ConnectedApi([{"id": "dm1", "channel_type": "agent_private"}]))
+    assert asyncio.run(serve._post_dm(built, "Needs you: sign gh in")) is True
+    assert owner_dm.calls == []
+    assert built.api.posted == [
+        ("/workspaces/ws/channels/dm1/messages", {"content": "Needs you: sign gh in"})
+    ]
+
+
+def test_the_owner_hears_plain_words(home, monkeypatch) -> None:
+    conn = init_db()
+    worker = _worker(conn)
+    monkeypatch.setattr(capability_requests, "decide", lambda program: capability_requests.PENDING)
+    made = capability_requests.request(worker, "xcodegen", why="regenerate the project")
+    capability_requests.escalate(made.id, why="it needs the Apple developer account")
+    shipped = _worker(conn)
+    store.set_task_status(conn, shipped, "delivered")
+    monkeypatch.setattr(supervision, "prs_needing_a_person", lambda: [(shipped, "checks fail")])
+    asks = outreach.collect(init_db())
+
+    said = outreach.owner_message(asks)
+    assert said is not None and said.kind == "question"
+    assert said.body.startswith("2 things need you before I can go on:")
+    assert "run `xcodegen`, to regenerate the project" in said.body
+    assert f'"approve capability {made.id}"' in said.body, "the one thing they send"
+    for internal in (f"task {worker}", f"task {shipped}", "ppy ", "worker", "your request"):
+        assert internal not in said.body
+    assert said.dedupe_key == outreach.dedupe_key(list(reversed(asks)))
+    assert said.dedupe_key not in {a.fingerprint for a in asks}
+    # Nothing to answer, only to look at: a notice.
+    pull_request = [a for a in asks if a.kind == outreach.PULL_REQUEST]
+    only = outreach.owner_message(pull_request)
+    assert only is not None and only.kind == "notice"
+    assert only.dedupe_key == pull_request[0].fingerprint
+
+
+def test_the_owner_dm_request_is_the_route_s_shape() -> None:
+    seen: list = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"conversation_id": "c1", "turn_id": "t1", "replayed": true}'
+
+    def opener(request, timeout=None):
+        seen.append(request)
+        return Response()
+
+    env = {**OWNER_ENV, "PAPAYA_API_URL": "https://papaya.test/api/v1/"}
+    answer = papaya_events.post_owner_dm(
+        "x" * 5000, kind="question", dedupe_key="k" * 200, environ=env, opener=opener
+    )
+    assert answer["replayed"] is True
+    request = seen[0]
+    assert (request.get_method(), request.full_url) == ("POST", OWNER_DM_URL)
+    assert request.get_header("Authorization") == "Bearer pagc_token"
+    body = json.loads(request.data)
+    assert set(body) == {"body", "kind", "dedupe_key"}
+    assert len(body["body"]) == papaya_events.OWNER_DM_MAX_CHARS
+    assert len(body["dedupe_key"]) == papaya_events.OWNER_DM_KEY_MAX
+    # Not connected: nothing to call with.
+    assert papaya_events.post_owner_dm("x", kind="notice", environ={}, opener=opener) is None
+    with pytest.raises(papaya_events.PapayaEventError):
+        papaya_events.post_owner_dm("x", kind="progress", environ=env, opener=opener)
 
 
 def test_the_parity_registry_names_it_shared() -> None:
