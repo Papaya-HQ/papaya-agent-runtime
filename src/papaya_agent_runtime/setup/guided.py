@@ -8,7 +8,8 @@ person answers are the agent (in the Papaya approval) and the repositories.
 
 Every step checks first and acts only when it has to:
 
-1. the machine: platform, git, uv and this checkout's environment;
+1. the machine: platform, git, uv and this checkout's environment (built from
+   its current lockfile, with the picker's packages importing);
 2. Claude Code signed in (`claude auth login` with the terminal attached if not);
 3. GitHub signed in (`gh auth login`, then `gh auth setup-git`);
 4. Papaya connected (a device code over SSH or with no display);
@@ -258,6 +259,26 @@ class PlainPicker(Picker):
         return None
 
 
+#: What :class:`QuestionaryPicker` imports. Step 1 imports it up front, so an
+#: environment without it stops there with the sync hint, never at a prompt
+#: (2026-09-24: `ModuleNotFoundError` at the first `yes_no`, after a pull).
+PICKER_PACKAGES = ("questionary",)
+
+
+def picker_packages_missing() -> list[str]:
+    """The picker's packages that do not import from this interpreter's environment."""
+    import importlib
+
+    importlib.invalidate_caches()
+    missing = []
+    for name in PICKER_PACKAGES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            missing.append(name)
+    return missing
+
+
 def default_picker(stdin: TextIO | None = None) -> Picker:
     """Questionary on a real terminal; numbered lists on anything else."""
     stream = stdin or sys.stdin
@@ -362,13 +383,28 @@ class Setup:
             raise Stop(f"git is not installed. Install it: {_git_install(self.platform)}")
         if self.shell.which("uv") is None:
             raise Stop(f"uv is not installed. Install it: {UV_INSTALL}")
-        from papaya_agent_runtime import readiness
+        from papaya_agent_runtime import envsync, readiness
 
-        if not readiness.environment_imports(readiness.environment_path()):
-            self.say("Building the runtime's environment…")
+        env = readiness.environment_path()
+        if not readiness.environment_ready(env):
+            if readiness.environment_imports(env):
+                self.say("Updating the runtime's environment…")
+            else:
+                self.say("Building the runtime's environment…")
             code = (self._sync_env or _sync_env)()
-            if code != 0 or not readiness.environment_imports(readiness.environment_path()):
+            if code == envsync.REFUSED:
+                raise Stop(
+                    "The runtime's environment is out of date and a running ppy serve holds "
+                    "it: run ./bin/ppy supervisor stop, then ./bin/ppy setup again"
+                )
+            if code != 0 or not readiness.environment_ready(env):
                 raise Stop("The runtime's environment could not be built: run ./bin/ppy env sync")
+        missing = picker_packages_missing() if self.options.interactive else []
+        if missing:
+            raise Stop(
+                f"The runtime's environment is missing {', '.join(missing)}: run "
+                "./bin/ppy env sync, then ./bin/ppy setup again"
+            )
         where = "macOS" if self.platform == "darwin" else "Linux"
         if where == "Linux" and self._wsl():
             where = "Linux (WSL2)"

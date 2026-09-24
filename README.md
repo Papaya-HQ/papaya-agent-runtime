@@ -648,20 +648,28 @@ itself through GitHub's device flow: the owner is sent the code to enter, and th
 goes into `gh auth login --with-token` on stdin and nowhere else. `ppy blockers` (exit 1
 when there are any) and `ppy doctor` print them locally.
 
-**The environment is built once, never under a running `serve`.** `bin/ppy` runs every
-command with `uv run --no-sync`, so typing `ppy status` in a terminal cannot rebuild
-`.venv` out from under the manager the desktop app started. Only three things sync:
-`ppy serve` as it starts (only when the environment was built from another lockfile or
-does not import), an explicit `ppy env sync`, and the first command on a checkout with
-no environment. Each takes the supervisor's lock (`.ppy/run/supervisor.lock`) for the
-length of the sync and refuses, naming the pid, while a `serve` or `supervisor serve`
-holds it; a lock file naming a pid that is no longer running is taken, with one line
-saying so. A sync never touches the environment in use: it builds a fresh
+**The environment follows the lockfile, never under a running `serve`.** `bin/ppy` runs
+every command with `uv run --no-sync`, so typing `ppy status` in a terminal cannot let uv
+rebuild `.venv` out from under the manager the desktop app started. The syncing is the
+launcher's own: `ppy serve` as it starts (only when the environment was built from
+another lockfile or does not import), an explicit `ppy env sync`, and — before any other
+command — a comparison of the stamp the last sync left in the environment with
+`uv.lock`, `pyproject.toml` and `.python-version`. After a pull that changed them, the
+next command says "Updating the runtime's environment…", syncs, and then runs; unchanged,
+it costs that one stamp read. A sync that fails stops the command with one line naming
+`./bin/ppy env sync` to retry. `ppy capabilities` (the client's ten-second connect probe)
+never waits on that sync. Each sync takes the supervisor's lock
+(`.ppy/run/supervisor.lock`) for its length; while a `serve` or `supervisor serve` holds
+it, `ppy env sync` refuses, naming the pid, and any other command says in one line that
+it runs on the environment as it is until the next `ppy serve` start. A lock file naming
+a pid that is no longer running is taken, with one line saying so. A sync never touches
+the environment in use: it builds a fresh
 `.venv.env-<stamp>` beside it, checks the Papaya client imports from it, and swaps the
 `.venv` symlink over in one rename, so a refused, failed or interrupted sync leaves the
 previous environment importable. `ppy readiness` reports `environment_broken` when the
-client is missing from it, and the next `ppy serve` start rebuilds it before anything
-else. The launcher also passes `--python` from `.python-version`, so the app's uv and a
+client is missing from it and `environment_stale` when it was built from an older
+lockfile; `ppy setup`'s first step rebuilds it in either case, and checks the picker's
+packages import before it asks anything. The launcher also passes `--python` from `.python-version`, so the app's uv and a
 shell's uv ask for the same interpreter series; `ppy doctor` warns when the
 environment's `pyvenv.cfg` disagrees with it.
 

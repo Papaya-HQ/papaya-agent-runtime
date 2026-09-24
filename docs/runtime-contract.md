@@ -498,7 +498,10 @@ quietly; do not narrate the steps or report diagnostics.
    be recorded stopped, then signals it); the rounds resume those workers from their
    sessions. `serve_cannot_start` in `ppy blockers` is the one sentence a start that
    could not go on left, with its steps; `environment_broken` in `ppy readiness` is
-   repaired by the next `ppy serve` start (or `ppy env sync` now). `ppy supervisor stop`,
+   repaired by the next `ppy serve` start (or `ppy env sync` now). `environment_stale`
+   (built from an older lockfile, after a pull) is repaired by the next `./bin/ppy`
+   command when no supervisor holds the lock, else by the next `ppy serve` start; a
+   command that says it "runs on it as it is" is that case. `ppy supervisor stop`,
    `status`, `version`, `doctor` and `blockers` work even when the environment is
    broken or a sync would be refused.
 

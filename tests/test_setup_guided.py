@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -342,6 +343,66 @@ def test_a_broken_environment_is_built(world, monkeypatch):
     assert code == 0
     assert built == [1]
     assert lines[0] == "Building the runtime's environment…"
+
+
+def test_an_environment_built_from_an_older_lockfile_is_updated_in_step_one(world, monkeypatch):
+    """2026-09-24: a pull added a dependency and step 1 ticked the old environment."""
+    built = []
+    state = {"current": False}
+    monkeypatch.setattr(readiness, "environment_current", lambda env: state["current"])
+
+    def sync():
+        built.append(1)
+        state["current"] = True
+        return 0
+
+    _set_up_fully(world)
+    code, lines = _setup(world, shell=_healthy(), picker=ScriptedPicker(), sync_env=sync)
+
+    assert code == 0
+    assert built == [1]
+    assert lines[:2] == ["Updating the runtime's environment…", TICKS[0]]
+
+
+def test_a_stale_environment_held_by_a_running_serve_stops_step_one(world, monkeypatch, capsys):
+    from papaya_agent_runtime import envsync
+
+    monkeypatch.setattr(readiness, "environment_current", lambda env: False)
+
+    code, lines = _setup(world, shell=_healthy(), sync_env=lambda: envsync.REFUSED)
+
+    assert code == 1
+    assert lines == ["Updating the runtime's environment…"]
+    err = capsys.readouterr().err
+    assert "./bin/ppy supervisor stop" in err and "./bin/ppy setup again" in err
+
+
+def test_a_missing_picker_package_stops_in_step_one_not_at_a_prompt(world, monkeypatch, capsys):
+    """The owner's crash: `import questionary` failed inside the first `yes_no`."""
+    monkeypatch.setitem(sys.modules, "questionary", None)  # so importing it raises
+    _set_up_fully(world)
+
+    code, lines = _setup(world, shell=_healthy(), picker=Silent())
+
+    assert code == 1
+    assert lines == []
+    err = capsys.readouterr().err.strip()
+    assert err == (
+        "The runtime's environment is missing questionary: run ./bin/ppy env sync, "
+        "then ./bin/ppy setup again"
+    )
+
+
+def test_a_non_interactive_setup_does_not_need_the_picker(world, monkeypatch):
+    monkeypatch.setitem(sys.modules, "questionary", None)
+    _set_up_fully(world)
+
+    code, lines = _setup(
+        world, guided.Options(interactive=False, skip_tools=True), shell=_healthy()
+    )
+
+    assert code == 0
+    assert lines[0] == TICKS[0]
 
 
 def test_wsl_is_named(world):
