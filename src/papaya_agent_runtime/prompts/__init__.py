@@ -7,7 +7,9 @@ or take it to a person), ``review.md`` (review at head, deliver, report back),
 resume, said on one last line the runner acts on) and ``ledger.md`` (the next steps
 that sat in the ledger: do each, defer it with a reason, or drop it), and a sixth,
 ``instruction.md`` (answer an instruction a person sent this machine from its own state,
-ending in an `OUTCOME:` block the runner posts where they asked). The answer and
+ending in an `OUTCOME:` block the runner posts where they asked), and a seventh,
+``repo_choice.md`` (choose the repository an instruction's work runs in, or say it
+cannot tell, on one `REPOSITORY:` line). The answer and
 review turns run with a held Papaya work item or without one (a worker dispatched from
 a session, or whose ticket ended: `lanes`); the facts say which.
 
@@ -22,6 +24,7 @@ fill-in brief. Writing those is the turn's job.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -32,7 +35,26 @@ CHECKIN = "checkin"
 LEDGER = "ledger"
 #: The answer path of an instruction a person sent this machine (`instructions.py`).
 INSTRUCTION = "instruction"
-TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION)
+#: One short turn choosing the repository for an instruction's work path, when neither
+#: the text, a referenced work item nor a single registered repository settles it.
+REPO_CHOICE = "repo_choice"
+TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION, REPO_CHOICE)
+
+#: How the choice turn says what it chose: its last such line, then a candidate's name
+#: or `cannot tell`.
+REPOSITORY_PREFIX = "REPOSITORY:"
+REPOSITORY_CANNOT_TELL = "cannot tell"
+
+#: How a repository is chosen when nothing names it: the brief turn's layers 2 and 3,
+#: which the choice turn follows too. One rule, not two resolvers: `brief.md` and
+#: `repo_choice.md` carry it verbatim, and a test holds both to it.
+REPO_CHOICE_LAYERS = """\
+2. **You already know.** Your Papaya memories (through MCP), and the "What it is"
+   section of each registered repository's notes (`ppy repo list`, then
+   `ppy memory show --repo <name>`).
+3. **The code says.** `ppy repo locate "<terms>"` with the ticket's most distinctive
+   strings: UI copy, identifiers, error messages, file names. It reports hits per
+   registered repository. Read the hits before you trust them."""
 #: Not a manager turn: the scoped brief a reconciler worker starts from when the
 #: session that delivered a pull request cannot be resumed to fix it.
 RECONCILE = "reconcile"
@@ -80,6 +102,39 @@ NOTHING_TO_BUILD_PREFIX = "NOTHING TO BUILD:"
 TEN_MINUTE_RULE = (
     "A command that may run longer than ten minutes must not be run as a tool call; "
     "use `ppy gate run`, or push and let the hook run it. Never background a gate and wait."
+)
+
+#: What an instruction's turns are told about its `MI-<n>`: an internal id, never said to
+#: the person (a reply once read "(MI-1, "What are you working on right now?")"). The
+#: instruction and answer prompts carry it verbatim; `instructions.for_person` also takes
+#: any that slips through out of what is posted.
+NO_REQUEST_ID_RULE = (
+    "Never name the request's `MI-<n>` to the person: it is an internal id. Call it "
+    '"your question", "your request", or by its title.'
+)
+
+#: What a review turn on a person's request (an instruction, not a work item) is told
+#: about its answer. The runtime posts it at the origin with the pull request after
+#: it; the worker's closeout never reaches the person (2026-09-23: a raw closeout with
+#: a SHA, a branch, an evidence path and another request's id did).
+INSTRUCTION_SUMMARY_RULE = (
+    "There is no work item: the person who asked reads your answer where they asked. "
+    "When you approve and deliver, end your turn with an `OUTCOME: done` block of two to "
+    "four short sentences written for them: what changed and what the tests show. No "
+    "branch names, commit SHAs, evidence paths or worker task ids, and do not paste the "
+    "worker's report. Do not name the pull request: the runtime adds its link after your "
+    "words. " + NO_REQUEST_ID_RULE
+)
+
+#: What the instruction turn is told when a worker finished with nothing to review (an
+#: investigation, a spike that found rather than built): its report is data, and the
+#: answer to the person is this turn's to write.
+FINDINGS_SUMMARY_RULE = (
+    "The worker finished and changed nothing; its report is above. Do not start, steer "
+    "or stop any work. End your turn with an `OUTCOME: done` block written for the "
+    "person who asked: what was found and what you propose, in a few plain sentences. "
+    "No branch names, commit SHAs, evidence paths or worker task ids, and do not paste "
+    "the worker's report. " + NO_REQUEST_ID_RULE
 )
 
 #: The rule every brief, environment block and command-rules block gives a worker
@@ -194,7 +249,9 @@ def render(turn: str, *, runtime_dir: str | Path, facts: Mapping[str, object]) -
     ``facts`` are rendered as a plain list in the order given. A value that is
     ``None`` or empty is left out rather than written as "none", so a turn never
     reads an absent repository as a repository called "none". Multi-line values
-    (a worker's question, a failure summary) are kept verbatim in a fenced block.
+    (a worker's question, a failure summary) are kept verbatim in a fenced block, whose
+    fence is longer than any run of backticks in the value (:func:`fence_for`), so text
+    somebody else wrote can never close it early.
     """
     body = load(turn).replace(RUNTIME_DIR, str(Path(runtime_dir).resolve()))
     lines = ["", FACTS_HEADING, ""]
@@ -206,10 +263,17 @@ def render(turn: str, *, runtime_dir: str | Path, facts: Mapping[str, object]) -
         if not text:
             continue
         if "\n" in text:
-            blocks.extend(["", f"{key}:", "", "```", text, "```"])
+            fence = fence_for(text)
+            blocks.extend(["", f"{key}:", "", fence, text, fence])
         else:
             lines.append(f"- {key}: {text}")
     return body.rstrip() + "\n" + "\n".join(lines + blocks) + "\n"
+
+
+def fence_for(text: str) -> str:
+    """A backtick fence one longer than the longest backtick run in ``text``, at least 3."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 __all__ = [
@@ -221,6 +285,7 @@ __all__ = [
     "BRIEF_SKILL",
     "CHECKIN",
     "CHECKIN_CONTINUE",
+    "fence_for",
     "CHECKIN_DECISIONS",
     "CHECKIN_NOTE",
     "CHECKIN_PREFIX",
@@ -232,6 +297,13 @@ __all__ = [
     "INSTRUCTION",
     "LEDGER",
     "MEMORY_RULE",
+    "NO_REQUEST_ID_RULE",
+    "INSTRUCTION_SUMMARY_RULE",
+    "FINDINGS_SUMMARY_RULE",
+    "REPOSITORY_CANNOT_TELL",
+    "REPOSITORY_PREFIX",
+    "REPO_CHOICE",
+    "REPO_CHOICE_LAYERS",
     "REVIEW",
     "PR_FOLLOW_RULE",
     "PUSH_MILESTONE_RULE",

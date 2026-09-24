@@ -291,6 +291,64 @@ def hydrate_work_item(
     return _with_work_item(event, _papaya_request(url, token, what="read", opener=opener))
 
 
+def read_work_item(
+    event: PapayaEvent,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Papaya's current record of this event's work item: its status and owner now.
+
+    ``None`` when there is nothing to call with (not connected), which a caller must
+    read as "cannot tell". A refusal or an unreachable Papaya raises
+    :class:`PapayaEventError`, like every other read here.
+    """
+    env = os.environ if environ is None else environ
+    url = _papaya_work_item_url(event, env)
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    return _papaya_request(url, token, what="read", opener=opener)
+
+
+def read_work_item_ref(
+    ref: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Papaya's record of the work item ``ref`` names: its short id (`PAP-115`) or UUID.
+
+    The work-item read takes either (the backend's `WorkItemPathRef`), so an
+    instruction's reference is read with the same route and token a ticket's is.
+    ``None`` when not connected; a refusal raises :class:`PapayaHTTPError` (a 404 is
+    an id this workspace does not have, e.g. another tracker's).
+    """
+    env = os.environ if environ is None else environ
+    api_url = _clean(env.get(_PAPAYA_API_ENV))
+    workspace = _clean(env.get(_PAPAYA_WORKSPACE_ENV))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if not api_url or not workspace or not token or not str(ref or "").strip():
+        return None
+    base = api_url.rstrip("/")
+    if not base.endswith("/api/v1"):
+        base += "/api/v1"
+    url = (
+        f"{base}/workspaces/{urllib.parse.quote(workspace, safe='')}"
+        f"/work-items/{urllib.parse.quote(str(ref).strip(), safe='')}"
+    )
+    return _papaya_request(url, token, what="read", opener=opener)
+
+
+def work_item_repository(item: Mapping[str, Any]) -> str | None:
+    """The repository a work item record names (its fields or metadata), or ``None``."""
+    try:
+        event = PapayaEvent(id=None, kind="", subject="", payload={"work_item": dict(item)})
+        return repository_spec(event)
+    except PapayaEventError:
+        return None
+
+
 #: The work-item statuses `ppy serve` sets while it holds a ticket. Status is
 #: *state*, not judgment: each of these follows mechanically from where the work
 #: has got to, and anything said in words on the item is a manager turn's to say.
@@ -437,6 +495,13 @@ REPLY_DM = "agent_dm_reply"
 #: Papaya's bounds on a result (`report_machine_instruction_result`).
 RESULT_SUMMARY_MAX = 10_000
 RESULT_MESSAGE_ID_MAX = 128
+#: What a person meant by an instruction, when Papaya says (`intent` on the payload).
+INTENT_ASK = "ask"
+INTENT_WORK = "work"
+INTENTS = (INTENT_ASK, INTENT_WORK)
+#: A reply's `kind`: a line said while the work goes on, or the answer itself.
+REPLY_PROGRESS = "progress"
+REPLY_FINAL = "final"
 
 
 @dataclass(frozen=True)
@@ -455,6 +520,20 @@ class Instruction:
     agent_instructions: str
     #: Where the answer goes, exactly as the event said: never taken from anything else.
     reply: dict[str, Any]
+    #: What the person meant, when Papaya said: `ask` or `work`. ``None`` when the event
+    #: carries no `intent` key at all — an older Papaya, whose reply routes also take
+    #: no `kind` (:attr:`speaks_kind`).
+    intent: str | None = None
+
+    @property
+    def speaks_kind(self) -> bool:
+        """Whether this Papaya takes a reply's `kind` (`progress`/`final`).
+
+        Feature-detected from the event: the backend change that added `intent` to the
+        payload added `kind` to the DM reply in the same release, and the DM reply
+        refuses a key it does not know (422).
+        """
+        return self.intent is not None
 
     @property
     def subject(self) -> str:
@@ -466,20 +545,20 @@ class Instruction:
         return str(who.get("display_name") or who.get("handle") or who.get("id") or "someone")
 
     def as_json(self) -> str:
-        return json.dumps(
-            {
-                "instruction_id": self.instruction_id,
-                "short_id": self.short_id,
-                "title": self.title,
-                "instruction": self.text,
-                "references": list(self.references),
-                "origin": self.origin,
-                "requested_by": self.requested_by,
-                "agent_instructions": self.agent_instructions,
-                "reply": self.reply,
-            },
-            sort_keys=True,
-        )
+        payload: dict[str, Any] = {
+            "instruction_id": self.instruction_id,
+            "short_id": self.short_id,
+            "title": self.title,
+            "instruction": self.text,
+            "references": list(self.references),
+            "origin": self.origin,
+            "requested_by": self.requested_by,
+            "agent_instructions": self.agent_instructions,
+            "reply": self.reply,
+        }
+        if self.intent is not None:
+            payload["intent"] = self.intent
+        return json.dumps(payload, sort_keys=True)
 
 
 def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instruction:
@@ -499,6 +578,11 @@ def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instructi
     references = payload.get("references")
     origin = payload.get("origin")
     who = payload.get("requested_by")
+    intent: str | None = None
+    if "intent" in payload:
+        # Present means this Papaya knows the key; a value it does not name is no intent.
+        intent = str(payload.get("intent") or "").strip().lower()
+        intent = intent if intent in INTENTS else ""
     return Instruction(
         instruction_id=ident,
         short_id=short_id,
@@ -511,6 +595,7 @@ def instruction_from(payload: Mapping[str, Any], subject: str = "") -> Instructi
         requested_by=dict(who) if isinstance(who, Mapping) else {},
         agent_instructions=str(payload.get("agent_instructions") or ""),
         reply=dict(reply),
+        intent=intent,
     )
 
 
@@ -569,6 +654,7 @@ def post_instruction_reply(
     *,
     environ: Mapping[str, str] | None = None,
     opener=urllib.request.urlopen,
+    kind: str | None = None,
 ) -> str | None:
     """Answer an instruction where it was asked. Returns the posted message's id.
 
@@ -576,6 +662,10 @@ def post_instruction_reply(
     message's ``id``; a DM posts ``{"text"}`` and answers with the ``turn_id`` the
     result route takes as ``result_message_id``. ``None`` when there is nothing to
     call with (not connected). A refusal raises :class:`PapayaHTTPError`.
+
+    ``kind`` (`progress` or `final`) is sent only when given, and a caller gives it
+    only when the event said this Papaya takes it (:attr:`Instruction.speaks_kind`):
+    an older DM route refuses the key outright.
     """
     env = os.environ if environ is None else environ
     path, _result = reply_paths(reply, env)
@@ -588,6 +678,8 @@ def post_instruction_reply(
         body = {"content": text, "parent_id": reply.get("parent_id")}
     else:
         body = {"text": text}
+    if kind is not None:
+        body["kind"] = kind
     answer = _papaya_request(
         url, token, method="POST", body=body, what="instruction reply", opener=opener
     )
@@ -623,6 +715,116 @@ def report_instruction_result(
     return True
 
 
+#: How many follow-ups one read asks for: the route's ceiling (its default is 100).
+FOLLOW_UPS_LIMIT = 200
+
+
+def follow_up_as_comment(follow_up: Mapping[str, Any]) -> dict[str, Any]:
+    """A follow-up in the shape a comment has, from Papaya's follow-up record.
+
+    Papaya's shape is flat (`MachineInstructionFollowUpOut`): `{id, body, author_type,
+    author_id, author_actor, author_display_name, origin_message_id, created_at}`, a
+    person's with `author_type: "user"` and `author_actor: null`. A nested
+    `author: {type, id, display_name}` is read as a fallback.
+
+    So the comment cursor, dedupe and authorship rule apply unchanged. A person's
+    follow-up never carries `author_actor`: that key alone makes a comment an agent's
+    (`sweep.is_agent_comment`), and an agent's comment is never woken for.
+    """
+    author = follow_up.get("author")
+    who: Mapping[str, Any] = author if isinstance(author, Mapping) else {}
+    kind = (
+        str(follow_up.get("author_type") or who.get("type") or who.get("kind") or "")
+        .strip()
+        .lower()
+    )
+    name = (
+        _clean(follow_up.get("author_display_name"))
+        or _clean(who.get("display_name"))
+        or _clean(who.get("name"))
+        or _clean(who.get("handle"))
+        or (_clean(author) if isinstance(author, str) else None)
+    )
+    comment: dict[str, Any] = {
+        "id": follow_up.get("id"),
+        "body": str(follow_up.get("body") or ""),
+        "created_at": follow_up.get("created_at"),
+        "author_type": "agent" if kind == "agent" else (kind or "user"),
+        "author_id": _clean(follow_up.get("author_id")) or _clean(who.get("id")),
+        "author_name": name,
+    }
+    if kind == "agent":
+        actor = follow_up.get("author_actor")
+        comment["author_actor"] = (
+            dict(actor) if isinstance(actor, Mapping) and actor else {"name": name or "agent"}
+        )
+    return comment
+
+
+def list_instruction_follow_ups(
+    reply: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> list[dict[str, Any]] | None:
+    """What the person added to an instruction since sending it, oldest first, as comments.
+
+    Read beside the instruction's result route (`.../machine-instructions/<ref>/follow-ups`),
+    checked against this workspace the same way. ``None`` when there is nothing to call
+    with (not connected). A refusal raises :class:`PapayaHTTPError` — a 404 is a Papaya
+    that has no follow-ups yet, which the caller reads as none.
+    """
+    env = os.environ if environ is None else environ
+    _path, result_path = reply_paths(reply, env)
+    url = _api_url(env, result_path.removesuffix("/result") + "/follow-ups")
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    answer = _papaya_request(
+        f"{url}?limit={FOLLOW_UPS_LIMIT}",
+        token,
+        what="follow-up list",
+        opener=opener,
+        shape=object,
+    )
+    if isinstance(answer, Mapping):
+        # A page rather than a bare list; an empty body is no follow-ups.
+        answer = answer.get("items", answer.get("follow_ups", [])) if answer else []
+    if not isinstance(answer, list):
+        raise PapayaEventError("Papaya returned an invalid follow-up list; retry")
+    return [follow_up_as_comment(item) for item in answer if isinstance(item, Mapping)]
+
+
+#: An instruction Papaya still has open: offered to a machine, or held by one.
+INSTRUCTION_OPEN = ("routed", "picked_up")
+
+
+def read_instruction_status(
+    reply: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> str | None:
+    """Where Papaya has an instruction now: `routed`, `picked_up`, `done`, `failed`,
+    `not_picked_up` or `cancelled` (`GET .../machine-instructions/<ref>`).
+
+    The route is the one beside its result route, checked against this workspace the
+    same way. ``None`` when there is nothing to call with (not connected). A refusal,
+    or an answer with no status, raises :class:`PapayaEventError`.
+    """
+    env = os.environ if environ is None else environ
+    _path, result_path = reply_paths(reply, env)
+    url = _api_url(env, result_path.removesuffix("/result"))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    answer = _papaya_request(url, token, what="instruction read", opener=opener)
+    status = str(answer.get("status") or "").strip().lower()
+    if not status:
+        raise PapayaEventError("Papaya returned an instruction with no status; retry")
+    return status
+
+
 def put_connection_status(
     snapshot: Mapping[str, Any],
     *,
@@ -648,6 +850,54 @@ def put_connection_status(
         return False
     _papaya_request(url, token, method="PUT", body=snapshot, what="status snapshot", opener=opener)
     return True
+
+
+#: What a message to the owner is (`OwnerDmMessage.kind`): telling them, or asking them.
+OWNER_DM_NOTICE = "notice"
+OWNER_DM_QUESTION = "question"
+#: The route's limits: `body` 1-4000 characters, `dedupe_key` 1-128.
+OWNER_DM_MAX_CHARS = 4000
+OWNER_DM_KEY_MAX = 128
+
+
+def post_owner_dm(
+    body: str,
+    *,
+    kind: str,
+    dedupe_key: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Say ``body`` to the person who connected this machine, in their agent DM.
+
+    `POST .../polyweave-agents/me/owner-dm/messages` with the connection's own token
+    (backend PR #1042): the token is the connection and its owner, so nothing in the
+    request names a person or a conversation. The same ``dedupe_key`` within 24 hours
+    posts nothing and answers 200 with ``replayed: true``. Returns the answer, or
+    ``None`` when there is nothing to call with (not connected). A refusal raises
+    :class:`PapayaHTTPError`: a 404 is a Papaya that predates the route.
+    """
+    if kind not in (OWNER_DM_NOTICE, OWNER_DM_QUESTION):
+        raise PapayaEventError(f"a message to the owner is a notice or a question, not {kind!r}")
+    env = os.environ if environ is None else environ
+    workspace = _clean(env.get(_PAPAYA_WORKSPACE_ENV))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    text = str(body or "").strip()
+    if not workspace or not token or not text:
+        return None
+    url = _api_url(
+        env,
+        f"/api/v1/workspaces/{urllib.parse.quote(workspace, safe='')}"
+        "/polyweave-agents/me/owner-dm/messages",
+    )
+    if url is None:
+        return None
+    if len(text) > OWNER_DM_MAX_CHARS:
+        text = text[: OWNER_DM_MAX_CHARS - 1].rstrip() + "…"
+    payload: dict[str, Any] = {"body": text, "kind": kind}
+    if dedupe_key:
+        payload["dedupe_key"] = str(dedupe_key)[:OWNER_DM_KEY_MAX]
+    return _papaya_request(url, token, method="POST", body=payload, what="owner DM", opener=opener)
 
 
 def _repository_value(value: object) -> str | None:
@@ -795,11 +1045,28 @@ __all__ = [
     "WORK_ITEM_KEY",
     "WORK_ITEM_TITLE",
     "WORK_ITEM_URL",
+    "INTENTS",
+    "INTENT_ASK",
+    "INTENT_WORK",
+    "REPLY_FINAL",
+    "REPLY_PROGRESS",
     "Instruction",
     "PapayaHTTPError",
+    "FOLLOW_UPS_LIMIT",
+    "follow_up_as_comment",
     "instruction_from",
+    "list_instruction_follow_ups",
+    "read_instruction_status",
+    "INSTRUCTION_OPEN",
+    "read_work_item_ref",
+    "work_item_repository",
     "parse_instruction",
+    "OWNER_DM_KEY_MAX",
+    "OWNER_DM_MAX_CHARS",
+    "OWNER_DM_NOTICE",
+    "OWNER_DM_QUESTION",
     "post_instruction_reply",
+    "post_owner_dm",
     "put_connection_status",
     "reply_paths",
     "report_instruction_result",

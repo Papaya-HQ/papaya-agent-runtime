@@ -209,6 +209,7 @@ def ledger(ppy_home) -> dict[str, int]:
         "decision": decision,
         "blocked": blocked,
         "request": request.id,
+        "mi_ticket": mi_ticket,
     }
 
 
@@ -246,9 +247,11 @@ def test_a_the_fixture_ledger_builds_a_snapshot_inside_every_wire_bound(ledger) 
         "short_id": "PPY-120",
         "url": "https://app.trypapaya.ai/w/ppy/items/PPY-120",
     }
+    # A request's `MI-7` is internal (task 372, Goal 4): the wire's `short_id` is an
+    # identifier, so it is the ticket's task, and the title is the row's own.
     assert about[f"task-{ledger['second']}"] == {
         "kind": "machine_instruction",
-        "short_id": "MI-7",
+        "short_id": f"task-{ledger['mi_ticket']}",
         "url": None,
     }
     assert about[f"task-{ledger['reviewable']}"] is None

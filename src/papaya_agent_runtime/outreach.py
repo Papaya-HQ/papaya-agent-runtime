@@ -26,8 +26,11 @@ This module is that procedure, one decision both modes run:
 - :func:`record_said` writes down where it was said and what it said, so an unchanged
   ask is never said twice.
 
-Nothing is ever posted in a channel: without a DM, the ticket comment is the only place
-an ask is said (Shane, 2026-09-17 — a public channel is not where his decisions go).
+Nothing is ever posted in a channel (Shane, 2026-09-17 — a public channel is not where
+his decisions go). An agent in no DM channel with its owner says it through Papaya's
+owner-DM route instead (:func:`say_in_workspace`), in the words a person in Papaya reads
+(:func:`owner_message`): the agent DM is where the owner already talks to it, and until
+that route existed the runtime logged "nowhere it could reach" (2026-09-23).
 
 `ppy serve` runs it every round (`rounds.Rounds._outreach_lane`) and posts through its
 own connection. A session runs it from the heartbeat (`watch.outreach_step`), from the
@@ -38,12 +41,16 @@ session; serve takes the same pieces around its async posting.
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import hashlib
 import json
 import logging
 import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -68,8 +75,11 @@ VIA_DM = "dm"
 VIA_TICKET = "ticket"
 VIA_DESKTOP = "desktop"
 VIA_SESSION = "session"
+#: Where a person sent this machine an instruction (a DM or a channel thread): an ask
+#: about that request is said there, as a progress reply, and nowhere else.
+VIA_ORIGIN = "origin"
 #: The channels that reach a person who is not at a terminal.
-REMOTE = frozenset({VIA_DM, VIA_TICKET})
+REMOTE = frozenset({VIA_DM, VIA_TICKET, VIA_ORIGIN})
 
 #: The event recorded each time asks are said, for `ppy tail` and the tests.
 SAID_EVENT = "outreach_said"
@@ -120,12 +130,17 @@ class Ask:
     task_id: int | None = None
     work_item_id: str | None = None
     since: str | None = None
+    #: The instruction ticket this ask belongs to, when a person's request is behind it:
+    #: the ask is said where they asked (:data:`VIA_ORIGIN`).
+    instruction_task_id: int | None = None
+    #: What is needed and how to answer, in plain words for a person in Papaya (no task
+    #: ids, no commands to run at a terminal): what is said at a request's origin.
+    person: str = ""
+    person_how: str = ""
 
     @property
     def fingerprint(self) -> str:
         """What the person is asked, so a changed requirement is said again and nothing else is."""
-        import hashlib
-
         words = " ".join(f"{self.kind}|{self.work_item_id or ''}|{self.text}|{self.how}".split())
         return hashlib.sha256(words.lower().encode("utf-8")).hexdigest()[:16]
 
@@ -138,7 +153,20 @@ class Ask:
             "task_id": self.task_id,
             "work_item_id": self.work_item_id,
             "since": self.since,
+            "instruction_task_id": self.instruction_task_id,
         }
+
+
+@dataclass(frozen=True)
+class OwnerMessage:
+    """What is said to the owner through Papaya's owner-DM route, when the agent is in no
+    DM channel with them: plain words, whether it asks or tells, and the key that keeps
+    Papaya from posting the same thing twice (`papaya_events.post_owner_dm`)."""
+
+    body: str
+    #: `papaya_events.OWNER_DM_QUESTION` when it needs their answer, else `..._NOTICE`.
+    kind: str
+    dedupe_key: str | None = None
 
 
 @dataclass
@@ -146,10 +174,14 @@ class Plan:
     """What one round says, and where. Empty when nothing is due."""
 
     due: list[Ask] = field(default_factory=list)
-    #: The DM text, one message for every ask due.
+    #: The DM text, one message for every ask due that no request's origin carries.
     dm: str = ""
+    #: The same asks for the owner-DM route, when the agent is in no DM channel.
+    owner: OwnerMessage | None = None
     #: Work item id -> the comment for the asks on it.
     tickets: dict[str, str] = field(default_factory=dict)
+    #: Instruction ticket task id -> the progress reply for the asks about that request.
+    origins: dict[int, str] = field(default_factory=dict)
     #: One line for a desktop notification.
     headline: str = ""
 
@@ -186,6 +218,29 @@ def work_item_of(conn: sqlite3.Connection, task_id: int | None) -> str | None:
     return None
 
 
+def instruction_ticket_of(conn: sqlite3.Connection, task_id: int | None) -> int | None:
+    """The instruction ticket a task belongs to (its own, or its run's), while its
+    request is still being answered (`instructions.live`); else ``None``.
+
+    Once the person has their answer, or the request is over, the conversation is not
+    where a later ask goes: a pull request the reconcile lane gives up on after the
+    final reply is the owner's, said the usual way.
+    """
+    if task_id is None:
+        return None
+    from papaya_agent_runtime import instructions
+
+    row = conn.execute(
+        "SELECT tasks.id FROM tasks JOIN task_env ON task_env.task_id = tasks.id "
+        "WHERE tasks.run_id = (SELECT run_id FROM tasks WHERE id = ?) AND task_env.key = ? "
+        "ORDER BY tasks.id LIMIT 1",
+        (task_id, instructions.INSTRUCTION_SUBJECT),
+    ).fetchone()
+    if row is None or not instructions.live(conn, int(row["id"])):
+        return None
+    return int(row["id"])
+
+
 def _decisions(conn: sqlite3.Connection) -> list[Ask]:
     rows = conn.execute(
         "SELECT id, task_id, text, blocked_on, created_at FROM todos WHERE status = 'open' "
@@ -208,6 +263,9 @@ def _decisions(conn: sqlite3.Connection) -> list[Ask]:
                 task_id=task_id,
                 work_item_id=work_item_of(conn, task_id),
                 since=row["created_at"],
+                instruction_task_id=instruction_ticket_of(conn, task_id),
+                person=text,
+                person_how="Reply here with your answer.",
             )
         )
     return found
@@ -242,6 +300,19 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
                 task_id=item.task_id,
                 work_item_id=work_item_of(conn, item.task_id),
                 since=since["created_at"] if since is not None else None,
+                instruction_task_id=instruction_ticket_of(conn, item.task_id),
+                person=(
+                    f"The work needs your permission to run `{item.label}`"
+                    + (f", to {item.why.rstrip('.')}" if item.why else "")
+                    + "."
+                ),
+                # A reply in the conversation cannot grant it (no turn on a request's work
+                # path may): a new message to this machine, in these words, does.
+                person_how=(
+                    "To allow it, send me a new message saying "
+                    f'"approve capability {item.id}". To refuse, say '
+                    f'"deny capability {item.id} because …".'
+                ),
             )
         )
     return found
@@ -268,6 +339,14 @@ def _pull_requests(conn: sqlite3.Connection) -> list[Ask]:
                 task_id=task_id,
                 work_item_id=work_item_of(conn, task_id),
                 since=marked["created_at"] if marked is not None else None,
+                instruction_task_id=instruction_ticket_of(conn, task_id),
+                # Read where a request was asked and in the owner's DM alike.
+                person="The pull request for this work needs a person to look at it.",
+                person_how=(
+                    f"Please look at it ({url}); I pick it up again once it changes."
+                    if url
+                    else "Please look at the pull request; I pick it up again once it changes."
+                ),
             )
         )
     return found
@@ -347,21 +426,35 @@ def open_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def last_said_at(conn: sqlite3.Connection) -> datetime | None:
-    """When anything was last said to the person, open or since resolved."""
-    stamps = [_parse(r[0]) for r in conn.execute("SELECT said_at FROM outreach").fetchall()]
+    """When anything was last said to the person, open or since resolved.
+
+    Not counting what was said only where a request was asked: that is its own
+    conversation, and the owner's DM keeps its own interval.
+    """
+    stamps = [
+        _parse(r[0])
+        for r in conn.execute("SELECT said_at, said_via FROM outreach").fetchall()
+        if r[1] != json.dumps([VIA_ORIGIN])
+    ]
     known = [s for s in stamps if s is not None]
     return max(known) if known else None
 
 
 def due(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -> list[Ask]:
-    """The asks to say now: new or changed since last said, at most once per interval."""
+    """The asks to say now: new or changed since last said, at most once per interval.
+
+    An ask about a person's request is not held to the interval: they are in the
+    conversation they sent it from, waiting on it, and it is said there once per
+    change of what it asks, never twice unchanged.
+    """
     said = {str(row["key"]): row["said_fingerprint"] for row in open_rows(conn)}
     fresh = [ask for ask in asks if said.get(ask.key) != ask.fingerprint]
     if not fresh:
         return []
+    at_origin = [ask for ask in fresh if ask.instruction_task_id is not None]
     last = last_said_at(conn)
     if last is not None and (now - last).total_seconds() < repeat_after_seconds():
-        return []
+        return at_origin
     return fresh
 
 
@@ -465,6 +558,74 @@ def ticket_bodies(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime) -
     return bodies
 
 
+def origin_bodies(asks: list[Ask]) -> dict[int, str]:
+    """One progress reply per request, for the asks about it, said where it was asked.
+
+    In the words a person in Papaya reads (:attr:`Ask.person`): what is needed and how
+    to answer, never a task id, a command it ran, or a `ppy` command to type.
+    """
+    from papaya_agent_runtime import blockers
+
+    by_request: dict[int, list[Ask]] = {}
+    for ask in asks:
+        if ask.instruction_task_id is not None:
+            by_request.setdefault(ask.instruction_task_id, []).append(ask)
+    bodies: dict[int, str] = {}
+    for request, group in by_request.items():
+        lines = [
+            "This needs you before I can go on:"
+            if len(group) == 1
+            else f"{len(group)} things need you before I can go on:"
+        ]
+        for ask in group:
+            lines.append(f"- {ask.person or ask.text}")
+            lines.append(f"  {ask.person_how or 'Reply here with your answer.'}")
+        bodies[request] = blockers.redact("\n".join(lines))
+    return bodies
+
+
+#: The kinds of ask only a person's answer moves: said to the owner as a question.
+ANSWERED = frozenset({DECISION, CAPABILITY})
+
+
+def dedupe_key(asks: list[Ask]) -> str:
+    """The name Papaya dedupes a message on: the ask's own fingerprint, or one over all of
+    theirs, so an unchanged ask said again is posted once."""
+    prints = sorted(ask.fingerprint for ask in asks)
+    if len(prints) == 1:
+        return prints[0]
+    return "outreach:" + hashlib.sha256("|".join(prints).encode("utf-8")).hexdigest()[:16]
+
+
+def owner_message(asks: list[Ask]) -> OwnerMessage | None:
+    """The asks no request's origin carries, for the owner's agent DM in Papaya.
+
+    The same plain words said where a request was asked (:func:`origin_bodies`): what is
+    needed and how to answer, never a task id, a command a worker ran, or a `ppy` command
+    to type. A question when any of them waits on the owner's answer.
+    """
+    if not asks:
+        return None
+    from papaya_agent_runtime import blockers, instructions, papaya_events
+
+    lines = [
+        "This needs you before I can go on:"
+        if len(asks) == 1
+        else f"{len(asks)} things need you before I can go on:"
+    ]
+    for ask in asks:
+        # A request's internal id is nobody's business here (`instructions.without_ids`).
+        what = instructions.without_ids(ask.person or ask.text) or "A decision is waiting on you."
+        lines.append(f"- {what}")
+        lines.append(f"  {ask.person_how or 'Reply here with your answer.'}")
+    asks_them = any(ask.kind in ANSWERED for ask in asks)
+    return OwnerMessage(
+        body=blockers.redact("\n".join(lines)),
+        kind=papaya_events.OWNER_DM_QUESTION if asks_them else papaya_events.OWNER_DM_NOTICE,
+        dedupe_key=dedupe_key(asks),
+    )
+
+
 def headline(asks: list[Ask]) -> str:
     if not asks:
         return ""
@@ -481,12 +642,16 @@ def plan(conn: sqlite3.Connection, *, now: datetime, host: str) -> tuple[Plan, l
     wanted = due(conn, asks, now=now)
     if not wanted:
         return Plan(), lines
+    # An ask about a person's request is said where they asked, not in the owner's DM.
+    elsewhere = [ask for ask in wanted if ask.instruction_task_id is None]
     return (
         Plan(
             due=wanted,
-            dm=message(conn, wanted, now=now, host=host),
-            tickets=ticket_bodies(conn, wanted, now=now),
-            headline=headline(wanted),
+            dm=message(conn, elsewhere, now=now, host=host),
+            owner=owner_message(elsewhere),
+            tickets=ticket_bodies(conn, elsewhere, now=now),
+            origins=origin_bodies(wanted),
+            headline=headline(elsewhere),
         ),
         lines,
     )
@@ -519,9 +684,102 @@ async def _owner_mention(api: Any) -> dict[str, str] | None:
     return {"type": "user", "id": owner_id, "handle": "", "display_name": "owner"}
 
 
-async def say_in_workspace(api: Any, text: str) -> bool:
-    """Put ``text`` in its owner's DM with this agent. ``False`` when there is no DM or the
-    post did not land. Never a channel — not even a private one. Never raises.
+#: What is logged when nothing reached the owner's DM, by default.
+NO_DM = "[outreach] This agent has no DM with its owner; the ticket comment carries it"
+
+#: What this process has learned about the owner-DM route: ``absent`` once Papaya
+#: answered 404 (a backend older than the route; asked again on the next start), and
+#: the lines already logged, so an owner who cannot be reached is one line per start,
+#: not one per round (753 of them on 2026-09-23).
+_OWNER_DM: dict[str, Any] = {"absent": False, "logged": set()}
+
+
+def forget_owner_dm() -> None:
+    """Forget what this process learned about the owner-DM route. For tests."""
+    _OWNER_DM["absent"] = False
+    _OWNER_DM["logged"] = set()
+
+
+def _log_once(line: str, *args: object) -> None:
+    said = line % args if args else line
+    if said in _OWNER_DM["logged"]:
+        return
+    _OWNER_DM["logged"].add(said)
+    log.warning(said)
+
+
+def connection_env(api: Any) -> dict[str, str]:
+    """The API url, workspace and token of the connection ``api`` speaks as.
+
+    The same three values `rounds.Rounds._env_from_connection` and `papaya.agent_env`
+    hand a job: what the `/me/` routes take.
+    """
+    agent = getattr(api, "agent_config", None) or {}
+    config = getattr(api, "config", None) or {}
+    return {
+        "PAPAYA_API_URL": os.environ.get("PAPAYA_API_URL") or str(config.get("server_url") or ""),
+        "PAPAYA_WORKSPACE_ID": str(agent.get("workspace_id") or ""),
+        "PAPAYA_AGENT_TOKEN": str(agent.get("client_token") or ""),
+    }
+
+
+async def say_to_owner(
+    owner: OwnerMessage, environ: Mapping[str, str], *, unreached: str = NO_DM
+) -> bool:
+    """Post ``owner`` through Papaya's owner-DM route; whether it landed. Never raises.
+
+    A replay (the same ``dedupe_key`` within 24 hours) landed the first time, so it is
+    ``True``. A 404 is a Papaya that predates the route: ``unreached`` is logged once and
+    the route is not asked again until the next start. Any other failure is logged once
+    and asked again next time.
+    """
+    from papaya_agent_runtime import papaya_events
+
+    if _OWNER_DM["absent"]:
+        return False
+    try:
+        answer = await asyncio.to_thread(
+            functools.partial(
+                papaya_events.post_owner_dm,
+                owner.body,
+                kind=owner.kind,
+                dedupe_key=owner.dedupe_key,
+                environ=environ,
+            )
+        )
+    except papaya_events.PapayaHTTPError as exc:
+        if exc.code in (404, 405):
+            _OWNER_DM["absent"] = True
+            _log_once("%s (this Papaya has no owner-DM route)", unreached)
+        else:
+            _log_once("[outreach] Could not message the owner (HTTP %d); again next time", exc.code)
+        return False
+    except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
+        _log_once("[outreach] Could not message the owner: %s; again next time", exc)
+        return False
+    if answer is None:  # not connected: nothing to call with
+        _log_once(unreached)
+        return False
+    # Landed: a later outage is a new thing to say.
+    _OWNER_DM["logged"] = set()
+    return True
+
+
+async def say_in_workspace(
+    api: Any,
+    text: str,
+    *,
+    owner: OwnerMessage | None = None,
+    environ: Mapping[str, str] | None = None,
+    unreached: str = NO_DM,
+) -> bool:
+    """Put ``text`` in its owner's DM with this agent. ``False`` when it did not land.
+    Never a channel — not even a private one. Never raises.
+
+    The DM channel when the agent is in one, as it always was. When it is in none,
+    ``owner`` goes through Papaya's owner-DM route (:func:`say_to_owner`), on
+    ``environ`` (default: ``api``'s own connection); without one, ``unreached`` is logged
+    once and nothing is said.
     """
     if api is None or not text:
         return False
@@ -535,21 +793,23 @@ async def say_in_workspace(api: Any, text: str) -> bool:
         if channel is not None:
             await api_client.post_agent_channel_message(api, channel, text)
             return True
-        log.info("[outreach] This agent has no DM with its owner; the ticket comment carries it")
-        return False
     except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
         log.warning("[outreach] Could not post to the workspace: %s", exc)
         return False
+    if owner is None:
+        _log_once(unreached)
+        return False
+    return await say_to_owner(
+        owner, connection_env(api) if environ is None else environ, unreached=unreached
+    )
 
 
-def post_dm(text: str) -> bool:
+def post_dm(text: str, *, owner: OwnerMessage | None = None) -> bool:
     """The session's form of :func:`say_in_workspace`, on this connection's client."""
-    import asyncio
-
     from papaya_agent_runtime import papaya
 
     try:
-        return asyncio.run(say_in_workspace(papaya.agent_api(), text))
+        return asyncio.run(say_in_workspace(papaya.agent_api(), text, owner=owner))
     except Exception as exc:  # noqa: BLE001 - an unreachable workspace is not a crash
         log.warning("[outreach] Could not post to the workspace: %s", exc)
         return False
@@ -560,8 +820,6 @@ _OWNER_MENTION: dict[str, dict[str, str] | None] = {}
 
 def owner_mention() -> dict[str, str] | None:
     """The connection owner's mention payload, resolved once per process. Never raises."""
-    import asyncio
-
     from papaya_agent_runtime import papaya
 
     if "owner" in _OWNER_MENTION:
@@ -608,6 +866,45 @@ def post_ticket(
         return False
 
 
+def post_origin(
+    ticket_task_id: int,
+    body: str,
+    *,
+    environ: dict[str, str] | None = None,
+    post=None,
+) -> bool:
+    """Say ``body`` where a person sent the request, as a progress reply. Never raises.
+
+    The reply block is the one the instruction's event carried, recorded on its ticket:
+    never one from anywhere else. No `MI-<n>` in it (`instructions.for_person`).
+    """
+    from papaya_agent_runtime import instructions, papaya, papaya_events
+    from papaya_agent_runtime.state import init_db
+
+    try:
+        env = environ if environ is not None else papaya.agent_env()
+        conn = init_db()
+        try:
+            instruction = instructions.instruction_of(conn, ticket_task_id)
+        finally:
+            conn.close()
+        if instruction is None:
+            return False
+        text = instructions.for_person(body, instruction, allow_empty=True)
+        if not text:
+            return False
+        kind = {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}
+        posted = (post or papaya_events.post_instruction_reply)(
+            instruction.reply, text, environ=env, **kind
+        )
+        return posted is not None
+    except Exception as exc:  # noqa: BLE001 - an ask that did not land is said next round
+        log.warning(
+            "[outreach] Could not reply where request %d was asked: %s", ticket_task_id, exc
+        )
+        return False
+
+
 #: Set to ``1`` to also raise a macOS desktop notification for what is due. Off by
 #: default: `osascript`'s notifications are attributed to Script Editor, so clicking one
 #: opens Script Editor rather than the ask (Shane, 2026-09-17) — noise, not a channel.
@@ -647,6 +944,7 @@ def deliver(
     dm=None,
     ticket=None,
     desktop=None,
+    origin=None,
     session: bool = False,
 ) -> list[str]:
     """Say the plan through every channel that lands; record it; the lines of what happened.
@@ -656,10 +954,47 @@ def deliver(
     with no terminal open is never marked told by a line they could not read. The
     channels default to this module's at call time, so a test that replaces one
     replaces it everywhere.
+
+    An ask about a person's request goes only where they asked (``origin``): said
+    there, it is recorded said; not, it is due again next round.
     """
     if not found:
         return []
-    dm = dm or post_dm
+    origin = origin or post_origin
+    lines: list[str] = []
+    at_origin = [ask for ask in found.due if ask.instruction_task_id is not None]
+    landed = {request: origin(request, body) for request, body in found.origins.items()}
+    reached_origin = [ask for ask in at_origin if landed.get(ask.instruction_task_id)]
+    record_said(conn, reached_origin, [VIA_ORIGIN], now=now)
+    for ask in at_origin:
+        where = VIA_ORIGIN if ask in reached_origin else "nowhere it could reach; again next round"
+        lines.append(f"said to a person ({where}): {ask.text}")
+    rest = Plan(
+        due=[ask for ask in found.due if ask.instruction_task_id is None],
+        dm=found.dm,
+        owner=found.owner,
+        tickets=found.tickets,
+        headline=found.headline,
+    )
+    if not rest:
+        return lines
+    return lines + _deliver_elsewhere(
+        conn, rest, now=now, dm=dm, ticket=ticket, desktop=desktop, session=session
+    )
+
+
+def _deliver_elsewhere(
+    conn: sqlite3.Connection,
+    found: Plan,
+    *,
+    now: datetime,
+    dm=None,
+    ticket=None,
+    desktop=None,
+    session: bool = False,
+) -> list[str]:
+    """The asks no request's origin carries: the ticket comments, the DM, the desktop."""
+    dm = dm or functools.partial(post_dm, owner=found.owner)
     ticket = ticket or post_ticket
     desktop = desktop or notify_desktop
     via: list[str] = []
@@ -692,6 +1027,7 @@ def step(
     dm=None,
     ticket=None,
     desktop=None,
+    origin=None,
     session: bool = False,
 ) -> list[str]:
     """The whole procedure for a session: read, reconcile, say what is due, record it."""
@@ -700,7 +1036,14 @@ def step(
     now = now or datetime.now(UTC)
     found, lines = plan(conn, now=now, host=host or blockers.short_hostname())
     return lines + deliver(
-        conn, found, now=now, dm=dm, ticket=ticket, desktop=desktop, session=session
+        conn,
+        found,
+        now=now,
+        dm=dm,
+        ticket=ticket,
+        desktop=desktop,
+        origin=origin,
+        session=session,
     )
 
 
@@ -757,16 +1100,25 @@ def lines(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[str]
 
 
 __all__ = [
+    "ANSWERED",
     "CAPABILITY",
     "DECISION",
     "DESKTOP_ENV",
+    "NO_DM",
+    "OwnerMessage",
     "PULL_REQUEST",
+    "connection_env",
+    "dedupe_key",
+    "forget_owner_dm",
+    "owner_message",
+    "say_to_owner",
     "REMOTE",
     "REPEAT_AFTER_SECONDS",
     "REPEAT_ENV",
     "SAID_EVENT",
     "VIA_DESKTOP",
     "VIA_DM",
+    "VIA_ORIGIN",
     "VIA_SESSION",
     "VIA_TICKET",
     "Ask",
@@ -776,7 +1128,10 @@ __all__ = [
     "desktop_enabled",
     "due",
     "headline",
+    "instruction_ticket_of",
     "last_said_at",
+    "origin_bodies",
+    "post_origin",
     "lines",
     "message",
     "notify_desktop",

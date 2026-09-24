@@ -95,8 +95,8 @@ def _age(seconds: int | None) -> str:
 
 # ── colour ──────────────────────────────────────────────────────────────────
 
-#: The only styles the views use, as SGR codes. Nothing else is ever coloured.
-STYLES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33"}
+#: The only styles the views and `ppy setup` use, as SGR codes. Nothing else is coloured.
+STYLES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 
 #: `--color` choices.
 COLOR_CHOICES = ("auto", "always", "never")

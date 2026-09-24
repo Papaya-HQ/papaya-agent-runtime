@@ -115,6 +115,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         interactive=("papaya_agent_runtime.owed", "papaya_agent_runtime.cli"),
     ),
     Capability(
+        "artifact_commit_dropped",
+        SHARED,
+        "a local head that only adds build artifacts over the pushed lease branch is "
+        "dropped for the pushed head before review and delivery",
+        serve=("TicketRunner._onto_pushed_head",),
+        shared="papaya_agent_runtime.stacks",
+        interactive=("papaya_agent_runtime.review", "papaya_agent_runtime.delivery"),
+    ),
+    Capability(
         "plan_stop_answered",
         SHARED,
         "a worker that stopped after posting its plan note is answered about the plan, "
@@ -158,6 +167,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._listen",
             "TicketRunner._take_pending",
             "TicketRunner._mark_read",
+            "TicketRunner._heard_facts",
         ),
         shared="papaya_agent_runtime.workitems",
         interactive=("papaya_agent_runtime.watch", "papaya_agent_runtime.owed"),
@@ -301,9 +311,39 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._instruction_facts",
             "TicketRunner._snapshot_text",
             "TicketRunner._instruction_answer",
+            "TicketRunner._answer_turns",
             "TicketRunner._instruction_work",
+            "TicketRunner._instruction_steps",
+            "TicketRunner._say_once",
+            "TicketRunner._note_said",
+            "TicketRunner._note_lease_lost",
+            "TicketRunner._findings_answer",
+            "TicketRunner._has_ticket",
+            "TicketRunner._decline_ticket",
             "TicketRunner._has_commits",
+            # Placing work nothing named, acknowledging it and following it live happen
+            # in the conversation the instruction came from, under its lease.
+            "TicketRunner._read_item",
+            "TicketRunner._choose_repository",
+            "TicketRunner._decline_instruction",
+            "TicketRunner._instruction_declined",
+            "TicketRunner._instruction_progress",
+            "TicketRunner._looking",
+            "TicketRunner._outcome_turns",
+            # What the person adds to a held request reaches the running work, the way a
+            # comment reaches a held work item, read under the same lease.
+            "TicketRunner._start_listening",
+            "TicketRunner._follow_ups",
+            "TicketRunner._follow_ups_failed",
+            "TicketRunner._reply_to_follow_ups",
+            "TicketRunner._unheard_follow_ups",
+            "TicketRunner._also_sent",
             "Rounds._instruction_lane",
+            "Rounds._reclaim_instructions",
+            "Rounds._instruction_status",
+            "Rounds._unread_request",
+            "Rounds._post_seam",
+            "Rounds._report_seam",
         ),
     ),
     Capability(
@@ -341,7 +381,12 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._wait_for_slot",
             "Rounds._reclaim",
             "Rounds._reoffer_missed",
+            # A re-offer reads the item and compares its owner with the listener's
+            # agent before it offers: part of the reclaim, which a session never does.
+            "Rounds._read_work_item",
+            "Rounds._agent_id",
             "Rounds._offer",
+            "Rounds._send_offer",
             "Rounds._watch_refusals",
             "Rounds._post",
             "Rounds._env_from_connection",

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import io
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -569,6 +571,7 @@ def _runner(
     gate_verdict=None,
     gate_state=None,
     uncommitted=lambda _task_id: [],
+    drop_artifacts=lambda _task_id: "",
     agent_record=lambda _env: None,
     full_suite=lambda _task_id: None,
     review_base=lambda _task_id: "",
@@ -584,6 +587,8 @@ def _runner(
         # No supervisor answers in these tests; a liveness check never asks the socket.
         gate_state=gate_state or (lambda _task_id: rounds.GateState(False, "no gate running")),
         uncommitted=uncommitted,
+        # No worktree is compared with its pushed branch unless a test asks.
+        drop_artifacts=drop_artifacts,
         run_turn=turns,
         config=_manager_config,
         opener=papaya_api,
@@ -888,6 +893,98 @@ def test_the_listener_declares_the_configured_worker_count_as_its_subjects(
 
     assert harness.events.connection[0]["capabilities"]["max_concurrent_subjects"] == workers
     assert harness.loop.max_concurrent == workers
+
+
+def _listen_briefly(harness: Harness, client_home: ClientHome) -> int:
+    """Run `serve` until its connection has announced itself, then stop it."""
+    options = serve.parse_args(["--working-directory", str(client_home.work_dir)])
+
+    async def scenario() -> int:
+        runner = asyncio.create_task(
+            serve.run(options, stdout=io.StringIO(), stderr=io.StringIO(), extra=harness.extra())
+        )
+        await _until(lambda: harness.events.connection, what="the capabilities to be announced")
+        harness.loop.request_stop()
+        return await runner
+
+    return asyncio.run(scenario())
+
+
+def test_a_client_that_takes_extra_capabilities_is_told_this_runtime_answers_questions(
+    ppy_home, client_home, ready, caplog
+) -> None:
+    """Papaya routes a no-card question only to a connection that says it takes `ask`.
+
+    This runtime answers one read-only, so it says so, next to `work`. The client it
+    is pinned to has the parameter on both builders, so this goes through the real
+    ones, and what reaches Papaya's connection is what the client itself registered.
+    """
+    from papaya_agent_client import embed
+
+    for builder in (embed.build_listener, embed.build_supervised_listener):
+        assert serve.EXTRA_CAPABILITIES in inspect.signature(builder).parameters
+        assert serve.extra_capabilities(builder) == {
+            serve.EXTRA_CAPABILITIES: {"instruction_intents": ["ask", "work"]}
+        }
+    harness = Harness(FakeEvents([]))
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+
+    assert _listen_briefly(harness, client_home) == 0
+
+    capabilities = harness.events.connection[0]["capabilities"]
+    assert capabilities["instruction_intents"] == ["ask", "work"]
+    assert serve.OLD_CLIENT_CAPABILITIES not in caplog.text
+
+
+def test_a_client_with_no_extra_capabilities_still_listens_and_says_questions_are_refused(
+    ppy_home, client_home, ready, monkeypatch, caplog
+) -> None:
+    """A client older than the parameter would raise on it: nothing new is passed.
+
+    The machine still starts and still does work; one line says why Papaya will not
+    send it questions yet.
+    """
+    from papaya_agent_client import embed
+
+    original = embed.build_listener
+    passed: list[dict[str, Any]] = []
+
+    async def build_listener(**kwargs):
+        passed.append(kwargs)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(embed, "build_listener", build_listener)
+    harness = Harness(FakeEvents([]))
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+
+    assert _listen_briefly(harness, client_home) == 0
+
+    assert len(passed) == 1 and serve.EXTRA_CAPABILITIES not in passed[0]
+    assert "instruction_intents" not in harness.events.connection[0]["capabilities"]
+    said = [r for r in caplog.records if r.getMessage() == serve.OLD_CLIENT_CAPABILITIES]
+    assert len(said) == 1
+    assert "refuse to send questions" in said[0].getMessage()
+
+
+def test_extra_capabilities_are_offered_to_either_builder_only_when_it_names_them(
+    caplog,
+) -> None:
+    """Supervised or not, the check is the builder's own signature, never its version."""
+
+    async def supervised(writer, *, stdin_fd=None, extra_capabilities=None, runner=None):
+        return None
+
+    async def old_supervised(writer, *, stdin_fd=None, runner=None):
+        return None
+
+    caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
+
+    assert serve.extra_capabilities(supervised) == {
+        "extra_capabilities": {"instruction_intents": ["ask", "work"]}
+    }
+    assert caplog.records == []
+    assert serve.extra_capabilities(old_supervised) == {}
+    assert [r.getMessage() for r in caplog.records] == [serve.OLD_CLIENT_CAPABILITIES]
 
 
 def test_a_machine_with_no_harness_still_listens_and_dms_what_needs_the_user(
@@ -2196,6 +2293,37 @@ def test_a_review_at_a_head_with_a_dirty_worktree_reports_the_count_and_steers(
     review_prompt = " ".join(prompts.load(prompts.REVIEW).split())
     assert "uncommitted work in the worktree: <n> files" in review_prompt
     assert "Review the remote branch, never the worktree." in review_prompt
+
+
+def test_an_artifact_only_local_commit_is_dropped_before_the_review_turn(
+    ppy_home, client_home, ready, registered_repo, progress_lines
+) -> None:
+    """2026-09-23: review read the runtime's own pyc/uv.lock commit and sent the worker back."""
+    papaya_api = FakePapaya()
+    order: list[str] = []
+
+    def drop(task_id: int) -> str:
+        order.append("drop")
+        return f"Worker task {task_id}: dropped 1 local commit(s) that only added build artifacts."
+
+    def act(turn: Turn) -> None:
+        if turn.name == prompts.BRIEF:
+            worker = dispatch_worker(turn.run_id)
+            worker_event(worker, "worker_done", status="worker_done", summary="pushed clean")
+        elif turn.name == prompts.REVIEW:
+            order.append("review")
+            _deliver(turn)
+
+    turns = FakeTurns(act)
+    runner = _runner(turns, papaya_api, drop_artifacts=drop)
+
+    assert _one_ticket(Harness(FakeEvents([EVENT])), client_home, runner) == 0
+
+    # Before the review turn, and nobody was sent back for it.
+    assert order == ["drop", "review"]
+    assert turns.names() == [prompts.BRIEF, prompts.REVIEW]
+    said = [d for _s, _p, d in progress_lines if "only added build artifacts" in d]
+    assert len(said) == 1
 
 
 # ── waiting on a gate ───────────────────────────────────────────────────────

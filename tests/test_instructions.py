@@ -112,10 +112,11 @@ TABLE = [
         "",
     ),
     ("Implement dark mode in papaya-web", [], WORK, "papaya-web", ""),
-    ("Implement dark mode in papaya-web and papaya-backend", [], UNANSWERABLE, None, ""),
+    # Work the words do not place is still work: placed next, never asked about here.
+    ("Implement dark mode in papaya-web and papaya-backend", [], WORK, None, ""),
     ("", [], UNANSWERABLE, None, ""),
     ("Why is task 41 still blocked?", [], ANSWER, None, ""),
-    (f"Investigate {JIRA}", [], UNANSWERABLE, None, ""),
+    (f"Investigate {JIRA}", [], WORK, None, ""),
 ]
 
 
@@ -127,13 +128,316 @@ def test_d_twelve_instructions_classify_as_expected(text, refs, path, repo, inte
         assert found.question.endswith("?") or "?" in found.question
 
 
-def test_d_the_unanswerable_rows_ask_the_one_specific_question() -> None:
+def test_d_only_an_empty_instruction_is_asked_about_at_classification() -> None:
     assert instructions.classify("", [], REPOS).question == instructions.EMPTY_QUESTION
     both = instructions.classify("Implement dark mode in papaya-web and papaya-backend", [], REPOS)
-    assert both.question == "Which repository should I work in: papaya-web or papaya-backend?"
+    assert both.choosing and both.candidates == ("papaya-web", "papaya-backend")
     none = instructions.classify(f"Investigate {JIRA}", [], REPOS)
-    assert none.question.startswith("Which repository should I work in?")
-    assert "papaya-backend, papaya-web" in none.question
+    assert none.choosing and none.candidates == ()
+
+
+def test_the_question_names_the_candidates_and_says_a_reply_is_picked_up() -> None:
+    assert instructions.which_repository(["papaya-web", "papaya-backend"]) == (
+        "Which repository should I work in: papaya-backend or papaya-web? "
+        "Reply with the name and I'll pick it straight up."
+    )
+    three = instructions.which_repository(["c", "a", "b"])
+    assert three.startswith("Which repository should I work in: a, b or c?")
+    assert "reply with its GitHub URL and I'll pick it straight up" in (
+        instructions.which_repository([])
+    )
+    unread = instructions.which_repository(["a", "b"], ("PAP-9",))
+    assert unread.startswith("I could not read PAP-9, so I can't tell from the ticket. ")
+
+
+# ── (Goal 1) intent ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "intent", "path"),
+    [
+        ("fix the bug in papaya-web", "ask", ANSWER),
+        ("Investigate PAP-115", "ask", ANSWER),
+        ("What is going on with the export?", "work", WORK),
+        ("status", "work", WORK),
+        ("What are you working on?", None, ANSWER),
+        ("fix the bug in papaya-web", None, WORK),
+        ("fix the bug in papaya-web", "", WORK),
+        ("approve capability 12", "work", ANSWER),
+        ("", "work", UNANSWERABLE),
+    ],
+)
+def test_intent_decides_answer_or_work_and_absent_reads_the_words(text, intent, path) -> None:
+    assert instructions.classify(text, [], REPOS, intent=intent).path == path
+
+
+def test_intent_is_read_from_the_event_and_absent_means_an_older_papaya() -> None:
+    old = instruction()
+    assert old.intent is None and not old.speaks_kind
+    assert "intent" not in json.loads(old.as_json())
+    asked = papaya_events.instruction_from(payload(intent="ask"))
+    assert asked.intent == "ask" and asked.speaks_kind
+    assert papaya_events.instruction_from(json.loads(asked.as_json())).intent == "ask"
+    odd = papaya_events.instruction_from(payload(intent="whatever"))
+    assert odd.intent == "" and odd.speaks_kind
+
+
+# ── (Goal 2) placing the work ───────────────────────────────────────────────
+
+THREE = [
+    RepoRef("papaya-frontend-monorepo", "https://github.com/acme/papaya-frontend-monorepo"),
+    RepoRef("papaya-backend-monorepo", "https://github.com/acme/papaya-backend-monorepo"),
+    RepoRef("runtime", "https://github.com/acme/runtime"),
+]
+ONE = [RepoRef("runtime", "https://github.com/acme/runtime")]
+FRONT = instructions.ReadItem("PAP-1", repo="https://github.com/acme/papaya-frontend-monorepo")
+BACK = instructions.ReadItem("PAP-2", repo="papaya-backend-monorepo")
+WORDS = instructions.ReadItem("PAP-3", summary="PAP-3: Activity feed (todo) — web and iOS")
+UNREAD = instructions.ReadItem("PAP-4")
+
+PRECEDENCE = [
+    # (row, text, registered, items read, repo, spec, candidates)
+    ("text names it, item names another", "fix it in runtime", THREE, [FRONT], "runtime", None, ()),
+    (
+        "item names a registered one",
+        "fix PAP-1",
+        THREE,
+        [FRONT],
+        "papaya-frontend-monorepo",
+        None,
+        (),
+    ),
+    (
+        "item names an unregistered one",
+        "fix PAP-9",
+        THREE,
+        [instructions.ReadItem("PAP-9", repo="https://github.com/acme/elsewhere")],
+        None,
+        "https://github.com/acme/elsewhere",
+        (),
+    ),
+    (
+        "item wins over the single registered",
+        "fix PAP-2",
+        ONE,
+        [BACK],
+        None,
+        "papaya-backend-monorepo",
+        (),
+    ),
+    ("single registered", "fix the bug", ONE, [], "runtime", None, ()),
+    ("single registered, item says only words", "fix PAP-3", ONE, [WORDS], "runtime", None, ()),
+    (
+        "two items, two repositories: a choice between them",
+        "fix PAP-1 and PAP-2",
+        THREE,
+        [FRONT, BACK],
+        None,
+        None,
+        ("papaya-frontend-monorepo", "papaya-backend-monorepo"),
+    ),
+    (
+        "several registered, nothing names one: a choice between all",
+        "fix PAP-3",
+        THREE,
+        [WORDS],
+        None,
+        None,
+        ("papaya-frontend-monorepo", "papaya-backend-monorepo", "runtime"),
+    ),
+    (
+        "the text names two: a choice between them",
+        "fix it in runtime and papaya-backend-monorepo",
+        THREE,
+        [FRONT],
+        None,
+        None,
+        ("runtime", "papaya-backend-monorepo"),
+    ),
+    (
+        "two items, one repository unregistered: only the registered one is a candidate",
+        "fix PAP-1 and PAP-9",
+        THREE,
+        [FRONT, instructions.ReadItem("PAP-9", repo="https://github.com/acme/elsewhere")],
+        None,
+        None,
+        ("papaya-frontend-monorepo",),
+    ),
+    (
+        "the text names a registered and an unregistered one",
+        "fix it in runtime or https://github.com/acme/elsewhere",
+        THREE,
+        [],
+        None,
+        None,
+        ("runtime",),
+    ),
+    ("none registered", "fix the bug", [], [], None, None, ()),
+]
+
+
+@pytest.mark.parametrize(
+    ("row", "text", "registered", "read", "repo", "spec", "candidates"),
+    PRECEDENCE,
+    ids=[row[0] for row in PRECEDENCE],
+)
+def test_precedence_text_then_item_then_single_then_choice(
+    row, text, registered, read, repo, spec, candidates
+) -> None:
+    found = instructions.place(instructions.classify(text, [], registered), registered, read)
+    assert found.path == WORK, row
+    assert (found.repo, found.spec) == (repo, spec), (row, found)
+    if repo is None and spec is None:
+        assert found.choosing and set(found.candidates) == set(candidates), (row, found)
+    if found.choosing:
+        assert found.question == ""  # asked only after the choice turn cannot tell
+
+
+def test_an_item_that_could_not_be_read_is_named_in_the_question() -> None:
+    found = instructions.place(instructions.classify("fix PAP-4", [], THREE), THREE, [UNREAD])
+    assert found.unread == ("PAP-4",)
+    asked = instructions.cannot_tell(found, "the choice turn could not tell")
+    assert asked.path == UNANSWERABLE
+    assert asked.question.startswith("I could not read PAP-4")
+    for name in ("papaya-frontend-monorepo", "papaya-backend-monorepo", "runtime"):
+        assert name in asked.question
+
+
+def test_work_item_refs_are_papaya_ids_never_another_trackers() -> None:
+    refs = instructions.work_item_refs(
+        "investigate PAP-115 (activity feed) and pap-2",
+        [
+            "https://linear.app/acme/issue/PAP-115/activity-feed",
+            JIRA,
+            "https://app.papaya.example/w/ws/work-items/PPY-7",
+        ],
+    )
+    assert refs == ["PAP-115", "PPY-7"]
+
+
+def test_read_references_drops_other_trackers_and_keeps_refusals_as_unread() -> None:
+    def read(ref: str) -> dict[str, Any] | None:
+        if ref == "PAP-404":
+            raise papaya_events.PapayaHTTPError("nope", code=404)
+        if ref == "PAP-403":
+            raise papaya_events.PapayaHTTPError("refused", code=403)
+        return {
+            "title": "Activity feed",
+            "status": "done",
+            "description": "Web and iOS",
+            "metadata": {"repository": "https://github.com/acme/papaya-frontend-monorepo"},
+        }
+
+    read_items = instructions.read_references("see PAP-404 PAP-403 PAP-115", [], read)
+    assert [item.ref for item in read_items] == ["PAP-403", "PAP-115"]
+    refused, feed = read_items
+    assert refused.repo is None and refused.summary == ""
+    assert feed.repo == "https://github.com/acme/papaya-frontend-monorepo"
+    assert feed.summary == "PAP-115: Activity feed (done) — Web and iOS"
+
+
+def test_the_choice_turn_follows_the_brief_turns_own_layers_word_for_word() -> None:
+    """One rule for choosing a repository, not a second resolver."""
+    from papaya_agent_runtime import prompts
+
+    assert prompts.REPO_CHOICE_LAYERS in prompts.load(prompts.BRIEF)
+    choice = prompts.load(prompts.REPO_CHOICE)
+    assert prompts.REPO_CHOICE_LAYERS in choice
+    assert f"{prompts.REPOSITORY_PREFIX} {prompts.REPOSITORY_CANNOT_TELL}" in choice
+
+
+CHOICE_COMMANDS = [
+    # (argv, allowed on the choice path)
+    (["repo", "list"], True),
+    (["repo", "show", "runtime"], True),
+    (["repo", "locate", "activity feed"], True),
+    (["memory", "show", "--repo", "runtime"], True),
+    (["version"], True),
+    (["repo", "ensure", "https://github.com/acme/x"], False),
+    (["memory", "add", "x"], False),
+    (["capability", "approve", "12"], False),
+    (["deliver", "41"], False),
+    (["answer", "41", "go"], False),
+    (["outreach"], False),
+    (["status"], False),
+    (["stack", "merge", "41"], False),
+    (["dispatch", "--repo", "x"], False),
+]
+
+
+@pytest.mark.parametrize(("argv", "allowed"), CHOICE_COMMANDS)
+def test_the_choice_turn_may_only_look_at_repositories(argv, allowed) -> None:
+    refusal = instructions.command_refusal(instructions.CHOICE, argv, merge_allowed=True)
+    assert (refusal is None) == allowed, refusal
+
+
+def test_ppy_answer_is_refused_on_the_ask_path_by_ppy_itself(ppy_home, monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, instructions.ASK)
+    assert cli.main(["answer", "41", "use the staging database"]) == 2
+    err = capsys.readouterr().err
+    assert "refused on this instruction's path" in err and "`ppy answer`" in err
+    # The answer path itself still answers a worker when the person said to.
+    assert instructions.command_refusal(ANSWER, ["answer", "41", "go"]) is None
+
+
+def test_the_choice_path_is_enforced_by_ppy_itself(ppy_home, monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, instructions.CHOICE)
+    assert cli.main(["capability", "approve", "12"]) != 0
+    assert "repository-choice turn" in capsys.readouterr().err
+
+
+ASK_COMMANDS = [
+    (["status", "--team"], True),
+    (["task", "show", "41"], True),
+    (["todo", "list", "--all"], True),
+    (["memory", "show", "--repo", "runtime"], True),
+    (["outreach", "--json"], True),
+    (["board"], True),
+    # Nothing that acts: steering a waiting worker is work, and so is any write.
+    (["answer", "41", "use the staging database"], False),
+    (["todo", "add", "look at it", "--blocked-on", "user"], False),
+    (["todo", "done", "3"], False),
+    (["memory", "init"], False),
+    (["outreach", "run"], False),
+    (["capability", "approve", "12"], False),
+    (["capability", "deny", "12"], False),
+    (["deliver", "41"], False),
+    (["stack", "merge", "41"], False),
+    (["dispatch", "--repo", "x"], False),
+]
+
+
+@pytest.mark.parametrize(("argv", "allowed"), ASK_COMMANDS)
+def test_an_asked_question_never_approves_delivers_or_merges(argv, allowed) -> None:
+    refusal = instructions.command_refusal(instructions.ASK, argv, merge_allowed=True)
+    assert (refusal is None) == allowed, refusal
+
+
+@pytest.mark.parametrize(
+    "text", ["should I merge #12?", "merge PR 12", "approve capability 12", "hold 1024"]
+)
+def test_an_ask_that_reads_like_a_command_is_a_plain_question(text) -> None:
+    found = instructions.classify(text, [], REPOS, intent="ask")
+    assert (found.path, found.intent, found.number) == (ANSWER, "", "")
+    asked = papaya_events.instruction_from(payload(intent="ask"))
+    assert instructions.turn_path(found, asked, choosing=False) == instructions.ASK
+    # Without an `ask` from Papaya, the words are still the command they were.
+    assert instructions.turn_path(found, instruction(), choosing=False) == ANSWER
+
+
+def test_the_choice_turn_counts_only_a_candidate() -> None:
+    names = ("papaya-web", "papaya-backend")
+    assert instructions.chosen_repository("Read.\nREPOSITORY: papaya-web", names) == "papaya-web"
+    assert instructions.chosen_repository("REPOSITORY: `Papaya-Backend`.", names) == (
+        "papaya-backend"
+    )
+    assert instructions.chosen_repository("REPOSITORY: cannot tell", names) is None
+    assert instructions.chosen_repository("REPOSITORY: elsewhere", names) is None
+    assert instructions.chosen_repository("no line at all", names) is None
 
 
 def test_a_forge_url_that_is_not_registered_is_a_work_path_to_ensure() -> None:
@@ -194,6 +498,30 @@ def test_cli_refuses_a_command_outside_the_turns_path(ppy_home, monkeypatch, cap
     assert cli.main(["version"]) == 0
 
 
+@pytest.mark.parametrize("path", instructions.TURN_PATHS)
+@pytest.mark.parametrize("event", ["session-start", "stop", "session-end"])
+def test_the_harness_hooks_run_on_every_instruction_path(
+    ppy_home, monkeypatch, capsys, path, event
+) -> None:
+    """Goal 1: `.claude/settings.json` runs `ppy hook …` in every turn; a refused one
+    failed the turn after it had answered (2026-09-23, "Answered MI-1 (failed)")."""
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, path)
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    assert cli.main(["hook", event]) == 0
+    assert "refused" not in capsys.readouterr().err
+    assert instructions.command_refusal(path, ["hook", event], merge_allowed=False) is None
+
+
+def test_a_hook_exemption_opens_nothing_else_on_the_ask_path(ppy_home, monkeypatch, capsys) -> None:
+    from papaya_agent_runtime import cli
+
+    monkeypatch.setenv(instructions.PATH_ENV, instructions.ASK)
+    assert cli.main(["capability", "approve", "12"]) == 2
+    assert "refused on this instruction's path" in capsys.readouterr().err
+
+
 # ── the work path's brief ───────────────────────────────────────────────────
 
 
@@ -208,10 +536,12 @@ def test_f_the_composed_brief_has_the_four_instruction_sections_and_lints_clean(
         assert heading in brief, heading
     assert "> Investigate JIRA-4411\n> and tell me what broke." in brief
     assert f"- {JIRA}" in brief
-    assert "Shane (Papaya user user-1), as MI-42." in brief
+    assert "Shane (Papaya user user-1)." in brief
+    # The brief reaches the pull request: no request id in it (task 372, Goal 4).
+    assert "MI-42" not in brief
     assert "> You are the Engineering Agent." in brief
     assert brief_lint.lint_brief(brief) == []
-    assert brief.startswith("# MI-42: Investigate JIRA-4411")
+    assert brief.startswith("# Investigate JIRA-4411")
 
 
 def test_persona_text_is_quoted_data_in_the_brief_and_never_a_command() -> None:

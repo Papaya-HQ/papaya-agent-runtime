@@ -257,7 +257,10 @@ def _config_problems(problems: list[Problem]) -> None:
                 summary=(
                     "this runtime has never been set up: no driver profile and no worker ceiling"
                 ),
-                fix="`ppy setup` — `ppy serve` does this itself before it starts listening",
+                fix=(
+                    "`ppy setup --profile-only --non-interactive` — `ppy serve` does this "
+                    "itself before it starts listening"
+                ),
             )
         )
         return
@@ -268,7 +271,10 @@ def _config_problems(problems: list[Problem]) -> None:
             Problem(
                 code="config_invalid",
                 summary=f"the configuration cannot be read: {exc}",
-                fix="`ppy setup` to rewrite it, or `ppy config show` to see what is wrong",
+                fix=(
+                    "`ppy setup --profile-only --non-interactive` to rewrite it, or "
+                    "`ppy config show` to see what is wrong"
+                ),
             )
         )
         return
@@ -739,18 +745,24 @@ def _client_problems(problems: list[Problem]) -> None:
 
 
 ENVIRONMENT_BROKEN = "environment_broken"
+ENVIRONMENT_STALE = "environment_stale"
+
+
+def checkout_root() -> Path:
+    """The checkout this runtime runs from: where uv.lock and pyproject.toml are."""
+    import papaya_agent_runtime
+
+    return Path(papaya_agent_runtime.__file__).resolve().parents[2]
 
 
 def environment_path() -> Path:
     """This checkout's environment, where `bin/ppy` runs everything from."""
     import os
 
-    import papaya_agent_runtime
-
     configured = os.environ.get("UV_PROJECT_ENVIRONMENT")
     if configured:
         return Path(configured)
-    return Path(papaya_agent_runtime.__file__).resolve().parents[2] / ".venv"
+    return checkout_root() / ".venv"
 
 
 def environment_imports(env: Path) -> bool:
@@ -768,9 +780,47 @@ def environment_imports(env: Path) -> bool:
     )
 
 
+def environment_current(env: Path) -> bool:
+    """Was ``env`` built from the uv.lock and pyproject.toml this checkout has now?
+
+    A sync by `ppy` stamps the environment with a hash of both (`envsync`); a pull
+    that changes either leaves the stamp behind, and the environment then lacks what
+    the new code imports — `ppy setup` crashed at its first prompt that way on
+    2026-09-24. An environment with no stamp was built by something else (a bare
+    `uv sync`, CI) and is not called stale here: nothing says what it was built from.
+    """
+    from papaya_agent_runtime import envsync
+
+    stamp = envsync.built_stamp(str(env))
+    if not stamp:
+        return True
+    root = str(checkout_root())
+    return stamp == envsync.wanted_stamp(root, envsync.pinned_python(root))
+
+
+def environment_ready(env: Path) -> bool:
+    """The client imports from ``env`` and it was built from this checkout's lockfile."""
+    return environment_imports(env) and environment_current(env)
+
+
 def _environment_problems(problems: list[Problem]) -> None:
     env = environment_path()
     if environment_imports(env):
+        if not environment_current(env):
+            problems.append(
+                Problem(
+                    code=ENVIRONMENT_STALE,
+                    summary=(
+                        "this checkout's environment was built from an older uv.lock or "
+                        "pyproject.toml, so a dependency the code now needs may be missing"
+                    ),
+                    fix=(
+                        "every `./bin/ppy` command rebuilds it first when no `ppy serve` is "
+                        "running; with one running, its next start does"
+                    ),
+                    blocking=False,
+                )
+            )
         return
     problems.append(
         Problem(

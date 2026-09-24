@@ -17,7 +17,7 @@ dynamic = ["version"]
 description = "A lightweight, local framework for directing autonomous software work across one or more Git repositories."
 readme = "README.md"
 requires-python = ">=3.13"
-# One runtime dependency, and it is deliberate. The control plane is otherwise
+# Two runtime dependencies, both deliberate. The control plane is otherwise
 # standard library only; Treehouse, gh-axi and lavish-axi are pinned companion
 # CLIs, not Python libraries.
 #
@@ -25,12 +25,19 @@ requires-python = ">=3.13"
 # the client's listener loop in-process, so its cursor, reservations, renewals and
 # supervised-protocol writer are used as-is instead of reimplemented here. That
 # makes this a library API dependency, not a tool: pre-1.0 the minor is the
-# client's breaking-change unit, so the range is the current 0.16 line and moving
-# to 0.17 is a deliberate change with the import sites re-checked. 0.16.0 is the
-# floor because the sweep in `ppy serve` calls `ListenerLoop.offer`, which arrived
-# in it.
+# client's breaking-change unit, so the range is the current 0.18 line and moving
+# to 0.19 is a deliberate change with the import sites re-checked. 0.18.0 brought
+# the embed builders' `extra_capabilities`, through which `ppy serve` advertises
+# `instruction_intents` (without it Papaya never routes a question to this
+# machine); 0.18.1 is the floor because it adds `connect --quiet`, which `ppy
+# setup` feature-detects, and the arrow-key workspace/agent pickers.
+#
+# `questionary` is the second, and it is for one screen: `ppy setup`'s repository
+# picker (an owner list, then a checkbox list with type-to-filter). It is imported
+# only there, so nothing else in the control plane may assume it.
 dependencies = [
-    "papaya-agent-client>=0.16.0,<0.17.0",
+    "papaya-agent-client>=0.18.1,<0.19.0",
+    "questionary>=2.1.0,<3",
 ]
 
 [dependency-groups]

@@ -56,16 +56,34 @@ def _parity_gaps_are_recorded_only_where_a_test_asks(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _environment_stamp_only_where_a_test_asks(request, monkeypatch):
+    """Readiness compares this checkout's `.venv` stamp with uv.lock
+    (`readiness.environment_current`). A `uv run pytest` that re-synced a `ppy`-built
+    environment in place leaves the old stamp behind, so readiness tests would depend on
+    how the developer's environment was last built. `tests/test_environment_freshness.py`
+    exercises the real comparison."""
+    if request.module.__name__.endswith("test_environment_freshness"):
+        return
+    from papaya_agent_runtime import readiness
+
+    monkeypatch.setattr(readiness, "environment_current", lambda env: True)
+
+
+@pytest.fixture(autouse=True)
 def _outreach_reaches_nobody_unless_a_test_asks(request, monkeypatch):
     """The outreach procedure (`outreach.py`) runs from the heartbeat, the hooks and
     serve's rounds and reaches a person through the workspace and the desktop; tests
     about other lines must neither post anywhere nor raise a notification on the
-    developer's screen. `tests/test_outreach.py` fakes the channels itself."""
-    if request.module.__name__.endswith("test_outreach"):
-        return
+    developer's screen. `tests/test_outreach.py` fakes the channels itself.
+
+    What a process learned about the owner-DM route (a 404, the lines it logged) is
+    forgotten between tests, as it is between starts."""
     from papaya_agent_runtime import outreach
 
-    monkeypatch.setattr(outreach, "post_dm", lambda text: False)
+    outreach.forget_owner_dm()
+    if request.module.__name__.endswith("test_outreach"):
+        return
+    monkeypatch.setattr(outreach, "post_dm", lambda text, **_: False)
     monkeypatch.setattr(outreach, "post_ticket", lambda item, body, environ=None: False)
     monkeypatch.setattr(outreach, "notify_desktop", lambda text: False)
 

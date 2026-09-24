@@ -43,6 +43,14 @@ if [ "${1:-}" = "capabilities" ] && [ ! -d "$VENV" ]; then
     fi
 fi
 
+# `setup` is the first command on a fresh machine, and everything below needs uv,
+# so a machine without it hears the one line that installs it.
+if [ "${1:-}" = "setup" ] && ! command -v uv >/dev/null 2>&1; then
+    echo "uv is not installed. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    echo "then open a new shell and run ./bin/ppy setup again" >&2
+    exit 1
+fi
+
 # Does the runtime's dependency import from the environment? A refused or
 # interrupted sync used to leave it without the Papaya client (2026-09-16).
 environment_ok() {
@@ -62,17 +70,20 @@ helper() {
     fi
 }
 
-# The environment is built once, never under a running `serve`.
+# The environment is rebuilt when the lockfile changes, never under a running `serve`.
 #
 # `uv run` re-syncs whenever it decides the environment is stale, and a sync
 # deletes the interpreter and packages a live `serve` is importing from — which
 # is how a `ppy status` in a terminal killed the app's manager on 2026-09-16. So
-# only three things sync: `ppy serve` as it starts (when the environment is out
-# of date or broken), an explicit `ppy env sync`, and first use on a checkout
-# with no environment. `envsync` refuses while the supervisor lock is held and
-# names the pid; it builds into a fresh directory and swaps it in only once the
-# client imports from it, so a refused or interrupted sync leaves the previous
-# environment as it was.
+# every command runs with `--no-sync`, and the syncing is `envsync`'s: `ppy serve`
+# as it starts (when the environment is out of date or broken), an explicit
+# `ppy env sync`, and — ahead of every other command — a comparison of the
+# environment's stamp with uv.lock and pyproject.toml, which rebuilds it when a
+# pull changed them (2026-09-24: `ppy setup` crashed on a dependency the pull had
+# just added). `envsync` never rebuilds while the supervisor lock is held; it
+# builds into a fresh directory and swaps it in only once the client imports
+# from it, so a refused or interrupted sync leaves the previous environment as
+# it was.
 sync_env() {
     helper papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"} "$@"
 }
@@ -109,8 +120,13 @@ if [ "${1:-}" = "serve" ]; then
         3) ;; # adopted: its environment is this build's, and it is running from it
         *) exit "$decision" ;;
     esac
-elif [ ! -d "$VENV" ]; then
-    sync_env || exit $?
+elif [ "${1:-}" = "capabilities" ]; then
+    # The client's connect-time probe waits ten seconds (see above): it answers
+    # from the environment there is and never waits on a rebuild.
+    [ -d "$VENV" ] || sync_env || exit $?
+else
+    # Unchanged since the last sync: a stamp read and a hash, nothing more.
+    sync_env --before-command || exit $?
 fi
 
 exec uv run --no-sync --project "$ROOT" ${PYTHON:+--python "$PYTHON"} python -m papaya_agent_runtime "$@"
