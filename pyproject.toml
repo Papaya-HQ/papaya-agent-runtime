@@ -25,12 +25,13 @@ requires-python = ">=3.13"
 # the client's listener loop in-process, so its cursor, reservations, renewals and
 # supervised-protocol writer are used as-is instead of reimplemented here. That
 # makes this a library API dependency, not a tool: pre-1.0 the minor is the
-# client's breaking-change unit, so the range is the current 0.16 line and moving
-# to 0.17 is a deliberate change with the import sites re-checked. 0.16.0 is the
-# floor because the sweep in `ppy serve` calls `ListenerLoop.offer`, which arrived
-# in it.
+# client's breaking-change unit, so the range is the current 0.18 line and moving
+# to 0.19 is a deliberate change with the import sites re-checked. 0.18.0 is the
+# floor because `ppy serve` advertises `instruction_intents` through the embed
+# builders' `extra_capabilities`, which arrived in it; without it Papaya never
+# routes a question to this machine.
 dependencies = [
-    "papaya-agent-client>=0.16.0,<0.17.0",
+    "papaya-agent-client>=0.18.0,<0.19.0",
 ]
 
 [dependency-groups]

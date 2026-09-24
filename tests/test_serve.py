@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import io
 import json
 import logging
@@ -910,29 +911,25 @@ def _listen_briefly(harness: Harness, client_home: ClientHome) -> int:
 
 
 def test_a_client_that_takes_extra_capabilities_is_told_this_runtime_answers_questions(
-    ppy_home, client_home, ready, monkeypatch, caplog
+    ppy_home, client_home, ready, caplog
 ) -> None:
     """Papaya routes a no-card question only to a connection that says it takes `ask`.
 
-    This runtime answers one read-only, so it says so, next to `work`, whenever the
-    client has a way to register it.
+    This runtime answers one read-only, so it says so, next to `work`. The client it
+    is pinned to has the parameter on both builders, so this goes through the real
+    ones, and what reaches Papaya's connection is what the client itself registered.
     """
     from papaya_agent_client import embed
 
-    original = embed.build_listener
-    registered: list[Any] = []
-
-    async def build_listener(*, extra_capabilities: dict[str, Any] | None = None, **kwargs):
-        registered.append(extra_capabilities)
-        return await original(**kwargs)
-
-    monkeypatch.setattr(embed, "build_listener", build_listener)
+    for builder in (embed.build_listener, embed.build_supervised_listener):
+        assert serve.EXTRA_CAPABILITIES in inspect.signature(builder).parameters
     harness = Harness(FakeEvents([]))
     caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
 
     assert _listen_briefly(harness, client_home) == 0
 
-    assert registered == [{"instruction_intents": ["ask", "work"]}]
+    capabilities = harness.events.connection[0]["capabilities"]
+    assert capabilities["instruction_intents"] == ["ask", "work"]
     assert serve.OLD_CLIENT_CAPABILITIES not in caplog.text
 
 
