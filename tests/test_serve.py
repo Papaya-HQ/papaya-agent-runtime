@@ -923,6 +923,9 @@ def test_a_client_that_takes_extra_capabilities_is_told_this_runtime_answers_que
 
     for builder in (embed.build_listener, embed.build_supervised_listener):
         assert serve.EXTRA_CAPABILITIES in inspect.signature(builder).parameters
+        assert serve.extra_capabilities(builder) == {
+            serve.EXTRA_CAPABILITIES: {"instruction_intents": ["ask", "work"]}
+        }
     harness = Harness(FakeEvents([]))
     caplog.set_level(logging.WARNING, logger="papaya_agent_runtime.serve")
 
