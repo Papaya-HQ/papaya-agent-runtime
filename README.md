@@ -316,25 +316,51 @@ It installs what it can, but these have to exist:
 - **Python 3.13+** (uv fetches it when it is missing), **Git**, and
   **[uv](https://docs.astral.sh/uv/)**.
 - **Node 22+** and the **`gh` CLI** — for companions, discovery, and PR delivery.
-- **A signed-in Claude Code and/or Codex CLI.** It never logs you in. One is enough;
-  two lets you run one as the driver and cap workers at the other.
+- **Claude Code** (and/or the Codex CLI). `./bin/ppy setup` runs its sign-in with you
+  when it is not signed in yet. One harness is enough; two lets you run one as the
+  driver and cap workers at the other.
 
-A missing prerequisite is the one thing preflight will stop and tell you about.
+A missing prerequisite is the one thing setup stops for, with the one line that
+installs it.
 
 ## Getting started
 
 ```bash
 git clone https://github.com/Papaya-HQ/papaya-agent-runtime
 cd papaya-agent-runtime
-
-claude          # or: codex
+./bin/ppy setup     # Claude Code, GitHub, Papaya and your repositories, in one go
+./bin/ppy serve     # takes requests until you stop it
 ```
 
-That's the whole procedure. On the first turn it runs a quiet preflight: checks the
-environment, runs `./bin/install` itself if needed, connects to Papaya (you click
-Approve), configures itself in conversation if it has never been set up, provisions
-the pinned companions, and looks at what repositories you have. You never type
-`install`, `setup`, or a launch command.
+`./bin/ppy setup` works through five steps and says one line for each one that is
+already done:
+
+1. the machine: macOS or Linux (Windows through WSL2), git, uv, and this checkout's
+   environment, which it builds when it has to;
+2. Claude Code signed in, running `claude auth login` with you when it is not;
+3. GitHub signed in, running `gh auth login` with you when it is not, then
+   `gh auth setup-git` so `git push` uses it;
+4. Papaya: connects this machine as one of your workspace's agents (with a device code
+   over SSH or when there is no display) and prints `Connected as <Name> (@handle)`;
+5. repositories: pick an owner (you or one of your organizations), then tick
+   repositories in its list (arrow keys, space to tick, type to filter, Enter), and go
+   back to pick from another owner.
+
+It ends with `Done. Start it with: ./bin/ppy serve`. Run it again whenever you like: it
+only acts on what is not done. On a re-run it offers to switch agents, and
+`./bin/ppy setup --repos` reopens the picker with the registered repositories ticked
+(unticking one does not remove it). Setup stops at the first thing it cannot finish,
+with one line saying what to do, and the next run starts there.
+
+For scripts, `./bin/ppy setup --non-interactive --repo <url>` (plus `--agent` and
+`--workspace` when the account has several) runs the same steps with no prompts and
+never starts a sign-in. `--non-interactive` without those flags writes only the
+manager profile, as it always has, and so does `--profile-only`.
+
+Prefer a conversation? Open your harness here instead (`claude`, or `codex`). On the
+first turn it runs a quiet preflight: checks the environment, runs `./bin/install`
+itself if needed, configures itself if it has never been set up, provisions the pinned
+companions, and looks at what repositories you have.
 
 ### What the first turn looks like
 
@@ -385,10 +411,10 @@ page that mentions it links here.
   runtime locks its state with `fcntl`, which Windows does not have.
 - **git** and **[uv](https://docs.astral.sh/uv/)**. uv fetches the Python this checkout
   pins (`.python-version`) when the machine has none.
-- **Claude Code, signed in**, as the user that will run the runtime: run `claude` once
-  and finish its sign-in. If you connect with Codex instead, `codex login`.
-- **`gh`, signed in** to the forge your repositories live on: `gh auth login`, then
-  `gh auth setup-git` so `git push` uses it.
+- **Claude Code** and **`gh`**, installed, as the user that will run the runtime.
+  `./bin/ppy setup` signs both in with you (`claude auth login`, `gh auth login`, then
+  `gh auth setup-git` so `git push` uses it). If you connect with Codex instead, run
+  `codex login` yourself.
 - Node 22+ if a repository you register needs it. Readiness tells you when one does.
 
 **Set it up**
@@ -396,6 +422,20 @@ page that mentions it links here.
 ```bash
 git clone https://github.com/Papaya-HQ/papaya-agent-runtime
 cd papaya-agent-runtime
+./bin/ppy setup
+./bin/ppy serve
+```
+
+`./bin/ppy setup` is the whole procedure: it does each step below that is not done yet
+and asks only which agent (in the Papaya approval) and which repositories. Over SSH, or
+on Linux with no display, it connects with a device code by itself. `./bin/ppy serve`
+started with no `--working-directory` runs jobs in the folder stored with the Papaya
+connection, and when there is none, in the current directory (this checkout, when you
+start it from here). An explicit `--working-directory` always wins.
+
+**The same by hand, for reference**
+
+```bash
 ./bin/ppy env sync       # builds .venv, and with it the Papaya client, papaya-agent
 
 # Connect this machine as one of your workspace's agents, with a device code:
@@ -440,7 +480,7 @@ cd papaya-agent-runtime
 
 **Keep it running**
 
-`ppy serve` runs in the foreground until it is stopped. On SIGTERM it stops its workers
+Setup does not install a service. `ppy serve` runs in the foreground until it is stopped. On SIGTERM it stops its workers
 itself and keeps their sessions for a resume, so let a service manager stop it rather
 than killing everything it started. On Linux, use a systemd user unit,
 `~/.config/systemd/user/papaya-runtime.service`:

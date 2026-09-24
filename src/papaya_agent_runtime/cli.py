@@ -59,11 +59,40 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _guided(args: argparse.Namespace) -> bool:
+    """Is this the guided setup, or the profile-only one scripts have always run?
+
+    `ppy setup --non-interactive [--manager-provider …]` wrote the manager profile
+    and nothing else before the guided setup existed, and sessions and skills still
+    run it that way, so it stays exactly that. The guided steps run for a person
+    (no `--non-interactive`) or for a script that names what they need.
+    """
+    if args.profile_only:
+        return False
+    if not args.non_interactive:
+        return True
+    return bool(args.agent or args.workspace or args.repo)
+
+
 def _cmd_setup(args: argparse.Namespace) -> int:
     from papaya_agent_runtime.config import ConfigError
     from papaya_agent_runtime.setup.wizard import run_setup
 
     overrides = _collect_overrides(args)
+    if _guided(args):
+        from papaya_agent_runtime.setup import guided
+
+        return guided.run(
+            guided.Options(
+                interactive=not args.non_interactive,
+                agent=args.agent,
+                workspace=args.workspace,
+                repos=tuple(args.repo or ()),
+                pick_repos=args.repos,
+                profile=overrides,
+                skip_tools=args.skip_tools,
+            )
+        )
     try:
         cfg = run_setup(non_interactive=args.non_interactive, overrides=overrides)
     except ConfigError as exc:
@@ -3227,12 +3256,40 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", help="machine-readable output")
     doctor.set_defaults(func=_cmd_doctor)
 
-    setup = sub.add_parser("setup", help="configure manager profile and worker ceiling")
+    setup = sub.add_parser(
+        "setup",
+        help=(
+            "set this machine up to take requests: Claude Code, GitHub, Papaya and "
+            "repositories, each only when it is not done yet"
+        ),
+    )
     setup.add_argument(
         "--non-interactive",
         action="store_true",
-        help="write config from flags/defaults without prompting",
+        help=(
+            "no prompts: with --agent/--workspace/--repo, run every step and stop at the "
+            "first that cannot finish; without them, write the manager profile only"
+        ),
     )
+    setup.add_argument(
+        "--profile-only",
+        dest="profile_only",
+        action="store_true",
+        help="only the manager profile and worker ceiling, as setup did before",
+    )
+    setup.add_argument(
+        "--repos",
+        action="store_true",
+        help="reopen the repository picker with the registered ones ticked",
+    )
+    setup.add_argument(
+        "--repo",
+        action="append",
+        metavar="URL",
+        help="register this repository (a URL or owner/name); repeatable",
+    )
+    setup.add_argument("--agent", help="the Papaya agent to connect as, when there are several")
+    setup.add_argument("--workspace", help="the Papaya workspace, when there are several")
     setup.add_argument(
         "--skip-tools",
         dest="skip_tools",
