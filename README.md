@@ -1439,12 +1439,21 @@ you're hacking on the framework, edit `src/`/tests/docs as usual or set `PPY_DEV
 to switch explicitly.
 
 ```bash
+make hooks       # once per checkout: enable the secret-scanning pre-commit hook
 make test        # hermetic tests (no provider spawning)
 make lint        # ruff check
 make fmt         # ruff format
 make test-live   # opt-in: spawn real Claude/Codex probes
 make probe       # re-run the provider capability matrix
 ```
+
+### Secret scanning on commit
+
+`make hooks` sets `core.hooksPath` to `.githooks/`, whose `pre-commit` runs
+[gitleaks](https://github.com/gitleaks/gitleaks) (`brew install gitleaks`) over the
+staged changes and refuses a commit that adds a secret, naming the file, line and rule.
+A false positive goes in `.gitleaks.toml` as a narrow allowlist entry with a comment
+saying why it is safe. `git commit --no-verify` skips the hook; use it deliberately.
 
 The version is a git tag, read back out of the checkout, and every merge to `main`
 tags the next patch — see [`docs/versioning.md`](docs/versioning.md).
