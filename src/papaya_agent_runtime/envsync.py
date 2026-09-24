@@ -28,6 +28,14 @@ environment exactly as it was. The first sync of a checkout whose environment is
 plain directory moves that directory aside and puts the symlink in its place — two
 renames, once.
 
+Why every command asks: on 2026-09-24 a pull added `questionary` to the lockfile and
+`ppy setup` crashed at its first prompt, because only `serve` compared the stamp.
+So `bin/ppy` runs ``--before-command`` ahead of every other command: the stamp alone
+is compared (nothing is imported to check it), an out-of-date environment is rebuilt with
+one line said, and a sync that fails stops the command with one line naming the
+retry. A supervisor holding the lock is not overruled: the command runs on the
+environment as it is, and the next `ppy serve` start rebuilds it.
+
 Run by `bin/ppy` under whatever interpreter it can find — possibly an old system
 `python3` — so this module stays standard-library only and 3.9-compatible, like
 `capabilities.py`.
@@ -57,6 +65,12 @@ STAMP = ".ppy-env-stamp"
 
 #: What must import from an environment for it to be this runtime's.
 IMPORT_CHECK = "import papaya_agent_client"
+
+#: The one line a command says before it rebuilds an out-of-date environment.
+UPDATING = "Updating the runtime's environment…"
+
+#: How a person retries a sync that failed.
+RETRY = "./bin/ppy env sync"
 
 
 def lock_path() -> str:
@@ -112,12 +126,32 @@ def wanted_stamp(root: str, python: str | None) -> str:
     return digest.hexdigest()
 
 
+def pinned_python(root: str) -> str | None:
+    """The series `.python-version` pins, read the way `bin/ppy` reads it."""
+    try:
+        with open(os.path.join(root, ".python-version"), encoding="utf-8") as fh:
+            pin = "".join(fh.read().split())
+    except OSError:
+        return None
+    return pin or None
+
+
 def built_stamp(env: str) -> str:
     try:
         with open(os.path.join(env, STAMP), encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return ""
+
+
+def stale(root: str, python: str | None) -> bool:
+    """Was this checkout's environment built from another lockfile, or never by `ppy`?
+
+    Only the stamp is read, so the answer costs two small file reads and a hash.
+    An environment with no stamp (missing, or built by a bare `uv sync`) is stale:
+    nothing says what it was built from.
+    """
+    return built_stamp(environment_path(root)) != wanted_stamp(root, python)
 
 
 def importable(env: str, *, timeout: float = 60.0) -> bool:
@@ -179,24 +213,51 @@ def prune(env: str, keep: set[str]) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def build(root: str, python: str | None, *, stderr=None) -> int:
-    """Build a fresh environment and swap it in; the one in use is untouched on any failure."""
+def uv_error(output: str) -> str:
+    """The line of uv's output that says what went wrong, for a one-line failure."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    said = next((line for line in lines if line.startswith("error:")), lines[-1] if lines else "")
+    return said if len(said) <= 200 else said[:199] + "…"
+
+
+def build(root: str, python: str | None, *, stderr=None, quiet: bool = False) -> int:
+    """Build a fresh environment and swap it in; the one in use is untouched on any failure.
+
+    ``quiet`` keeps uv's own output off the terminal, so a command that syncs first
+    says one line on success and one on failure (with uv's error folded into it).
+    """
     stderr = stderr or sys.stderr
     env = environment_path(root)
     fresh = _fresh_path(env)
     child = dict(os.environ, UV_PROJECT_ENVIRONMENT=fresh)
+    output = ""
+    retry = f" Nothing was run; retry with {RETRY}" if quiet else ""
     try:
-        code = subprocess.call(sync_command(root, python), env=child)
+        if quiet:
+            proc = subprocess.run(
+                sync_command(root, python),
+                env=child,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            code, output = proc.returncode, proc.stdout or ""
+        else:
+            code = subprocess.call(sync_command(root, python), env=child)
     except OSError as exc:
         shutil.rmtree(fresh, ignore_errors=True)
-        print(f"ppy: could not rebuild the environment: {exc}", file=stderr)
+        print(f"ppy: could not rebuild the environment: {exc}.{retry}", file=stderr)
         return FAILED
     if code != 0 or not importable(fresh):
         shutil.rmtree(fresh, ignore_errors=True)
+        reason = f"`uv sync` exited {code}" if code else "the Papaya client does not import from it"
+        detail = uv_error(output) if code else ""
         print(
             "ppy: could not rebuild the environment: "
-            + (f"`uv sync` exited {code}" if code else "the Papaya client does not import from it")
-            + "; the previous environment is left as it was.",
+            + reason
+            + (f" ({detail})" if detail else "")
+            + f"; the previous environment is left as it was.{retry}",
             file=stderr,
         )
         return code or FAILED
@@ -241,6 +302,15 @@ def main(argv: list[str] | None = None, *, stderr=None) -> int:
         action="store_true",
         help="a `ppy serve` start: record a failure for the blockers ledger",
     )
+    parser.add_argument(
+        "--before-command",
+        action="store_true",
+        help=(
+            "any other command: rebuild only when the stamp says the lockfile or project "
+            "changed, run on the environment as it is while a supervisor holds the lock, "
+            "and exit 1 on a failed sync"
+        ),
+    )
     args = parser.parse_args(argv)
     root = os.path.abspath(args.project)
     said = _Said(stderr or sys.stderr)
@@ -257,6 +327,8 @@ def main(argv: list[str] | None = None, *, stderr=None) -> int:
 def _sync(root: str, args: argparse.Namespace, stderr) -> int:
     if args.if_needed and up_to_date(root, args.python):
         return 0
+    if args.before_command and not stale(root, args.python):
+        return 0
 
     path = lock_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -270,6 +342,17 @@ def _sync(root: str, args: argparse.Namespace, stderr) -> int:
             holder = f"pid {recorded}" if recorded else "another process"
             if pid and not pid_alive(pid):
                 holder = f"a process other than pid {recorded} (which is no longer running)"
+            if args.before_command and os.path.isdir(environment_path(root)):
+                # Rebuilding under a running supervisor is what this lock prevents;
+                # the command is better run on the old environment than not at all.
+                print(
+                    "ppy: the runtime's environment is out of date (uv.lock or "
+                    f"pyproject.toml changed), but {holder} holds {path} — a running "
+                    "`ppy serve`, or another sync — so this runs on it as it is; the next "
+                    "`ppy serve` start updates it.",
+                    file=stderr,
+                )
+                return 0
             print(
                 "ppy: refusing to sync the environment: "
                 + holder
@@ -288,7 +371,10 @@ def _sync(root: str, args: argparse.Namespace, stderr) -> int:
             # Ours now; the pid is advisory, for whoever is refused while we sync.
             os.ftruncate(fd, 0)
             os.pwrite(fd, str(os.getpid()).encode(), 0)
-            return build(root, args.python, stderr=stderr)
+            if not args.before_command:
+                return build(root, args.python, stderr=stderr)
+            print(UPDATING, file=stderr, flush=True)
+            return FAILED if build(root, args.python, stderr=stderr, quiet=True) else 0
         finally:
             # Leave no pid behind: a pid in the file after its process is gone is
             # how the next start recognises a crashed holder.

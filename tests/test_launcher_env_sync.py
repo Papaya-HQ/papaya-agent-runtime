@@ -274,6 +274,9 @@ def test_serve_records_a_sync_it_could_not_do_for_the_blockers_ledger(tmp_path) 
 
 
 def test_a_command_with_an_environment_present_never_syncs(tmp_path) -> None:
+    # `capabilities` answers the client's ten-second connect probe, so it runs on the
+    # environment there is even though this one carries no stamp (stale to any other
+    # command).
     env, log, _ = _launcher(tmp_path)
 
     proc = _ppy(env, "capabilities", "--json")
@@ -283,6 +286,100 @@ def test_a_command_with_an_environment_present_never_syncs(tmp_path) -> None:
     assert len(calls) == 1, calls
     assert calls[0][:2] == ["run", "--no-sync"]
     assert "sync" not in calls[0][2:]
+
+
+# ── every command, after a pull (2026-09-24) ─────────────────────────────────
+#
+# A pull added `questionary` to uv.lock; `ppy setup` ran on the environment built
+# from the previous lockfile and crashed at its first prompt. Only `serve` compared
+# the stamp. The environment's stamp is what records the lockfile it was built
+# from, so "the lockfile changed" is a stamp from another lockfile.
+
+
+def _stamp(venv: Path, value: str) -> None:
+    (venv / envsync.STAMP).write_text(value + "\n")
+
+
+def _current() -> str:
+    root = str(ROOT)
+    return envsync.wanted_stamp(root, envsync.pinned_python(root))
+
+
+@pytest.mark.parametrize(
+    "command", [["setup", "--help"], ["status", "--help"], ["--help"]], ids=" ".join
+)
+def test_a_changed_lockfile_is_synced_once_before_any_command_runs(tmp_path, command) -> None:
+    env, log, venv = _launcher(tmp_path)
+    _stamp(venv, "built-from-the-lockfile-before-the-pull")
+
+    proc = _ppy(env, *command)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _verbs(log) == [["sync", "--frozen"], ["run", "--no-sync"]]
+    assert [line for line in proc.stderr.splitlines() if line.strip()] == [envsync.UPDATING]
+    assert venv.is_symlink() and envsync.built_stamp(str(venv)) == _current()
+
+    # The environment now records this lockfile: the next command only runs.
+    again = _ppy(env, *command)
+    assert again.returncode == 0, again.stderr
+    assert _verbs(log)[2:] == [["run", "--no-sync"]]
+    assert envsync.UPDATING not in again.stderr
+
+
+def test_an_unchanged_lockfile_syncs_nothing(tmp_path) -> None:
+    env, log, venv = _launcher(tmp_path)
+    _stamp(venv, _current())
+
+    proc = _ppy(env, "status", "--help")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _verbs(log) == [["run", "--no-sync"]]
+    assert proc.stderr.strip() == ""
+
+
+def test_a_sync_that_fails_stops_the_command_with_one_line(tmp_path) -> None:
+    env, log, venv = _launcher(tmp_path)
+    _stamp(venv, "built-from-the-lockfile-before-the-pull")
+    # What an offline `uv sync --frozen` says when a new package is not in its cache.
+    env["FAKE_UV_SYNC"] = (
+        "echo 'error: Failed to fetch: `https://pypi.org/simple/questionary/`' >&2; "
+        "echo '  Caused by: dns error: failed to lookup address information' >&2; exit 2"
+    )
+
+    proc = _ppy(env, "setup", "--help")
+
+    assert proc.returncode == 1
+    assert _verbs(log) == [["sync", "--frozen"]], "the command ran after a failed sync"
+    said = [line for line in proc.stderr.splitlines() if line.strip()]
+    assert said[0] == envsync.UPDATING
+    assert len(said) == 2, proc.stderr
+    assert "Failed to fetch" in said[1] and "Caused by" not in said[1]
+    assert said[1].endswith("retry with ./bin/ppy env sync")
+    # The environment in use is the one there was, untouched.
+    assert not venv.is_symlink() and envsync.importable(str(venv))
+    assert list(tmp_path.glob("venv.env-*")) == []
+
+
+def test_a_stale_environment_under_a_running_supervisor_is_run_as_it_is(
+    tmp_path, monkeypatch
+) -> None:
+    env, log, venv = _launcher(tmp_path)
+    _stamp(venv, "built-from-the-lockfile-before-the-pull")
+    monkeypatch.setenv("PPY_HOME", env["PPY_HOME"])
+    holding = SupervisorServer.__new__(SupervisorServer)
+    holding._acquire_owner_lock()  # exactly what a running supervisor holds
+    try:
+        proc = _ppy(env, "status", "--help")
+    finally:
+        holding._release_owner_lock()
+
+    assert proc.returncode == 0, proc.stderr
+    assert _verbs(log) == [["run", "--no-sync"]], "the environment was rebuilt under a supervisor"
+    said = [line for line in proc.stderr.splitlines() if line.strip()]
+    assert len(said) == 1, proc.stderr
+    assert "out of date" in said[0] and f"pid {os.getpid()}" in said[0]
+    assert "next `ppy serve` start updates it" in said[0]
+    assert not venv.is_symlink()
 
 
 def test_the_launcher_asks_uv_for_the_series_python_version_pins(tmp_path) -> None:

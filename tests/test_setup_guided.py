@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,7 @@ def test_a_fully_set_up_machine_run_by_a_script_asks_nothing(world):
 
 
 def test_switching_agents_on_a_rerun_connects_again(world):
+    """Ending on the agent already connected is not reported as a new connection."""
     _set_up_fully(world)
     picker = ScriptedPicker(switch=True)
 
@@ -265,7 +267,86 @@ def test_switching_agents_on_a_rerun_connects_again(world):
 
     assert code == 0
     assert len(world.connects) == 1
-    assert lines.count("✓ Connected as Ada (@ada)") == 2
+    assert lines.count("✓ Connected as Ada (@ada)") == 1
+    assert "✓ Still connected as Ada (@ada)" in lines
+
+
+def test_an_interactive_switch_is_one_connect_on_the_terminal(world):
+    """The owner, 2026-09-24: two sign-ins, and no chance to pick the agent. On a
+    terminal the client asks the workspace and agent inside the one sign-in."""
+    _set_up_fully(world)
+
+    def connect(**kwargs):
+        world.connects.append(kwargs)
+        _write_connection(world.client, agent_id="a-2", name="Bea", handle="bea")
+        return {"ok": True, "agent_choice": "asked", "workspace": "Papaya HQ"}
+
+    picker = ScriptedPicker(switch=True)
+    code, lines = _setup(world, shell=_healthy(), picker=picker, connect=connect)
+
+    assert code == 0
+    assert len(world.connects) == 1
+    assert world.connects[0]["interactive"] is True
+    assert world.connects[0]["agent"] is None and world.connects[0]["workspace"] is None
+    assert picker.asked == ["Switch to another agent?"]  # no second picker of our own
+    assert lines[3:6] == [
+        "✓ Connected as Ada (@ada)",
+        "Connecting to Papaya: approve in the browser that opens.",
+        "✓ Connected as Bea (@bea)",
+    ]
+
+
+def test_a_switch_with_only_one_agent_says_so_instead_of_claiming_a_switch(world):
+    _set_up_fully(world)
+
+    def connect(**kwargs):
+        world.connects.append(kwargs)
+        _write_connection(world.client)  # the same agent, freshly pinned
+        return {"ok": True, "agent_choice": "only", "workspace": "Papaya HQ"}
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(switch=True), connect=connect
+    )
+
+    assert code == 0
+    assert (
+        "Ada (@ada) is the only agent you can connect in Papaya HQ. To use another, create it "
+        "in Papaya (Agents → New agent), then run ./bin/ppy setup again."
+    ) in lines
+    assert lines.count("✓ Connected as Ada (@ada)") == 1  # the "before" tick only
+    assert not any(line.startswith("✓ Still") for line in lines)
+
+
+def test_a_switch_that_does_not_finish_says_not_switched(world, capsys):
+    _set_up_fully(world)
+
+    def connect(**kwargs):
+        world.connects.append(kwargs)
+        return {"ok": False, "reason": "failed", "detail": "exit 1"}
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(switch=True), connect=connect
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Not switched: still connected as Ada (@ada) (exit 1)." in err
+    assert lines.count("✓ Connected as Ada (@ada)") == 1
+    assert guided.DONE not in lines
+
+
+def test_a_script_connects_captured_with_the_agent_it_was_given(world):
+    options = guided.Options(
+        interactive=False, agent="Bea", workspace="papaya-hq", repos=("acme/api",), skip_tools=True
+    )
+
+    code, _ = _setup(world, options, shell=_healthy(), picker=Silent())
+
+    assert code == 0
+    assert len(world.connects) == 1
+    call = world.connects[0]
+    assert call["interactive"] is False
+    assert (call["agent"], call["workspace"]) == ("Bea", "papaya-hq")
 
 
 # ── picking up where it stopped ─────────────────────────────────────────────
@@ -342,6 +423,66 @@ def test_a_broken_environment_is_built(world, monkeypatch):
     assert code == 0
     assert built == [1]
     assert lines[0] == "Building the runtime's environment…"
+
+
+def test_an_environment_built_from_an_older_lockfile_is_updated_in_step_one(world, monkeypatch):
+    """2026-09-24: a pull added a dependency and step 1 ticked the old environment."""
+    built = []
+    state = {"current": False}
+    monkeypatch.setattr(readiness, "environment_current", lambda env: state["current"])
+
+    def sync():
+        built.append(1)
+        state["current"] = True
+        return 0
+
+    _set_up_fully(world)
+    code, lines = _setup(world, shell=_healthy(), picker=ScriptedPicker(), sync_env=sync)
+
+    assert code == 0
+    assert built == [1]
+    assert lines[:2] == ["Updating the runtime's environment…", TICKS[0]]
+
+
+def test_a_stale_environment_held_by_a_running_serve_stops_step_one(world, monkeypatch, capsys):
+    from papaya_agent_runtime import envsync
+
+    monkeypatch.setattr(readiness, "environment_current", lambda env: False)
+
+    code, lines = _setup(world, shell=_healthy(), sync_env=lambda: envsync.REFUSED)
+
+    assert code == 1
+    assert lines == ["Updating the runtime's environment…"]
+    err = capsys.readouterr().err
+    assert "./bin/ppy supervisor stop" in err and "./bin/ppy setup again" in err
+
+
+def test_a_missing_picker_package_stops_in_step_one_not_at_a_prompt(world, monkeypatch, capsys):
+    """The owner's crash: `import questionary` failed inside the first `yes_no`."""
+    monkeypatch.setitem(sys.modules, "questionary", None)  # so importing it raises
+    _set_up_fully(world)
+
+    code, lines = _setup(world, shell=_healthy(), picker=Silent())
+
+    assert code == 1
+    assert lines == []
+    err = capsys.readouterr().err.strip()
+    assert err == (
+        "The runtime's environment is missing questionary: run ./bin/ppy env sync, "
+        "then ./bin/ppy setup again"
+    )
+
+
+def test_a_non_interactive_setup_does_not_need_the_picker(world, monkeypatch):
+    monkeypatch.setitem(sys.modules, "questionary", None)
+    _set_up_fully(world)
+
+    code, lines = _setup(
+        world, guided.Options(interactive=False, skip_tools=True), shell=_healthy()
+    )
+
+    assert code == 0
+    assert lines[0] == TICKS[0]
 
 
 def test_wsl_is_named(world):
