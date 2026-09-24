@@ -202,6 +202,13 @@ def _work(spec: dict, session_id: str) -> int:
         os.makedirs(f"{worktree}/evidence", exist_ok=True)
         with open(f"{worktree}/evidence/after.png", "w", encoding="utf-8") as fh:
             fh.write("pretend screenshot\n")
+        if "LEFTOVERS" in instructions:
+            # What running the tests leaves in a repository with no .gitignore.
+            os.makedirs(f"{worktree}/__pycache__", exist_ok=True)
+            with open(f"{worktree}/__pycache__/app.cpython-313.pyc", "wb") as fh:
+                fh.write(b"\x00pretend bytecode\n")
+            with open(f"{worktree}/uv.lock", "w", encoding="utf-8") as fh:
+                fh.write("version = 1\n")
         _emit({"type": "progress", "session_id": session_id, "text": "left work uncommitted"})
         _finish_the_gate(spec, session_id)
         _emit(

@@ -1151,6 +1151,17 @@ that see one slice with no context.
   event and in `worker_done`, so a missing file is a recorded decision, not a
   surprise. Change the list with `PPY_AUTOCOMMIT_EXCLUDE` (comma-separated;
   a leading `!` keeps a path an earlier rule excluded).
+- The auto-commit never stages a build or environment artifact the repository does
+  not already track (`__pycache__/`, `*.pyc`, `.venv/`, `node_modules/`, tool caches,
+  `dist/`, `build/`, `*.egg-info/`, `.ppy-evidence/`, `.mm-evidence/`, and untracked
+  `uv.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`); a
+  lockfile the repository tracks is committed as usual. `PPY_AUTOCOMMIT_EXCLUDE` does
+  not change this list, and an untracked artifact is never uncommitted work to send a
+  worker back for. When the local head differs from the pushed lease branch only by
+  commits that add such paths, the runtime drops them (`git reset --mixed` to the
+  pushed head, the files left untracked) before review (`ppy serve`'s review phase and
+  `ppy review show`) and before delivery, and says so in one `artifact_commit_dropped`
+  event; review and delivery use the pushed head.
 
 > **Never block. The only thing you ever block on is producing your reply to the
 > user.** Everything else runs in the background: workers execute in the supervisor

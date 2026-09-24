@@ -1119,8 +1119,13 @@ def plan_resume_message(reply: str) -> str:
 def uncommitted_files(worker_task_id: int) -> list[str] | None:
     """The paths `git status` reports in the worker's worktree, or ``None`` if unreadable.
 
-    Ignored paths (the evidence directory is excluded at dispatch) are not reported.
+    Ignored paths (the evidence directory is excluded at dispatch) are not reported,
+    and neither are untracked build artifacts (`autocommit.ARTIFACTS`): the auto-commit
+    holds them back on purpose, so sending the worker back to commit them would ask
+    for exactly the files the branch must not carry.
     """
+    from papaya_agent_runtime.supervisor import autocommit
+
     conn = db.init_db()
     try:
         task = store.get_task(conn, worker_task_id)
@@ -1141,7 +1146,35 @@ def uncommitted_files(worker_task_id: int) -> list[str] | None:
         return None
     if proc.returncode != 0:
         return None
-    return [line[3:] for line in proc.stdout.splitlines() if line.strip()]
+    return [
+        line[3:]
+        for line in proc.stdout.splitlines()
+        if line.strip() and not (line.startswith("??") and autocommit.is_artifact(line[3:]))
+    ]
+
+
+def drop_artifact_commits(worker_task_id: int) -> str:
+    """Put a worker's worktree back on its pushed head when all it adds is artifacts.
+
+    `stacks.drop_artifact_commits`, for the review phase; the one line saying what was
+    dropped, or "" when the head was left alone. Never raises.
+    """
+    from papaya_agent_runtime import stacks
+
+    conn = db.init_db()
+    try:
+        task = store.get_task(conn, worker_task_id)
+        if task is None or not task["worktree_path"] or not os.path.isdir(task["worktree_path"]):
+            return ""
+        dropped = stacks.drop_artifact_commits(conn, task)
+    except Exception as exc:  # noqa: BLE001 - the review reads the head as it is
+        log.warning(
+            "[serve] Could not compare worker task %d with its branch: %s", worker_task_id, exc
+        )
+        return ""
+    finally:
+        conn.close()
+    return f"Worker task {worker_task_id}: {dropped['summary']}." if dropped else ""
 
 
 def uncommitted_finding(files: list[str]) -> str:
@@ -1312,6 +1345,7 @@ class TicketRunner:
         gate_state=None,
         liveness_seconds: float | None = None,
         uncommitted=None,
+        drop_artifacts=None,
         status_comment=None,
         agent_record=None,
         full_suite=None,
@@ -1383,6 +1417,9 @@ class TicketRunner:
         self._answering: set[asyncio.Task[Any]] = set()
         #: What is in a worker's worktree and not on its branch, read before a review.
         self._uncommitted = uncommitted or uncommitted_files
+        #: `drop_artifact_commits`' seam, read before a review: a local commit of
+        #: nothing but build artifacts is dropped for the pushed head.
+        self._drop_artifacts = drop_artifacts or drop_artifact_commits
         #: `gate.full_suite_once`'s seam: the full suite at a worker's head, run at most
         #: once per head, or ``None`` when it is not the supervisor's to run.
         self._full_suite = full_suite or full_suite_at_head
@@ -2732,6 +2769,21 @@ class TicketRunner:
             "run again; the review decides whether these failures were already there.",
         )
 
+    async def _onto_pushed_head(self, ticket: Ticket) -> None:
+        """Review the pushed head when all the local one adds is build artifacts.
+
+        The auto-commit could put `__pycache__/` and `uv.lock` on top of a branch the
+        worker had pushed clean (2026-09-23), and the review turn — which may not
+        write in the worktree — sent the worker back to undo a commit it never made.
+        The runtime drops that commit itself and says so in one line.
+        """
+        worker = ticket.worker
+        if worker is None:
+            return
+        line = await asyncio.to_thread(self._drop_artifacts, worker.task_id)
+        if line:
+            _report_progress(ticket.job, ticket.phase, line)
+
     async def _back_to_commit(self, ticket: Ticket) -> bool:
         """Send a worker back when its worktree holds what its branch does not.
 
@@ -2921,6 +2973,7 @@ class TicketRunner:
                     return PHASE_DISPATCHED
                 await self._wait_on_person(ticket)
                 continue
+            await self._onto_pushed_head(ticket)
             if await self._back_to_commit(ticket):
                 return PHASE_DISPATCHED
             if not failure and await self._delivery_blocked(ticket):

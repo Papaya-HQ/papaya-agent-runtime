@@ -123,6 +123,11 @@ def build_bundle(task_id: int) -> ReviewBundle:
     worktree = task["worktree_path"]
     if not worktree or not task["base_sha"]:
         raise ReviewError("task has no worktree/base to review")
+    from papaya_agent_runtime import stacks
+
+    # A local commit of nothing but build artifacts is not the worker's; review the
+    # pushed head it sits on (recorded as `artifact_commit_dropped`).
+    stacks.drop_artifact_commits(conn, task)
     head = head_sha(worktree)
     found = review_base(conn, task)
     base = found.sha
