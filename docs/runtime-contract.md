@@ -1573,6 +1573,25 @@ and turns do.
   modes, and remove it from the known gaps. Never heal by adding serve-only code or by
   classifying new supervision behaviour as the hold protocol.
 
+## Runtime updates — checked every six hours, applied only by a person
+
+Every six hours (`update.CHECK_EVERY_SECONDS`), `ppy serve`'s rounds fetch this checkout's
+own remote default branch. The heartbeat does the same when no serve is running. It is
+one fetch with a 60-second limit, and the clock is kept in `.ppy/update.json`, so a
+restart does not fetch again early. A checkout on another branch is not checked. When the
+checkout is behind, the owner is told once for each upstream head, through the outreach
+route (their DM with this agent, or Papaya's owner DM when there is no DM channel): "A
+runtime update is available (N changes). Run ./bin/ppy update, then restart." A notice
+that did not land is tried again at the next check. A failed fetch is one log line: no
+notice, and serve carries on. `ppy status` and `ppy setup` show "Update available (N
+changes): ./bin/ppy update" from what the last fetch saw.
+
+Updating is the person's call. Never run `./bin/ppy update` or restart the runtime
+yourself because a notice arrived. If the owner asks you to update, `./bin/ppy update`
+is the whole procedure (the `update-ppy` skill covers stopping and resuming work around
+it). It refuses when there are uncommitted changes, another branch is checked out, or
+there are local commits, and it never restarts anything.
+
 ## Reporting
 
 Keep the user oriented without making them work: after meaningful steps, give a
@@ -1595,6 +1614,7 @@ readable at a glance by someone who just wants to know if it's done.
 | Take a repo on | `ppy repo ensure <name\|owner/name\|url> [--allow-outside] [--json]` — registers and onboards in one idempotent step, and is what to call when *work* names a repository you do not have. It refuses anything outside the signed-in account and its organisations, because registering someone else's repository is not implied by anything; `--allow-outside` is an explicit human yes, never an inference |
 | Learn a repository | `ppy repo onboard <name> [--dry-run] [--json]` — reads the registered base clone and records how it builds, how it tests, the commands its CI workflows actually run, which agent contracts it carries, and whether UI work has a design reference — into that repo's durable notes, between markers so hand-written notes survive a re-run. It names what it could not determine; those unknowns are yours to close before the first dispatch |
 | Set a machine up | `./bin/ppy setup` — a person's one command on a fresh clone: machine, Claude Code and GitHub sign-in (run on their terminal), Papaya connect, repository picker; then `./bin/ppy serve`. `--repos` reopens the picker. `ppy setup --non-interactive --repo <url> [--agent A] [--workspace W]` is the same with no prompts. Never run it from a session: it attaches sign-ins to a terminal |
+| Update the runtime | `./bin/ppy update`: fast-forward this checkout to its default branch, rebuild the environment if the lockfile changed, and say how to restart. It refuses, changing nothing, when there are uncommitted changes, another branch is checked out, or there are local commits. Only when the owner asks; never on a notice alone |
 | Configure | `ppy setup --profile-only --non-interactive ...` (the manager profile only; `ppy setup --non-interactive` without `--repo`/`--agent`/`--workspace` is the same), `ppy config show|models|authority|assessments|health|claude` |
 | Capability requests | A worker names a program it needs in its plan phase: `ppy need <task> --capability <program> --why "..."`; a plain command its profile refused becomes the same request. This machine's policy decides first — the safe family (read-only tools, the toolchains including `nvm`, `xcodegen` and `xcodebuild`, and the `chrome-devtools-axi` browser) and `capabilities.auto_grant` are granted (the pattern joins `claude.extra_tools`), the never list (including `gh`, its `gh-axi` wrapper and `kill`: the forge and process control are the runtime's) and `capabilities.never` are refused — and anything else is the **manager's** to decide (the `capability_request_undecided` problem, owner runtime): `ppy serve`'s rounds hand it to the answer turn (a held ticket's worker through its ticket, any other live worker through the owed lane, once per request), a session sees it in readiness and as `your turn:`, and either grants or denies it with a reason. Only `ppy capability escalate <id> --why "..."` — for what only a person has: a credential, money, access nobody here can judge — makes it a person's `capability_request_pending` blocker, which the outreach procedure says to them once (and again only if it changes). A request on a task that has since ended is `moot`: nobody is asked and it cannot be answered. A tool every worker should have belongs in the code's safe family, not only in one machine's config. `ppy capability list [--all] [--task <id>]`; `ppy capability escalate <id> --why "..."`; `ppy capability approve <id>` grants the task alone (its next launch carries the pattern), `--always` grants every worker here; `ppy capability deny <id> --reason "..."`. The worker is steered with every outcome it did not ask to hear. `ppy config capabilities --auto-grant/--never/--remove <program>` edits the policy; no setting lowers the never list |
 | Reference repositories | A worker sees its own worktree and nothing else, so a brief that points at another registered repository — the other half of a change, a contract it must match, a schema it reads — is unreadable unless you say so. `ppy dispatch --reference-repo <name>` (repeatable) lets the worker READ that repository's base clone; the edit tools are refused there, because a reference is not its work. After dispatch: `ppy reference grant <task> --repo <name>` records it and resumes the worker, since a directory only reaches a session through a relaunch, and `ppy reference list <task>` shows what it can read and what it has asked for. A worker that finds it needs one asks with `ppy need <task> --reference-repo <name> --why "..."`, which records the ask rather than granting it: what a task may read is scope, and scope is yours. A read command refused for pointing outside the worktree is recorded as that, never learned as a missing tool — no tool pattern would have allowed it |

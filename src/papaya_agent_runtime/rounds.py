@@ -76,6 +76,9 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    (:meth:`Rounds._reclaim_instructions`); and this machine's status snapshot is published to
    Papaya (:mod:`papaya_agent_runtime.machine_status`) — once a round, and between
    rounds whenever the board changes (:meth:`Rounds.watch_changes`).
+9. **Runtime updates**, every `update.CHECK_EVERY_SECONDS` (six hours): one fetch of
+   this checkout's own default branch; when it is behind, the owner is told once per
+   upstream head, through the same path outreach takes (:mod:`papaya_agent_runtime.update`).
 
 Step 1 covers every delivered pull request, live ticket or not: one a live ticket owns
 goes through that ticket's review turn; every other one (no ticket, or a ticket that
@@ -121,6 +124,7 @@ from papaya_agent_runtime import (
     serve,
     supervision,
     sweep,
+    update,
     workitems,
 )
 from papaya_agent_runtime.state import db, store
@@ -1507,6 +1511,7 @@ class Rounds:
         ):
             self._last_hygiene = now
             parts += await self._hygiene(None, now)
+        parts += await self._update_lane(now)
         if not self._standalone():
             parts += await self._instruction_lane()
             await self.status.publish("round")
@@ -1627,6 +1632,33 @@ class Rounds:
             return []
         self._last_deficiencies = now
         return await asyncio.to_thread(lanes.deficiency_step, self._reporter)
+
+    async def _update_lane(self, now: datetime) -> list[str]:
+        """Every six hours, is this checkout behind its default branch? Tell the owner once.
+
+        The same `update.check_due` a session's heartbeat runs (`update.step`); serve
+        says it through its own connection (`outreach.say_in_workspace`: the DM
+        channel, else Papaya's owner-DM route). A notice that did not land is not
+        recorded, so the next check says it again. Never raises: a failed fetch is
+        one log line, and serve goes on.
+        """
+        try:
+            notice = await asyncio.to_thread(update.check_due, now)
+            if notice is None:
+                return []
+            api = getattr(self._built, "api", None)
+            if api is None:
+                return []
+            landed = await outreach.say_in_workspace(
+                api, notice.text, owner=notice.owner_message(), environ=self._papaya_env()
+            )
+            if not landed:
+                return []
+            await asyncio.to_thread(update.record_notified, notice.upstream_sha)
+            return [notice.summary]
+        except Exception as exc:  # noqa: BLE001 - the rounds keep going
+            log.warning("[rounds] Could not check for a runtime update: %s", exc)
+            return []
 
     # -- reclaim -----------------------------------------------------------------
 

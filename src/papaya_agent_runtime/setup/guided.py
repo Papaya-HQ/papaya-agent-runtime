@@ -369,6 +369,7 @@ class Setup:
         connect: Callable[..., dict] | None = None,
         sync_env: Callable[[], int] | None = None,
         wsl: Callable[[], bool] | None = None,
+        update_line: Callable[[], str | None] | None = None,
     ):
         self.options = options
         self.shell = shell or Shell()
@@ -379,6 +380,15 @@ class Setup:
         self._connect = connect
         self._sync_env = sync_env
         self._wsl = wsl or is_wsl
+        self._update_line = update_line
+
+    def update_available(self) -> str | None:
+        """ "Update available (N changes): ./bin/ppy update", from the last fetch; no network."""
+        if self._update_line is not None:
+            return self._update_line()
+        from papaya_agent_runtime import update
+
+        return update.available_line()
 
     @property
     def picker(self) -> Picker:
@@ -432,6 +442,9 @@ class Setup:
             return 1
         paint = self._paint(self.out)
         self.say("")
+        available = self.update_available()
+        if available:
+            self.say(paint(available, "yellow"))
         self.say(f"{paint('Done.', 'bold')}{DONE.removeprefix('Done.')}")
         self.say(f"  {paint(START, 'bold', 'cyan')}")
         return 0

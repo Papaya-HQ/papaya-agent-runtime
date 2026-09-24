@@ -682,6 +682,32 @@ environment's `pyvenv.cfg` disagrees with it.
 source tree (under uv's interpreter for the pinned series) when it does not, so the
 command that clears a supervisor in the way always works.
 
+## Updating
+
+```sh
+./bin/ppy update
+```
+
+It fetches this checkout's default branch, fast-forwards to it, lists what changed
+("Updated 1a2b3c4 → 5d6e7f8 (3 changes)" and up to five commit subjects), rebuilds the
+environment when the lockfile changed, and tells you how to restart: quit and reopen the
+Papaya app, or stop `./bin/ppy serve` and run it again, depending on what started it. It
+never restarts anything itself. Already current, it says "Up to date (<sha>)."
+
+It changes nothing when there is local work in the way. With uncommitted changes (it
+names up to five files), with a branch other than the default checked out, or with
+commits upstream does not have, it refuses in one line that says why and what to do. It
+never resets, merges, stashes or rebases.
+
+You do not have to watch the repository. A running `ppy serve` (or, with none running,
+the session heartbeat) fetches the default branch every six hours. When the checkout is
+behind, it tells the owner once for each new upstream commit: "A runtime update is
+available (N changes). Run ./bin/ppy update, then restart." It uses the same route as
+everything else the owner hears: the agent's DM, or Papaya's owner DM when there is no
+DM channel. A failed fetch writes one log line and nothing else. `./bin/ppy status` and
+`./bin/ppy setup` show "Update available (N changes): ./bin/ppy update" from what the
+last fetch saw, and fetch nothing themselves.
+
 ## Running as the Papaya manager
 
 `ppy serve` is the always-on manager. It runs until told to stop, and in one process
