@@ -346,8 +346,12 @@ already done:
    repositories in its list (arrow keys, space to tick, type to filter, Enter), and go
    back to pick from another owner.
 
-It ends with `Done. Start it with: ./bin/ppy serve`. Run it again whenever you like: it
-only acts on what is not done. On a re-run it offers to switch agents, and
+Each line is a mark (✓ done, → doing now, ✗ stopped), the step's name and what
+happened; whatever a sign-in or the Papaya client prints sits between two rules. On a
+terminal the marks are coloured; piped, or with `NO_COLOR` set, it is plain text.
+
+It ends with `Done. Start it with:` and `./bin/ppy serve` on its own line. Run it
+again whenever you like: it only acts on what is not done. On a re-run it offers to switch agents, and
 `./bin/ppy setup --repos` reopens the picker with the registered repositories ticked
 (unticking one does not remove it). Setup stops at the first thing it cannot finish,
 with one line saying what to do, and the next run starts there.
