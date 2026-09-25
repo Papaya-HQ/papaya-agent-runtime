@@ -118,12 +118,23 @@ def test_connect_argv_prefers_the_installed_client(monkeypatch) -> None:
     ]
 
 
-def test_connect_argv_falls_back_to_the_npm_shim(monkeypatch) -> None:
-    """With no client installed there is still a way in, so preflight is never stuck."""
+def test_connect_argv_falls_back_to_the_npm_shim_without_uv(monkeypatch) -> None:
+    """With no client installed and no uv there is still a way in, so preflight is never
+    stuck."""
+    monkeypatch.setattr(papaya, "installed", lambda: None)
+    _only_on_path(monkeypatch, "npx")
+    argv = papaya.connect_argv(harness="codex")
+    assert argv[: len(papaya.BOOTSTRAP)] == list(papaya.BOOTSTRAP)
+    assert argv[-2:] == ["--harness", "codex"]
+
+
+def test_connect_argv_takes_the_quiet_uv_path_even_with_node(monkeypatch) -> None:
+    """The npm shim runs its own, loud uv: with uv here, the runtime runs it itself."""
     monkeypatch.setattr(papaya, "installed", lambda: None)
     _only_on_path(monkeypatch, "npx", "uv")
     argv = papaya.connect_argv(harness="codex")
-    assert argv[: len(papaya.BOOTSTRAP)] == list(papaya.BOOTSTRAP)
+    assert argv[: len(papaya.UV_BOOTSTRAP)] == list(papaya.UV_BOOTSTRAP)
+    assert papaya.UV_QUIET in argv[: argv.index("--from")]
     assert argv[-2:] == ["--harness", "codex"]
 
 
@@ -384,12 +395,13 @@ def test_the_runtimes_own_bundled_client_does_not_count_as_installed(tmp_path, m
     ("installed", "on_path", "expected"),
     [
         ("/home/me/.local/bin/papaya-agent", ("npx", "uv"), "installed"),
-        (None, ("npx", "uv"), "npx"),
+        (None, ("npx", "uv"), "uv"),
         (None, ("uv",), "uv"),
+        (None, ("npx",), "npx"),
         (None, (), None),
     ],
 )
-def test_the_installer_prefers_the_persons_client_then_npx_then_uv(
+def test_the_installer_prefers_the_persons_client_then_uv_then_npx(
     monkeypatch, installed, on_path, expected
 ) -> None:
     monkeypatch.setattr(papaya, "installed", lambda: installed)
