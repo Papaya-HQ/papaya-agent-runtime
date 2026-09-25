@@ -58,10 +58,16 @@ def test_version_drift_disables_record(tmp_path) -> None:
 
 
 def test_committed_matrix_matches_m0(tmp_path) -> None:
-    # The committed matrix records the real M0 outcome for these versions.
+    # The committed matrix records the real M0 outcome for the versions it was
+    # probed at; read them from the record so a re-probe does not stale the test.
     capability._load.cache_clear()
-    assert capability.allows_interrupt_steer("claude", cli_version="2.1.251") is True
-    assert capability.allows_interrupt_steer("codex", cli_version="0.150.1") is True
+    for provider in ("claude", "codex"):
+        assert capability.record_source(provider) == capability.TRACKED
+        version = capability.recorded_version(provider)
+        assert version  # None would skip the version check and pass vacuously
+        assert capability.allows_interrupt_steer(provider, cli_version=version) is True
+        # Any other installed version is still untrusted by the committed row.
+        assert capability.allows_interrupt_steer(provider, cli_version=f"{version}.0") is False
     # Codex is single-shot: mid-process steer stays false even so.
     assert capability.capabilities_for("codex")["mid_process_steer"] is False
 
@@ -78,7 +84,7 @@ def _write_local(tmp_path, monkeypatch, providers) -> None:
 
 
 def test_local_record_overrides_tracked(tmp_path, monkeypatch) -> None:
-    # The tracked record proves claude at 2.1.251; this machine runs 2.1.226.
+    # The tracked record proves claude at a newer version; this machine runs 2.1.226.
     assert capability.allows_interrupt_steer("claude", cli_version="2.1.226") is False
     _write_local(
         tmp_path,
@@ -117,7 +123,9 @@ def test_missing_local_record_falls_back_to_tracked(tmp_path, monkeypatch) -> No
     monkeypatch.setenv("PPY_HOME", str(home))
     capability.clear_cache()
     assert capability.record_source("claude") == capability.TRACKED
-    assert capability.allows_interrupt_steer("claude", cli_version="2.1.251") is True
+    version = capability.recorded_version("claude")
+    assert version
+    assert capability.allows_interrupt_steer("claude", cli_version=version) is True
 
 
 def test_explicit_path_ignores_local_override(tmp_path, monkeypatch) -> None:
