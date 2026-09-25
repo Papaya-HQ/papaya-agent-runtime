@@ -58,7 +58,9 @@ REPOSITORIES = "Repositories"
 NAME_WIDTH = max(len(n) for n in (MACHINE, CLAUDE_CODE, GITHUB, PAPAYA, REPOSITORIES))
 #: A step's mark: done, doing now, stopped; and each one's colour.
 OK, DOING, STOPPED = "✓", "→", "✗"
-MARK_STYLES = {OK: "green", DOING: "yellow", STOPPED: "red"}
+#: Something to do by hand that does not stop setup.
+WARN = "!"
+MARK_STYLES = {OK: "green", DOING: "yellow", STOPPED: "red", WARN: "yellow"}
 #: The rule a child program's output sits between.
 RULE_WIDTH = 60
 
@@ -370,6 +372,7 @@ class Setup:
         sync_env: Callable[[], int] | None = None,
         wsl: Callable[[], bool] | None = None,
         update_line: Callable[[], str | None] | None = None,
+        client_currency: Callable[[], dict] | None = None,
     ):
         self.options = options
         self.shell = shell or Shell()
@@ -381,6 +384,7 @@ class Setup:
         self._sync_env = sync_env
         self._wsl = wsl or is_wsl
         self._update_line = update_line
+        self._client_currency = client_currency
 
     def update_available(self) -> str | None:
         """ "Update available (N changes): ./bin/ppy update", from the last fetch; no network."""
@@ -539,9 +543,20 @@ class Setup:
 
     # 4 ── Papaya
 
+    def keep_client_current(self) -> None:
+        """An older `papaya-agent` on the PATH is reinstalled at the version this runtime
+        locks, before it is asked to connect: an old one has no arrow-key pickers."""
+        from papaya_agent_runtime import papaya
+
+        result = (self._client_currency or papaya.keep_client_current)()
+        line = result.get("line")
+        if line:
+            self.step(OK if result.get("state") == "updated" else WARN, PAPAYA, line)
+
     def papaya(self) -> None:
         from papaya_agent_runtime import papaya
 
+        self.keep_client_current()
         before = papaya.identity()
         if before is not None:
             self.step(OK, PAPAYA, connected_line(before))

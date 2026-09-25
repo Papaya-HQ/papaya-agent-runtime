@@ -479,7 +479,8 @@ def test_the_sign_in_link_reaches_the_person_while_the_flow_waits(tmp_path, monk
 def test_connecting_through_uv_keeps_the_client_on_the_path_afterwards(
     client_home, monkeypatch
 ) -> None:
-    """The npm shim installs the client after a connect; the uv path does the same."""
+    """The npm shim installs the client after a connect; the uv path does the same, at
+    the version this runtime locks."""
     calls: list[list[str]] = []
     monkeypatch.setattr(papaya, "installer", lambda: "uv")
     monkeypatch.setattr(papaya, "installed", lambda: None)
@@ -498,7 +499,9 @@ def test_connecting_through_uv_keeps_the_client_on_the_path_afterwards(
     monkeypatch.setattr(papaya, "_run", run)
     result = papaya.connect()
     assert result["ok"] is True and result["via"] == "uv" and result["installed"] is True
-    assert calls == [list(papaya.UV_INSTALL)]
+    locked = papaya.locked_client_version()
+    assert locked is not None
+    assert calls == [[*papaya.UV_INSTALL[:-1], f"{papaya.CLIENT_PACKAGE}=={locked}"]]
 
 
 def test_the_cli_names_the_choices_and_the_exact_command_to_rerun(monkeypatch, capsys) -> None:

@@ -87,6 +87,19 @@ def _runtime_update_reads_no_real_checkout(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _papaya_client_is_never_reinstalled(request, monkeypatch):
+    """`ppy setup` and `ppy doctor` reinstall an older `papaya-agent` found on the PATH
+    (`papaya.keep_client_current`). The developer's own client is on the suite's PATH,
+    so unfaked, a setup or doctor test would run `uv tool install --force` on it.
+    `tests/test_client_currency.py` exercises the real check with a fake runner."""
+    if request.module.__name__.endswith("test_client_currency"):
+        return
+    monkeypatch.setattr(
+        papaya, "keep_client_current", lambda **_: {"state": "absent", "line": None}
+    )
+
+
+@pytest.fixture(autouse=True)
 def _outreach_reaches_nobody_unless_a_test_asks(request, monkeypatch):
     """The outreach procedure (`outreach.py`) runs from the heartbeat, the hooks and
     serve's rounds and reaches a person through the workspace and the desktop; tests
