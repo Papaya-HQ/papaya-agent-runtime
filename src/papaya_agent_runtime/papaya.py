@@ -446,13 +446,19 @@ def client_env() -> dict[str, str]:
 
 
 def installer() -> str | None:
-    """How this machine would get the client: ``installed``, ``npx``, ``uv``, or None."""
+    """How this machine would get the client: ``installed``, ``uv``, ``npx``, or None.
+
+    `uv` before `npx`: the runtime needs uv anyway, and on that path every uv call is
+    ours and quiet. The npm shim runs its own uv with none of that, so on a Mac with
+    Node its ~70 "+ package" lines landed in setup (2026-09-25). `npx` is only for a
+    machine without uv.
+    """
     if installed():
         return "installed"
-    if shutil.which("npx"):
-        return "npx"
     if shutil.which("uv"):
         return "uv"
+    if shutil.which("npx"):
+        return "npx"
     return None
 
 
@@ -644,18 +650,19 @@ def connect_argv(
 ) -> list[str] | None:
     """The exact command that establishes the connection, or None with no way to run one.
 
-    Prefers an installed `papaya-agent`; then the npm shim (`npx papaya-agent`), which
-    installs the client as a side effect so the next run takes the first branch; then
-    the same client through `uv` for a machine with no Node. ``quiet`` adds
-    :data:`QUIET_FLAG` only when that client offers it (:func:`connect_takes_quiet`).
+    Prefers an installed `papaya-agent`; then the client through the runtime's own quiet
+    `uv` (:func:`connect` installs it onto the PATH afterwards, so the next run takes the
+    first branch); then the npm shim (`npx papaya-agent`) for a machine with no uv.
+    ``quiet`` adds :data:`QUIET_FLAG` only when that client offers it
+    (:func:`connect_takes_quiet`).
     """
     how = installer()
     if how == "installed":
         base = [str(installed())]
-    elif how == "npx":
-        base = list(BOOTSTRAP)
     elif how == "uv":
         base = list(UV_BOOTSTRAP)
+    elif how == "npx":
+        base = list(BOOTSTRAP)
     else:
         return None
     argv = [*base, "connect", "--harness", harness]
@@ -1055,7 +1062,8 @@ def connect(
             "workspace": _workspace_named(lines),
         }
         if how == "uv" and not installed():
-            # The npm shim keeps the client on the PATH after a connect; do the same.
+            # The npm shim keeps the client on the PATH after a connect; do the same,
+            # quietly, and say the one line the shim would have said.
             try:
                 kept = _run(uv_install_argv(), timeout=PROBE_TIMEOUT * 4)
                 result["installed"] = kept.returncode == 0
@@ -1064,6 +1072,8 @@ def connect(
             except (OSError, subprocess.TimeoutExpired) as exc:
                 result["installed"] = False
                 result["install_detail"] = str(exc)
+            if echo is not None:
+                print(_install_line(result), file=echo, flush=True)
         return result
     tail = [line for line in lines if line.strip()]
     return {
@@ -1096,6 +1106,20 @@ def _workspace_named(lines: list[str]) -> str | None:
         if match is not None:
             return match["workspace"]
     return None
+
+
+def _install_line(result: dict) -> str:
+    """Our one line about putting the client on the PATH, in place of uv's install output."""
+    version = locked_client_version()
+    name = f"papaya-agent {version}" if version else "papaya-agent"
+    if result.get("installed"):
+        return f"{name} is installed on your PATH; open a new terminal if it is not found."
+    why = str(result.get("install_detail") or "").strip()
+    return (
+        f"{name} could not be installed on your PATH"
+        + (f" ({why})" if why else "")
+        + f": run {' '.join(uv_install_argv(version, force=True, quiet=False))}"
+    )
 
 
 def _first_link(lines: list[str]) -> str | None:

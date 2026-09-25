@@ -406,11 +406,14 @@ def test_what_the_pickers_draw_still_reads_as_the_clients_lines() -> None:
 #
 # 2026-09-25: on a machine with no `papaya-agent`, `ppy setup` ran the client through
 # `uv tool run`, and uv's resolve and install progress (about 70 packages, with ANSI
-# progress bars) came through the pty relay onto the person's terminal.
+# progress bars) came through the pty relay onto the person's terminal. On a Mac with
+# Node it went through the npm shim instead, whose own uv printed ~70 lines after the
+# agent picker: the runtime now takes its own quiet uv path whenever uv is here.
 
-#: A stand-in `uv` as loud as the real one: its resolve and install lines unless given
-#: `--quiet`, and a progress bar unless that or `UV_NO_PROGRESS` turns it off. `tool run`
-#: then acts as the client; `tool install` fails when `STUB_UV_FAIL` is set.
+#: A stand-in `uv` shaped like the real one: a progress bar unless `--quiet` or
+#: `UV_NO_PROGRESS`, and its resolve / "Installed 69 packages" / one "+ pkg==ver" line
+#: per package unless `--quiet`. `tool run` then acts as the client; `tool install`
+#: fails when `STUB_UV_FAIL` is set.
 STUB_UV = r"""
 import json, os, sys
 
@@ -420,9 +423,11 @@ ours, theirs = args[:cut], args[cut + 1 :]
 quiet = "--quiet" in ours
 if not quiet:
     if os.environ.get("UV_NO_PROGRESS") != "1":
-        sys.stderr.write("\x1b[2K\x1b[36m⠙\x1b[0m Preparing packages... (3/70)\r")
-    sys.stderr.write("Resolved 70 packages in 812ms\nInstalled 70 packages in 95ms\n")
+        sys.stderr.write("\x1b[2K\x1b[36m⠙\x1b[0m Preparing packages... (3/69)\r")
+    sys.stderr.write("Resolved 69 packages in 812ms\nInstalled 69 packages in 76ms\n")
     sys.stderr.write(" + httpx==0.28.1\n")
+    for n in range(68):
+        sys.stderr.write(f" + package-{n}==1.0.{n}\n")
     sys.stderr.flush()
 if ours[:2] == ["tool", "install"]:
     if os.environ.get("STUB_UV_FAIL"):
@@ -430,7 +435,8 @@ if ours[:2] == ["tool", "install"]:
         sys.stderr.write("  ╰─▶ dns error: failed to lookup address information\n")
         sys.exit(1)
     if not quiet:
-        print("Installed 1 executable: papaya-agent")
+        sys.stderr.write(" + papaya-agent-client==0.18.2\n")
+        sys.stderr.write("Installed 1 executable: papaya-agent\n")
     sys.exit(0)
 if theirs[:1] == ["connect"] and "--help" in theirs:
     print("  --quiet  print only the sign-in link or code and the final Connected line")
@@ -452,23 +458,46 @@ if theirs[:1] == ["connect"]:
 sys.exit(f"stub uv: unexpected {args}")
 """
 
-#: What only uv says. None of it may reach the person.
-UV_CHATTER = ("Preparing packages", "Resolved 70", "Installed 70", "+ httpx", "Installed 1")
+#: A stand-in `npx`: the npm shim, loud as it is, and leaves a mark that it ran.
+STUB_NPX = r"""
+import os, sys
+open(os.environ["STUB_NPX_MARK"], "a").write(" ".join(sys.argv[1:]) + "\n")
+sys.stderr.write("Installed 69 packages in 76ms\n + httpx==0.28.1\n")
+sys.stderr.write("papaya-agent is installed on your PATH\n")
+sys.exit(1)
+"""
+
+#: What only uv (or the shim's uv) says. None of it may reach the person.
+UV_CHATTER = ("Preparing packages", "Resolved 69", "Installed 69", "+ ", "Installed 1")
+CONNECTED = "Connected as Engineering Agent (@engineering_agent) in Papaya HQ."
+SIGN_IN = "Open https://app.trypapaya.ai/signin?code=abc to sign in"
+#: Our one line after the quiet install, standing in for the shim's.
+ON_PATH = (
+    f"papaya-agent {papaya.locked_client_version()} is installed on your PATH; "
+    "open a new terminal if it is not found."
+)
 
 
 @pytest.fixture
 def fresh_machine(tmp_path, monkeypatch) -> Path:
-    """No `papaya-agent`, no Node: only the stand-in `uv` on the PATH."""
+    """No `papaya-agent`; Node (a stand-in `npx`) and the stand-in `uv` on the PATH, as on
+    a person's Mac."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    uv = bin_dir / "uv"
-    uv.write_text(f"#!{sys.executable}\n{STUB_UV}", encoding="utf-8")
-    uv.chmod(0o755)
+    for name, script in (("uv", STUB_UV), ("npx", STUB_NPX)):
+        path = bin_dir / name
+        path.write_text(f"#!{sys.executable}\n{script}", encoding="utf-8")
+        path.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("STUB_NPX_MARK", str(tmp_path / "npx-ran"))
     monkeypatch.delenv("UV_NO_PROGRESS", raising=False)
     monkeypatch.delenv("STUB_UV_FAIL", raising=False)
     assert papaya.installer() == "uv"
-    return uv
+    return bin_dir / "uv"
+
+
+def _npx_ran(fresh_machine: Path) -> bool:
+    return (fresh_machine.parent.parent / "npx-ran").exists()
 
 
 def test_every_uv_call_for_the_client_is_quiet(fresh_machine) -> None:
@@ -503,30 +532,47 @@ def test_nothing_of_uvs_reaches_the_terminal_on_a_fresh_machine(fresh_machine) -
         )
         shown = echo.getvalue()
         assert code == 0, shown
-        assert "Connected as Engineering Agent (@engineering_agent) in Papaya HQ." in lines
+        assert lines == [SIGN_IN, CONNECTED], shown
         assert not [said for said in UV_CHATTER if said in shown], shown
         assert "\x1b[36m" not in shown
+        assert not _npx_ran(fresh_machine)
     finally:
         os.close(person)
         os.close(keys)
 
 
-def test_connecting_through_uv_installs_the_client_without_a_word_from_uv(fresh_machine) -> None:
+def test_connecting_through_uv_installs_the_client_and_says_only_our_line(fresh_machine) -> None:
     echo = io.StringIO()
     result = papaya.connect(timeout=30, echo=echo, quiet=True)
     assert result["ok"] is True and result["via"] == "uv", result
     assert result["installed"] is True and "install_detail" not in result
-    assert not [said for said in UV_CHATTER if said in echo.getvalue()], echo.getvalue()
+    assert echo.getvalue().splitlines() == [SIGN_IN, CONNECTED, ON_PATH]
+    assert not _npx_ran(fresh_machine)
 
 
 def test_a_failed_install_after_connect_keeps_what_uv_said(fresh_machine, monkeypatch) -> None:
     monkeypatch.setenv("STUB_UV_FAIL", "1")
-    result = papaya.connect(timeout=30, echo=io.StringIO(), quiet=True)
+    echo = io.StringIO()
+    result = papaya.connect(timeout=30, echo=echo, quiet=True)
     assert result["ok"] is True and result["installed"] is False
-    assert result["install_detail"] == (
+    said = (
         "× Failed to download `pydantic-core==2.41.5`"
         " / ╰─▶ dns error: failed to lookup address information"
     )
+    assert result["install_detail"] == said
+    locked = papaya.locked_client_version()
+    assert echo.getvalue().splitlines()[-1] == (
+        f"papaya-agent {locked} could not be installed on your PATH ({said}): "
+        f"run uv tool install --force {papaya.CLIENT_PACKAGE}=={locked}"
+    )
+
+
+def test_without_uv_the_npm_shim_is_still_the_way_in(fresh_machine) -> None:
+    fresh_machine.unlink()
+    assert papaya.installer() == "npx"
+    assert papaya.connect_argv()[: len(papaya.BOOTSTRAP)] == list(papaya.BOOTSTRAP)
+    papaya.connect(timeout=30, echo=io.StringIO())
+    assert _npx_ran(fresh_machine)
 
 
 def test_a_failed_uv_run_still_names_uvs_error(fresh_machine) -> None:
