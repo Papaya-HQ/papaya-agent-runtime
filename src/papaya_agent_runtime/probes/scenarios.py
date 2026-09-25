@@ -206,7 +206,10 @@ def run_provider(spec: ProviderSpec, evidence_dir: str) -> CapabilityRecord:
     scenarios.append(_sigint_tool(spec, evidence_dir, caps))
 
     # ------------------------------------------------------------------ #
-    # Scenario 4: SIGKILL the process group early, then attempt resume.
+    # Scenario 4: SIGKILL the process group once the model turn is under way,
+    # then attempt resume. A fixed 3s timer raced startup: slow SessionStart hooks
+    # on the probing machine let it fire before any conversation was written, and
+    # killing on claude's `init` line is still too early (2026-09-25).
     # ------------------------------------------------------------------ #
     scenarios.append(
         _interrupt_then_resume(
@@ -215,8 +218,8 @@ def run_provider(spec: ProviderSpec, evidence_dir: str) -> CapabilityRecord:
             label="sigkill_survival",
             cap_setter=lambda: setattr(caps, "resume_after_sigkill", True),
             prompt=spec.trivial_prompt,
-            predicate=None,
-            interrupt_after_s=3.0,
+            predicate=spec.model_turn_predicate,
+            interrupt_after_s=None,
             interrupt_signal=signal.SIGKILL,
             caps=caps,
         )
@@ -246,7 +249,7 @@ def _interrupt_then_resume(
     cap_setter,
     prompt: str,
     predicate,
-    interrupt_after_s: float,
+    interrupt_after_s: float | None,
     interrupt_signal: signal.Signals,
     caps: Capabilities,
 ) -> ScenarioResult:

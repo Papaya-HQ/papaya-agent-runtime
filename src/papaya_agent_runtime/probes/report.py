@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from papaya_agent_runtime.probes.capability import CAPABILITY_FIELDS, CapabilityRecord
+import re
+from typing import cast
+
+from papaya_agent_runtime.probes.capability import (
+    CAPABILITY_FIELDS,
+    Capabilities,
+    CapabilityRecord,
+    ScenarioResult,
+    ScenarioStatus,
+)
 
 _FLAG_DOC = {
     "session_id_in_stream": "Durable session/thread id emitted in the event stream",
@@ -83,3 +92,55 @@ def render_markdown(records: list[CapabilityRecord]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+_SCENARIO_ROW = re.compile(r"^\| (\S+) \| (\S+) \| (.*) \|$")
+
+
+def carried_records(tracked: dict, markdown: str, *, probed: set[str]) -> list[CapabilityRecord]:
+    """Rebuild the published records of providers this run did not probe.
+
+    A maintainer who has only one CLI installed still publishes: the other
+    provider's row stays exactly as it was last proved, its flags from the tracked
+    JSON and its scenario evidence from its section of the previous matrix, rather
+    than disappearing from both files.
+    """
+    out: list[CapabilityRecord] = []
+    for provider, row in sorted(tracked.items()):
+        if provider in probed:
+            continue
+        caps = Capabilities()
+        for flag, value in (row.get("capabilities") or {}).items():
+            if flag in CAPABILITY_FIELDS:
+                setattr(caps, flag, bool(value))
+        record = CapabilityRecord(
+            provider=provider,
+            cli_version=str(row.get("cli_version") or "?"),
+            probed_at=str(row.get("probed_at") or "?"),
+            probe_tool_version="?",
+            model=row.get("model"),
+            capabilities=caps,
+        )
+        _read_section(record, markdown)
+        out.append(record)
+    return out
+
+
+def _read_section(record: CapabilityRecord, markdown: str) -> None:
+    heading = f"## {record.provider} {record.cli_version}"
+    inside = False
+    for line in markdown.splitlines():
+        if line.startswith("## "):
+            inside = line.strip() == heading
+            continue
+        if not inside:
+            continue
+        if line.startswith("- Probe harness: "):
+            record.probe_tool_version = line.removeprefix("- Probe harness: ").strip()
+            continue
+        m = _SCENARIO_ROW.match(line)
+        if m and m.group(1) not in ("Scenario", "---"):
+            status = cast(ScenarioStatus, m.group(2))
+            record.scenarios.append(
+                ScenarioResult(m.group(1), status, m.group(3).replace("\\|", "|"))
+            )
