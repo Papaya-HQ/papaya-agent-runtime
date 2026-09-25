@@ -29,14 +29,19 @@ requires-python = ">=3.13"
 # to 0.19 is a deliberate change with the import sites re-checked. 0.18.0 brought
 # the embed builders' `extra_capabilities`, through which `ppy serve` advertises
 # `instruction_intents` (without it Papaya never routes a question to this
-# machine); 0.18.1 is the floor because it adds `connect --quiet`, which `ppy
-# setup` feature-detects, and the arrow-key workspace/agent pickers.
+# machine); 0.18.1 added `connect --quiet`, which `ppy setup` feature-detects,
+# and the arrow-key workspace/agent pickers. 0.18.2 is the floor: 0.18.1's
+# pickers crash under setup's terminal relay ("asyncio.run() cannot be called
+# from a running event loop") and its `connect --quiet` did not silence request
+# logs; 0.18.2 fixes both and adds "Create your engineering agent". `ppy setup`
+# reinstalls the person's own `papaya-agent` at the version locked here, so the
+# floor is what every setup hands out.
 #
 # `questionary` is the second, and it is for one screen: `ppy setup`'s repository
 # picker (an owner list, then a checkbox list with type-to-filter). It is imported
 # only there, so nothing else in the control plane may assume it.
 dependencies = [
-    "papaya-agent-client>=0.18.1,<0.19.0",
+    "papaya-agent-client>=0.18.2,<0.19.0",
     "questionary>=2.1.0,<3",
 ]
 

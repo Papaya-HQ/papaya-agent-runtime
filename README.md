@@ -1339,7 +1339,7 @@ on the read-only `ask` command set, which can approve, deliver or merge nothing.
 routes a question with no work item only to a connection that registered
 `instruction_intents` including `ask`. `ppy serve` registers `["ask", "work"]` when its
 Papaya client can register extra capabilities (`extra_capabilities` on the client's
-embed builders, since papaya-agent-client 0.18.0; this checkout pins 0.18.1). With
+embed builders, since papaya-agent-client 0.18.0; this checkout pins 0.18.2). With
 an older client it registers nothing new and logs one line at
 start: Papaya will refuse to send this machine questions until the client is updated.
 A reply in the request's thread while it is held is read about every fifteen seconds

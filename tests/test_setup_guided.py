@@ -265,7 +265,7 @@ def test_a_fully_set_up_machine_says_one_line_per_step_and_asks_only_to_switch(w
 
 def test_an_older_papaya_client_is_updated_before_papaya_is_checked_and_said_in_one_line(world):
     _set_up_fully(world)
-    updated = {"state": "updated", "line": "Updated papaya-agent 0.17.0 → 0.18.1"}
+    updated = {"state": "updated", "line": "Updated papaya-agent 0.17.0 → 0.18.2"}
 
     code, lines = _setup(
         world, shell=_healthy(), picker=ScriptedPicker(), client_currency=lambda: updated
@@ -275,7 +275,7 @@ def test_an_older_papaya_client_is_updated_before_papaya_is_checked_and_said_in_
     papaya_at = TICKS.index("✓ Papaya        Connected as Ada (@ada)")
     assert lines == [
         *TICKS[:papaya_at],
-        "✓ Papaya        Updated papaya-agent 0.17.0 → 0.18.1",
+        "✓ Papaya        Updated papaya-agent 0.17.0 → 0.18.2",
         *TICKS[papaya_at:],
     ]
 
@@ -284,8 +284,8 @@ def test_a_papaya_client_that_could_not_be_updated_is_one_line_and_setup_carries
     _set_up_fully(world)
     failed = {
         "state": "failed",
-        "line": "papaya-agent 0.17.0 is older than 0.18.1 and could not be updated: "
-        "run uv tool install --force papaya-agent-client==0.18.1",
+        "line": "papaya-agent 0.17.0 is older than 0.18.2 and could not be updated: "
+        "run uv tool install --force papaya-agent-client==0.18.2",
     }
 
     code, lines = _setup(
@@ -294,8 +294,8 @@ def test_a_papaya_client_that_could_not_be_updated_is_one_line_and_setup_carries
 
     assert code == 0
     assert (
-        "! Papaya        papaya-agent 0.17.0 is older than 0.18.1 and could not be updated: "
-        "run uv tool install --force papaya-agent-client==0.18.1"
+        "! Papaya        papaya-agent 0.17.0 is older than 0.18.2 and could not be updated: "
+        "run uv tool install --force papaya-agent-client==0.18.2"
     ) in lines
     assert "✓ Papaya        Connected as Ada (@ada)" in lines
 
