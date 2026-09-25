@@ -651,7 +651,9 @@ def compose_brief(instruction: papaya_events.Instruction, repo: str) -> str:
     who = instruction.requested_by
     requester = instruction.requester
     ident = str(who.get("id") or "").strip()
-    origin = "a channel thread" if instruction.origin.get("kind") == "channel" else "a DM"
+    origin = {"channel": "a channel thread", "provider": "a connected tool"}.get(
+        str(instruction.origin.get("kind") or ""), "a DM"
+    )
     # No `MI-<n>` anywhere in it: the brief's words reach the pull request a person reads.
     return f"""# {title}
 

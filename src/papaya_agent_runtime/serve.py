@@ -140,6 +140,7 @@ from papaya_agent_runtime import (
     instructions,
     limits,
     machine_status,
+    machine_tasks,
     outreach,
     papaya,
     papaya_events,
@@ -1752,12 +1753,14 @@ class TicketRunner:
             await asyncio.to_thread(self._note_repetition, ticket)
             await self._status(ticket, papaya_events.STATUS_IN_PROGRESS)
             _report_progress(job, PHASE_PICKED_UP, f"Recorded as task {held.task_id}{where}.")
+            said = "Picked up; choosing the repository and writing the brief."
             if not again:
                 # Said once per assignment of the work item: an item offered again (a
                 # restart, a sweep, a comment) already has this line, and saying it
                 # again is noise. A hand-back ends the assignment; the next one is news.
-                said = "Picked up; choosing the repository and writing the brief."
                 await self._say(ticket, PHASE_BRIEFING, said)
+            # Where it was asked, once per machine task (the ledger keeps the once).
+            await self._milestone(ticket, machine_tasks.PICKED_UP, said)
         else:
             # A redelivered ticket that was already being worked goes back to where
             # it was. Nothing is picked up twice: no second brief, no second status,
@@ -1836,7 +1839,12 @@ class TicketRunner:
                 status, text = await self._instruction_answer(ticket)
             elif found.path == instructions.WORK:
                 assert found.repo is not None
-                await self._say_once(ticket, SAID_ON_IT, instructions.on_it(found.repo))
+                await self._say_once(
+                    ticket,
+                    SAID_ON_IT,
+                    instructions.on_it(found.repo),
+                    milestone=machine_tasks.PICKED_UP,
+                )
                 status, text, url = await self._instruction_work(ticket)
             else:
                 # A question back to the person is an answer, not a failure: the
@@ -1945,12 +1953,18 @@ class TicketRunner:
         ticket.job.decline(reason)
         return _result(ticket.job, _declined_exit_code(), reason)
 
-    async def _instruction_progress(self, ticket: Ticket, text: str) -> None:
+    async def _instruction_progress(
+        self, ticket: Ticket, text: str, *, milestone: str | None = None
+    ) -> None:
         """One progress reply in the conversation the instruction came from. Never fatal.
 
         Nothing once the hold is over: a lost lease means another holder, or nobody,
         speaks for it now. A refusal or an unreachable Papaya is logged once per
         ticket and the work goes on; the final reply is posted regardless.
+
+        An instruction asked from a connected tool is answered through the machine-task
+        route, which takes only milestones: a line that is one (``milestone``) reaches
+        it, any other is not sent there.
         """
         instruction = ticket.held.instruction
         if instruction is None:
@@ -1962,7 +1976,13 @@ class TicketRunner:
         post = self._instruction_post or functools.partial(
             papaya_events.post_instruction_reply, **self._opener_kwargs()
         )
-        kind = {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}
+        kind: dict[str, str] = (
+            {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}
+        )
+        if instruction.reply.get("kind") == papaya_events.REPLY_MACHINE_TASK:
+            if milestone is None:
+                return
+            kind["milestone"] = milestone
         try:
             await asyncio.to_thread(
                 functools.partial(
@@ -2405,6 +2425,7 @@ class TicketRunner:
                 # though: forgotten, a stale `in_progress` item is offered again every
                 # sweep and briefed to the same answer (PAP-210, 2026-09-19).
                 await self._enter(ticket, PHASE_REPORTED, f"Nothing to build: {why}")
+                await self._milestone(ticket, machine_tasks.DONE, f"Nothing to build: {why}")
                 await asyncio.to_thread(self._park, ticket, why)
                 return PHASE_REPORTED
             outcome = self._missed(ticket, misses, "dispatching a worker", result)
@@ -3078,6 +3099,8 @@ class TicketRunner:
         await self._enter(
             ticket, PHASE_DELIVERING, opened, say=opened if ticket.reported is None else ""
         )
+        if pr_url and not delivery.get("pr_error"):
+            await self._milestone(ticket, machine_tasks.DELIVERED, opened)
         await self._status(ticket, papaya_events.STATUS_REVIEW)
         if ticket.reported is False:
             # The review turn's report was looked for and is not there, twice. Say
@@ -3357,6 +3380,7 @@ class TicketRunner:
         todo_id, question = wait
         waiting = f"Waiting on a person: {question}"
         await self._enter(ticket, PHASE_BLOCKED, waiting, say=f"Blocked: {waiting}")
+        await self._milestone(ticket, machine_tasks.BLOCKED, f"Blocked: {waiting}")
         await self._status(ticket, papaya_events.STATUS_BLOCKED)
         before = await asyncio.to_thread(self._fingerprint, ticket)
         while True:
@@ -3909,7 +3933,8 @@ class TicketRunner:
             # No work item to comment on: the person follows it in the conversation
             # they sent it from, deduped the same way, and on the record, so a hold
             # taken back up after a restart starts from what was said last.
-            await self._instruction_progress(ticket, line)
+            milestone = machine_tasks.BLOCKED if phase == PHASE_BLOCKED else None
+            await self._instruction_progress(ticket, line, milestone=milestone)
             await self._note_said(ticket, phase)
             return
         try:
@@ -3923,7 +3948,31 @@ class TicketRunner:
         except papaya_events.PapayaEventError as exc:
             log.warning("[serve] Could not comment on %s: %s", ticket.job.subject, exc)
 
-    async def _say_once(self, ticket: Ticket, key: str, text: str) -> None:
+    async def _milestone(self, ticket: Ticket, milestone: str, text: str) -> None:
+        """Say a milestone where a work item's work was asked, once. Never fatal.
+
+        Only for a ticket whose event carried a `machine_task` with an origin
+        (`machine_tasks.send` decides, and keeps the once across resumes); every
+        other ticket is left exactly as it was. The work-item comment is said as
+        before: this is where the person asked, not instead of the item. An
+        instruction answers through its own reply block (`_instruction_progress`).
+        """
+        if ticket.held.instruction is not None or ticket.lease_lost:
+            return
+        await asyncio.to_thread(
+            functools.partial(
+                machine_tasks.send,
+                ticket.held.task_id,
+                milestone,
+                _one_line(text),
+                environ=dict(ticket.job.env),
+                **self._opener_kwargs(),
+            )
+        )
+
+    async def _say_once(
+        self, ticket: Ticket, key: str, text: str, *, milestone: str | None = None
+    ) -> None:
         """One progress line at an instruction's origin, once per ticket, ever.
 
         Kept on the ledger, not the hold: a request taken back up after a restart
@@ -3932,7 +3981,7 @@ class TicketRunner:
         task_id = ticket.held.task_id
         if await store.run_in_thread(instructions.said_before, task_id, key):
             return
-        await self._instruction_progress(ticket, text)
+        await self._instruction_progress(ticket, text, milestone=milestone)
         await self._note_said(ticket, key)
 
     async def _note_said(self, ticket: Ticket, key: str) -> None:
@@ -3959,6 +4008,9 @@ class TicketRunner:
         await asyncio.to_thread(self._record_phase, held.task_id, PHASE_DECLINED, reason)
         job.decline(reason)
         await self._status(ticket, papaya_events.STATUS_TODO)
+        # The work is back with the person who asked: a blocker that needs them.
+        back = blockers.TICKET_COMMENT if setup else f"Handed back: {reason}"
+        await self._milestone(ticket, machine_tasks.BLOCKED, back)
         if not setup:
             await self._comment(ticket, reason)
         elif held.event.work_item_id:
@@ -4242,7 +4294,12 @@ class TicketRunner:
             post = self._instruction_post or functools.partial(
                 papaya_events.post_instruction_reply, **self._opener_kwargs()
             )
-            kind = {"kind": papaya_events.REPLY_FINAL} if instruction.speaks_kind else {}
+            kind: dict[str, str] = (
+                {"kind": papaya_events.REPLY_FINAL} if instruction.speaks_kind else {}
+            )
+            if instruction.reply.get("kind") == papaya_events.REPLY_MACHINE_TASK:
+                # Declined for a setup blocker: one only a person can close.
+                kind["milestone"] = machine_tasks.BLOCKED
             try:
                 post(
                     instruction.reply,
@@ -4427,6 +4484,8 @@ class TicketRunner:
         # What `ppy workers` names the ticket by; a ticket taken before this was
         # recorded gets it on its next pick-up.
         papaya_events.record_work_item_label(conn, task_id, event)
+        # Where the work was asked, when Papaya said: an offer later carries no block.
+        machine_tasks.remember(conn, task_id, event.payload, event.work_item_id)
         if resume_from is None:
             record_phase(conn, task_id, PHASE_PICKED_UP)
         if event.work_item_id:

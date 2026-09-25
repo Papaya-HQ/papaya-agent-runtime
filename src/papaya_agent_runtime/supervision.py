@@ -830,14 +830,20 @@ def record_merge(worker_task_id: int, entry: dict[str, Any]) -> bool:
     return "already recorded" not in str(result.note or "")
 
 
-def merged_step(entries: list[dict[str, Any]], *, post, held: set[int] | None = None) -> list[str]:
+def merged_step(
+    entries: list[dict[str, Any]], *, post, held: set[int] | None = None, reply=None
+) -> list[str]:
     """Follow up every merged pull request whose ticket has not been, once. Returns lines.
 
     ``post(ticket, body, status)`` says it on the work item (serve through its connection,
     a session through :func:`papaya.agent_env`). The ticket's local phase becomes done.
+    ``reply(task_id, milestone, text)`` says `done` where the work was asked, when its
+    event said where (`machine_tasks.send`; a session's own connection by default).
     Both modes call it; a held ticket is its runner's. Never raises.
     """
-    from papaya_agent_runtime import rounds, serve
+    from papaya_agent_runtime import machine_tasks, rounds, serve
+
+    reply = reply or machine_tasks.send_as_agent
 
     lines: list[str] = []
     try:
@@ -862,6 +868,10 @@ def merged_step(entries: list[dict[str, Any]], *, post, held: set[int] | None = 
             where = entry.get("url") or f"PR #{entry['pr']}"
             body, status = merged_message(where, rule)
             post(ticket, body, status)
+            try:
+                reply(ticket.task_id, machine_tasks.DONE, body)
+            except Exception as exc:  # noqa: BLE001 - the item has it; never post it twice
+                log.warning("[supervision] Could not say done for task %d: %s", ticket.task_id, exc)
             rounds.record_round(ticket.task_id, MERGED_FOLLOWUP, worker_task_id=worker_id)
             rounds._set_phase(
                 ticket.task_id, serve.PHASE_DONE, f"Worker task {worker_id} merged: {where}"

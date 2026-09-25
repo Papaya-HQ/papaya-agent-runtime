@@ -119,6 +119,7 @@ from papaya_agent_runtime import (
     instructions,
     lanes,
     machine_status,
+    machine_tasks,
     outreach,
     papaya_events,
     serve,
@@ -2626,8 +2627,20 @@ class Rounds:
         def post(target: Ticket, body: str, status: str | None) -> None:
             asyncio.run_coroutine_threadsafe(self._post(target, body, status=status), loop).result()
 
+        def reply(task_id: int, milestone: str, text: str) -> bool:
+            # Said through the connection the item's comment went through; nothing
+            # running without Papaya, where the comment was only recorded.
+            if self._standalone():
+                return False
+            opener = getattr(self._runner, "_opener_kwargs", lambda: {})()
+            return machine_tasks.send(
+                task_id, milestone, text, environ=self._papaya_env(), **opener
+            )
+
         recorded = await asyncio.to_thread(supervision.record_merge, worker_id, entry)
-        parts = await asyncio.to_thread(supervision.merged_step, [entry], post=post)
+        parts = await asyncio.to_thread(
+            functools.partial(supervision.merged_step, [entry], post=post, reply=reply)
+        )
         if ticket is None and recorded:
             parts.append(f"worker task {worker_id}'s pull request merged: recorded, no ticket")
         if not parts:
