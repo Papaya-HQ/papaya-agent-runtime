@@ -626,17 +626,35 @@ QUIET_FLAG = "--quiet"
 _QUIET = re.compile(r"(?<![\w-])--quiet(?![\w-])")
 
 
-def connect_takes_quiet(base: list[str]) -> bool:
-    """Whether the client ``base`` runs offers ``connect --quiet``: its own help says so.
+CREATE_ENGINEER_FLAG = "--create-engineer"
+_CREATE_ENGINEER = re.compile(r"(?<![\w-])--create-engineer(?![\w-])")
 
-    A help that cannot be read (no client yet, a timeout) counts as no, so an old or
-    unreachable client is run exactly as before.
+
+def _connect_help(base: list[str]) -> str | None:
+    """`connect --help` from the client ``base`` runs, or None when it cannot be read.
+
+    A help that cannot be read (no client yet, a timeout) is None, so an old or
+    unreachable client is run exactly as before, with no optional flag.
     """
     try:
         proc = _run([*base, "connect", "--help"], timeout=PROBE_TIMEOUT, env=client_env())
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0 and _QUIET.search(proc.stdout or "") is not None
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout or ""
+
+
+def connect_takes_quiet(base: list[str]) -> bool:
+    """Whether the client ``base`` runs offers ``connect --quiet``: its own help says so."""
+    text = _connect_help(base)
+    return text is not None and _QUIET.search(text) is not None
+
+
+def connect_takes_create_engineer(base: list[str]) -> bool:
+    """Whether the client offers ``connect --create-engineer`` (papaya-agent-client 0.18.2+)."""
+    text = _connect_help(base)
+    return text is not None and _CREATE_ENGINEER.search(text) is not None
 
 
 def connect_argv(
@@ -647,6 +665,7 @@ def connect_argv(
     device: bool = False,
     no_browser: bool = False,
     quiet: bool = False,
+    create_engineer: bool = False,
 ) -> list[str] | None:
     """The exact command that establishes the connection, or None with no way to run one.
 
@@ -654,7 +673,12 @@ def connect_argv(
     `uv` (:func:`connect` installs it onto the PATH afterwards, so the next run takes the
     first branch); then the npm shim (`npx papaya-agent`) for a machine with no uv.
     ``quiet`` adds :data:`QUIET_FLAG` only when that client offers it
-    (:func:`connect_takes_quiet`).
+    (:func:`connect_takes_quiet`). ``create_engineer`` adds
+    :data:`CREATE_ENGINEER_FLAG`, which connects as the person's own engineering agent
+    and creates it when they have none: only when the client offers it
+    (:func:`connect_takes_create_engineer`), never beside ``agent`` (the client refuses
+    the pair), and not with ``device``, where the person picks the agent in the app and
+    the client ignores the flag anyway.
     """
     how = installer()
     if how == "installed":
@@ -676,6 +700,8 @@ def connect_argv(
         argv.append("--no-browser")
     if quiet and connect_takes_quiet(base):
         argv.append(QUIET_FLAG)
+    if create_engineer and not agent and not device and connect_takes_create_engineer(base):
+        argv.append(CREATE_ENGINEER_FLAG)
     return argv
 
 
@@ -961,6 +987,12 @@ _ONLY_AGENT = re.compile(_STARTS + r"Agent: \S")
 #: …and lists several before asking: `Choose an agent:` then a number, or the
 #: arrow-key list's `? Choose an agent` on a terminal.
 _ASKED_AGENT = re.compile(r"Choose an? agent\b")
+#: `connect --create-engineer` could not: a Papaya server without the route
+#: (`This Papaya server can't create an engineering agent yet; create one in Papaya →
+#: Agents → New agent.`) or a refusal (`Could not create your engineering agent. …`).
+_NO_ENGINEER = re.compile(
+    r"(?:can't|cannot) create an engineering agent|Could not create your engineering agent"
+)
 
 
 def connect(
@@ -974,6 +1006,7 @@ def connect(
     echo: Any = None,
     interactive: bool = False,
     quiet: bool = False,
+    create_engineer: bool = False,
 ) -> dict:
     """Install the client if it is missing, run its connect flow, and say what happened.
 
@@ -998,7 +1031,14 @@ def connect(
     - ``timeout`` — nobody approved in time; ``link`` is the sign-in link when one was
       printed;
     - ``no_installer`` — neither Node (`npx`) nor `uv` is on this machine;
+    - ``no_engineer`` — ``create_engineer`` was asked and the Papaya server could not
+      create one; ``detail`` is the client's line, which says where to create it instead;
     - ``unavailable``, ``failed``, ``declined`` — as the words say, with ``detail``.
+
+    ``create_engineer`` connects as the person's own engineering agent, creating it when
+    they have none. Every result carries ``create_engineer``: whether the flag reached
+    the client (it is dropped for an ``agent``, a ``device`` sign-in, or a client too old
+    to offer it, and the flow then runs as before).
     """
     argv = connect_argv(
         harness=harness,
@@ -1007,7 +1047,9 @@ def connect(
         device=device,
         no_browser=no_browser,
         quiet=quiet,
+        create_engineer=create_engineer,
     )
+    asked_engineer = argv is not None and CREATE_ENGINEER_FLAG in argv
     if argv is None:
         return {
             "ok": False,
@@ -1046,6 +1088,15 @@ def connect(
                 "choices": [c.strip() for c in choice["choices"].split(";") if c.strip()],
                 "detail": line.strip(),
                 "command": argv,
+                "create_engineer": asked_engineer,
+            }
+        if asked_engineer and code != 0 and _NO_ENGINEER.search(line):
+            return {
+                "ok": False,
+                "reason": "no_engineer",
+                "detail": line.strip(),
+                "command": argv,
+                "create_engineer": True,
             }
     after = status()
     now = _connection_mark()
@@ -1060,6 +1111,7 @@ def connect(
             "before": asdict(before) if before is not None else None,
             "agent_choice": _agent_choice(lines),
             "workspace": _workspace_named(lines),
+            "create_engineer": asked_engineer,
         }
         if how == "uv" and not installed():
             # The npm shim keeps the client on the PATH after a connect; do the same,
@@ -1083,6 +1135,7 @@ def connect(
         "link": _first_link(lines),
         "status": after,
         "command": argv,
+        "create_engineer": asked_engineer,
     }
 
 
@@ -1368,6 +1421,7 @@ __all__ = [
     "config_path",
     "connect",
     "connect_argv",
+    "connect_takes_create_engineer",
     "connect_takes_quiet",
     "context",
     "identity",

@@ -49,6 +49,7 @@ CORPUS = (
     "src/papaya_agent_runtime/manager/launch.py",
     "src/papaya_agent_runtime/environment.py",
     "docs/runtime-contract.md",
+    "docs/operating.md",
     "README.md",
 )
 
