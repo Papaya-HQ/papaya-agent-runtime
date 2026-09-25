@@ -1,0 +1,16 @@
+# Secret scanning for commits (.githooks/pre-commit) and ad-hoc scans
+# (`gitleaks dir . --config .gitleaks.toml`). The default gitleaks rules apply;
+# add an allowlist entry here only for a finding verified to be fake or public,
+# as narrow as possible, with a comment saying why it is safe.
+
+[extend]
+useDefault = true
+
+# Python bytecode is gitignored and never committed, so the pre-commit hook
+# never sees it; only a working-tree scan does. Its string constants are the
+# test fixtures in tests/*.py folded together: tests split fake tokens
+# ("ghp_" + "A1b2C3d4...") precisely so the source does not look like a secret,
+# and the compiler joins them back up in the .pyc.
+[[allowlists]]
+description = "gitignored Python bytecode of fake test fixtures"
+paths = ['''(^|/)__pycache__/[^/]+\.pyc$''']

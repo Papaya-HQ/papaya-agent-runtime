@@ -107,6 +107,8 @@ class Options:
     interactive: bool = True
     agent: str | None = None
     workspace: str | None = None
+    #: Connect as the person's own engineering agent, creating it when they have none.
+    create_engineer: bool = False
     #: Repositories to register without the picker (URLs or ``owner/name``).
     repos: tuple[str, ...] = ()
     #: Reopen the picker even though repositories are registered.
@@ -584,6 +586,9 @@ class Setup:
             "harness": "claude",
             "workspace": chosen.get("workspace", self.options.workspace),
             "agent": chosen.get("agent", self.options.agent),
+            # Only while no agent is named: the client refuses the pair.
+            "create_engineer": self.options.create_engineer
+            and not chosen.get("agent", self.options.agent),
             "device": device,
             "echo": self.out,
             # On a terminal the client asks the workspace and agent itself, inside the
@@ -623,6 +628,9 @@ class Setup:
             if not picked:
                 raise Stop(f"No {kind} chosen: run ./bin/ppy setup again")
             return self._connect_papaya(before, **{**chosen, kind: picked})
+        if reason == "no_engineer":
+            said = result.get("detail") or "Papaya could not create your engineering agent."
+            raise Stop(f"{said} Then run ./bin/ppy setup again")
         if reason == "no_installer":
             raise Stop("The Papaya client cannot be installed here: install Node or uv first")
         if reason == "timeout":

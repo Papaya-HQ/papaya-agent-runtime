@@ -1,0 +1,19 @@
+#!/bin/sh
+# Refuse a commit that adds a secret. Scans only the staged diff.
+# Enable once per checkout with `make hooks`; bypass deliberately with
+# `git commit --no-verify`.
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+	echo "pre-commit: gitleaks is not installed; run 'brew install gitleaks' (other platforms: https://github.com/gitleaks/gitleaks#installing)" >&2
+	exit 1
+fi
+
+# gitleaks reads .gitleaks.toml from the repository root on its own. A finding
+# exits 2 so it is not mistaken for gitleaks failing to run (exit 1).
+gitleaks git --pre-commit --staged --redact --no-banner --verbose --exit-code 2
+status=$?
+if [ "$status" -eq 2 ]; then
+	echo "pre-commit: commit refused, gitleaks found a secret in the staged changes (file, line and rule above)." >&2
+	echo "pre-commit: if it is a false positive, allowlist it narrowly in .gitleaks.toml with a comment saying why it is safe." >&2
+fi
+exit "$status"

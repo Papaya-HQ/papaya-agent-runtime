@@ -95,6 +95,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
                 interactive=not args.non_interactive,
                 agent=args.agent,
                 workspace=args.workspace,
+                create_engineer=args.create_engineer,
                 repos=tuple(args.repo or ()),
                 pick_repos=args.repos,
                 profile=overrides,
@@ -778,11 +779,25 @@ def _papaya_connect(args: argparse.Namespace) -> int:
         "agent": args.agent,
         "device": args.device,
         "no_browser": args.no_browser,
+        "create_engineer": args.create_engineer,
         "echo": sys.stdout,
     }
     if args.timeout:
         kwargs["timeout"] = args.timeout
     result = papaya.connect(**kwargs)
+    if (
+        args.create_engineer
+        and not result.get("create_engineer")
+        and result.get("reason") != "no_installer"
+    ):
+        # Dropped on purpose (a device sign-in picks in the app) or by an old client.
+        print(
+            "note: --create-engineer was not passed to the Papaya client (a device-code "
+            "sign-in chooses the agent in the app; a client older than 0.18.2 cannot create "
+            "one); pick your engineering agent from the list, or create it in Papaya → "
+            "Agents → New agent",
+            file=sys.stderr,
+        )
     if result["ok"]:
         print(f"connected as {result['status']['addressed']}")
         if result.get("installed") is False:
@@ -810,6 +825,12 @@ def _papaya_connect(args: argparse.Namespace) -> int:
         rerun.append(f'{flag} "<the {kind} chosen>"')
         print(f"then: {' '.join(rerun)}", file=sys.stderr)
         return 2
+    if reason == "no_engineer":
+        print(
+            f"not connected: {result['detail']} Then run `ppy papaya connect` again and pick it",
+            file=sys.stderr,
+        )
+        return 1
     if reason == "no_installer":
         print(
             "cannot install the Papaya client: this machine has neither Node (for `npx "
@@ -3311,6 +3332,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="register this repository (a URL or owner/name); repeatable",
     )
     setup.add_argument("--agent", help="the Papaya agent to connect as, when there are several")
+    setup.add_argument(
+        "--create-engineer",
+        dest="create_engineer",
+        action="store_true",
+        help=(
+            "connect as your own engineering agent, creating it when you have none; "
+            "not with --agent (on a terminal the agent list offers this row by itself)"
+        ),
+    )
     setup.add_argument("--workspace", help="the Papaya workspace, when there are several")
     setup.add_argument(
         "--skip-tools",
@@ -3764,8 +3794,19 @@ def build_parser() -> argparse.ArgumentParser:
     pconnect.add_argument(
         "--workspace", help="the workspace to connect in, when the account has several"
     )
-    pconnect.add_argument(
+    who = pconnect.add_mutually_exclusive_group()
+    who.add_argument(
         "--agent", help="the agent to connect as (name, handle or id), when there are several"
+    )
+    who.add_argument(
+        "--create-engineer",
+        dest="create_engineer",
+        action="store_true",
+        help=(
+            "connect as your own engineering agent, creating it in the workspace when you "
+            "have none (the recommended agent for this runtime); not with --agent, and "
+            "ignored with --device, where you pick in the app"
+        ),
     )
     pconnect.add_argument(
         "--device",

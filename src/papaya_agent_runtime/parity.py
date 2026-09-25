@@ -308,6 +308,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         interactive=("papaya_agent_runtime.watch", "papaya_agent_runtime.cli"),
     ),
     Capability(
+        "machine_task_milestones",
+        SHARED,
+        "work Papaya routed to this machine from somewhere (a thread, a DM, a connected "
+        "tool) hears its milestones there, once each: picked up, the pull request, a "
+        "blocker that needs the person, done. Serve says the first three while it holds "
+        "the ticket; done is said by the merged follow-up both modes run",
+        serve=("TicketRunner._milestone",),
+        shared="papaya_agent_runtime.machine_tasks",
+        interactive=("papaya_agent_runtime.watch",),
+    ),
+    Capability(
         "machine_instructions",
         HOST,
         "an instruction a person sent this machine is taken on its subject, classified, run "

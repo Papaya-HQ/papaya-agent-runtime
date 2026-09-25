@@ -49,10 +49,16 @@ BOOTSTRAP = ("npx", "--yes", "papaya-agent")
 #: The Python package the shim runs. Reached directly through `uv` when this machine
 #: has no Node: the runtime always has `uv`, and the shim is only a wrapper around it.
 CLIENT_PACKAGE = "papaya-agent-client"
-UV_BOOTSTRAP = ("uv", "tool", "run", "--from", CLIENT_PACKAGE, CLI)
+#: uv's own output for every uv call made for the client: no resolve, download or
+#: "Installed N packages" lines. Errors still print, and the client's own output is
+#: untouched: `--quiet` belongs to uv, not to the tool it runs.
+UV_QUIET = "--quiet"
+UV_BOOTSTRAP = ("uv", "tool", "run", UV_QUIET, "--from", CLIENT_PACKAGE, CLI)
 #: What the shim does after a successful connect, done by hand on the `uv` path;
 #: :func:`uv_install_argv` adds the version this runtime locks.
-UV_INSTALL = ("uv", "tool", "install", CLIENT_PACKAGE)
+UV_INSTALL = ("uv", "tool", "install", UV_QUIET, CLIENT_PACKAGE)
+#: uv's progress bars, off for the npm shim's uv too, which `--quiet` cannot reach.
+UV_NO_PROGRESS = "UV_NO_PROGRESS"
 #: The client's answer when a choice is needed and nobody is at a terminal to make it:
 #: `Multiple Papaya agents found. Re-run with `--agent <agent>`. Available: a; b`.
 _CHOICE = re.compile(
@@ -429,8 +435,10 @@ def client_env() -> dict[str, str]:
     A shell the person opened did not inherit the desktop app's `PAPAYA_AGENT_HOME`,
     so a client started from it looks in the wrong home and says "not connected"
     while `status()` says connected. Every call into the client goes through this.
+    Whatever uv runs it (`uv tool run`, the npm shim) shows no progress bars.
     """
     env = dict(os.environ)
+    env[UV_NO_PROGRESS] = "1"
     found = _best()
     if found is not None:
         env[CLIENT_HOME_ENV] = str(found[1])
@@ -438,13 +446,19 @@ def client_env() -> dict[str, str]:
 
 
 def installer() -> str | None:
-    """How this machine would get the client: ``installed``, ``npx``, ``uv``, or None."""
+    """How this machine would get the client: ``installed``, ``uv``, ``npx``, or None.
+
+    `uv` before `npx`: the runtime needs uv anyway, and on that path every uv call is
+    ours and quiet. The npm shim runs its own uv with none of that, so on a Mac with
+    Node its ~70 "+ package" lines landed in setup (2026-09-25). `npx` is only for a
+    machine without uv.
+    """
     if installed():
         return "installed"
-    if shutil.which("npx"):
-        return "npx"
     if shutil.which("uv"):
         return "uv"
+    if shutil.which("npx"):
+        return "npx"
     return None
 
 
@@ -492,11 +506,31 @@ def locked_client_version(root: str | Path | None = None) -> str | None:
     return floor.group(1) if floor else None
 
 
-def uv_install_argv(version: str | None = None, *, force: bool = False) -> list[str]:
-    """`uv tool install [--force] papaya-agent-client==<locked>`; unpinned with no lock."""
+def uv_install_argv(
+    version: str | None = None, *, force: bool = False, quiet: bool = True
+) -> list[str]:
+    """`uv tool install --quiet [--force] papaya-agent-client==<locked>`; unpinned with no
+    lock. ``quiet=False`` is the command to hand a person, who wants to see it work."""
     version = version or locked_client_version()
     spec = f"{CLIENT_PACKAGE}=={version}" if version else CLIENT_PACKAGE
-    return ["uv", "tool", "install", *(["--force"] if force else []), spec]
+    return [
+        "uv",
+        "tool",
+        "install",
+        *([UV_QUIET] if quiet else []),
+        *(["--force"] if force else []),
+        spec,
+    ]
+
+
+def _said_last(proc: subprocess.CompletedProcess[str], lines: int = 3) -> str:
+    """The last few lines a captured command printed (stderr after stdout): why it failed."""
+    said = [
+        line.strip()
+        for line in f"{proc.stdout or ''}\n{proc.stderr or ''}".splitlines()
+        if line.strip()
+    ]
+    return " / ".join(said[-lines:])
 
 
 def client_version(path: str, *, run: Any = None) -> str | None:
@@ -553,12 +587,16 @@ def keep_client_current(*, root: str | Path | None = None, run: Any = None) -> d
         return {**result, "state": "current", "line": None}
     if have_key > locked_key:
         return {**result, "state": "newer", "line": None}
-    command = uv_install_argv(locked, force=True)
+    command = uv_install_argv(locked, force=True, quiet=False)
+    why = ""
     try:
-        proc = runner(command, timeout=PROBE_TIMEOUT * 4)
+        proc = runner(uv_install_argv(locked, force=True), timeout=PROBE_TIMEOUT * 4)
         ok = proc.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        if not ok:
+            why = _said_last(proc)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         ok = False
+        why = str(exc)
     if ok:
         after = client_version(installed() or path, run=runner)
         after_key = _version_key(after or "")
@@ -573,9 +611,11 @@ def keep_client_current(*, root: str | Path | None = None, run: Any = None) -> d
         **result,
         "state": "failed",
         "command": command,
+        "detail": why,
         "line": (
-            f"papaya-agent {have} is older than {locked} and could not be updated: "
-            f"run {' '.join(command)}"
+            f"papaya-agent {have} is older than {locked} and could not be updated"
+            + (f" ({why})" if why else "")
+            + f": run {' '.join(command)}"
         ),
     }
 
@@ -586,17 +626,35 @@ QUIET_FLAG = "--quiet"
 _QUIET = re.compile(r"(?<![\w-])--quiet(?![\w-])")
 
 
-def connect_takes_quiet(base: list[str]) -> bool:
-    """Whether the client ``base`` runs offers ``connect --quiet``: its own help says so.
+CREATE_ENGINEER_FLAG = "--create-engineer"
+_CREATE_ENGINEER = re.compile(r"(?<![\w-])--create-engineer(?![\w-])")
 
-    A help that cannot be read (no client yet, a timeout) counts as no, so an old or
-    unreachable client is run exactly as before.
+
+def _connect_help(base: list[str]) -> str | None:
+    """`connect --help` from the client ``base`` runs, or None when it cannot be read.
+
+    A help that cannot be read (no client yet, a timeout) is None, so an old or
+    unreachable client is run exactly as before, with no optional flag.
     """
     try:
         proc = _run([*base, "connect", "--help"], timeout=PROBE_TIMEOUT, env=client_env())
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0 and _QUIET.search(proc.stdout or "") is not None
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout or ""
+
+
+def connect_takes_quiet(base: list[str]) -> bool:
+    """Whether the client ``base`` runs offers ``connect --quiet``: its own help says so."""
+    text = _connect_help(base)
+    return text is not None and _QUIET.search(text) is not None
+
+
+def connect_takes_create_engineer(base: list[str]) -> bool:
+    """Whether the client offers ``connect --create-engineer`` (papaya-agent-client 0.18.2+)."""
+    text = _connect_help(base)
+    return text is not None and _CREATE_ENGINEER.search(text) is not None
 
 
 def connect_argv(
@@ -607,21 +665,28 @@ def connect_argv(
     device: bool = False,
     no_browser: bool = False,
     quiet: bool = False,
+    create_engineer: bool = False,
 ) -> list[str] | None:
     """The exact command that establishes the connection, or None with no way to run one.
 
-    Prefers an installed `papaya-agent`; then the npm shim (`npx papaya-agent`), which
-    installs the client as a side effect so the next run takes the first branch; then
-    the same client through `uv` for a machine with no Node. ``quiet`` adds
-    :data:`QUIET_FLAG` only when that client offers it (:func:`connect_takes_quiet`).
+    Prefers an installed `papaya-agent`; then the client through the runtime's own quiet
+    `uv` (:func:`connect` installs it onto the PATH afterwards, so the next run takes the
+    first branch); then the npm shim (`npx papaya-agent`) for a machine with no uv.
+    ``quiet`` adds :data:`QUIET_FLAG` only when that client offers it
+    (:func:`connect_takes_quiet`). ``create_engineer`` adds
+    :data:`CREATE_ENGINEER_FLAG`, which connects as the person's own engineering agent
+    and creates it when they have none: only when the client offers it
+    (:func:`connect_takes_create_engineer`), never beside ``agent`` (the client refuses
+    the pair), and not with ``device``, where the person picks the agent in the app and
+    the client ignores the flag anyway.
     """
     how = installer()
     if how == "installed":
         base = [str(installed())]
-    elif how == "npx":
-        base = list(BOOTSTRAP)
     elif how == "uv":
         base = list(UV_BOOTSTRAP)
+    elif how == "npx":
+        base = list(BOOTSTRAP)
     else:
         return None
     argv = [*base, "connect", "--harness", harness]
@@ -635,6 +700,8 @@ def connect_argv(
         argv.append("--no-browser")
     if quiet and connect_takes_quiet(base):
         argv.append(QUIET_FLAG)
+    if create_engineer and not agent and not device and connect_takes_create_engineer(base):
+        argv.append(CREATE_ENGINEER_FLAG)
     return argv
 
 
@@ -920,6 +987,12 @@ _ONLY_AGENT = re.compile(_STARTS + r"Agent: \S")
 #: …and lists several before asking: `Choose an agent:` then a number, or the
 #: arrow-key list's `? Choose an agent` on a terminal.
 _ASKED_AGENT = re.compile(r"Choose an? agent\b")
+#: `connect --create-engineer` could not: a Papaya server without the route
+#: (`This Papaya server can't create an engineering agent yet; create one in Papaya →
+#: Agents → New agent.`) or a refusal (`Could not create your engineering agent. …`).
+_NO_ENGINEER = re.compile(
+    r"(?:can't|cannot) create an engineering agent|Could not create your engineering agent"
+)
 
 
 def connect(
@@ -933,6 +1006,7 @@ def connect(
     echo: Any = None,
     interactive: bool = False,
     quiet: bool = False,
+    create_engineer: bool = False,
 ) -> dict:
     """Install the client if it is missing, run its connect flow, and say what happened.
 
@@ -957,7 +1031,14 @@ def connect(
     - ``timeout`` — nobody approved in time; ``link`` is the sign-in link when one was
       printed;
     - ``no_installer`` — neither Node (`npx`) nor `uv` is on this machine;
+    - ``no_engineer`` — ``create_engineer`` was asked and the Papaya server could not
+      create one; ``detail`` is the client's line, which says where to create it instead;
     - ``unavailable``, ``failed``, ``declined`` — as the words say, with ``detail``.
+
+    ``create_engineer`` connects as the person's own engineering agent, creating it when
+    they have none. Every result carries ``create_engineer``: whether the flag reached
+    the client (it is dropped for an ``agent``, a ``device`` sign-in, or a client too old
+    to offer it, and the flow then runs as before).
     """
     argv = connect_argv(
         harness=harness,
@@ -966,7 +1047,9 @@ def connect(
         device=device,
         no_browser=no_browser,
         quiet=quiet,
+        create_engineer=create_engineer,
     )
+    asked_engineer = argv is not None and CREATE_ENGINEER_FLAG in argv
     if argv is None:
         return {
             "ok": False,
@@ -1005,6 +1088,15 @@ def connect(
                 "choices": [c.strip() for c in choice["choices"].split(";") if c.strip()],
                 "detail": line.strip(),
                 "command": argv,
+                "create_engineer": asked_engineer,
+            }
+        if asked_engineer and code != 0 and _NO_ENGINEER.search(line):
+            return {
+                "ok": False,
+                "reason": "no_engineer",
+                "detail": line.strip(),
+                "command": argv,
+                "create_engineer": True,
             }
     after = status()
     now = _connection_mark()
@@ -1019,14 +1111,21 @@ def connect(
             "before": asdict(before) if before is not None else None,
             "agent_choice": _agent_choice(lines),
             "workspace": _workspace_named(lines),
+            "create_engineer": asked_engineer,
         }
         if how == "uv" and not installed():
-            # The npm shim keeps the client on the PATH after a connect; do the same.
+            # The npm shim keeps the client on the PATH after a connect; do the same,
+            # quietly, and say the one line the shim would have said.
             try:
                 kept = _run(uv_install_argv(), timeout=PROBE_TIMEOUT * 4)
                 result["installed"] = kept.returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
+                if kept.returncode != 0:
+                    result["install_detail"] = _said_last(kept)
+            except (OSError, subprocess.TimeoutExpired) as exc:
                 result["installed"] = False
+                result["install_detail"] = str(exc)
+            if echo is not None:
+                print(_install_line(result), file=echo, flush=True)
         return result
     tail = [line for line in lines if line.strip()]
     return {
@@ -1036,6 +1135,7 @@ def connect(
         "link": _first_link(lines),
         "status": after,
         "command": argv,
+        "create_engineer": asked_engineer,
     }
 
 
@@ -1059,6 +1159,20 @@ def _workspace_named(lines: list[str]) -> str | None:
         if match is not None:
             return match["workspace"]
     return None
+
+
+def _install_line(result: dict) -> str:
+    """Our one line about putting the client on the PATH, in place of uv's install output."""
+    version = locked_client_version()
+    name = f"papaya-agent {version}" if version else "papaya-agent"
+    if result.get("installed"):
+        return f"{name} is installed on your PATH; open a new terminal if it is not found."
+    why = str(result.get("install_detail") or "").strip()
+    return (
+        f"{name} could not be installed on your PATH"
+        + (f" ({why})" if why else "")
+        + f": run {' '.join(uv_install_argv(version, force=True, quiet=False))}"
+    )
 
 
 def _first_link(lines: list[str]) -> str | None:
@@ -1307,6 +1421,7 @@ __all__ = [
     "config_path",
     "connect",
     "connect_argv",
+    "connect_takes_create_engineer",
     "connect_takes_quiet",
     "context",
     "identity",
