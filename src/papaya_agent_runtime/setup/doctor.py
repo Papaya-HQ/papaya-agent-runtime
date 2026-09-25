@@ -1,4 +1,8 @@
-"""`ppy doctor` — read-only diagnostics of the environment and config."""
+"""`ppy doctor` — diagnostics of the environment and config.
+
+Read-only but for one repair: the person's own `papaya-agent`, when it is older than
+the version this runtime locks (`papaya.keep_client_current`).
+"""
 
 from __future__ import annotations
 
@@ -154,7 +158,11 @@ def collect() -> dict:
         changes = []
     from papaya_agent_runtime import deficiencies
 
+    # The one thing doctor changes: an older `papaya-agent` than this runtime locks
+    # is reinstalled, because nothing else ever upgrades it.
+    client = papaya.keep_client_current()
     return {
+        "papaya_client": client,
         "self_report": deficiencies.summary(),
         "ppy_home": str(home),
         "readiness": verdict.as_dict(),
@@ -192,6 +200,9 @@ def render_text(data: dict) -> str:
     connection = data.get("papaya") or {}
     if connection:
         lines.append(f"papaya:    {_papaya_line(connection)}")
+    client_line = (data.get("papaya_client") or {}).get("line")
+    if client_line:
+        lines.append(f"           {client_line}")
     if data.get("venv"):
         lines.append(_venv_line(data["venv"]))
     reported = data.get("self_report")

@@ -654,6 +654,9 @@ def _write_serve_record(home: str, identity: dict[str, str]) -> None:
             "proc_started": own_started(),
             "connection_id": identity.get("connection_id") or "",
             "agent_handle": (identity.get("agent_handle") or "").lstrip("@"),
+            # "app" (the desktop app, `--supervised`) or "terminal": which restart
+            # `ppy update` names.
+            "launched_by": identity.get("launched_by") or "",
             "started_at": _now(),
         },
     )

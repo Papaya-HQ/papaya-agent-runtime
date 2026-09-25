@@ -340,13 +340,17 @@ already done:
 2. Claude Code signed in, running `claude auth login` with you when it is not;
 3. GitHub signed in, running `gh auth login` with you when it is not, then
    `gh auth setup-git` so `git push` uses it;
-4. Papaya: connects this machine as one of your workspace's agents (with a device code
-   over SSH or when there is no display) and prints `Connected as <Name> (@handle)`;
+4. Papaya: first brings your own `papaya-agent` up to the version this checkout locks
+   in `uv.lock` (`Updated papaya-agent <old> → <new>`; a newer one is left alone, and a
+   failed reinstall is one `!` line naming the command, then setup carries on), then
+   connects this machine as one of your workspace's agents (with a device code over SSH
+   or when there is no display), choosing the workspace and agent from arrow-key lists
+   on a terminal, and prints `Connected as <Name> (@handle)`;
 5. repositories: pick an owner (you or one of your organizations), then tick
    repositories in its list (arrow keys, space to tick, type to filter, Enter), and go
    back to pick from another owner.
 
-Each line is a mark (✓ done, → doing now, ✗ stopped), the step's name and what
+Each line is a mark (✓ done, → doing now, ! yours to do by hand, ✗ stopped), the step's name and what
 happened; whatever a sign-in or the Papaya client prints sits between two rules. On a
 terminal the marks are coloured; piped, or with `NO_COLOR` set, it is plain text.
 
@@ -681,6 +685,32 @@ environment's `pyvenv.cfg` disagrees with it.
 `ppy blockers` never sync: they run from the environment when it imports and from the
 source tree (under uv's interpreter for the pinned series) when it does not, so the
 command that clears a supervisor in the way always works.
+
+## Updating
+
+```sh
+./bin/ppy update
+```
+
+It fetches this checkout's default branch, fast-forwards to it, lists what changed
+("Updated 1a2b3c4 → 5d6e7f8 (3 changes)" and up to five commit subjects), rebuilds the
+environment when the lockfile changed, and tells you how to restart: quit and reopen the
+Papaya app, or stop `./bin/ppy serve` and run it again, depending on what started it. It
+never restarts anything itself. Already current, it says "Up to date (<sha>)."
+
+It changes nothing when there is local work in the way. With uncommitted changes (it
+names up to five files), with a branch other than the default checked out, or with
+commits upstream does not have, it refuses in one line that says why and what to do. It
+never resets, merges, stashes or rebases.
+
+You do not have to watch the repository. A running `ppy serve` (or, with none running,
+the session heartbeat) fetches the default branch every six hours. When the checkout is
+behind, it tells the owner once for each new upstream commit: "A runtime update is
+available (N changes). Run ./bin/ppy update, then restart." It uses the same route as
+everything else the owner hears: the agent's DM, or Papaya's owner DM when there is no
+DM channel. A failed fetch writes one log line and nothing else. `./bin/ppy status` and
+`./bin/ppy setup` show "Update available (N changes): ./bin/ppy update" from what the
+last fetch saw, and fetch nothing themselves.
 
 ## Running as the Papaya manager
 
@@ -1309,7 +1339,7 @@ on the read-only `ask` command set, which can approve, deliver or merge nothing.
 routes a question with no work item only to a connection that registered
 `instruction_intents` including `ask`. `ppy serve` registers `["ask", "work"]` when its
 Papaya client can register extra capabilities (`extra_capabilities` on the client's
-embed builders, since papaya-agent-client 0.18.0, the release this checkout pins). With
+embed builders, since papaya-agent-client 0.18.0; this checkout pins 0.18.2). With
 an older client it registers nothing new and logs one line at
 start: Papaya will refuse to send this machine questions until the client is updated.
 A reply in the request's thread while it is held is read about every fifteen seconds

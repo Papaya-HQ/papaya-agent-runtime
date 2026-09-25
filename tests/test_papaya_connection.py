@@ -213,6 +213,34 @@ def test_connect_passes_quiet_on_to_the_command(client_home, monkeypatch) -> Non
     assert ran == [[CLIENT, "connect", "--harness", "claude", "--quiet"]]
 
 
+def test_setup_asks_the_pinned_client_for_quiet_and_it_says_yes(client_home, monkeypatch) -> None:
+    """The real client this checkout locks (0.18.2+) answers the probe, not a canned help.
+
+    `ppy setup` connects with ``quiet=True``; if the lock ever falls back to a client
+    without `connect --quiet`, setup silently shows the old output again.
+    """
+    import importlib.metadata
+    import sys
+    from pathlib import Path
+
+    version = importlib.metadata.version(papaya.CLIENT_PACKAGE)
+    assert tuple(int(part) for part in version.split(".")[:3]) >= (0, 18, 2), version
+    client = Path(sys.executable).parent / papaya.CLI
+    assert client.is_file(), f"{client} missing: the locked client installs this script"
+    monkeypatch.setattr(papaya, "installed", lambda: str(client))
+    ran: list[list[str]] = []
+
+    def stream(argv, *, timeout, echo):
+        ran.append(argv)
+        return 1, ["nope"]
+
+    monkeypatch.setattr(papaya, "_stream", stream)
+
+    papaya.connect(quiet=True)
+
+    assert ran == [[str(client), "connect", "--harness", "claude", "--quiet"]]
+
+
 def test_connect_reports_a_timeout_without_raising(client_home, monkeypatch) -> None:
     """A person who never clicks Approve must degrade, not break the session."""
     import subprocess
@@ -451,7 +479,8 @@ def test_the_sign_in_link_reaches_the_person_while_the_flow_waits(tmp_path, monk
 def test_connecting_through_uv_keeps_the_client_on_the_path_afterwards(
     client_home, monkeypatch
 ) -> None:
-    """The npm shim installs the client after a connect; the uv path does the same."""
+    """The npm shim installs the client after a connect; the uv path does the same, at
+    the version this runtime locks."""
     calls: list[list[str]] = []
     monkeypatch.setattr(papaya, "installer", lambda: "uv")
     monkeypatch.setattr(papaya, "installed", lambda: None)
@@ -470,7 +499,9 @@ def test_connecting_through_uv_keeps_the_client_on_the_path_afterwards(
     monkeypatch.setattr(papaya, "_run", run)
     result = papaya.connect()
     assert result["ok"] is True and result["via"] == "uv" and result["installed"] is True
-    assert calls == [list(papaya.UV_INSTALL)]
+    locked = papaya.locked_client_version()
+    assert locked is not None
+    assert calls == [[*papaya.UV_INSTALL[:-1], f"{papaya.CLIENT_PACKAGE}=={locked}"]]
 
 
 def test_the_cli_names_the_choices_and_the_exact_command_to_rerun(monkeypatch, capsys) -> None:

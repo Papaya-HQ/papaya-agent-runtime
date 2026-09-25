@@ -28,6 +28,7 @@ those two worlds it is in rather than raising.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -49,7 +50,8 @@ BOOTSTRAP = ("npx", "--yes", "papaya-agent")
 #: has no Node: the runtime always has `uv`, and the shim is only a wrapper around it.
 CLIENT_PACKAGE = "papaya-agent-client"
 UV_BOOTSTRAP = ("uv", "tool", "run", "--from", CLIENT_PACKAGE, CLI)
-#: What the shim does after a successful connect, done by hand on the `uv` path.
+#: What the shim does after a successful connect, done by hand on the `uv` path;
+#: :func:`uv_install_argv` adds the version this runtime locks.
 UV_INSTALL = ("uv", "tool", "install", CLIENT_PACKAGE)
 #: The client's answer when a choice is needed and nobody is at a terminal to make it:
 #: `Multiple Papaya agents found. Re-run with `--agent <agent>`. Available: a; b`.
@@ -446,6 +448,138 @@ def installer() -> str | None:
     return None
 
 
+# ── keeping the person's client current ─────────────────────────────────────
+
+_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+#: `>=0.18.1,<0.19.0` in pyproject: the floor, when there is no lock to read.
+_FLOOR = re.compile(re.escape(CLIENT_PACKAGE) + r"\s*>=\s*(\d+\.\d+\.\d+)")
+#: `papaya-agent-client v0.17.0` in `uv tool list`.
+_UV_TOOL = re.compile(r"^" + re.escape(CLIENT_PACKAGE) + r"\s+v?(\d+\.\d+\.\d+)", re.MULTILINE)
+
+
+def _version_key(version: str) -> tuple[int, ...] | None:
+    match = _VERSION.search(version)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def locked_client_version(root: str | Path | None = None) -> str | None:
+    """The client version this checkout locks: `uv.lock`, else the pyproject floor.
+
+    The version `ppy serve` embeds, so the person's own `papaya-agent` (which runs
+    the connect, the plugin's hooks and the `papaya` MCP server) behaves the same.
+    """
+    import tomllib
+
+    if root is None:
+        from papaya_agent_runtime import readiness
+
+        root = readiness.checkout_root()
+    root = Path(root)
+    try:
+        lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        lock = {}
+    for package in lock.get("package") or []:
+        if isinstance(package, dict) and package.get("name") == CLIENT_PACKAGE:
+            version = str(package.get("version") or "")
+            if _version_key(version) is not None:
+                return version
+    try:
+        text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    floor = _FLOOR.search(text)
+    return floor.group(1) if floor else None
+
+
+def uv_install_argv(version: str | None = None, *, force: bool = False) -> list[str]:
+    """`uv tool install [--force] papaya-agent-client==<locked>`; unpinned with no lock."""
+    version = version or locked_client_version()
+    spec = f"{CLIENT_PACKAGE}=={version}" if version else CLIENT_PACKAGE
+    return ["uv", "tool", "install", *(["--force"] if force else []), spec]
+
+
+def client_version(path: str, *, run: Any = None) -> str | None:
+    """The version of the `papaya-agent` at ``path``, or None when it will not say.
+
+    Its own `--version` first; a client that has none (0.18 and older refuse the
+    flag) is read from `uv tool list`, which is how `setup` and the npm shim install it.
+    """
+    runner = run or _run
+    try:
+        proc = runner([path, "--version"], timeout=PROBE_TIMEOUT)
+        if proc.returncode == 0:
+            match = _VERSION.search(proc.stdout or "")
+            if match is not None:
+                return match.group(0)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        proc = runner(["uv", "tool", "list"], timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    listed = _UV_TOOL.search(proc.stdout or "") if proc.returncode == 0 else None
+    return listed.group(1) if listed else None
+
+
+def keep_client_current(*, root: str | Path | None = None, run: Any = None) -> dict:
+    """Bring the person's own `papaya-agent` up to the version this runtime locks.
+
+    Never raises. ``state`` is what happened, ``line`` the one thing to say (None
+    when there is nothing worth saying):
+
+    - ``absent`` — no client of their own; connect installs the locked one.
+    - ``unknown`` — the client or the lock would not say its version; left alone.
+    - ``current`` / ``newer`` — nothing to do; a newer client is theirs to keep.
+    - ``updated`` — it was older and was reinstalled at the locked version.
+    - ``failed`` — it was older and the reinstall failed; ``command`` is what to run.
+
+    An older client silently falls back to the numbered prompts and the HTTP log
+    lines at connect (2026-09-24: 0.17.0 on the PATH under a runtime locking 0.18.1),
+    because installing it once never upgrades it.
+    """
+    runner = run or _run
+    path = installed()
+    if path is None:
+        return {"state": "absent", "line": None}
+    locked = locked_client_version(root)
+    have = client_version(path, run=runner)
+    result: dict[str, Any] = {"path": path, "before": have, "locked": locked}
+    have_key = _version_key(have or "")
+    locked_key = _version_key(locked or "")
+    if have_key is None or locked_key is None:
+        return {**result, "state": "unknown", "line": None}
+    if have_key == locked_key:
+        return {**result, "state": "current", "line": None}
+    if have_key > locked_key:
+        return {**result, "state": "newer", "line": None}
+    command = uv_install_argv(locked, force=True)
+    try:
+        proc = runner(command, timeout=PROBE_TIMEOUT * 4)
+        ok = proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if ok:
+        after = client_version(installed() or path, run=runner)
+        after_key = _version_key(after or "")
+        ok = after_key is None or after_key >= locked_key
+    if ok:
+        return {
+            **result,
+            "state": "updated",
+            "line": f"Updated papaya-agent {have} → {locked}",
+        }
+    return {
+        **result,
+        "state": "failed",
+        "command": command,
+        "line": (
+            f"papaya-agent {have} is older than {locked} and could not be updated: "
+            f"run {' '.join(command)}"
+        ),
+    }
+
+
 #: `connect --quiet` (client 0.18.1): the sign-in, its questions and the result, without
 #: the client's progress chatter. An older client refuses a flag it does not know.
 QUIET_FLAG = "--quiet"
@@ -558,7 +692,12 @@ def _attached(argv: list[str], *, timeout: int, echo: Any) -> tuple[int, list[st
     sign-in. Output still passes through here, a chunk at a time rather than a line
     at a time, so a question with no newline after it (``Agent number:``) shows
     before the answer is typed, and a copy is kept to read what the client said.
+
+    On a POSIX terminal the client runs under a pseudo-terminal (:func:`_on_pty`),
+    because it offers its arrow-key pickers only when its stdout is a terminal too.
     """
+    if _pty_wanted():
+        return _on_pty(argv, timeout=timeout, echo=echo)
     import codecs
     import threading
 
@@ -604,6 +743,170 @@ def _attached(argv: list[str], *, timeout: int, echo: Any) -> tuple[int, list[st
     return code, "".join(said).splitlines()
 
 
+def _pty_wanted(stdin: Any = None) -> bool:
+    """Run the client under a pseudo-terminal: POSIX, with a person at the keyboard."""
+    if os.name != "posix":
+        return False
+    stream = stdin if stdin is not None else sys.stdin
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+#: Escape sequences the client's pickers draw with: CSI, OSC, and the two-byte ones.
+_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+
+
+def _plain(text: str) -> str:
+    """What a terminal would leave on screen, near enough to read lines from.
+
+    Escapes dropped, and a line redrawn after a carriage return is its last drawing.
+    """
+    lines = []
+    for line in _ANSI.sub("", text).replace("\r\n", "\n").split("\n"):
+        drawn = [part for part in line.split("\r") if part]
+        lines.append(drawn[-1] if drawn else "")
+    return "\n".join(lines)
+
+
+def _take_terminal() -> None:
+    """In the child, after `setsid`: make the pty its controlling terminal, so Ctrl-C
+    typed while the client is not reading keys still reaches it as SIGINT."""
+    import fcntl
+    import termios
+
+    with contextlib.suppress(OSError):
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
+def _copy_window_size(source: int, target: int) -> None:
+    import fcntl
+    import termios
+
+    with contextlib.suppress(OSError):
+        size = fcntl.ioctl(source, termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(target, termios.TIOCSWINSZ, size)
+
+
+def _stop(proc: subprocess.Popen | None) -> None:
+    """Kill the client and everything it started (`npx`/`uv` run it as a grandchild)."""
+    import signal
+
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=5)
+
+
+def _on_pty(
+    argv: list[str], *, timeout: int, echo: Any, stdin_fd: int | None = None
+) -> tuple[int, list[str]]:
+    """Run ``argv`` on a pseudo-terminal, relaying the person's keys to it and its output back.
+
+    The client draws its arrow-key workspace and agent pickers only when both its
+    stdin and stdout are terminals; with stdout piped it falls back to numbered
+    prompts. The pty is that terminal, and it still passes every byte through here,
+    so what the client said is kept. The person's terminal is raw for the duration —
+    each key goes straight to the client, whose pty echoes it — and is restored on
+    every way out. ``stdin_fd`` is the terminal to read keys from (a test's pty).
+    """
+    import codecs
+    import pty
+    import select
+    import signal
+    import termios
+    import time
+    import tty
+
+    env = client_env()
+    env["PYTHONUNBUFFERED"] = "1"
+    out = echo if echo is not None else sys.stdout
+    keys = sys.stdin.fileno() if stdin_fd is None else stdin_fd
+    master, slave = pty.openpty()
+    _copy_window_size(keys, slave)
+    saved = termios.tcgetattr(keys)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    said: list[str] = []
+    proc: subprocess.Popen | None = None
+    resized: Any = None
+    interrupted = False
+
+    def show(chunk: bytes) -> None:
+        text = decoder.decode(chunk, final=not chunk)
+        if text:
+            said.append(text)
+            print(text, end="", file=out, flush=True)
+
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            argv,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            start_new_session=True,
+            preexec_fn=_take_terminal,  # noqa: PLW1509 - setup runs no threads here
+        )
+        os.close(slave)
+        slave = -1
+        try:
+            resized = signal.signal(signal.SIGWINCH, lambda *_: _copy_window_size(keys, master))
+        except ValueError:  # not the main thread: the size stays as it started
+            resized = None
+        tty.setraw(keys, termios.TCSANOW)
+        deadline = time.monotonic() + timeout
+        reading = True
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            watched = [master, keys] if reading else [master]
+            ready, _, _ = select.select(watched, [], [], min(left, 0.1))
+            if master in ready:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:  # EIO: every copy of the client's side is closed
+                    chunk = b""
+                if not chunk:
+                    break
+                show(chunk)
+            elif proc.poll() is not None:
+                # Exited, and nothing left to read (a descendant may still hold the pty).
+                break
+            if keys in ready:
+                typed = os.read(keys, 1024)
+                if typed:
+                    interrupted = interrupted or b"\x03" in typed
+                    os.write(master, typed)
+                else:
+                    reading = False
+        show(b"")
+        code = proc.wait(timeout=max(deadline - time.monotonic(), 1))
+    except subprocess.TimeoutExpired as exc:
+        _stop(proc)
+        exc.output = _plain("".join(said))
+        raise
+    except BaseException:
+        _stop(proc)
+        raise
+    finally:
+        termios.tcsetattr(keys, termios.TCSADRAIN, saved)
+        if resized is not None:
+            signal.signal(signal.SIGWINCH, resized)
+        os.close(master)
+        if slave >= 0:
+            os.close(slave)
+    if interrupted and code != 0:
+        # Ctrl-C at the client's question ends setup, as it did before the pty.
+        raise KeyboardInterrupt
+    return code, _plain("".join(said)).splitlines()
+
+
 #: Where a line of the client's starts. The answer typed at `Workspace number: ` is the
 #: terminal's echo, not the client's output, so in the copy the next line runs on
 #: from the question.
@@ -614,8 +917,9 @@ _STARTS = r"(?:^|number: )"
 _CONNECTED = re.compile(_STARTS + r"Connected as .+? in (?P<workspace>.+?)\.(?: Open .*)?$")
 #: The client's browser flow names a lone candidate instead of asking: `Agent: <label>`.
 _ONLY_AGENT = re.compile(_STARTS + r"Agent: \S")
-#: …and lists several before asking for a number.
-_ASKED_AGENT = re.compile(_STARTS + r"Choose an? agent:")
+#: …and lists several before asking: `Choose an agent:` then a number, or the
+#: arrow-key list's `? Choose an agent` on a terminal.
+_ASKED_AGENT = re.compile(r"Choose an? agent\b")
 
 
 def connect(
@@ -719,7 +1023,7 @@ def connect(
         if how == "uv" and not installed():
             # The npm shim keeps the client on the PATH after a connect; do the same.
             try:
-                kept = _run(list(UV_INSTALL), timeout=PROBE_TIMEOUT * 4)
+                kept = _run(uv_install_argv(), timeout=PROBE_TIMEOUT * 4)
                 result["installed"] = kept.returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 result["installed"] = False
@@ -1007,7 +1311,9 @@ __all__ = [
     "context",
     "identity",
     "installed",
+    "keep_client_current",
     "known_agent_kind",
+    "locked_client_version",
     "remember_agent_kind",
     "signed_in",
     "status",

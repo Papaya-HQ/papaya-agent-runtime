@@ -50,6 +50,7 @@ from papaya_agent_runtime import (
     outreach,
     owed,
     supervision,
+    update,
 )
 from papaya_agent_runtime.state import init_db, store
 
@@ -727,10 +728,11 @@ HYGIENE_EVERY_SECONDS = 60 * 60.0
 
 
 class UpkeepStep:
-    """Hourly hygiene and a blocker re-check every fifteen minutes, when no serve does them.
+    """Hourly hygiene, a blocker re-check every fifteen minutes and the six-hourly update
+    check, when no serve does them.
 
-    The same `supervision.hygiene_step` and `supervision.blocker_step` serve's rounds and
-    blocker watch run. Never raises.
+    The same `supervision.hygiene_step`, `supervision.blocker_step` and `update.check_due`
+    serve's rounds and blocker watch run. Never raises.
     """
 
     def __init__(self) -> None:
@@ -763,6 +765,9 @@ class UpkeepStep:
                 # The deficiency lane serve's rounds run: recorded defects open as issues.
                 self._deficiencies_at = now
                 lines += lanes.deficiency_step()
+            # The update check serve's rounds run: a fetch every six hours, the owner
+            # told once per upstream head (its clock is on disk, shared with serve).
+            lines += update.step(now, say=outreach.post_dm)
             last = supervision.last_hygiene_at()
             if last is None or (now - last).total_seconds() >= HYGIENE_EVERY_SECONDS:
                 lines += supervision.hygiene_step(
