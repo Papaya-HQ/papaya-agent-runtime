@@ -893,7 +893,13 @@ def post_origin(
         text = instructions.for_person(body, instruction, allow_empty=True)
         if not text:
             return False
-        kind = {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}
+        kind: dict[str, str] = (
+            {"kind": papaya_events.REPLY_PROGRESS} if instruction.speaks_kind else {}
+        )
+        if instruction.reply.get("kind") == papaya_events.REPLY_MACHINE_TASK:
+            # Asked from a connected tool, whose route takes milestones: an ask
+            # waiting on the person is the blocker that needs them.
+            kind["milestone"] = papaya_events.MILESTONE_BLOCKED
         posted = (post or papaya_events.post_instruction_reply)(
             instruction.reply, text, environ=env, **kind
         )
