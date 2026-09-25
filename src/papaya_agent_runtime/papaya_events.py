@@ -492,6 +492,17 @@ def read_agent_record(
 
 REPLY_THREAD = "thread_reply"
 REPLY_DM = "agent_dm_reply"
+#: An instruction asked from a connected tool (a Linear issue, say): its reply block
+#: points at the one machine-task reply route, which takes milestones, not free lines.
+REPLY_MACHINE_TASK = "machine_task_reply"
+#: What a machine-task reply says (`reply_to_machine_task`), each sent once per task.
+MILESTONE_PICKED_UP = "picked_up"
+MILESTONE_DELIVERED = "delivered"
+MILESTONE_BLOCKED = "blocked"
+MILESTONE_DONE = "done"
+MILESTONES = (MILESTONE_PICKED_UP, MILESTONE_DELIVERED, MILESTONE_BLOCKED, MILESTONE_DONE)
+#: Papaya's bound on a machine-task reply's text.
+MACHINE_TASK_REPLY_MAX = 10_000
 #: Papaya's bounds on a result (`report_machine_instruction_result`).
 RESULT_SUMMARY_MAX = 10_000
 RESULT_MESSAGE_ID_MAX = 128
@@ -614,10 +625,54 @@ def _workspace_path(environ: Mapping[str, str]) -> str:
     return re.escape(workspace) if workspace else "[^/]+"
 
 
+def machine_task_reply_path(path: object, environ: Mapping[str, str]) -> str:
+    """A machine task's reply route, checked against this workspace, or refuse."""
+    found = str(path or "")
+    ws = _workspace_path(environ)
+    if not re.fullmatch(rf"/api/v1/workspaces/{ws}/machine-tasks/[^/]+/reply", found):
+        raise PapayaEventError("a machine task's reply path is not in this workspace")
+    return found
+
+
+def post_machine_task_reply(
+    path: str,
+    text: str,
+    milestone: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    opener=urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Send one milestone where a machine task was asked (`reply_to_machine_task`).
+
+    Returns Papaya's answer (`status`, `delivered_to`, `replayed`, ...), or ``None``
+    when there is nothing to call with (not connected). Papaya sends each milestone
+    once per task: a resend answers ``replayed: true`` and posts nothing. A refusal
+    raises :class:`PapayaHTTPError`.
+    """
+    if milestone not in MILESTONES:
+        raise PapayaEventError(f"a machine task has no milestone {milestone!r}")
+    line = str(text or "").strip()[:MACHINE_TASK_REPLY_MAX]
+    if not line:
+        raise PapayaEventError("a machine task reply needs text")
+    env = os.environ if environ is None else environ
+    url = _api_url(env, machine_task_reply_path(path, env))
+    token = _clean(env.get(_PAPAYA_TOKEN_ENV))
+    if url is None or token is None:
+        return None
+    return _papaya_request(
+        url,
+        token,
+        method="POST",
+        body={"text": line, "milestone": milestone},
+        what="machine task reply",
+        opener=opener,
+    )
+
+
 def reply_paths(reply: Mapping[str, Any], environ: Mapping[str, str]) -> tuple[str, str]:
     """The reply block's ``(path, result_path)``, checked against this workspace.
 
-    Only the two shapes the wire names, in this connection's workspace: a path
+    Only the shapes the wire names, in this connection's workspace: a path
     anywhere else is not somewhere this machine was asked, whoever wrote it.
     """
     ws = _workspace_path(environ)
@@ -627,6 +682,7 @@ def reply_paths(reply: Mapping[str, Any], environ: Mapping[str, str]) -> tuple[s
     shapes = {
         REPLY_THREAD: rf"/api/v1/workspaces/{ws}/channels/[^/]+/messages",
         REPLY_DM: rf"/api/v1/workspaces/{ws}/polyweave-agents/me/dm-conversations/[^/]+/replies",
+        REPLY_MACHINE_TASK: rf"/api/v1/workspaces/{ws}/machine-tasks/[^/]+/reply",
     }
     shape = shapes.get(kind)
     if shape is None or str(reply.get("method") or "POST").upper() != "POST":
@@ -655,6 +711,7 @@ def post_instruction_reply(
     environ: Mapping[str, str] | None = None,
     opener=urllib.request.urlopen,
     kind: str | None = None,
+    milestone: str | None = None,
 ) -> str | None:
     """Answer an instruction where it was asked. Returns the posted message's id.
 
@@ -666,9 +723,26 @@ def post_instruction_reply(
     ``kind`` (`progress` or `final`) is sent only when given, and a caller gives it
     only when the event said this Papaya takes it (:attr:`Instruction.speaks_kind`):
     an older DM route refuses the key outright.
+
+    An instruction asked from a connected tool answers through the machine-task
+    route, which takes one reply per ``milestone``: the final answer is ``done``, and
+    a progress line reaches it only when it is one (``milestone``) — any other line
+    is not sent and answers ``None``.
     """
     env = os.environ if environ is None else environ
     path, _result = reply_paths(reply, env)
+    if reply.get("kind") == REPLY_MACHINE_TASK:
+        if milestone is None and kind != REPLY_PROGRESS:
+            milestone = MILESTONE_DONE
+        if milestone is None:
+            return None
+        sent = post_machine_task_reply(path, text, milestone, environ=env, opener=opener)
+        if sent is None:
+            return None
+        where = sent.get("delivered_to")
+        ref = where.get("ref") if isinstance(where, dict) else None
+        found = ref.get("message_id") if isinstance(ref, dict) else None
+        return str(found) if found else ""
     url = _api_url(env, path)
     token = _clean(env.get(_PAPAYA_TOKEN_ENV))
     if url is None or token is None:
@@ -1038,7 +1112,16 @@ __all__ = [
     "PAPAYA_EVENT_KEY",
     "PAPAYA_EVENT_METADATA",
     "REPLY_DM",
+    "REPLY_MACHINE_TASK",
     "REPLY_THREAD",
+    "MACHINE_TASK_REPLY_MAX",
+    "MILESTONES",
+    "MILESTONE_BLOCKED",
+    "MILESTONE_DELIVERED",
+    "MILESTONE_DONE",
+    "MILESTONE_PICKED_UP",
+    "machine_task_reply_path",
+    "post_machine_task_reply",
     "SUBJECT_INSTRUCTION",
     "SUBJECT_KINDS",
     "SUBJECT_WORK_ITEM",

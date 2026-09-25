@@ -712,9 +712,11 @@ def merge_step(conn: sqlite3.Connection, now: datetime) -> list[str]:
         entries = pr_states(conn)
         if not entries:
             return []
-        from papaya_agent_runtime import rounds
+        from papaya_agent_runtime import machine_tasks, rounds
 
-        lines = supervision.merged_step(entries, post=supervision.post_as_agent)
+        lines = supervision.merged_step(
+            entries, post=supervision.post_as_agent, reply=machine_tasks.send_as_agent
+        )
         return lines + supervision.green_step(
             entries, now, post=supervision.post_as_agent, merge=rounds._default_merge
         )

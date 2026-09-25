@@ -469,6 +469,7 @@ class FakePapaya:
         self.updated_at = "2026-09-16T10:00:00Z"
         self.acceptance_criteria = acceptance_criteria
         self.stored: dict[str, list[dict[str, Any]]] = {}
+        self.milestones_said: set[tuple[str, str]] = set()
         FakePapaya.latest = self
 
     def __call__(self, request, timeout):
@@ -476,6 +477,20 @@ class FakePapaya:
         path = urllib.parse.unquote(urllib.parse.urlparse(request.full_url).path)
         with self._lock:
             self.calls.append((request.method, path, body))
+            if "/machine-tasks/" in path:
+                # Papaya's one reply route (backend #1077): once per milestone.
+                task = path.split("/machine-tasks/", 1)[1].split("/", 1)[0]
+                replayed = (task, body["milestone"]) in self.milestones_said
+                self.milestones_said.add((task, body["milestone"]))
+                answer = {
+                    "id": f"reply-{len(self.milestones_said)}",
+                    "task_id": task,
+                    "milestone": body["milestone"],
+                    "status": "delivered",
+                    "delivered_to": {"kind": "papaya_thread", "ref": {"message_id": "msg-1"}},
+                    "replayed": replayed,
+                }
+                return _Body(json.dumps(answer).encode())
             item = self._item(path)
             if path.endswith("/comments"):
                 thread = self.stored.setdefault(item, [])
@@ -541,6 +556,19 @@ class FakePapaya:
                 (self._item(path), body["body"])
                 for method, path, body in self.calls
                 if method == "POST" and path.endswith("/comments")
+            ]
+
+    def milestones(self) -> list[tuple[str, str, str]]:
+        """Every machine-task reply sent: ``(task, milestone, text)``, in order."""
+        with self._lock:
+            return [
+                (
+                    path.split("/machine-tasks/", 1)[1].split("/", 1)[0],
+                    body["milestone"],
+                    body["text"],
+                )
+                for method, path, body in self.calls
+                if method == "POST" and "/machine-tasks/" in path
             ]
 
 
