@@ -1111,3 +1111,30 @@ def test_the_launcher_prints_the_uv_install_line_when_uv_is_missing(tmp_path):
 
     assert proc.returncode == 1
     assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in proc.stderr
+
+
+def test_setup_can_ask_for_the_persons_engineering_agent(world):
+    options = guided.Options(
+        interactive=False,
+        create_engineer=True,
+        workspace="papaya-hq",
+        repos=("acme/api",),
+        skip_tools=True,
+    )
+
+    code, _ = _setup(world, options, shell=_healthy(), picker=Silent())
+
+    assert code == 0
+    assert [c["create_engineer"] for c in world.connects] == [True]
+
+
+def test_a_named_agent_wins_over_create_engineer(world):
+    """The client refuses the pair, so setup never sends both."""
+    options = guided.Options(
+        interactive=False, agent="Bea", create_engineer=True, repos=("acme/api",), skip_tools=True
+    )
+
+    code, _ = _setup(world, options, shell=_healthy(), picker=Silent())
+
+    assert code == 0
+    assert [(c["agent"], c["create_engineer"]) for c in world.connects] == [("Bea", False)]

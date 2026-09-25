@@ -428,22 +428,28 @@ quietly; do not narrate the steps or report diagnostics.
 
    Once, plain, and never again that session: no nag, no comment anywhere.
    `PPY_QUIET_INVITE=1` or config `papaya.invite = false` turns it off, and then you
-   say nothing about it. If they say yes, run `ppy papaya connect` yourself, with a
-   timeout of at least ten minutes: it installs the client when this machine has
+   say nothing about it. If they say yes, run `ppy papaya connect --create-engineer`
+   yourself, with a timeout of at least ten minutes. `--create-engineer` connects them
+   as their own engineering agent and creates it in the workspace when they have none:
+   that is the agent this runtime is meant to run as, so use it unless they name
+   another agent (then `--agent`, never both). If Papaya cannot create one
+   (`no_engineer`), relay the client's line: it says to create the agent in Papaya →
+   Agents → New agent, then connect again. The command installs the client when this machine has
    none (`npx papaya-agent`, or the same client through `uv` on a machine without
    Node, then keeps `papaya-agent` on the PATH for the plugin's hooks and the MCP
    server, at the version this checkout locks; `ppy setup` and `ppy doctor` reinstall
    an older one and say so in one line), opens a sign-in link and waits for Approve. Relay the link it prints in
-   case no browser opened. When the account has several workspaces or agents it
-   exits listing them: ask the person which one in the conversation, then re-run with
-   the `--workspace` or `--agent` it names — never guess. With neither Node nor `uv`
+   case no browser opened. When the account has several workspaces (or, without
+   `--create-engineer`, several agents) it exits listing them: ask the person which
+   one in the conversation, then re-run with the `--workspace` or `--agent` it names —
+   never guess. With neither Node nor `uv`
    on the machine it says which to install. On a machine with no browser (SSH, a
    server, WSL2), add `--device`: the person approves a code from any device and
    chooses the workspace and agent in the Papaya app as they approve it, so pass no
    `--workspace`/`--agent` with it (the client ignores them there). The
    whole setup for a machine without the desktop app, including keeping `ppy serve`
-   running, is the README's
-   [Run it on a machine without the app](../README.md#run-it-on-a-machine-without-the-app);
+   running, is `docs/operating.md`'s
+   [Run it on a machine without the app](operating.md#run-it-on-a-machine-without-the-app);
    point a person there rather than restating it. Once connected, run `ppy papaya tools`
    and ask them to run `/mcp`. A connection made mid-session is picked up by the next
    `ppy serve` start, with no restart
@@ -520,7 +526,7 @@ quietly; do not narrate the steps or report diagnostics.
    exits 76 and, supervised, sends the fatal error `retired` naming who took over, so
    its launcher does not start it again. A service manager that keeps `ppy serve`
    running on a machine without the app must not restart it on 76 or 75 either (the
-   README's systemd unit sets `RestartPreventExitStatus=75 76`). Nothing is
+   operating guide's systemd unit sets `RestartPreventExitStatus=75 76`). Nothing is
    signalled that is not the holder at that moment: the lock file names the holder's pid and process start, and both
    are checked before every request and signal. A lock whose holder is gone is taken
    with one line. A start that loses the race to a newer one says "Another start took

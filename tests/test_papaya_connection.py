@@ -755,3 +755,85 @@ def test_the_client_runs_unbuffered_so_the_link_is_not_held_back(tmp_path, monke
     )
     code, lines = papaya._stream([papaya.installed()], timeout=30, echo=None)
     assert code == 0 and lines == ["PYTHONUNBUFFERED=1"]
+
+
+# ── --create-engineer ────────────────────────────────────────────────────────
+
+#: 0.18.2: `connect --create-engineer` beside `--quiet`.
+ENGINEER_HELP = (
+    NEW_HELP.replace("[--quiet]", "[--quiet] [--create-engineer]")
+    + "  --create-engineer     Connect to your engineering agent, creating it first.\n"
+)
+
+
+def test_create_engineer_is_passed_to_a_client_that_offers_it(monkeypatch) -> None:
+    _client_help(monkeypatch, stdout=ENGINEER_HELP)
+
+    argv = papaya.connect_argv(create_engineer=True)
+
+    assert argv == [CLIENT, "connect", "--harness", "claude", "--create-engineer"]
+
+
+def test_create_engineer_is_dropped_for_a_client_without_it(monkeypatch) -> None:
+    """An older client would refuse the flag outright; without it the picker still runs."""
+    _client_help(monkeypatch, stdout=NEW_HELP)
+
+    assert papaya.connect_argv(create_engineer=True) == [CLIENT, "connect", "--harness", "claude"]
+
+
+@pytest.mark.parametrize("extra", [{"agent": "Bea"}, {"device": True}])
+def test_create_engineer_yields_to_a_named_agent_and_to_a_device_code(monkeypatch, extra) -> None:
+    """The client refuses `--agent` beside it and ignores it with `--device`."""
+    _client_help(monkeypatch, stdout=ENGINEER_HELP)
+
+    argv = papaya.connect_argv(create_engineer=True, **extra)
+
+    assert "--create-engineer" not in argv
+
+
+def test_the_locked_client_offers_create_engineer(client_home, monkeypatch) -> None:
+    """The real client this checkout locks (0.18.2+) answers the probe, not a canned help."""
+    import sys
+    from pathlib import Path
+
+    client = Path(sys.executable).parent / papaya.CLI
+    assert client.is_file(), f"{client} missing: the locked client installs this script"
+    monkeypatch.setattr(papaya, "installed", lambda: str(client))
+    ran: list[list[str]] = []
+
+    def stream(argv, *, timeout, echo):
+        ran.append(argv)
+        return 1, ["nope"]
+
+    monkeypatch.setattr(papaya, "_stream", stream)
+
+    result = papaya.connect(create_engineer=True)
+
+    assert ran == [[str(client), "connect", "--harness", "claude", "--create-engineer"]]
+    assert result["create_engineer"] is True
+
+
+def test_a_server_that_cannot_create_an_engineer_is_one_reason(client_home, monkeypatch) -> None:
+    _client_help(monkeypatch, stdout=ENGINEER_HELP)
+    line = (
+        "This Papaya server can't create an engineering agent yet; "
+        "create one in Papaya → Agents → New agent."
+    )
+    monkeypatch.setattr(papaya, "_stream", lambda argv, *, timeout, echo: (1, [line]))
+
+    result = papaya.connect(create_engineer=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "no_engineer"
+    assert result["detail"] == line
+    assert result["create_engineer"] is True
+
+
+def test_a_connect_without_the_flag_reports_it_was_not_asked(client_home, monkeypatch) -> None:
+    _client_help(monkeypatch, stdout=NEW_HELP)
+    monkeypatch.setattr(papaya, "_stream", lambda argv, *, timeout, echo: (1, ["nope"]))
+
+    result = papaya.connect(create_engineer=True)
+
+    assert result["reason"] == "failed"
+    assert result["create_engineer"] is False

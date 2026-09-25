@@ -267,3 +267,14 @@ def test_no_warning_for_fake_against_a_local_origin(
 
     assert rc == 0
     assert FAKE_REMOTE_WARNING not in capsys.readouterr().out
+
+
+def test_papaya_connect_refuses_create_engineer_beside_a_named_agent() -> None:
+    """The client exits 2 on the pair; the parser says so before anything is installed."""
+    from papaya_agent_runtime import cli
+
+    parser = cli.build_parser()
+    assert parser.parse_args(["papaya", "connect", "--create-engineer"]).create_engineer is True
+    assert parser.parse_args(["setup", "--create-engineer"]).create_engineer is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["papaya", "connect", "--create-engineer", "--agent", "Bea"])

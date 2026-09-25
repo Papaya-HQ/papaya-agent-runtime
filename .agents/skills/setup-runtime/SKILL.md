@@ -30,7 +30,7 @@ sign-ins need the person's terminal); the steps below are the session's own path
    rerun after a partial failure. Linux and macOS run natively; Windows only inside
    WSL2 (the runtime needs `fcntl`). For a machine with no desktop app — a server,
    SSH, WSL2 — the whole procedure, including keeping `ppy serve` running, is the
-   README's "Run it on a machine without the app"; follow and link it, don't restate it.
+   `docs/operating.md` section "Run it on a machine without the app"; follow and link it, don't restate it.
 2. Run `ppy doctor` (or `ppy doctor --json`). Read the harness, requirement, and
    companion-tool sections.
 3. If a harness is installed but unauthenticated, hand the exact login step to
@@ -55,7 +55,7 @@ sign-ins need the person's terminal); the steps below are the session's own path
    the same, and say once the one line the runtime prints ("Running without Papaya.
    It's better with it: … `ppy papaya connect` sets it up … https://trypapaya.ai") —
    unless `PPY_QUIET_INVITE=1` or `papaya.invite = false` silenced it — offering to do
-   it for them. Never wait on it. If they say yes, run `ppy papaya connect` yourself
+   it for them. Never wait on it. If they say yes, run `ppy papaya connect --create-engineer` yourself (their own engineering agent, created when they have none; `--agent` instead only when they name another)
    with a timeout of at least ten minutes: it installs the client when there is none
    (`npx papaya-agent`, or `uv` on a machine without Node), opens a sign-in link, pins
    the machine and installs the harness plugin; their only step is clicking Approve.
