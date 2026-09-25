@@ -73,7 +73,9 @@ def on_path(monkeypatch):
     monkeypatch.setattr(papaya, "installed", lambda: CLIENT)
 
 
-REINSTALL = ["uv", "tool", "install", "--force", f"{papaya.CLIENT_PACKAGE}=={LOCKED}"]
+REINSTALL = ["uv", "tool", "install", "--quiet", "--force", f"{papaya.CLIENT_PACKAGE}=={LOCKED}"]
+#: What a person is told to run by hand: the same, without `--quiet`.
+BY_HAND = ["uv", "tool", "install", "--force", f"{papaya.CLIENT_PACKAGE}=={LOCKED}"]
 
 
 # ── the locked version ──────────────────────────────────────────────────────
@@ -142,11 +144,41 @@ def test_a_failed_reinstall_names_the_command_to_run(checkout, on_path) -> None:
     client = FakeClient("0.17.0", reinstall=1)
     result = papaya.keep_client_current(root=checkout, run=client)
     assert result["state"] == "failed"
-    assert result["command"] == REINSTALL
+    assert REINSTALL in client.calls
+    assert result["command"] == BY_HAND
     assert result["line"] == (
-        "papaya-agent 0.17.0 is older than 0.18.2 and could not be updated: "
+        "papaya-agent 0.17.0 is older than 0.18.2 and could not be updated "
+        "(error: network unreachable): "
         f"run uv tool install --force {papaya.CLIENT_PACKAGE}==0.18.2"
     )
+
+
+def test_the_reinstall_is_quiet_and_a_failure_still_says_what_uv_said(checkout, on_path) -> None:
+    """`--quiet` drops uv's resolve and install chatter, never its errors: the last lines
+    of a failed install are the reason setup and doctor give."""
+    client = FakeClient("0.17.0")
+
+    def run(argv, **kw):
+        if argv[:3] == ["uv", "tool", "install"]:
+            assert papaya.UV_QUIET in argv
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                "",
+                "Resolved 70 packages in 1.2s\n"
+                "  × Failed to download `pydantic-core==2.41.5`\n"
+                "  ├─▶ Request failed after 3 retries\n"
+                "  ╰─▶ dns error: failed to lookup address information\n",
+            )
+        return client(argv, **kw)
+
+    result = papaya.keep_client_current(root=checkout, run=run)
+    assert result["state"] == "failed"
+    assert result["detail"] == (
+        "× Failed to download `pydantic-core==2.41.5` / ├─▶ Request failed after 3 retries"
+        " / ╰─▶ dns error: failed to lookup address information"
+    )
+    assert result["detail"] in result["line"]
 
 
 def test_a_client_that_will_not_say_its_version_is_left_alone(checkout, on_path) -> None:
@@ -196,6 +228,7 @@ def test_doctor_updates_an_older_client_and_says_so(on_path, monkeypatch, tmp_pa
         "uv",
         "tool",
         "install",
+        "--quiet",
         "--force",
         f"{papaya.CLIENT_PACKAGE}=={locked}",
     ] in client.calls
@@ -216,7 +249,10 @@ def test_doctor_names_the_command_when_the_update_fails(on_path, monkeypatch, tm
     )
     data = doctor.collect()
     assert data["papaya_client"]["state"] == "failed"
-    assert "could not be updated: run uv tool install --force" in doctor.render_text(data)
+    assert (
+        "could not be updated (error: network unreachable): run uv tool install --force"
+        in doctor.render_text(data)
+    )
 
 
 # ── the pseudo-terminal ─────────────────────────────────────────────────────
@@ -364,3 +400,144 @@ def test_what_the_pickers_draw_still_reads_as_the_clients_lines() -> None:
     lines = papaya._plain(drawn).splitlines()
     assert papaya._agent_choice(lines) == "asked"
     assert papaya._workspace_named(lines) == "Papaya HQ"
+
+
+# ── uv stays quiet ──────────────────────────────────────────────────────────
+#
+# 2026-09-25: on a machine with no `papaya-agent`, `ppy setup` ran the client through
+# `uv tool run`, and uv's resolve and install progress (about 70 packages, with ANSI
+# progress bars) came through the pty relay onto the person's terminal.
+
+#: A stand-in `uv` as loud as the real one: its resolve and install lines unless given
+#: `--quiet`, and a progress bar unless that or `UV_NO_PROGRESS` turns it off. `tool run`
+#: then acts as the client; `tool install` fails when `STUB_UV_FAIL` is set.
+STUB_UV = r"""
+import json, os, sys
+
+args = sys.argv[1:]
+cut = args.index("--from") + 2 if "--from" in args else len(args)
+ours, theirs = args[:cut], args[cut + 1 :]
+quiet = "--quiet" in ours
+if not quiet:
+    if os.environ.get("UV_NO_PROGRESS") != "1":
+        sys.stderr.write("\x1b[2K\x1b[36m⠙\x1b[0m Preparing packages... (3/70)\r")
+    sys.stderr.write("Resolved 70 packages in 812ms\nInstalled 70 packages in 95ms\n")
+    sys.stderr.write(" + httpx==0.28.1\n")
+    sys.stderr.flush()
+if ours[:2] == ["tool", "install"]:
+    if os.environ.get("STUB_UV_FAIL"):
+        sys.stderr.write("  × Failed to download `pydantic-core==2.41.5`\n")
+        sys.stderr.write("  ╰─▶ dns error: failed to lookup address information\n")
+        sys.exit(1)
+    if not quiet:
+        print("Installed 1 executable: papaya-agent")
+    sys.exit(0)
+if theirs[:1] == ["connect"] and "--help" in theirs:
+    print("  --quiet  print only the sign-in link or code and the final Connected line")
+    sys.exit(0)
+if theirs[:1] == ["connect"]:
+    stamp = "2026-09-25T09:00:00+00:00"
+    agent = {
+        "agent_id": "a-1", "agent_name": "Engineering Agent",
+        "agent_handle": "engineering_agent", "workspace_id": "w-1",
+        "connection_id": "c-1", "client_token_updated_at": stamp,
+    }
+    home = os.environ["PPY_PAPAYA_HOME"]
+    with open(os.path.join(home, "config.json"), "w") as f:
+        json.dump({"agents": {"a-1": agent},
+                   "connect": {"agent_id": "a-1", "harness": "claude", "updated_at": stamp}}, f)
+    print("Open https://app.trypapaya.ai/signin?code=abc to sign in", flush=True)
+    print("Connected as Engineering Agent (@engineering_agent) in Papaya HQ.", flush=True)
+    sys.exit(0)
+sys.exit(f"stub uv: unexpected {args}")
+"""
+
+#: What only uv says. None of it may reach the person.
+UV_CHATTER = ("Preparing packages", "Resolved 70", "Installed 70", "+ httpx", "Installed 1")
+
+
+@pytest.fixture
+def fresh_machine(tmp_path, monkeypatch) -> Path:
+    """No `papaya-agent`, no Node: only the stand-in `uv` on the PATH."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text(f"#!{sys.executable}\n{STUB_UV}", encoding="utf-8")
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.delenv("UV_NO_PROGRESS", raising=False)
+    monkeypatch.delenv("STUB_UV_FAIL", raising=False)
+    assert papaya.installer() == "uv"
+    return uv
+
+
+def test_every_uv_call_for_the_client_is_quiet(fresh_machine) -> None:
+    argv = papaya.connect_argv(quiet=True)
+    assert argv[: len(papaya.UV_BOOTSTRAP)] == list(papaya.UV_BOOTSTRAP)
+    assert argv[:4] == ["uv", "tool", "run", papaya.UV_QUIET]
+    # The client's own `--quiet` is still asked for, after the client's name.
+    assert argv[-1] == papaya.QUIET_FLAG
+    assert papaya.uv_install_argv("0.18.2")[:4] == ["uv", "tool", "install", papaya.UV_QUIET]
+    assert papaya.uv_install_argv("0.18.2", force=True, quiet=False) == BY_HAND
+    assert papaya.client_env()[papaya.UV_NO_PROGRESS] == "1"
+
+
+def test_the_stand_in_uv_is_as_loud_as_the_real_one(fresh_machine) -> None:
+    """Without the quiet setting the stub spills exactly what setup used to show."""
+    proc = subprocess.run(
+        ["uv", "tool", "run", "--from", papaya.CLIENT_PACKAGE, papaya.CLI, "connect", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert all(said in proc.stderr for said in UV_CHATTER[:4])
+
+
+@posix_only
+def test_nothing_of_uvs_reaches_the_terminal_on_a_fresh_machine(fresh_machine) -> None:
+    person, keys = _terminal()
+    try:
+        echo = io.StringIO()
+        code, lines = papaya._on_pty(
+            papaya.connect_argv(quiet=True), timeout=30, echo=echo, stdin_fd=keys
+        )
+        shown = echo.getvalue()
+        assert code == 0, shown
+        assert "Connected as Engineering Agent (@engineering_agent) in Papaya HQ." in lines
+        assert not [said for said in UV_CHATTER if said in shown], shown
+        assert "\x1b[36m" not in shown
+    finally:
+        os.close(person)
+        os.close(keys)
+
+
+def test_connecting_through_uv_installs_the_client_without_a_word_from_uv(fresh_machine) -> None:
+    echo = io.StringIO()
+    result = papaya.connect(timeout=30, echo=echo, quiet=True)
+    assert result["ok"] is True and result["via"] == "uv", result
+    assert result["installed"] is True and "install_detail" not in result
+    assert not [said for said in UV_CHATTER if said in echo.getvalue()], echo.getvalue()
+
+
+def test_a_failed_install_after_connect_keeps_what_uv_said(fresh_machine, monkeypatch) -> None:
+    monkeypatch.setenv("STUB_UV_FAIL", "1")
+    result = papaya.connect(timeout=30, echo=io.StringIO(), quiet=True)
+    assert result["ok"] is True and result["installed"] is False
+    assert result["install_detail"] == (
+        "× Failed to download `pydantic-core==2.41.5`"
+        " / ╰─▶ dns error: failed to lookup address information"
+    )
+
+
+def test_a_failed_uv_run_still_names_uvs_error(fresh_machine) -> None:
+    """`--quiet` hides uv's progress, not its errors: a run that cannot resolve says why."""
+    fresh_machine.write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "sys.stderr.write('  ╰─▶ Because papaya-agent-client was not found in the package "
+        "registry, we can conclude that your requirements are unsatisfiable.\\n')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    result = papaya.connect(timeout=30, echo=io.StringIO())
+    assert result["reason"] == "failed"
+    assert "requirements are unsatisfiable" in result["detail"]

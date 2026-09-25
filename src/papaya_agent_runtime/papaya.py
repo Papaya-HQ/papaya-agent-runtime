@@ -49,10 +49,16 @@ BOOTSTRAP = ("npx", "--yes", "papaya-agent")
 #: The Python package the shim runs. Reached directly through `uv` when this machine
 #: has no Node: the runtime always has `uv`, and the shim is only a wrapper around it.
 CLIENT_PACKAGE = "papaya-agent-client"
-UV_BOOTSTRAP = ("uv", "tool", "run", "--from", CLIENT_PACKAGE, CLI)
+#: uv's own output for every uv call made for the client: no resolve, download or
+#: "Installed N packages" lines. Errors still print, and the client's own output is
+#: untouched: `--quiet` belongs to uv, not to the tool it runs.
+UV_QUIET = "--quiet"
+UV_BOOTSTRAP = ("uv", "tool", "run", UV_QUIET, "--from", CLIENT_PACKAGE, CLI)
 #: What the shim does after a successful connect, done by hand on the `uv` path;
 #: :func:`uv_install_argv` adds the version this runtime locks.
-UV_INSTALL = ("uv", "tool", "install", CLIENT_PACKAGE)
+UV_INSTALL = ("uv", "tool", "install", UV_QUIET, CLIENT_PACKAGE)
+#: uv's progress bars, off for the npm shim's uv too, which `--quiet` cannot reach.
+UV_NO_PROGRESS = "UV_NO_PROGRESS"
 #: The client's answer when a choice is needed and nobody is at a terminal to make it:
 #: `Multiple Papaya agents found. Re-run with `--agent <agent>`. Available: a; b`.
 _CHOICE = re.compile(
@@ -429,8 +435,10 @@ def client_env() -> dict[str, str]:
     A shell the person opened did not inherit the desktop app's `PAPAYA_AGENT_HOME`,
     so a client started from it looks in the wrong home and says "not connected"
     while `status()` says connected. Every call into the client goes through this.
+    Whatever uv runs it (`uv tool run`, the npm shim) shows no progress bars.
     """
     env = dict(os.environ)
+    env[UV_NO_PROGRESS] = "1"
     found = _best()
     if found is not None:
         env[CLIENT_HOME_ENV] = str(found[1])
@@ -492,11 +500,31 @@ def locked_client_version(root: str | Path | None = None) -> str | None:
     return floor.group(1) if floor else None
 
 
-def uv_install_argv(version: str | None = None, *, force: bool = False) -> list[str]:
-    """`uv tool install [--force] papaya-agent-client==<locked>`; unpinned with no lock."""
+def uv_install_argv(
+    version: str | None = None, *, force: bool = False, quiet: bool = True
+) -> list[str]:
+    """`uv tool install --quiet [--force] papaya-agent-client==<locked>`; unpinned with no
+    lock. ``quiet=False`` is the command to hand a person, who wants to see it work."""
     version = version or locked_client_version()
     spec = f"{CLIENT_PACKAGE}=={version}" if version else CLIENT_PACKAGE
-    return ["uv", "tool", "install", *(["--force"] if force else []), spec]
+    return [
+        "uv",
+        "tool",
+        "install",
+        *([UV_QUIET] if quiet else []),
+        *(["--force"] if force else []),
+        spec,
+    ]
+
+
+def _said_last(proc: subprocess.CompletedProcess[str], lines: int = 3) -> str:
+    """The last few lines a captured command printed (stderr after stdout): why it failed."""
+    said = [
+        line.strip()
+        for line in f"{proc.stdout or ''}\n{proc.stderr or ''}".splitlines()
+        if line.strip()
+    ]
+    return " / ".join(said[-lines:])
 
 
 def client_version(path: str, *, run: Any = None) -> str | None:
@@ -553,12 +581,16 @@ def keep_client_current(*, root: str | Path | None = None, run: Any = None) -> d
         return {**result, "state": "current", "line": None}
     if have_key > locked_key:
         return {**result, "state": "newer", "line": None}
-    command = uv_install_argv(locked, force=True)
+    command = uv_install_argv(locked, force=True, quiet=False)
+    why = ""
     try:
-        proc = runner(command, timeout=PROBE_TIMEOUT * 4)
+        proc = runner(uv_install_argv(locked, force=True), timeout=PROBE_TIMEOUT * 4)
         ok = proc.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        if not ok:
+            why = _said_last(proc)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         ok = False
+        why = str(exc)
     if ok:
         after = client_version(installed() or path, run=runner)
         after_key = _version_key(after or "")
@@ -573,9 +605,11 @@ def keep_client_current(*, root: str | Path | None = None, run: Any = None) -> d
         **result,
         "state": "failed",
         "command": command,
+        "detail": why,
         "line": (
-            f"papaya-agent {have} is older than {locked} and could not be updated: "
-            f"run {' '.join(command)}"
+            f"papaya-agent {have} is older than {locked} and could not be updated"
+            + (f" ({why})" if why else "")
+            + f": run {' '.join(command)}"
         ),
     }
 
@@ -1025,8 +1059,11 @@ def connect(
             try:
                 kept = _run(uv_install_argv(), timeout=PROBE_TIMEOUT * 4)
                 result["installed"] = kept.returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
+                if kept.returncode != 0:
+                    result["install_detail"] = _said_last(kept)
+            except (OSError, subprocess.TimeoutExpired) as exc:
                 result["installed"] = False
+                result["install_detail"] = str(exc)
         return result
     tail = [line for line in lines if line.strip()]
     return {
