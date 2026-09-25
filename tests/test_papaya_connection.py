@@ -214,7 +214,7 @@ def test_connect_passes_quiet_on_to_the_command(client_home, monkeypatch) -> Non
 
 
 def test_setup_asks_the_pinned_client_for_quiet_and_it_says_yes(client_home, monkeypatch) -> None:
-    """The real client this checkout locks (0.18.1+) answers the probe, not a canned help.
+    """The real client this checkout locks (0.18.2+) answers the probe, not a canned help.
 
     `ppy setup` connects with ``quiet=True``; if the lock ever falls back to a client
     without `connect --quiet`, setup silently shows the old output again.
@@ -224,7 +224,7 @@ def test_setup_asks_the_pinned_client_for_quiet_and_it_says_yes(client_home, mon
     from pathlib import Path
 
     version = importlib.metadata.version(papaya.CLIENT_PACKAGE)
-    assert tuple(int(part) for part in version.split(".")[:3]) >= (0, 18, 1), version
+    assert tuple(int(part) for part in version.split(".")[:3]) >= (0, 18, 2), version
     client = Path(sys.executable).parent / papaya.CLI
     assert client.is_file(), f"{client} missing: the locked client installs this script"
     monkeypatch.setattr(papaya, "installed", lambda: str(client))

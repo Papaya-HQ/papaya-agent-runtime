@@ -20,7 +20,7 @@ import pytest
 
 from papaya_agent_runtime import papaya
 
-LOCKED = "0.18.1"
+LOCKED = "0.18.2"
 CLIENT = "/Users/someone/.local/bin/papaya-agent"
 
 
@@ -85,9 +85,9 @@ def test_the_locked_version_is_read_from_uv_lock(checkout) -> None:
 
 def test_without_a_lock_the_pyproject_floor_is_the_locked_version(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text(
-        f'dependencies = [\n    "{papaya.CLIENT_PACKAGE}>=0.18.1,<0.19.0",\n]\n', encoding="utf-8"
+        f'dependencies = [\n    "{papaya.CLIENT_PACKAGE}>=0.18.2,<0.19.0",\n]\n', encoding="utf-8"
     )
-    assert papaya.locked_client_version(tmp_path) == "0.18.1"
+    assert papaya.locked_client_version(tmp_path) == "0.18.2"
 
 
 def test_this_checkout_locks_the_client_it_embeds() -> None:
@@ -111,7 +111,7 @@ def test_an_older_client_is_reinstalled_at_the_locked_version(checkout, on_path)
     client = FakeClient("0.17.0")
     result = papaya.keep_client_current(root=checkout, run=client)
     assert result["state"] == "updated"
-    assert result["line"] == "Updated papaya-agent 0.17.0 → 0.18.1"
+    assert result["line"] == "Updated papaya-agent 0.17.0 → 0.18.2"
     assert REINSTALL in client.calls
 
 
@@ -144,8 +144,8 @@ def test_a_failed_reinstall_names_the_command_to_run(checkout, on_path) -> None:
     assert result["state"] == "failed"
     assert result["command"] == REINSTALL
     assert result["line"] == (
-        "papaya-agent 0.17.0 is older than 0.18.1 and could not be updated: "
-        f"run uv tool install --force {papaya.CLIENT_PACKAGE}==0.18.1"
+        "papaya-agent 0.17.0 is older than 0.18.2 and could not be updated: "
+        f"run uv tool install --force {papaya.CLIENT_PACKAGE}==0.18.2"
     )
 
 
