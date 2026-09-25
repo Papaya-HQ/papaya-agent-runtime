@@ -432,7 +432,8 @@ quietly; do not narrate the steps or report diagnostics.
    timeout of at least ten minutes: it installs the client when this machine has
    none (`npx papaya-agent`, or the same client through `uv` on a machine without
    Node, then keeps `papaya-agent` on the PATH for the plugin's hooks and the MCP
-   server), opens a sign-in link and waits for Approve. Relay the link it prints in
+   server, at the version this checkout locks; `ppy setup` and `ppy doctor` reinstall
+   an older one and say so in one line), opens a sign-in link and waits for Approve. Relay the link it prints in
    case no browser opened. When the account has several workspaces or agents it
    exits listing them: ask the person which one in the conversation, then re-run with
    the `--workspace` or `--agent` it names — never guess. With neither Node nor `uv`

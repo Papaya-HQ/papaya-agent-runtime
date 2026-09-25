@@ -263,6 +263,54 @@ def test_a_fully_set_up_machine_says_one_line_per_step_and_asks_only_to_switch(w
     assert world.connects == [] and world.added == []
 
 
+def test_an_older_papaya_client_is_updated_before_papaya_is_checked_and_said_in_one_line(world):
+    _set_up_fully(world)
+    updated = {"state": "updated", "line": "Updated papaya-agent 0.17.0 → 0.18.1"}
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(), client_currency=lambda: updated
+    )
+
+    assert code == 0
+    papaya_at = TICKS.index("✓ Papaya        Connected as Ada (@ada)")
+    assert lines == [
+        *TICKS[:papaya_at],
+        "✓ Papaya        Updated papaya-agent 0.17.0 → 0.18.1",
+        *TICKS[papaya_at:],
+    ]
+
+
+def test_a_papaya_client_that_could_not_be_updated_is_one_line_and_setup_carries_on(world):
+    _set_up_fully(world)
+    failed = {
+        "state": "failed",
+        "line": "papaya-agent 0.17.0 is older than 0.18.1 and could not be updated: "
+        "run uv tool install --force papaya-agent-client==0.18.1",
+    }
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(), client_currency=lambda: failed
+    )
+
+    assert code == 0
+    assert (
+        "! Papaya        papaya-agent 0.17.0 is older than 0.18.1 and could not be updated: "
+        "run uv tool install --force papaya-agent-client==0.18.1"
+    ) in lines
+    assert "✓ Papaya        Connected as Ada (@ada)" in lines
+
+
+def test_a_current_papaya_client_says_nothing(world):
+    _set_up_fully(world)
+    current = {"state": "current", "line": None}
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(), client_currency=lambda: current
+    )
+
+    assert code == 0 and lines == TICKS
+
+
 def test_a_fully_set_up_machine_run_by_a_script_asks_nothing(world):
     _set_up_fully(world)
     options = guided.Options(interactive=False, repos=("acme/api",), skip_tools=True)

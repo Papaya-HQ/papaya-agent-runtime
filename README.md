@@ -340,13 +340,17 @@ already done:
 2. Claude Code signed in, running `claude auth login` with you when it is not;
 3. GitHub signed in, running `gh auth login` with you when it is not, then
    `gh auth setup-git` so `git push` uses it;
-4. Papaya: connects this machine as one of your workspace's agents (with a device code
-   over SSH or when there is no display) and prints `Connected as <Name> (@handle)`;
+4. Papaya: first brings your own `papaya-agent` up to the version this checkout locks
+   in `uv.lock` (`Updated papaya-agent <old> → <new>`; a newer one is left alone, and a
+   failed reinstall is one `!` line naming the command, then setup carries on), then
+   connects this machine as one of your workspace's agents (with a device code over SSH
+   or when there is no display), choosing the workspace and agent from arrow-key lists
+   on a terminal, and prints `Connected as <Name> (@handle)`;
 5. repositories: pick an owner (you or one of your organizations), then tick
    repositories in its list (arrow keys, space to tick, type to filter, Enter), and go
    back to pick from another owner.
 
-Each line is a mark (✓ done, → doing now, ✗ stopped), the step's name and what
+Each line is a mark (✓ done, → doing now, ! yours to do by hand, ✗ stopped), the step's name and what
 happened; whatever a sign-in or the Papaya client prints sits between two rules. On a
 terminal the marks are coloured; piped, or with `NO_COLOR` set, it is plain text.
 
