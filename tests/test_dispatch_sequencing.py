@@ -352,6 +352,7 @@ def test_the_cli_prints_a_supervisor_refusal_as_a_refusal(
     monkeypatch.setattr(client_mod, "SupervisorClient", RefusingClient)
     monkeypatch.setattr(shutil, "disk_usage", lambda _p: Usage(100e9, 20e9, 80e9))
     added = repos.add_repo(source_repo)
+    capsys.readouterr()  # drain the clone's start and done lines from setup
 
     rc = cli.main(["dispatch", "--repo", added.name, "--title", "t", "--instructions", "go"])
 
