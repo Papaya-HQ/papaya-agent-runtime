@@ -24,7 +24,7 @@ CALL = (
 )
 
 
-@pytest.mark.parametrize("name", sorted(p.name for p in SAMPLES.glob("*.log")))
+@pytest.mark.parametrize("name", sorted(p.name for p in SAMPLES.glob("claude-p-*.txt")))
 def test_real_claude_output_passes_through_unchanged(name) -> None:
     text = (SAMPLES / name).read_text()
     assert clean_outbound(text) == text
@@ -120,7 +120,7 @@ def test_a_stray_close_tag_or_bare_open_tag_goes_alone() -> None:
 
 
 def test_the_manager_turn_sample_with_quoted_tags_is_byte_for_byte() -> None:
-    text = (SAMPLES / "claude-p-answer-quoted-tags.log").read_text()
+    text = (SAMPLES / "claude-p-answer-quoted-tags.txt").read_text()
     assert "`<tool_call>`" in text
     assert clean_outbound(text) == text
 

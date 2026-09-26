@@ -5,10 +5,10 @@ format, not reproduced" (built in the tests from the vendor's documented shape;
 never call those real samples).
 
 captured
-  claude-p-instruction-a.log        `claude -p` instruction turn (a run on this machine);
+  claude-p-instruction-a.txt        `claude -p` instruction turn (a run on this machine);
                                     answer, OUTCOME: block, then one RUNTIME: line. Nothing else follows.
-  claude-p-instruction-b.log        the same shape, a second run.
-  claude-p-answer-quoted-tags.log   a `claude -p` answer that quotes `<tool_call>` inside inline
+  claude-p-instruction-b.txt        the same shape, a second run.
+  claude-p-answer-quoted-tags.txt   a `claude -p` answer that quotes `<tool_call>` inside inline
                                     code on purpose. Byte-for-byte: it must come through unchanged.
   Source: Claude Code transcripts from this machine, supplied by the manager (runs 320, 331, 336).
   No tool-call markup appears in any of them: Claude's text output ended cleanly after the answer.

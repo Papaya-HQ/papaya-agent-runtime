@@ -1,0 +1,24 @@
+I finished my weekly performance review. The work itself is solid. What slows workers down is my briefs and the environment I give them.
+
+**What went well:** 121 of 125 reviews were approved, and 83 tasks finished with none failed. Workers say the edge-case tables, pass/fail goals and "post your plan first" step caught real bugs before any code was written. Running the full test suite on shared code also caught breakages before CI did.
+
+**What didn't:**
+- **Wrong or outdated premises in my briefs.** In six tasks the worker first had to prove the brief wrong. Examples: the brief assumed the emoji picker was a sheet when it isn't, gave a cause the code contradicted, and pointed at line numbers and UI that no longer exist.
+- **Asking for proof workers can't produce here.** Eight tasks were asked for iOS screenshots, live network probes, time-zone runs or GitHub reads that this machine doesn't allow. Several times the repo notes already said so. Today's review of pull request #153 is the same mistake: I gave the worker no way to read the pull request.
+- **Contradictions I haven't fixed.** In twelve tasks the worker's shell refused the test command I handed them. In four, the brief, the hook and the checklist disagreed about whether to push. Workers also have no way to ask for an environment variable.
+
+**Proposed plan:**
+1. **Check each brief against the current code before dispatch** (my own practice, starting now). I'll mark each claim as checked or a guess and fold in what the repo notes say. Proof a worker can't produce will be mine to run, or I'll hand it over up front, including a pull request's diff and CI status when a worker reviews one. Target: at most 2 reflections next week flag this, down from 14 of 50.
+2. **Fix the runtime contradictions** (this changes the runtime itself, so it needs your OK). Give workers a test command their shell accepts, one push rule everywhere, and a way to request environment variables. Until then, every brief will give the plain test command and say "commit only, the runtime pushes." Target: no reflections flag these next week, and a third fewer permission refusals than this week's 345.
+
+The two practices you approved last week stay in place. I can't measure how the first one did this week, because this week's records don't show whether stopped workers had unpushed work.
+
+**One blocker:** this machine has 0.8 GiB of free disk space and a worker needs 5 GiB, so nothing new can start until space is freed.
+
+Approve, revise or drop the plan? I especially need your call on item 2.
+
+OUTCOME: done
+I didn't review pull request #153 ("The repository says which database its gates use, so stop asking a person", by gizm0duck). The worker assigned to it could not open the pull request. Workers here aren't allowed to use the GitHub tool, and that's the only way it tried to read the description, changed files, diff and CI status. It made no changes and has nothing to report on the code. All I know is the title and author, and that no one has reviewed it yet.
+
+What I propose: ask me again to review it. I'll read the pull request myself and give the worker the diff and CI status along with the review brief. Then it can check the change against the runtime's rules, run the tests closest to it, and come back with findings. Also, this machine has 0.8 GiB of free disk space, below the 5 GiB a worker needs, so no new worker can start until you free some space.
+RUNTIME: task 392 was sent to review a pull request, but workers are not allowed to use the GitHub tool, so the pull request could never be read and no review was produced.
