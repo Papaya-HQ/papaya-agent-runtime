@@ -408,7 +408,8 @@ def request(
         )
         if existing is not None:
             return existing
-        state, basis = assess(program)
+        state = decide(program)
+        basis = assess(program)[1] if state == AUTO_GRANTED else ""
         if state == AUTO_GRANTED and (path or reach) and reach != IN_WORKTREE:
             state = PENDING
         reason = basis or None
