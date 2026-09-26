@@ -28,8 +28,14 @@ from __future__ import annotations
 import logging
 import os
 import re
+import select
 import shutil
 import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -159,6 +165,236 @@ def _git(args: list[str], cwd: str | None = None) -> str:
 def _git_ok(args: list[str], cwd: str | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+#: How long a clone may write nothing at all before it is killed. Git's quiet phases
+#: still tick progress records, so five minutes is far past any silent gap seen on a
+#: large clone while still surfacing a dead network or a prompt well inside a lease.
+CLONE_STALL_SECONDS = 300.0
+CLONE_STALL_ENV = "PPY_CLONE_STALL_SECONDS"
+#: Non-terminal progress: a line on each phase change, at 100%, and otherwise only
+#: after this many percentage points AND this many seconds since the last line.
+_PROGRESS_STEP_PCT = 10
+_PROGRESS_STEP_SECONDS = 15.0
+_ERROR_TAIL_LINES = 20
+
+_PROGRESS_RECORD = re.compile(r"^(?:remote: )?(?P<phase>[A-Za-z][A-Za-z ]*?):\s+(?P<pct>\d+)%")
+_URL_CREDENTIALS = re.compile(r"(?<=://)[^/@\s]+@")
+
+ProgressSink = Callable[[str], None]
+
+
+def redact_credentials(text: str) -> str:
+    """Drop any `user:token@` from URLs in `text` so it is safe to print or raise."""
+    return _URL_CREDENTIALS.sub("", text)
+
+
+def _clone_stall_seconds() -> float:
+    try:
+        value = float(os.environ.get(CLONE_STALL_ENV, ""))
+    except ValueError:
+        return CLONE_STALL_SECONDS
+    return value if value > 0 else CLONE_STALL_SECONDS
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _non_interactive_env() -> dict[str, str]:
+    """Fail at once on a missing credential rather than waiting on a prompt nobody sees."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if not env.get("GIT_SSH_COMMAND"):
+        _, configured, _ = _git_ok(["config", "--get", "core.sshCommand"])
+        if not configured:
+            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+    return env
+
+
+class _ProgressThrottle:
+    """Decides which parsed `Phase: NN%` records are worth a plain line."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._phase: str | None = None
+        self._pct = 0
+        self._at = 0.0
+
+    def admit(self, phase: str, pct: int) -> bool:
+        now = self._clock()
+        if phase != self._phase:
+            wanted = True
+        elif pct >= 100:
+            wanted = self._pct < 100
+        else:
+            wanted = (
+                pct - self._pct >= _PROGRESS_STEP_PCT and now - self._at >= _PROGRESS_STEP_SECONDS
+            )
+        if wanted:
+            self._phase, self._pct, self._at = phase, pct, now
+        return wanted
+
+
+class _CloneStream:
+    """Consumes git's stderr: tracks activity, reports progress, keeps the error text."""
+
+    def __init__(self, name: str, sink: ProgressSink, tty: bool) -> None:
+        self.name = name
+        self.last_activity = time.monotonic()
+        self.tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
+        self._sink = sink
+        self._tty = tty
+        self._throttle = _ProgressThrottle()
+        self._partial = b""
+
+    def feed(self, chunk: bytes) -> None:
+        self.last_activity = time.monotonic()
+        try:
+            if self._tty:
+                sys.stderr.buffer.write(chunk)
+                sys.stderr.buffer.flush()
+            self._partial += chunk
+            *records, self._partial = re.split(rb"[\r\n]", self._partial)
+            for record in records:
+                self._record(record)
+        except Exception:  # a broken sink or terminal must not fail the clone
+            log.debug("clone output handling failed for %s", self.name, exc_info=True)
+
+    def finish(self) -> None:
+        partial, self._partial = self._partial, b""
+        if partial:
+            self._record(partial)
+
+    def _record(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", errors="replace").strip()
+        if not text:
+            return
+        match = _PROGRESS_RECORD.match(text)
+        if match:
+            phase, pct = match["phase"], int(match["pct"])
+            if not self._tty and self._throttle.admit(phase, pct):
+                self._sink(f"cloning {self.name}: {phase} {pct}%")
+        elif not text.startswith("Cloning into"):
+            self.tail.append(text)
+
+
+def _pump(fd: int, stream: _CloneStream, stop: threading.Event) -> None:
+    while not stop.is_set():
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return
+        if not chunk:
+            return
+        stream.feed(chunk)
+
+
+def _default_sink(line: str) -> None:
+    """The logger where logging is configured for INFO (`ppy serve`), else stderr.
+
+    Callers with no sink of their own (`ppy repo ensure`, guided setup) would otherwise
+    lose every line to an unconfigured logger. Never stdout: callers print results there.
+    """
+    if log.isEnabledFor(logging.INFO):
+        log.info(line)
+    else:
+        print(line, file=sys.stderr, flush=True)
+
+
+def clone_repo(
+    forge_url: str,
+    dest: Path,
+    repo_name: str,
+    progress: ProgressSink | None = None,
+    *,
+    tty: bool | None = None,
+) -> None:
+    """Clone `forge_url` into `dest`, the one path every clone the runtime makes takes.
+
+    Reports start, progress and completion to `progress` (default: the module logger);
+    on a terminal git's own live progress goes to stderr instead of parsed lines. A
+    failed, stalled or interrupted clone raises `RepoError` (or re-raises) and leaves
+    no `dest` behind, unless `dest` existed before this call, which is never touched.
+    """
+    sink = progress or _default_sink
+    shown_url = redact_credentials(forge_url)
+    is_tty = _stderr_is_tty() if tty is None else tty
+    created = not dest.exists()
+    stall_limit = _clone_stall_seconds()
+    started = time.monotonic()
+    proc: subprocess.Popen[bytes] | None = None
+    stop = threading.Event()
+    reader: threading.Thread | None = None
+    try:
+        sink(f"cloning {repo_name} from {shown_url}")
+        stream = _CloneStream(repo_name, sink, is_tty)
+        try:
+            proc = subprocess.Popen(
+                ["git", "clone", "--progress", forge_url, str(dest)],
+                stdin=None if is_tty else subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=None if is_tty else _non_interactive_env(),
+            )
+        except OSError as exc:
+            raise RepoError(f"could not run git to clone {repo_name}: {exc}") from exc
+        assert proc.stderr is not None
+        reader = threading.Thread(
+            target=_pump, args=(proc.stderr.fileno(), stream, stop), daemon=True
+        )
+        reader.start()
+        poll = min(1.0, stall_limit / 4)
+        returncode: int | None = None
+        while returncode is None:
+            try:
+                returncode = proc.wait(timeout=poll)
+            except subprocess.TimeoutExpired:
+                silent = time.monotonic() - stream.last_activity
+                if silent >= stall_limit:
+                    _reap(proc, reader, stop)
+                    raise RepoError(
+                        f"clone of {repo_name} stalled: git wrote nothing for {silent:.0f}s "
+                        f"(limit {stall_limit:g}s, set {CLONE_STALL_ENV} to change it); "
+                        "it was killed"
+                    ) from None
+        reader.join(timeout=5)
+        _reap(proc, reader, stop)
+        stream.finish()
+        if returncode != 0:
+            detail = redact_credentials("; ".join(stream.tail))
+            raise RepoError(f"git clone {shown_url} {dest} failed: {detail}")
+    except BaseException:
+        if proc is not None:
+            _reap(proc, reader, stop)
+        if created and dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        raise
+    sink(f"cloned {repo_name} in {time.monotonic() - started:.1f}s")
+
+
+def _reap(
+    proc: subprocess.Popen[bytes], reader: threading.Thread | None, stop: threading.Event
+) -> None:
+    """Kill git if still running, wait for it, and release the stderr pipe.
+
+    A child of git (git-remote-https, ssh) can outlive it holding stderr open, so the
+    reader is told to stop and joined with a timeout rather than waited on for EOF.
+    """
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+    stop.set()
+    if reader is not None:
+        reader.join(timeout=2)
+    if proc.stderr is not None and not proc.stderr.closed:
+        proc.stderr.close()
 
 
 def derive_name(url_or_path: str) -> str:
@@ -345,7 +581,12 @@ def _resolve_forge_url(source: str, forge_url: str | None) -> str:
     )
 
 
-def add_repo(url_or_path: str, name: str | None = None, forge_url: str | None = None) -> AddedRepo:
+def add_repo(
+    url_or_path: str,
+    name: str | None = None,
+    forge_url: str | None = None,
+    progress: ProgressSink | None = None,
+) -> AddedRepo:
     ensure_layout()
     conn = init_db()
     repo_name = name or derive_name(url_or_path)
@@ -361,10 +602,11 @@ def add_repo(url_or_path: str, name: str | None = None, forge_url: str | None = 
     # The clone comes from the forge, so its `origin` is the forge. A local path
     # only told us where that is; its branches and unpushed commits are not ours.
     try:
-        _git(["clone", "--quiet", resolved_forge, str(dest)])
+        clone_repo(resolved_forge, dest, repo_name, progress)
     except RepoError as exc:
         raise RepoError(
-            f"could not clone {repo_name} from its forge {resolved_forge}: {exc}. A base "
+            f"could not clone {repo_name} from its forge "
+            f"{redact_credentials(resolved_forge)}: {exc}. A base "
             "clone is always made from the forge, never from a local checkout; check "
             "that this machine can reach it (`gh auth status`), then register again."
         ) from exc

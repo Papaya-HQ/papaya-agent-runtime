@@ -163,8 +163,8 @@ def _fixture_repos_are_their_own_forge(request, monkeypatch):
 
     real = repos.add_repo
 
-    def add_repo(url_or_path, name=None, forge_url=None):
-        return real(url_or_path, name=name, forge_url=forge_url or url_or_path)
+    def add_repo(url_or_path, name=None, forge_url=None, progress=None):
+        return real(url_or_path, name=name, forge_url=forge_url or url_or_path, progress=progress)
 
     monkeypatch.setattr(repos, "add_repo", add_repo)
 

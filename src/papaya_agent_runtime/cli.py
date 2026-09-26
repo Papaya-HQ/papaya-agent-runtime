@@ -470,7 +470,12 @@ def _cmd_repo(args: argparse.Namespace) -> int:
             print(settings.describe())
             return 0
         if args.repo_cmd == "add":
-            added = add_repo(args.url, name=args.name, forge_url=args.forge_url)
+            added = add_repo(
+                args.url,
+                name=args.name,
+                forge_url=args.forge_url,
+                progress=lambda line: print(line, file=sys.stderr, flush=True),
+            )
             short_sha = added.base_sha[:8] if added.base_sha else "?"
             print(
                 f"registered {added.name} from {added.origin} "
