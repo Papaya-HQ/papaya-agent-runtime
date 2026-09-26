@@ -1,0 +1,26 @@
+Harness output the sanitiser and outcome_of are tested against.
+
+Each format is either "captured" (real output, with its source) or "known vendor
+format, not reproduced" (built in the tests from the vendor's documented shape;
+never call those real samples).
+
+captured
+  claude-p-instruction-a.log        `claude -p` instruction turn (a run on this machine);
+                                    answer, OUTCOME: block, then one RUNTIME: line. Nothing else follows.
+  claude-p-instruction-b.log        the same shape, a second run.
+  claude-p-answer-quoted-tags.log   a `claude -p` answer that quotes `<tool_call>` inside inline
+                                    code on purpose. Byte-for-byte: it must come through unchanged.
+  Source: Claude Code transcripts from this machine, supplied by the manager (runs 320, 331, 336).
+  No tool-call markup appears in any of them: Claude's text output ended cleanly after the answer.
+
+known vendor format, not reproduced (tests use the documented shape)
+  Anthropic <function_calls><invoke name=".."><parameter name="..">..</parameter></invoke></function_calls>
+  and <function_results>, with or without the `antml:` namespace
+  <invoke name=".."> on its own
+  <tool_call>..</tool_call>, <tool_use>..</tool_use>
+  JSON call object {"name": .., "arguments": ..} and {"name": .., "input": ..}
+  each closed, cut short (no close), and mid-paragraph
+
+not captured at all
+  `codex exec` output (its exec/tool trace and footer lines). Live capture was requested
+  (request 115271) and was not granted in time; no Codex rule is guessed.
