@@ -385,10 +385,23 @@ class CapabilityPolicy:
     asking, and the programs workers are never given are refused whatever this says.
     ``auto_grant`` adds programs granted without a person; ``never`` adds programs
     refused without one. Anything in neither waits on a person.
+
+    The **safe family** (`tool_learning.DEFAULT_SAFE_FAMILY`) is what a denial may teach
+    the profile, and it is tuned here: ``safe_family`` adds programs (each named with the
+    kind that decides how it is checked: ``read``, ``run`` or ``write``), ``drop_family``
+    removes any from the code's family. The rule stays closed whatever this says: a
+    program on the runtime's never list is not learnable from here. ``learn_approvals``
+    lets a person's approval add the approved program to ``safe_family``; ``intent_grants``
+    lets a request for a versioned variant of a granted program (``python3.12`` beside
+    ``python3``) be granted without asking.
     """
 
     auto_grant: list[str] = field(default_factory=list)
     never: list[str] = field(default_factory=list)
+    safe_family: dict[str, str] = field(default_factory=dict)
+    drop_family: list[str] = field(default_factory=list)
+    learn_approvals: bool = True
+    intent_grants: bool = True
 
 
 @dataclass
@@ -535,6 +548,32 @@ class MMConfig:
                 raise ConfigError(
                     f"capabilities.{name} must be a list of program names such as 'xcodegen'"
                 )
+        from papaya_agent_runtime.tool_learning import FAMILY_KINDS, POLICY
+
+        program = r"[A-Za-z0-9][A-Za-z0-9_.+-]*"
+        family = self.capabilities.safe_family
+        if not isinstance(family, dict) or not all(
+            isinstance(k, str) and re.fullmatch(program, k) and v in FAMILY_KINDS
+            for k, v in family.items()
+        ):
+            raise ConfigError(
+                "capabilities.safe_family must map program names to one of "
+                f"{FAMILY_KINDS}, such as xcodegen = 'run'"
+            )
+        if set(family) & POLICY:
+            raise ConfigError(
+                "capabilities.safe_family cannot hold "
+                + ", ".join(sorted(set(family) & POLICY))
+                + ": the family is closed and those programs are never learned"
+            )
+        dropped = self.capabilities.drop_family
+        if not isinstance(dropped, list) or not all(
+            isinstance(v, str) and re.fullmatch(program, v) for v in dropped
+        ):
+            raise ConfigError("capabilities.drop_family must be a list of program names")
+        for name in ("learn_approvals", "intent_grants"):
+            if not isinstance(getattr(self.capabilities, name), bool):
+                raise ConfigError(f"capabilities.{name} must be true or false")
         max_per_day = self.self_report.max_per_day
         if isinstance(max_per_day, bool) or not isinstance(max_per_day, int) or max_per_day < 0:
             raise ConfigError("self_report.max_per_day must be zero or a positive integer")
@@ -866,6 +905,12 @@ def _toml_scalar(value: object) -> str:
 def _toml_value(value: object) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(_toml_scalar(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{ "
+            + ", ".join(f"{_toml_scalar(k)} = {_toml_scalar(v)}" for k, v in value.items())
+            + " }"
+        )
     return _toml_scalar(value)
 
 

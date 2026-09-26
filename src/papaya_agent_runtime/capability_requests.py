@@ -13,7 +13,9 @@ Now there is one loop, the same whether the worker declared the need or was deni
    or a plain command refused for a gap in the profile, becomes a request on the task.
 2. **Decided** against this install's policy: a program on the floor (:func:`floor`,
    plus `capabilities.never`) is refused with the rule; one in the safe family or in
-   `capabilities.auto_grant` is granted at once; anything else is pending the manager.
+   `capabilities.auto_grant` (or a versioned variant of either) is granted at once;
+   anything else is pending the manager. A person's approval joins the safe family
+   (`capabilities.safe_family`), so the next similar ask is not asked.
 3. **Granted** for the task (its next launch carries the pattern) or, with `--always`,
    for this install (`claude.extra_tools`); **denied** with a reason. Either way the
    worker is steered with the outcome, and a pending one is told to go on with other
@@ -52,6 +54,7 @@ A request carries the pattern that makes the refused call run, which is not alwa
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
@@ -208,30 +211,76 @@ def pattern_for(program: str, *, path: str | None = None) -> str:
 
 def _policy() -> tuple[set[str], set[str]]:
     """``(auto_grant, never)`` for this install: code defaults plus config."""
-    from papaya_agent_runtime.tool_learning import SAFE_FAMILY
+    from papaya_agent_runtime import tool_learning
 
-    auto, never = set(SAFE_FAMILY), set(floor())
-    try:
-        from papaya_agent_runtime.config import load_config
-        from papaya_agent_runtime.paths import config_path
-
-        if config_path().exists():
-            cfg = load_config()
-            auto |= set(cfg.capabilities.auto_grant)
-            never |= set(cfg.capabilities.never)
-    except Exception:  # noqa: BLE001 - an unreadable config falls back to the code's policy
-        pass
+    policy = tool_learning.capability_policy()
+    auto = set(tool_learning.safe_family(policy)) | set(policy.auto_grant)
+    never = set(floor()) | set(policy.never)
     return auto - never, never
+
+
+def assess(program: str) -> tuple[str, str]:
+    """``(state, basis)``: what policy says about ``program``, and why when it grants.
+
+    Grants are by intent, not only by name: beyond the safe family and `auto_grant`, a
+    versioned spelling of a program this install already grants (`python3.12` beside
+    `python3`) is the same request a person already answered, so it is granted without
+    asking (``capabilities.intent_grants``). ``never`` and the floor still refuse first.
+    """
+    from papaya_agent_runtime import tool_learning
+
+    auto, never = _policy()
+    if program in never:
+        return REFUSED, ""
+    if program in auto:
+        return AUTO_GRANTED, ""
+    if tool_learning.capability_policy().intent_grants:
+        # find, sed and awk are judged by name, so a spelling of one has nothing to inherit.
+        base = tool_learning.variant_of(program, auto - set(tool_learning.CONDITIONAL), never)
+        if base:
+            return AUTO_GRANTED, f"a versioned variant of `{base}`, which this install grants"
+    return PENDING, ""
 
 
 def decide(program: str) -> str:
     """What this install's policy says about ``program`` before any person does."""
-    auto, never = _policy()
-    if program in never:
-        return REFUSED
-    if program in auto:
-        return AUTO_GRANTED
-    return PENDING
+    return assess(program)[0]
+
+
+def _generalize(approved: Request, *, by: str) -> None:
+    """A person's approval joins the safe family, so its variants are learned and granted.
+
+    Only a program the family could hold: not a tool that is not the shell, not a path
+    (it names one worktree's files), not anything on the floor or `never`, and not one
+    this install dropped from the family on purpose. The kind is ``run``: nothing about
+    an approval says the program only reads or only writes inside the worktree.
+    """
+    from papaya_agent_runtime import config_changes, tool_learning
+    from papaya_agent_runtime.config import load_config, save_config
+    from papaya_agent_runtime.paths import config_path
+
+    program = approved.program
+    if approved.path or is_tool(program) or program in _policy()[1] or not config_path().exists():
+        return
+    cfg = load_config()
+    caps = cfg.capabilities
+    if not caps.learn_approvals or program in caps.drop_family:
+        return
+    if program in tool_learning.safe_family(caps):
+        return
+    before = dict(caps.safe_family)
+    caps.safe_family = {**before, program: "run"}
+    save_config(cfg)
+    config_changes.record(
+        key="capabilities.safe_family",
+        before=before,
+        after=dict(caps.safe_family),
+        why=(
+            f"approved `{program}` for task {approved.task_id} ({by}); its versioned "
+            "variants are now granted without asking"
+        ),
+        evidence={"request_id": approved.id, "task_id": approved.task_id},
+    )
 
 
 # ── the record ──────────────────────────────────────────────────────────────
@@ -359,10 +408,10 @@ def request(
         )
         if existing is not None:
             return existing
-        state = decide(program)
+        state, basis = assess(program)
         if state == AUTO_GRANTED and (path or reach) and reach != IN_WORKTREE:
             state = PENDING
-        reason = None
+        reason = basis or None
         if state == REFUSED:
             from papaya_agent_runtime.tool_learning import policy_rule
 
@@ -445,6 +494,10 @@ def decide_request(
         conn.close()
     if approve and always:
         _grant_for_install(decided, by=by)
+    if approve:
+        # The approval stands; learning from it is a convenience.
+        with contextlib.suppress(Exception):
+            _generalize(decided, by=by)
     _tell_worker(decided)
     return decided
 
