@@ -10,6 +10,10 @@ captured
   claude-p-instruction-b.txt        the same shape, a second run.
   claude-p-answer-quoted-tags.txt   a `claude -p` answer that quotes `<tool_call>` inside inline
                                     code on purpose. Byte-for-byte: it must come through unchanged.
+  codex-exec-outcome.txt            `codex exec` (v0.157.0) live capture, 2026-09-26, run on this machine:
+                                    codex exec --cd <dir> "<2+2 sentence, then OUTCOME: done ...>".
+                                    Banner, hook lines, answer, OUTCOME:, then `hook: Stop` lines,
+                                    `tokens used`, the count, and an echo of the final message.
   Source: Claude Code transcripts from this machine, supplied by the manager (runs 320, 331, 336).
   No tool-call markup appears in any of them: Claude's text output ended cleanly after the answer.
 
@@ -21,6 +25,7 @@ known vendor format, not reproduced (tests use the documented shape)
   JSON call object {"name": .., "arguments": ..} and {"name": .., "input": ..}
   each closed, cut short (no close), and mid-paragraph
 
-not captured at all
-  `codex exec` output (its exec/tool trace and footer lines). Live capture was requested
-  (request 115271) and was not granted in time; no Codex rule is guessed.
+not captured
+  Codex exec/tool-trace lines from a turn that runs commands (the capture ran none).
+  A live `claude -p` turn (request 116372 undecided); Claude shapes come from runs 320/331/336.
+  No rule is guessed for either.

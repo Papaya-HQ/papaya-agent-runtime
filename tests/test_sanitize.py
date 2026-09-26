@@ -109,6 +109,17 @@ def test_json_needs_both_a_name_and_arguments_or_input() -> None:
         assert clean_outbound(kept) == kept
 
 
+def test_a_json_call_example_survives_only_when_fenced_or_in_inline_code() -> None:
+    call = '{"name": "Bash", "arguments": {"command": "ls"}}'
+    # On a line of its own it cannot be told from a leaked call, so it goes ...
+    assert call not in clean_outbound(f"Here is the shape:\n{call}\nDone.")
+    # ... and a person who means to quote one fences it or puts it in inline code.
+    fenced = f"Here is the shape:\n```json\n{call}\n```\nDone."
+    assert clean_outbound(fenced) == fenced
+    inline = f"The call was `{call}` as written."
+    assert clean_outbound(inline) == inline
+
+
 def test_prose_about_tool_calls_and_other_tags_is_untouched() -> None:
     text = "I made a tool call<br>and read the <b>result</b>; <invokes> is not a tag."
     assert clean_outbound(text) == text

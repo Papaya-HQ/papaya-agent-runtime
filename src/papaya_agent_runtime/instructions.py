@@ -746,8 +746,20 @@ def person_summary(outcome: Outcome | None) -> Outcome | None:
     return replace(outcome, text=text)
 
 
+#: Where `codex exec` stops the answer and starts its own footer, as captured in
+#: tests/samples/codex-exec-outcome.txt: `hook: Stop` lines, then `tokens used`, its
+#: count, and an echo of the final message. Claude's `-p` output has no such footer.
+_HARNESS_FOOTER = re.compile(r"(hook: |tokens used$)")
+
+
 def outcome_of(transcript: str) -> Outcome | None:
-    """The instruction turn's `OUTCOME:` block, or ``None`` when it wrote none."""
+    """The instruction turn's `OUTCOME:` block, or ``None`` when it wrote none.
+
+    The block runs from the last `OUTCOME:` line to the end of the answer: a harness
+    footer (:data:`_HARNESS_FOOTER`) ends it. When Codex echoes the final message
+    after its footer, that echo carries the last `OUTCOME:` line, so the person gets
+    one copy, not two.
+    """
     lines = str(transcript or "").splitlines()
     start = None
     for index, line in enumerate(lines):
@@ -765,6 +777,8 @@ def outcome_of(transcript: str) -> Outcome | None:
     also = ""
     for line in lines[start + 1 :]:
         stripped = line.strip()
+        if _HARNESS_FOOTER.match(stripped):
+            break
         if stripped.startswith(ALSO_SENT_PREFIX):
             also = stripped.removeprefix(ALSO_SENT_PREFIX).strip()
             continue
