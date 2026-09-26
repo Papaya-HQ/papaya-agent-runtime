@@ -1249,8 +1249,10 @@ All working state is under `.ppy/` (gitignored):
   `claude.allowed_tools` copy, stored defaults) migrates on load, once. At
   `ppy serve` start and whenever a repository is ensured, a gate tool that was dropped
   is restored, and a worker's denied command in the safe family
-  (`tool_learning.SAFE_FAMILY`: read-only text tools, the language toolchains, file
-  verbs inside the worktree, `ppy` by any path) is added to `extra_tools` for the next
+  (`tool_learning.DEFAULT_SAFE_FAMILY`: read-only text tools, the language toolchains,
+  file verbs inside the worktree, `ppy` by any path; tuned in the `[capabilities]` config
+  with `safe_family = { zig = "run" }` and `drop_family = ["make"]`, never able to hold a
+  program the runtime refuses outright) is added to `extra_tools` for the next
   dispatch. A plain command outside the family is a **capability request**, the same as
   one a worker declares in its plan with `ppy need <task> --capability <program> --why
   "..."`: this machine's policy (`ppy config capabilities --auto-grant/--never`) grants

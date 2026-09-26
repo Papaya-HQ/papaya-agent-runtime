@@ -7,8 +7,13 @@ command in the **safe family** below adds its pattern to `claude.extra_tools` (o
 restores it from `claude.dropped_tools`), recorded as a `config_change` with the
 denial as evidence, so the next dispatch has it.
 
-The safe family is a closed list in code, and the only thing ever added is
-`Bash(<program>:*)` for a program on it. Nothing else is ever learned: no `Bash(*)`,
+The safe family is a closed allowlist, and the only thing ever added is
+`Bash(<program>:*)` for a program on it. The code holds the default list and the
+install tunes it in its `capabilities` config (`safe_family` adds, `drop_family`
+removes, and a person's approval adds the approved program), but the list stays closed:
+a program on :data:`POLICY` is never in it, whatever the config says, and a versioned
+spelling of a family program (`python3.12`) is the same program. Nothing else is ever
+learned: no `Bash(*)`,
 no `sudo`, no network tool, no command named by an arbitrary path, no compound or
 redirected command, and no file verb whose target is outside the worker's worktree.
 A gap outside the family is a capability request (`capability_requests`): a program,
@@ -130,14 +135,20 @@ WORKTREE_WRITES = ("cp", "mkdir", "mv", "rm", "tee", "touch")
 #: Read-only unless told otherwise; the checks in :func:`classify` refuse the rest.
 CONDITIONAL = ("awk", "find", "sed")
 
-#: The safe family: program -> kind.
-SAFE_FAMILY: dict[str, str] = {
+#: The code's safe family: program -> kind. It is the start, not the last word: an
+#: install tunes it in `capabilities.safe_family` / `capabilities.drop_family` (see
+#: :func:`safe_family`), and what classification reads is that effective family.
+DEFAULT_SAFE_FAMILY: dict[str, str] = {
     **dict.fromkeys(READ_ONLY, "read"),
     **dict.fromkeys(TOOLCHAINS, "run"),
     **dict.fromkeys(BROWSER, "run"),
     **dict.fromkeys(WORKTREE_WRITES, "write"),
     **dict.fromkeys(CONDITIONAL, "conditional"),
 }
+SAFE_FAMILY = DEFAULT_SAFE_FAMILY
+#: The kinds an install may give a program it adds: how it is checked. `conditional`
+#: is the code's own (find, sed, awk have per-program argument checks).
+FAMILY_KINDS = ("read", "run", "write")
 
 #: Never learned, and a test holds the family to it.
 NEVER = frozenset(
@@ -207,6 +218,65 @@ QUOTED_HAZARDS = ("\n", "`", "$", "{")
 
 _FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"})
 _OPERATORS = set(";&|<>`\n")
+_VERSION_SUFFIX = re.compile(r"[-.]?\d+(?:\.\d+)*$")
+
+
+def capability_policy():
+    """This install's `capabilities` block; the code's defaults when there is no readable config."""
+    from papaya_agent_runtime.config import CapabilityPolicy, load_config
+    from papaya_agent_runtime.paths import config_path
+
+    try:
+        if config_path().exists():
+            return load_config().capabilities
+    except Exception:  # noqa: BLE001 - an unreadable config falls back to the code's policy
+        pass
+    return CapabilityPolicy()
+
+
+def safe_family(policy=None) -> dict[str, str]:
+    """The family this install learns from: the code's, plus and minus its config.
+
+    Closed whatever the config says: a program on :data:`POLICY` is never in it, so a
+    hand-edited file cannot make `sudo` or `curl` learnable.
+    """
+    policy = policy or capability_policy()
+    family = dict(DEFAULT_SAFE_FAMILY)
+    family.update(
+        {p: k for p, k in policy.safe_family.items() if k in FAMILY_KINDS and p not in POLICY}
+    )
+    for program in policy.drop_family:
+        family.pop(program, None)
+    return family
+
+
+def _stem(program: str) -> str:
+    return _VERSION_SUFFIX.sub("", program)
+
+
+def variant_of(program: str, known: Iterable[str], never: Iterable[str] = ()) -> str | None:
+    """The known program ``program`` is a versioned spelling of (`python3.12` of `python3`).
+
+    Same tool, another version: `xcodebuild`'s and `python`'s numbered siblings do not
+    change what a person granted. A program whose stem is on :data:`POLICY` (or
+    ``never``) is never a variant of anything.
+    """
+    stem = _stem(program)
+    if not stem or stem == program or stem in POLICY or stem in set(never):
+        return None
+    return next((k for k in sorted(known) if k != program and _stem(k) == stem), None)
+
+
+def family_kind(
+    program: str, family: dict[str, str], *, variants: bool = True
+) -> tuple[str, str] | None:
+    """``(kind, base)`` for a program in ``family``; ``base`` is the program it is a variant of."""
+    if program in family:
+        return family[program], ""
+    # `conditional` programs are judged by name in `classify`, so a spelling of one has
+    # no checks to inherit and is not a variant.
+    base = variant_of(program, [p for p, k in family.items() if k != "conditional"])
+    return (family[base], base) if variants and base else None
 
 
 @dataclass(frozen=True)
@@ -511,7 +581,9 @@ def classify(
             "", False, "an inline environment assignment is never learned", COMMAND_SHAPE
         )
     launcher = program in ("ppy", "./bin/ppy") or program.endswith("/bin/ppy")
-    if (launcher or program in SAFE_FAMILY or _profiled(program)) and _quoted_hazard(command):
+    policy = capability_policy()
+    found = family_kind(program, safe_family(policy), variants=policy.intent_grants)
+    if (launcher or found or _profiled(program)) and _quoted_hazard(command):
         # The program is allowed or learnable; only the argument can have been refused.
         return Verdict(suggestion, False, _HAZARD_REASON, COMMAND_SHAPE, program)
     if program == "cp" and any(a.startswith("-") for a in words[1:]):
@@ -535,9 +607,9 @@ def classify(
         )
     if "/" in program:
         return _path_verdict(program, name, worktree, roots)
-    family = SAFE_FAMILY.get(program)
-    if family is None:
+    if found is None:
         return Verdict(suggestion, False, f"{program} is not in the safe family", program=program)
+    family, base = found
     args = words[1:]
     paths = [a for a in args if not a.startswith("-")]
     if family == "read" and worktree and paths and _reaches_out(paths, worktree):
@@ -593,7 +665,8 @@ def classify(
         from papaya_agent_runtime.capability_requests import ARGUMENTS
 
         return Verdict(suggestion, False, refusal, program=program, reach=ARGUMENTS)
-    return Verdict(suggestion, True, f"{program} is in the safe family ({family})", program=program)
+    where = f"a versioned variant of {base}, in the safe family" if base else "in the safe family"
+    return Verdict(suggestion, True, f"{program} is {where} ({family})", program=program)
 
 
 def _path_verdict(program: str, name: str, worktree: str | None, roots: Iterable[str]) -> Verdict:
@@ -1238,8 +1311,14 @@ __all__ = [
     "POLICY_REFUSAL",
     "PROFILE_GAP",
     "SAFE_FAMILY",
+    "DEFAULT_SAFE_FAMILY",
+    "FAMILY_KINDS",
     "Verdict",
+    "capability_policy",
     "classify",
+    "family_kind",
+    "safe_family",
+    "variant_of",
     "counts",
     "hook_steer_message",
     "kind_of",
