@@ -120,6 +120,36 @@ def test_a_failing_clone_raises_with_gits_text_and_leaves_nothing(tmp_path, ppy_
     assert not dest.exists()
 
 
+def test_add_repo_with_no_sink_and_no_logging_writes_start_and_done_to_stderr(
+    tmp_path,
+    ppy_home,
+    capfd,
+) -> None:
+    source = _make_source_repo(tmp_path / "source")
+
+    repos.add_repo(source)
+
+    captured = capfd.readouterr()
+    assert f"cloning source from {source}" in captured.err
+    assert "cloned source in " in captured.err
+    assert captured.out == ""
+
+
+def test_the_default_sink_uses_the_logger_when_it_is_enabled_for_info(
+    tmp_path,
+    ppy_home,
+    caplog,
+    capfd,
+) -> None:
+    source = _make_source_repo(tmp_path / "source")
+
+    with caplog.at_level("INFO", logger="papaya_agent_runtime.repos"):
+        repos.add_repo(source)
+
+    assert any("cloned source in " in r.getMessage() for r in caplog.records)
+    assert "cloned source in " not in capfd.readouterr().err
+
+
 def test_add_repo_keeps_its_message_and_the_destination_is_free_to_retry(
     tmp_path,
     ppy_home,

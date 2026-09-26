@@ -296,6 +296,18 @@ def _pump(fd: int, stream: _CloneStream, stop: threading.Event) -> None:
         stream.feed(chunk)
 
 
+def _default_sink(line: str) -> None:
+    """The logger where logging is configured for INFO (`ppy serve`), else stderr.
+
+    Callers with no sink of their own (`ppy repo ensure`, guided setup) would otherwise
+    lose every line to an unconfigured logger. Never stdout: callers print results there.
+    """
+    if log.isEnabledFor(logging.INFO):
+        log.info(line)
+    else:
+        print(line, file=sys.stderr, flush=True)
+
+
 def clone_repo(
     forge_url: str,
     dest: Path,
@@ -311,7 +323,7 @@ def clone_repo(
     failed, stalled or interrupted clone raises `RepoError` (or re-raises) and leaves
     no `dest` behind, unless `dest` existed before this call, which is never touched.
     """
-    sink = progress or log.info
+    sink = progress or _default_sink
     shown_url = redact_credentials(forge_url)
     is_tty = _stderr_is_tty() if tty is None else tty
     created = not dest.exists()
