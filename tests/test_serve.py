@@ -994,6 +994,31 @@ def test_a_client_with_no_extra_capabilities_still_listens_and_says_questions_ar
     assert "refuse to send questions" in said[0].getMessage()
 
 
+@pytest.mark.parametrize(
+    ("requested", "connected", "announced"),
+    [
+        (None, "claude", "claude-code"),
+        (None, "codex", "codex"),
+        ("codex", "claude", "codex"),
+        ("claude-code", None, "claude-code"),
+        (None, "cursor", None),
+        (None, "", None),
+        (None, None, None),
+    ],
+)
+def test_the_runtime_announces_the_harness_it_drives(requested, connected, announced) -> None:
+    """`runtime_kind` names the runtime; the harness under it rides the capabilities,
+    so the app can show the agent with its harness's logo (Sarah, 2026-09-27)."""
+
+    async def builder(*, extra_capabilities=None):
+        return None
+
+    assert serve.announced_harness(requested, connected) == announced
+    declared = serve.extra_capabilities(builder, harness=announced)[serve.EXTRA_CAPABILITIES]
+    assert declared.get("harness") == announced
+    assert declared["instruction_intents"] == ["ask", "work"]
+
+
 def test_extra_capabilities_are_offered_to_either_builder_only_when_it_names_them(
     caplog,
 ) -> None:
