@@ -1,0 +1,10 @@
+Checked: the image fix has already shipped, and the notification fix hasn't been started. Here's the answer.
+
+OUTCOME: done
+The screenshot fix is already live. It merged a few hours ago as "A mention with a screenshot gets a real answer" (https://github.com/Papaya-HQ/papaya-polyweave-agent/pull/583), so no new change was needed. It covers everything you approved:
+- Images now count toward the request budget by their size in pixels, not as raw file bytes.
+- A screenshot is scaled down to what the model can see when it's first read. Only the copy sent to the model is scaled; the file people open is untouched.
+- A regression test posts a full-size phone screenshot (about 3.2 MB) at the top of a thread, and both the first reply and a later one get a real answer.
+- When the budget does run out, the message now says what actually went wrong instead of "narrow the request".
+
+The notification fix (showing the agent's name, like "Middle Manager", instead of @shanes_eng_assistant) hasn't been started. The worker checked the agent codebase and that code isn't there. Push notifications are built in the backend or the frontend, so the change belongs in one of those. Ask me to start it and I'll send a worker to find where the notification text is built and switch it to the agent's name.

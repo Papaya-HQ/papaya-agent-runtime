@@ -1,0 +1,31 @@
+Reading additional input from stdin...
+OpenAI Codex v0.157.0
+--------
+workdir: /Users/shanewolf/.treehouse/papaya-agent-runtime-8931af/5/papaya-agent-runtime/.ppy-evidence/capture
+model: gpt-6-astra
+provider: openai
+approval: on-request
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0deea-440a-7623-a287-c3e58ed13244
+--------
+user
+Reply with one sentence saying what 2+2 is, then on its own line write OUTCOME: done followed by that same sentence. Do not run any commands.
+hook: SessionStart
+hook: SessionStart
+hook: SessionStart
+hook: SessionStart
+hook: SessionStart Completed
+hook: SessionStart Completed
+hook: SessionStart Completed
+hook: SessionStart Completed
+codex
+2+2 is 4.
+OUTCOME: done 2+2 is 4.
+hook: Stop
+hook: Stop Completed
+tokens used
+10,080
+2+2 is 4.
+OUTCOME: done 2+2 is 4.

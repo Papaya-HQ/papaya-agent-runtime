@@ -12,6 +12,7 @@ import io
 import json
 import urllib.error
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -586,6 +587,42 @@ def test_the_turns_outcome_block_is_read_with_its_status_and_also_sent_line() ->
     )
     assert instructions.outcome_of("OUTCOME: failed — no such task 99").status == "failed"
     assert instructions.outcome_of("no block at all") is None
+
+
+CODEX_SAMPLE = (Path(__file__).parent / "samples" / "codex-exec-outcome.txt").read_text()
+
+
+def test_a_codex_turn_yields_the_answer_once_without_its_footer() -> None:
+    # The captured `codex exec` output echoes the final message after its footer.
+    found = instructions.outcome_of(CODEX_SAMPLE)
+    assert found == instructions.Outcome("done", "2+2 is 4.")
+
+
+def test_the_answer_stops_where_codexs_footer_starts_when_there_is_no_echo() -> None:
+    without_echo = "\n".join(CODEX_SAMPLE.splitlines()[:-2])
+    found = instructions.outcome_of(without_echo)
+    assert found == instructions.Outcome("done", "2+2 is 4.")
+    assert "tokens used" not in found.text and "hook:" not in found.text
+
+
+def test_a_multi_line_answer_keeps_its_lines_and_drops_the_footer() -> None:
+    said = "OUTCOME: done\nFirst.\nSecond.\nhook: Stop\ntokens used\n1,234\nnot part of it"
+    assert instructions.outcome_of(said) == instructions.Outcome("done", "First.\nSecond.")
+
+
+def test_the_claude_samples_read_as_they_did_before_the_footer_rule() -> None:
+    samples = Path(__file__).parent / "samples"
+    for name in ("claude-p-instruction-a.txt", "claude-p-instruction-b.txt"):
+        text = (samples / name).read_text()
+        lines = text.splitlines()
+        start = max(i for i, line in enumerate(lines) if line.startswith("OUTCOME:"))
+        head = lines[start].removeprefix("OUTCOME:").strip().removeprefix("done").strip()
+        kept = ([head] if head else []) + [
+            line.rstrip() for line in lines[start + 1 :] if not line.startswith("RUNTIME:")
+        ]
+        found = instructions.outcome_of(text)
+        assert found is not None and found.status == "done"
+        assert found.text == "\n".join(kept).strip()
 
 
 def test_a_reply_is_at_most_2000_characters_and_says_where_the_rest_is() -> None:

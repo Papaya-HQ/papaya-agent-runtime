@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from papaya_agent_runtime import repos, solicit
+from papaya_agent_runtime import repos, sanitize, solicit
 from papaya_agent_runtime.state import store
 
 PAPAYA_EVENT_KEY = "papaya_event_key"
@@ -217,6 +217,33 @@ def _papaya_work_item_url(event: PapayaEvent, environ: Mapping[str, str]) -> str
     return f"{base}/workspaces/{workspace_path}/work-items/{item_path}"
 
 
+#: The methods that carry words a person reads.
+_WRITES = ("POST", "PATCH", "PUT")
+#: The body fields a person reads: a comment, a reply, an instruction's result, and
+#: the text fields of the status snapshot (which nests them in its lists).
+_PERSON_FIELDS = frozenset(
+    {"body", "text", "content", "result_summary", "summary", "title", "how", "outcome"}
+)
+
+
+def _for_a_person(value: Any) -> Any:
+    """``value`` with every field a person reads cleaned of tool-call markup.
+
+    The one place every write to Papaya passes through (`_papaya_request`), so a new
+    posting path cannot skip it.
+    """
+    if isinstance(value, Mapping):
+        return {
+            key: sanitize.clean_outbound(item)
+            if key in _PERSON_FIELDS and isinstance(item, str)
+            else _for_a_person(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_for_a_person(item) for item in value]
+    return value
+
+
 def _papaya_request(
     url: str,
     token: str,
@@ -230,6 +257,8 @@ def _papaya_request(
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     data: bytes | None = None
     if body is not None:
+        if method in _WRITES:
+            body = _for_a_person(body)
         data = json.dumps(dict(body)).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, method=method, headers=headers, data=data)
