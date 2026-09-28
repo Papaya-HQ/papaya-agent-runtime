@@ -30,10 +30,12 @@ requires-python = ">=3.13"
 # the embed builders' `extra_capabilities`, through which `ppy serve` advertises
 # `instruction_intents` (without it Papaya never routes a question to this
 # machine); 0.18.1 added `connect --quiet`, which `ppy setup` feature-detects,
-# and the arrow-key workspace/agent pickers. 0.18.2 is the floor: 0.18.1's
+# and the arrow-key workspace/agent pickers. 0.18.1's
 # pickers crash under setup's terminal relay ("asyncio.run() cannot be called
 # from a running event loop") and its `connect --quiet` did not silence request
-# logs; 0.18.2 fixes both and adds "Create your engineering agent". `ppy setup`
+# logs; 0.18.2 fixes both and adds "Create your engineering agent". 0.18.3 is
+# the floor: it passes the selected harness when creating that agent and fixes
+# Windows executable resolution, including runtime launcher hand-off. `ppy setup`
 # reinstalls the person's own `papaya-agent` at the version locked here, so the
 # floor is what every setup hands out.
 #
@@ -41,7 +43,7 @@ requires-python = ">=3.13"
 # picker (an owner list, then a checkbox list with type-to-filter). It is imported
 # only there, so nothing else in the control plane may assume it.
 dependencies = [
-    "papaya-agent-client>=0.18.2,<0.19.0",
+    "papaya-agent-client>=0.18.3,<0.19.0",
     "questionary>=2.1.0,<3",
 ]
 
