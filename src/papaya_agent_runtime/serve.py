@@ -5678,12 +5678,40 @@ OLD_CLIENT_CAPABILITIES = (
 )
 
 
-def extra_capabilities(builder: Callable[..., Any]) -> dict[str, Any]:
+#: The coding harness each name this runtime meets means, as Papaya's app knows it:
+#: the client records `claude`/`codex` at connect, `--harness` may say `claude-code`.
+HARNESS_KINDS = {
+    "claude": "claude-code",
+    "claude-code": "claude-code",
+    "claude_code": "claude-code",
+    "codex": "codex",
+}
+
+
+def announced_harness(requested: str | None, connected: str | None) -> str | None:
+    """The harness this runtime drives, as it tells Papaya: `claude-code` or `codex`.
+
+    `runtime_kind` names the runtime, not the harness, on purpose; the app still wants
+    to show a connected agent with its harness's logo (Sarah, 2026-09-27), so the
+    harness rides the capabilities. `serve --harness` wins, then the harness the
+    person connected this machine with; anything else says nothing.
+    """
+    for name in (requested, connected):
+        kind = HARNESS_KINDS.get((name or "").strip().lower())
+        if kind:
+            return kind
+    return None
+
+
+def extra_capabilities(
+    builder: Callable[..., Any], *, harness: str | None = None
+) -> dict[str, Any]:
     """The keyword arguments that register this runtime's own capabilities with `builder`.
 
     Empty for a client whose builder has no such keyword: its builders take keywords
     only and would raise on an unknown one, and a machine that still does work is worth
     more than one that refuses to start over the questions it cannot be sent.
+    `harness` (:func:`announced_harness`) is added when known.
     """
     try:
         accepts = EXTRA_CAPABILITIES in inspect.signature(builder).parameters
@@ -5692,7 +5720,10 @@ def extra_capabilities(builder: Callable[..., Any]) -> dict[str, Any]:
     if not accepts:
         log.warning(OLD_CLIENT_CAPABILITIES)
         return {}
-    return {EXTRA_CAPABILITIES: {"instruction_intents": list(INSTRUCTION_INTENTS)}}
+    declared: dict[str, Any] = {"instruction_intents": list(INSTRUCTION_INTENTS)}
+    if harness:
+        declared["harness"] = harness
+    return {EXTRA_CAPABILITIES: declared}
 
 
 def working_directory_for(
@@ -5743,7 +5774,12 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         "max_concurrent": await asyncio.to_thread(configured_workers),
     }
     builder = build_supervised_listener if options.supervised else build_listener
-    shared.update(extra_capabilities(builder))
+    shared.update(
+        extra_capabilities(
+            builder,
+            harness=announced_harness(options.harness, identity.harness if identity else None),
+        )
+    )
     # `extra` is applied last throughout, so a caller holding a seam (the tests
     # hold `events_factory` and `loop_factory`) can also replace anything above it.
     if not options.supervised:
