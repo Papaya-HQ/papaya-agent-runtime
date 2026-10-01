@@ -31,6 +31,7 @@ So the facts live on the repository (``ppy repo set <name> --compose-stack ...
 
 from __future__ import annotations
 
+import re
 import shlex
 import socket
 import sqlite3
@@ -855,3 +856,238 @@ def evidence_path_for(repo_row, worktree: str | None) -> str | None:
     if not worktree:
         return None
     return str(Path(worktree) / for_repo(repo_row).evidence_dir)
+
+
+# ── what the repository already says about its database ─────────────────────
+#
+# Readiness used to report "ships a compose file but declares no compose stack" and
+# hand the person a `ppy repo set --db-port-base ... --db-port-variable ...
+# --test-db-url-template ...` to fill in. Every one of those answers was already in
+# the repository: the compose file publishes the database port (often through a named
+# variable with a default, `${POLYWEAVE_DB_PORT:-5440}:5432`) and carries the role,
+# password and database name beside it. Shane, 2026-09-22: the runtime is supposed to
+# figure this out, the way it already reads gates from the repository
+# (`solicit.keep_gate_policies_right`) rather than asking.
+
+#: Compose files, in the order Docker itself resolves them.
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+#: Images whose service is a database this runtime isolates per task.
+_DATABASE_IMAGES = ("postgres", "pgvector", "timescale", "postgis")
+#: `${NAME:-5440}` / `${NAME}` / `5433`, the three ways a published port is written.
+_PORT_VARIABLE = re.compile(r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>\d+))?\}$")
+#: `PAPAYA_DB_PORT ?= 5433` in a Makefile: the default a variable falls back to.
+_MAKE_DEFAULT = "{name}\\s*[?:]?=\\s*(?P<port>\\d+)"
+
+
+@dataclass(frozen=True)
+class DerivedIsolation:
+    """What the repository itself says about isolating its database, and where it says it."""
+
+    db_port_base: int
+    db_port_variable: str
+    test_db_url_template: str
+    #: `<file>:<line>`, the same shape the gate answers record.
+    evidence: str
+
+    def fields(self) -> dict[str, object]:
+        return {
+            "compose_stack": "yes",
+            "db_port_base": self.db_port_base,
+            "db_port_variable": self.db_port_variable,
+            "test_db_url_template": self.test_db_url_template,
+        }
+
+
+def _compose_path(root: Path) -> Path | None:
+    for name in COMPOSE_FILES:
+        candidate = root / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _published_port(entry: object) -> tuple[str, int | None, str | None] | None:
+    """`(raw, port, variable)` for a mapping that publishes container port 5432."""
+    if isinstance(entry, dict):  # the long form: {target: 5432, published: "5433"}
+        if int(entry.get("target") or 0) != 5432:
+            return None
+        raw = str(entry.get("published") or "").strip()
+    else:
+        text = str(entry).strip().strip("'\"")
+        if not text.endswith(":5432"):
+            return None
+        # `127.0.0.1:5433:5432` publishes on the middle field.
+        host = text[: -len(":5432")]
+        # `127.0.0.1:5433:5432` publishes on the middle field, but a `${VAR:-5440}`
+        # carries its own colon, so an interpolation is taken whole.
+        raw = host if host.startswith("${") else host.rsplit(":", 1)[-1]
+    if not raw:
+        return None
+    match = _PORT_VARIABLE.match(raw)
+    if match is not None:
+        default = match.group("default")
+        return raw, int(default) if default else None, match.group("name")
+    return (raw, int(raw), None) if raw.isdigit() else None
+
+
+def _make_default(root: Path, variable: str) -> int | None:
+    """The default a Makefile gives ``variable``, for a compose file that names no default."""
+    makefile = root / "Makefile"
+    try:
+        text = makefile.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    found = re.search(_MAKE_DEFAULT.format(name=re.escape(variable)), text, flags=re.M)
+    return int(found.group("port")) if found else None
+
+
+#: `BACKEND_DATABASE_URL ?= postgresql+asyncpg://lightwork:lightwork@localhost:$(PAPAYA_DB_PORT)/lightwork`
+#: — a Makefile naming the role, password and database behind the same port variable.
+_MAKE_DB_URL = (
+    r"^[A-Z_]*DATABASE_URL\s*[?:]?=\s*[a-z+]+://"
+    r"(?P<role>[^:/@\s]+):(?P<password>[^@/\s]+)@[^:/\s]+:"
+    r"(?:\$\(|\$\{)?(?P<variable>[A-Za-z_][A-Za-z0-9_]*)[\)\}]?/(?P<database>[^\s?]+)"
+)
+
+
+def _make_credentials(root: Path, variable: str) -> tuple[str, str, str] | None:
+    """`(role, password, database)` the Makefile uses behind ``variable``, if it says.
+
+    A compose file publishes the *server*: papaya-backend's is `postgres:postgres`, the
+    superuser, while every logical database its services use (`lightwork`) is created by
+    an init script and named only in the Makefile. The Makefile is the better answer
+    where there is one, and the compose environment is the fallback.
+    """
+    try:
+        text = (root / "Makefile").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for match in re.finditer(_MAKE_DB_URL, text, flags=re.M):
+        if match.group("variable") == variable:
+            return match.group("role"), match.group("password"), match.group("database")
+    return None
+
+
+def derive_isolation(local_path: str | Path | None) -> DerivedIsolation | None:
+    """Read this repository's own database facts, or ``None`` when it states none.
+
+    Best effort and never raises: an unreadable or unrecognised compose file simply
+    has no answer in it, and the caller leaves the repository alone.
+    """
+    if not local_path:
+        return None
+    root = Path(local_path)
+    compose = _compose_path(root)
+    if compose is None:
+        return None
+    try:
+        import yaml
+
+        document = yaml.safe_load(compose.read_text(encoding="utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - a compose file this cannot read says nothing
+        return None
+    services = (document or {}).get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return None
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        image = str(service.get("image") or "")
+        if not any(known in image for known in _DATABASE_IMAGES):
+            continue
+        published = None
+        for entry in service.get("ports") or []:
+            published = _published_port(entry)
+            if published is not None:
+                break
+        if published is None:
+            continue
+        raw, port, variable = published
+        if port is None and variable:
+            port = _make_default(root, variable)
+        if port is None:
+            continue
+        env = service.get("environment") or {}
+        if isinstance(env, list):  # the `KEY=value` list form
+            env = dict(
+                item.split("=", 1)
+                for item in (str(e) for e in env)
+                if "=" in item  # noqa: E501
+            )
+        role = str(env.get("POSTGRES_USER") or "postgres")
+        password = str(env.get("POSTGRES_PASSWORD") or "postgres")
+        database = str(env.get("POSTGRES_DB") or role)
+        named = _make_credentials(root, variable) if variable else None
+        if named is not None:
+            role, password, database = named
+        line = _line_of(compose, raw)
+        return DerivedIsolation(
+            db_port_base=port,
+            db_port_variable=variable or DB_PORT_VARIABLE,
+            test_db_url_template=(
+                f"postgresql://{role}:{password}@localhost:{{port}}/{database}_test_{{task_id}}"
+            ),
+            evidence=f"repo:{compose.name}:{line}" if line else f"repo:{compose.name}",
+        )
+    return None
+
+
+def _line_of(path: Path, needle: str) -> int | None:
+    try:
+        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if needle in text:
+                return number
+    except OSError:
+        return None
+    return None
+
+
+def _unset(env: RepoEnvironment, column: str) -> bool:
+    """Has nobody answered ``column`` for this repository yet?
+
+    ``db_port_variable`` is the one with a default of its own
+    (:data:`DB_PORT_VARIABLE`): a repository still carrying it has named nothing, and
+    the name its own compose file uses is the better answer. Every other column is
+    unset only when it is empty.
+    """
+    current = getattr(env, column, None)
+    if column == "db_port_variable":
+        return not current or current == DB_PORT_VARIABLE
+    return not current
+
+
+def keep_isolation_right() -> list[str]:
+    """Fill in what each repository says about its database, one line per repository.
+
+    Run at every start beside the gate policies. Only ever fills a blank: a value a
+    person set with ``ppy repo set`` stands, because their word outranks the file.
+    """
+    from papaya_agent_runtime import repos
+
+    lines: list[str] = []
+    try:
+        registered = repos.list_repos()
+    except Exception as exc:  # noqa: BLE001 - a remedy never stops a start
+        return [f"could not read the registered repositories: {exc}"]
+    for row in registered:
+        try:
+            env = for_repo(row)
+            if not isolation_gaps(env, has_compose_file=True):
+                continue
+            derived = derive_isolation(row.get("local_path"))
+            if derived is None:
+                continue
+            fields = {
+                column: value for column, value in derived.fields().items() if _unset(env, column)
+            }
+            if not fields:
+                continue
+            repos.set_settings(str(row["name"]), **fields)
+            lines.append(
+                f"{row['name']}: gates are isolated per task from what the repository says "
+                f"({derived.db_port_variable} from {derived.db_port_base}, a database per "
+                f"task) — {derived.evidence}"
+            )
+        except Exception as exc:  # noqa: BLE001 - one repository never stops the rest
+            lines.append(f"could not read {row.get('name')}'s database facts: {exc}")
+    return lines
