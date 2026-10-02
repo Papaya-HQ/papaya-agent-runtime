@@ -1,6 +1,6 @@
 """The Papaya connection is read, reported, and never required.
 
-This runtime has no persona of its own — it is whichever Papaya agent the machine
+This runtime has no persona of its own - it is whichever Papaya agent the machine
 is connected as. That makes two things load-bearing: reading the identity has to be
 right (connecting as the wrong agent would post to the workspace under someone
 else's name), and every state short of connected has to stay usable, because a
@@ -277,7 +277,7 @@ def test_context_returns_none_when_the_client_is_missing(monkeypatch) -> None:
 # which writes `~/.papaya-agent`, or the Papaya desktop app, which runs the same
 # client as a child process with `PAPAYA_AGENT_HOME` pointed into its own
 # application-support directory. That variable only exists inside the process the
-# app launched, so a shell the person opens themselves inherits nothing — and a
+# app launched, so a shell the person opens themselves inherits nothing - and a
 # runtime that only checked `~/.papaya-agent` told a genuinely connected user they
 # were not connected. Found on a real machine on 2026-09-15.
 
@@ -726,7 +726,7 @@ def test_the_clients_question_shows_before_it_is_answered(tmp_path, monkeypatch)
             + ["Connected as Middle Manager (@mm) in Papaya HQ."]
             + [
                 "Connected as Middle Manager in Papaya HQ. Open Claude Code in any "
-                "repository — the papaya tools are ready."
+                "repository - the papaya tools are ready."
             ],
             "only",
             "Papaya HQ",

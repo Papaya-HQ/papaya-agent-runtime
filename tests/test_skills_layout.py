@@ -29,7 +29,7 @@ def test_at_least_one_skill_exists() -> None:
 def test_claude_symlink_mirrors_agents_skill(name: str) -> None:
     link = CLAUDE_SKILLS / name
     assert link.is_symlink(), (
-        f"missing .claude/skills/{name} — Claude Code only scans .claude/skills/. "
+        f"missing .claude/skills/{name} - Claude Code only scans .claude/skills/. "
         f"Fix: (cd .claude/skills && ln -s ../../.agents/skills/{name} {name})"
     )
     expected = Path("..") / ".." / ".agents" / "skills" / name
@@ -43,6 +43,6 @@ def test_no_stray_claude_skills() -> None:
     stray = sorted(p.name for p in CLAUDE_SKILLS.iterdir()) if CLAUDE_SKILLS.exists() else []
     stray = [n for n in stray if n not in _skill_names()]
     assert not stray, (
-        f"unexpected entries in .claude/skills/: {stray} — "
+        f"unexpected entries in .claude/skills/: {stray} - "
         "skills are authored under .agents/skills/ and only symlinked here"
     )

@@ -8,7 +8,7 @@ has never been built.
 Why it is guarded: on 2026-09-16 a `ppy status` typed in a terminal rebuilt `.venv`
 under a running `serve`. The desktop app's uv and the shell's uv chose different
 interpreters for the same project, `uv run` "fixed" the environment, and every poll
-in `serve` failed with "No such file or directory" until the app was quit — the
+in `serve` failed with "No such file or directory" until the app was quit - the
 interpreter and packages it was importing from had been deleted. A sync is only
 safe when nothing is running from the environment, and the thing that runs from it
 for hours is the supervisor, which holds ``<PPY_HOME>/run/supervisor.lock`` with
@@ -25,7 +25,7 @@ builds a fresh directory beside it (``<env>.env-<stamp>``), checks the client
 imports from it, and only then points the environment path at it with one
 ``rename`` of a symlink. A refused, failed or interrupted sync leaves the previous
 environment exactly as it was. The first sync of a checkout whose environment is a
-plain directory moves that directory aside and puts the symlink in its place — two
+plain directory moves that directory aside and puts the symlink in its place - two
 renames, once.
 
 Why every command asks: on 2026-09-24 a pull added `questionary` to the lockfile and
@@ -36,8 +36,8 @@ one line said, and a sync that fails stops the command with one line naming the
 retry. A supervisor holding the lock is not overruled: the command runs on the
 environment as it is, and the next `ppy serve` start rebuilds it.
 
-Run by `bin/ppy` under whatever interpreter it can find — possibly an old system
-`python3` — so this module stays standard-library only and 3.9-compatible, like
+Run by `bin/ppy` under whatever interpreter it can find - possibly an old system
+`python3` - so this module stays standard-library only and 3.9-compatible, like
 `capabilities.py`.
 """
 
@@ -347,8 +347,8 @@ def _sync(root: str, args: argparse.Namespace, stderr) -> int:
                 # the command is better run on the old environment than not at all.
                 print(
                     "ppy: the runtime's environment is out of date (uv.lock or "
-                    f"pyproject.toml changed), but {holder} holds {path} — a running "
-                    "`ppy serve`, or another sync — so this runs on it as it is; the next "
+                    f"pyproject.toml changed), but {holder} holds {path} - a running "
+                    "`ppy serve`, or another sync - so this runs on it as it is; the next "
                     "`ppy serve` start updates it.",
                     file=stderr,
                 )

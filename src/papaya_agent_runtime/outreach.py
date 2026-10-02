@@ -7,16 +7,16 @@ lane gave up on. On 2026-09-17 a product decision (the pill copy on PAP-242) was
 on its ticket as a decision already made, filed in the ledger as "waiting on user", and
 mentioned in passing by the next session; the person it waited on found it by asking.
 Shane's rule, standing: anything blocked on a person is chased until it is answered,
-through a channel that works without a terminal — under `ppy serve` there is no session
+through a channel that works without a terminal - under `ppy serve` there is no session
 to ask in.
 
 This module is that procedure, one decision both modes run:
 
-- :func:`collect` reads every open *ask* — the same three kinds, from the same ledger,
+- :func:`collect` reads every open *ask* - the same three kinds, from the same ledger,
   every time;
 - :func:`observe` keeps the `outreach` table in step with it: an ask seen for the first
   time, an ask that is gone (answered, closed, decided) marked resolved;
-- :func:`due` says which asks to say now — only asks never said, or whose words
+- :func:`due` says which asks to say now - only asks never said, or whose words
   changed since they were said (:attr:`Ask.fingerprint`), and only once
   :data:`REPEAT_AFTER_SECONDS` has passed since anything was last said. An ask
   already said, unchanged, is never said again (Shane, 2026-09-17: the per-ask two-hour
@@ -26,7 +26,7 @@ This module is that procedure, one decision both modes run:
 - :func:`record_said` writes down where it was said and what it said, so an unchanged
   ask is never said twice.
 
-Nothing is ever posted in a channel (Shane, 2026-09-17 — a public channel is not where
+Nothing is ever posted in a channel (Shane, 2026-09-17 - a public channel is not where
 his decisions go). An agent in no DM channel with its owner says it through Papaya's
 owner-DM route instead (:func:`say_in_workspace`), in the words a person in Papaya reads
 (:func:`owner_message`): the agent DM is where the owner already talks to it, and until
@@ -282,7 +282,7 @@ def _capabilities(conn: sqlite3.Connection) -> list[Ask]:
         # (`ppy capability` refuses it too) and is not a person's to answer.
         if task is None or task["status"] not in (*owed.RUNNING_STATUSES, *owed.OWED_STATUSES):
             continue
-        why = f" — {item.why}" if item.why else ""
+        why = f" - {item.why}" if item.why else ""
         why += capability_requests.where(item)
         command = f" (it ran `{item.command}`)" if item.command else ""
         only = f"; only you can decide it because: {item.reason}" if item.reason else ""
@@ -520,7 +520,7 @@ def message(conn: sqlite3.Connection, asks: list[Ask], *, now: datetime, host: s
     for i, ask in enumerate(asks, 1):
         ago = _ago(now, ask.since)
         where = f"[{ask.work_item_id}] " if ask.work_item_id else ""
-        stamp = f" — since {ago} ago" if ago else ""
+        stamp = f" - since {ago} ago" if ago else ""
         lines.append(f"{i}. {where}{ask.text}{stamp}{_nth(counts.get(ask.key, 0))}")
         lines.append(f"   → {ask.how}")
     lines.append(
@@ -774,7 +774,7 @@ async def say_in_workspace(
     unreached: str = NO_DM,
 ) -> bool:
     """Put ``text`` in its owner's DM with this agent. ``False`` when it did not land.
-    Never a channel — not even a private one. Never raises.
+    Never a channel - not even a private one. Never raises.
 
     The DM channel when the agent is in one, as it always was. When it is in none,
     ``owner`` goes through Papaya's owner-DM route (:func:`say_to_owner`), on
@@ -859,7 +859,7 @@ def post_ticket(
         mention = mention if mention is not None else owner_mention()
         mentions = [mention] if mention and mention.get("id") else None
         if mention and mention.get("handle"):
-            body = f"@{mention['handle']} — {body}"
+            body = f"@{mention['handle']} - {body}"
         return papaya_events.post_work_item_comment(event, body, environ=env, mentions=mentions)
     except Exception as exc:  # noqa: BLE001 - a comment that did not land is said elsewhere
         log.warning("[outreach] Could not comment on %s: %s", work_item_id, exc)
@@ -913,7 +913,7 @@ def post_origin(
 
 #: Set to ``1`` to also raise a macOS desktop notification for what is due. Off by
 #: default: `osascript`'s notifications are attributed to Script Editor, so clicking one
-#: opens Script Editor rather than the ask (Shane, 2026-09-17) — noise, not a channel.
+#: opens Script Editor rather than the ask (Shane, 2026-09-17) - noise, not a channel.
 DESKTOP_ENV = "PPY_OUTREACH_DESKTOP"
 
 
@@ -1101,7 +1101,7 @@ def lines(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[str]
             said = f"said {item['said_count']}x via {', '.join(item['said_via']) or '?'}"
         else:
             said = "not said yet"
-        found.append(f"{item['text']} — waiting {waited}; {said}")
+        found.append(f"{item['text']} - waiting {waited}; {said}")
     return found
 
 

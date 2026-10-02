@@ -76,7 +76,7 @@ of this one.
 ### The pull request description
 
 It is the pull request's body, exactly as you write it, for the people who will read and
-merge it — not a log of this run. Follow the skill's "The pull request description"
+merge it - not a log of this run. Follow the skill's "The pull request description"
 section: five `##` sections (Summary, Why, Product impact, How to test, Risks and what
 was not verified), in the product's language, with no `.ppy-evidence/` paths, SHAs or
 round numbers. `ppy review approve` refuses one that falls short, and delivery refuses
@@ -104,5 +104,5 @@ Where a durable fact goes depends on this agent, which the facts at the end of t
 
 ## When the runtime got in the way
 
-If the runtime itself got in the way of this turn, say so in one line of its own: `RUNTIME: <what got in the way>`. ONLY for something that stopped or degraded the job this turn was sent to do — a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true — and never for the repository, the work itself, or anything that went fine. One that belongs: `RUNTIME: the instructions named a command that does not exist, so task 412 was never linked to its work item`. One that does not: `RUNTIME: the Papaya tools were loaded on demand this turn, so the work item could be read` — that is the runtime working, reported as though it were an obstacle. A turn with nothing in its way writes no `RUNTIME:` line at all. Name ids, never people, and quote no code or ticket text.
+If the runtime itself got in the way of this turn, say so in one line of its own: `RUNTIME: <what got in the way>`. ONLY for something that stopped or degraded the job this turn was sent to do - a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true - and never for the repository, the work itself, or anything that went fine. One that belongs: `RUNTIME: the instructions named a command that does not exist, so task 412 was never linked to its work item`. One that does not: `RUNTIME: the Papaya tools were loaded on demand this turn, so the work item could be read` - that is the runtime working, reported as though it were an obstacle. A turn with nothing in its way writes no `RUNTIME:` line at all. Name ids, never people, and quote no code or ticket text.
 Put it at the very end of your last message.

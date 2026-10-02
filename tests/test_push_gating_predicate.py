@@ -1,7 +1,7 @@
 """One predicate decides who pushes, and everything asks it.
 
-Two used to disagree. `environment.push_is_gated` — any readable `PreToolUse`
-hook on `Bash`, even a logging one — decided what the WORKER was told; the push
+Two used to disagree. `environment.push_is_gated` - any readable `PreToolUse`
+hook on `Bash`, even a logging one - decided what the WORKER was told; the push
 itself and its timeout read `repos.push_hook_runs_full_suite`. A repository
 matching the first and not the second told its worker "do not push, the runtime
 pushes for you" and then had nothing gate-aware to push for it: the branch fell
@@ -73,7 +73,7 @@ def _register_hook(repo) -> None:
 def test_a_repository_with_a_hook_but_no_recorded_flag_is_gated_everywhere(repo) -> None:
     """The mismatch case. Both answers have to be the same one.
 
-    The worker is told not to push, so the runtime must be the thing that pushes —
+    The worker is told not to push, so the runtime must be the thing that pushes -
     with its gate check, not through the ungated rescue.
     """
     _register_hook(repo)
@@ -122,7 +122,7 @@ def test_what_the_worker_is_told_matches_who_pushes(repo) -> None:
 
     The command rules said "Push with exactly `git push origin HEAD:<branch>`" while
     the environment block said "do not push". The worker followed the rules, and was
-    refused — which is most of issue #83's fourteen occurrences.
+    refused - which is most of issue #83's fourteen occurrences.
     """
     _register_hook(repo)
     from papaya_agent_runtime.providers.command_rules import command_rules

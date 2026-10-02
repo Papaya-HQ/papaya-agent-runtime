@@ -4,11 +4,11 @@ The runner already records everything a worker says (every stream event lands in
 ``events`` table) and the pid of its process. Health turns that into a verdict per
 in-flight task without a model call:
 
-- ``alive``  — process up and it spoke within the quiet threshold;
-- ``quiet``  — process up but silent for longer than the threshold (probably stuck:
+- ``alive``  - process up and it spoke within the quiet threshold;
+- ``quiet``  - process up but silent for longer than the threshold (probably stuck:
   a hung tool, a wedged prompt, a worker waiting on something nobody will give it);
-- ``dead``   — no live runner process for an in-flight task (crash, kill, machine
-  restart) — ``ppy reconcile`` turns this into ``needs_recovery``.
+- ``dead``   - no live runner process for an in-flight task (crash, kill, machine
+  restart) - ``ppy reconcile`` turns this into ``needs_recovery``.
 
 The supervisor polls this on its maintenance tick and raises an actionable
 ``worker_quiet`` event the first time a worker goes quiet (and again only after it
@@ -263,7 +263,7 @@ def _parse(ts: str | None) -> datetime | None:
 
 
 def last_heard(conn: sqlite3.Connection, task_id: int) -> datetime | None:
-    """When the worker last produced anything — its newest event, else the task row."""
+    """When the worker last produced anything - its newest event, else the task row."""
     row = conn.execute(
         "SELECT MAX(created_at) AS at FROM events WHERE task_id = ?", (task_id,)
     ).fetchone()
@@ -358,13 +358,13 @@ def claude_tool_profile() -> dict[str, Any]:
 def describe_claude_tools(profile: dict[str, Any]) -> str:
     if not profile["ok"]:
         return (
-            f"claude worker tools: NONE ({profile['source']} is empty) — a dispatch would be "
+            f"claude worker tools: NONE ({profile['source']} is empty) - a dispatch would be "
             "refused; run `ppy config claude --reset`"
         )
     shown = ", ".join(profile["tools"][:6])
     more = f", +{profile['count'] - 6} more" if profile["count"] > 6 else ""
     return (
-        f"claude worker tools: {profile['count']} patterns from {profile['source']} — {shown}{more}"
+        f"claude worker tools: {profile['count']} patterns from {profile['source']} - {shown}{more}"
     )
 
 
@@ -388,10 +388,10 @@ def describe(entry: dict[str, Any]) -> str:
     silence = humanize(entry["silent_seconds"])
     head = f'task {entry["task_id"]} "{entry["title"]}"{where}'
     if entry["verdict"] == "dead":
-        return f"{head}: DEAD — no runner process; run `ppy reconcile`, then `ppy resume`"
+        return f"{head}: DEAD - no runner process; run `ppy reconcile`, then `ppy resume`"
     if entry["verdict"] == "quiet":
         return (
-            f"{head}: QUIET for {silence} — process up but silent; peek at its progress "
+            f"{head}: QUIET for {silence} - process up but silent; peek at its progress "
             "log, then `ppy steer`/`ppy resume` or `ppy reconcile` if it's wedged"
         )
     return f"{head}: alive (heard {silence} ago)"
@@ -431,7 +431,7 @@ def flag_quiet_workers(
                 "last_heard": e["last_heard"],
                 "summary": (
                     f"no output from the worker for {humanize(e['silent_seconds'])}; "
-                    "it may be stuck — check its progress log and steer, resume, or reconcile"
+                    "it may be stuck - check its progress log and steer, resume, or reconcile"
                 ),
             },
             run_id=e["run_id"],

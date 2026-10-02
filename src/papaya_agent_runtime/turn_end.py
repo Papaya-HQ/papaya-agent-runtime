@@ -15,7 +15,7 @@ A turn ending is not evidence of completion. This module asks for the evidence:
 3. the session's last tool call was not a backgrounded command, which dies with
    the session that started it.
 
-Any of those failing means the task stopped mid-gate — a real state
+Any of those failing means the task stopped mid-gate - a real state
 (``worker_stopped``) with a named reason and a resume that says what was cut
 short, rather than a finished task nobody looks at again.
 
@@ -25,7 +25,7 @@ remote: a push hook that fails on advisories already on the default branch, a
 push held by the permission layer, a turn that simply ended first. The work was
 finished; only the push was missing, and the manager did it by hand every time.
 A task's lease branch belongs to that task and nothing else, so pushing it takes
-nothing from anyone — :func:`rescue_unpushed` does it here (issue #50). When the
+nothing from anyone - :func:`rescue_unpushed` does it here (issue #50). When the
 push itself is refused, the refusal's own words become the stop reason, because
 a hook that says why is more useful than the harness guessing.
 """
@@ -96,14 +96,14 @@ class StopVerdict:
             "Your turn ended before the work was finished: "
             + "; ".join(self.reasons)
             + ". Pick it back up in this worktree: run the authoritative verification "
-            "suite in the foreground (never as a background task — a backgrounded "
+            "suite in the foreground (never as a background task - a backgrounded "
             f"command dies with the session), {finish}."
         )
 
 
 def _unpushed_reason(count: int) -> str:
     """The one reason :func:`rescue_unpushed` can take back, so it matches exactly."""
-    return f"the branch has {count} commit(s) no remote holds — the work was never pushed"
+    return f"the branch has {count} commit(s) no remote holds - the work was never pushed"
 
 
 def latest_phase(conn, task_id: int) -> str | None:
@@ -125,8 +125,8 @@ def latest_phase(conn, task_id: int) -> str | None:
 def _tool_calls(payload: object) -> list[dict]:
     """Every tool call in one recorded provider event, in the order they appear.
 
-    Providers wrap tool calls differently — Claude nests ``tool_use`` blocks in an
-    assistant message's content — so this walks the payload rather than assuming a
+    Providers wrap tool calls differently - Claude nests ``tool_use`` blocks in an
+    assistant message's content - so this walks the payload rather than assuming a
     shape, and accepts anything carrying a name and an input object.
     """
     found: list[dict] = []
@@ -233,7 +233,7 @@ class PushResult:
 
     @property
     def delivered(self) -> bool:
-        """Is the head on the remote now — whether this call put it there or not?"""
+        """Is the head on the remote now - whether this call put it there or not?"""
         return self.pushed or self.already
 
     @property
@@ -243,7 +243,7 @@ class PushResult:
         target = f"{self.remote}/{self.branch}" if self.branch else "its lease branch"
         if self.already:
             return f"{target} already held {(self.sha or '')[:8]}; nothing to push"
-        return f"nothing was pushed to {target} — {self.stderr}"
+        return f"nothing was pushed to {target} - {self.stderr}"
 
 
 def _last_lines(text: str, count: int = 20) -> str:
@@ -324,7 +324,7 @@ def _remote_has(worktree: str, remote: str, branch: str, sha: str | None) -> boo
     """Is ``branch`` on ``remote`` already at ``sha``? Then there is nothing to push.
 
     Read from the worktree's own remote-tracking ref, which every push through this
-    module updates — no network, and no second push of a head already delivered.
+    module updates - no network, and no second push of a head already delivered.
     """
     if not sha:
         return False
@@ -400,7 +400,7 @@ def _push_env(conn, task) -> dict[str, str] | None:
     """The environment the push gets: the same one this task's gate would get.
 
     A repository that gates pushes runs its suite from the pre-push hook, and that
-    suite needs the task's private database stack and ports — the very thing
+    suite needs the task's private database stack and ports - the very thing
     `gate.gate_env` builds. Without it the hook would run against the shared stack
     and could pass or fail for reasons belonging to another task.
 
@@ -449,7 +449,7 @@ def push_lease_branch(
     carrying the remote's own words, which is what the manager needs to read.
 
     A branch the remote already holds at this head is not pushed again, so calling
-    this twice — the rounds, a resume, a person — costs one `rev-parse` and changes
+    this twice - the rounds, a resume, a person - costs one `rev-parse` and changes
     nothing. ``timeout`` defaults to what the repository's gate history says
     (:func:`push_wait_seconds`); a push that outlasts it is killed and reported.
     """
@@ -530,7 +530,7 @@ def push_lease_branch(
     wait = push_wait_seconds(conn, task) if timeout is None else timeout
     # The VERIFIED sha, not `HEAD`: the ref that was checked against the remote is the
     # ref that goes up, so nothing can move underneath the check. Still no force and
-    # no `--no-verify` — every hook the repository has runs.
+    # no `--no-verify` - every hook the repository has runs.
     code, out, err, timed_out = _run_push(
         ["git", "-C", worktree, "push", remote, f"{sha}:refs/heads/{branch}"],
         wait,
@@ -594,7 +594,7 @@ def deliver_after_turn(
     """**The** push decision for a worker's ending. Exactly one push, or none.
 
     There used to be two, run back to back: `rescue_unpushed` pushed whenever the
-    newest note was terminal and the branch was ahead — with no gate check at all —
+    newest note was terminal and the branch was ahead - with no gate check at all -
     and `deliver_finished_branch` then found the branch already there. In a gated
     repository the worker never pushes, so "ahead" is always true, and a red-gate,
     stale-gate or never-gated head went to the remote. Worse, a refused rescue was
@@ -605,7 +605,7 @@ def deliver_after_turn(
     - a repository that **gates pushes** (:func:`push_is_gated`) goes through
       :func:`deliver_finished_branch`, which requires the gate verdict to be green at
       the worktree's exact SHA;
-    - any other repository keeps :func:`rescue_unpushed` exactly as it was — the
+    - any other repository keeps :func:`rescue_unpushed` exactly as it was - the
       worker pushes there itself, and this is only the safety net for one that
       finished and did not.
     """
@@ -625,14 +625,14 @@ def deliver_finished_branch(
     Fourteen times (issue #83) a worker finished, ran exactly the push its rules
     prescribed, and the repository's own hook refused it inside the harness. The
     work shipped only because a manager turn happened to push by hand. So the
-    runtime pushes here instead, where no Claude hook applies — the repository's own
+    runtime pushes here instead, where no Claude hook applies - the repository's own
     git hooks still run and are never bypassed, and the suite the hook exists to
     protect has already run as the runtime's own gate at this exact head.
 
     Conditions, all of them:
 
     - the repository gates pushes (:func:`push_is_gated`);
-    - the worker's newest note reached the task's own terminal phase — ``done``, or
+    - the worker's newest note reached the task's own terminal phase - ``done``, or
       ``review`` for a task that ends at review and never files a ``done`` note;
     - the runtime's gate is green at the worktree's **exact** SHA.
 
@@ -658,7 +658,7 @@ def deliver_finished_branch(
     if _newest_phase(conn, task_id) != verdict.expected_phase:
         return verdict, None
     # At the worktree's exact SHA. `gate.verdict` answers only about the head the
-    # worktree is on now, so a green from before the last commit cannot stand in —
+    # worktree is on now, so a green from before the last commit cannot stand in -
     # and the SHA it names is the one the push sends.
     decided = gate.verdict(task_id)
     if decided.state != gate.GREEN:
@@ -673,7 +673,7 @@ def deliver_finished_branch(
     verdict.stopped = True
     verdict.reasons.append(
         f"this repository gates pushes, so the runtime pushed {pushed.branch} to "
-        f"{pushed.remote} after its gate was green — and that was refused too:\n{pushed.stderr}"
+        f"{pushed.remote} after its gate was green - and that was refused too:\n{pushed.stderr}"
     )
     return verdict, pushed
 
@@ -734,7 +734,7 @@ def rescue_unpushed(
     verdict is left exactly as it was and nothing is pushed.
 
     Returns the verdict to act on. After a successful push the turn is re-judged
-    from scratch — the push may have been the only thing wrong, or a backgrounded
+    from scratch - the push may have been the only thing wrong, or a backgrounded
     last command may still hold it open. After a refused push the branch is still
     unpushed, so the reason says so in the remote's own words.
     """

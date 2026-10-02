@@ -1,4 +1,4 @@
-"""A note of any length or punctuation is recorded first time — and only from the worktree.
+"""A note of any length or punctuation is recorded first time - and only from the worktree.
 
 Issue #115: `ppy progress <n> --phase done --note "…"` and `ppy need <n>
 --capability docker --why "…"` were refused as `Bash(ppy:*)` although that
@@ -33,11 +33,11 @@ from papaya_agent_runtime.state import init_db, store
 #: newline, backticks, `$`, braces and quotes. Modelled on task 112's real report.
 HARD_NOTE = """Rebased ppy/task-112 onto origin/main and pushed. NEW HEAD fffb1c342.
 
-Gate green: `make lint-check` — All checks passed! Env was
+Gate green: `make lint-check` - All checks passed! Env was
 `{"triggered_by": {"type": "user"}}` and $HOME was untouched.
 
 ## Flagged, not done
-- `cd /wt && git status --short` — refused for chaining cd.
+- `cd /wt && git status --short` - refused for chaining cd.
 """
 
 

@@ -1,7 +1,7 @@
 """What a supervisor started dies with it, however the supervisor dies.
 
 An orderly stop of `ppy serve` stops its workers itself (`SupervisorServer.close`).
-An abrupt one — the app crashing, `kill -9` — runs no Python at all, and a worker is
+An abrupt one - the app crashing, `kill -9` - runs no Python at all, and a worker is
 not a child the kernel takes down with its parent: every worker, gate and turn runs
 in a process group of its own, so an interrupt reaches the tools it started and
 never the supervisor (or the desktop app whose group `serve` may share). On
@@ -11,13 +11,13 @@ no longer existed.
 So the owner of a supervisor starts one small watcher, in a session of its own so a
 signal to the owner's group cannot take it first. It reads, on a pipe only the owner
 holds, which process groups and pids to answer for. When that pipe reaches end of
-file — the owner exited, by any route — it sends SIGTERM to everything still listed,
+file - the owner exited, by any route - it sends SIGTERM to everything still listed,
 waits a few seconds, and SIGKILLs what is left. An orderly stop has already stopped
 and released everything, so the watcher finds nothing and exits.
 
 The watcher is standard-library only and knows nothing else about the runtime.
 
-The watcher can itself be lost — killed by hand, by a memory reaper, by a crash —
+The watcher can itself be lost - killed by hand, by a memory reaper, by a crash -
 and then the guarantee is gone with nothing said. So the owner checks it on its
 own clock (:func:`keep_alive`: every manager round in `ppy serve`, every supervisor
 tick): a watcher that has exited is started again and handed every live runner's
@@ -253,7 +253,7 @@ def describe(seen: dict) -> str:
     if state == MISSING:
         why = f": {seen['error']}" if seen.get("error") else ""
         return (
-            f"lifeline watcher: MISSING under supervisor pid {seen['owner_pid']}{why} — its "
+            f"lifeline watcher: MISSING under supervisor pid {seen['owner_pid']}{why} - its "
             "workers would outlive an abrupt supervisor death"
         )
     return "lifeline watcher: none (no supervisor that started one is running)"

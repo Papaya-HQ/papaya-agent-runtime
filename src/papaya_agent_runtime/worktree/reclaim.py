@@ -16,14 +16,14 @@ work that was never pushed.
 
 The leases table is not the whole inventory. On 2026-09-03 the first real prune
 gave back 7.0 GB from nine backend slots while thirteen frontend slot directories
-under ``~/.treehouse/papaya-frontend-monorepo-bbcd55`` — about 10 GB, all clean,
-all from delivered tasks — did not appear in ``ppy worktree list`` at all: their
+under ``~/.treehouse/papaya-frontend-monorepo-bbcd55`` - about 10 GB, all clean,
+all from delivered tasks - did not appear in ``ppy worktree list`` at all: their
 leases were released, or were created by an earlier ppy instance whose database
 this one never saw. So inventory also walks the pool directories themselves (the
 treehouse pool roots for each registered repo, and the plain pool under
 ``.ppy/worktree-pools/``) and labels any slot no active lease owns as
-**orphaned**. Orphans are reclaimed under exactly the same safety rules — clean,
-and every commit already on a remote — because nothing about being unowned makes
+**orphaned**. Orphans are reclaimed under exactly the same safety rules - clean,
+and every commit already on a remote - because nothing about being unowned makes
 losing work cheaper.
 
 A pool root is not proof of ownership, and that distinction is load-bearing: the
@@ -32,7 +32,7 @@ same repositories (``papaya-backend-monorepo-58a49b`` is ours,
 ``papaya-backend-monorepo-e5cc8b`` is theirs), and both match the same name glob.
 So a slot is a reclamation candidate only when its checkout's base clone is one
 of this instance's, under ``.ppy/repos/``. Everything else is listed as unmanaged
-and is never removed, however clean and however pushed — a personal worktree is
+and is never removed, however clean and however pushed - a personal worktree is
 not ours to reclaim, and being tidy is not consent.
 """
 
@@ -77,7 +77,7 @@ class WorktreeEntry:
     repo_path: str = ""
     orphaned: bool = False
     checkout_path: str = ""
-    #: Whether this instance created the slot — i.e. its checkout belongs to one of
+    #: Whether this instance created the slot - i.e. its checkout belongs to one of
     #: our base clones. False means somebody else's worktree; never reclaimable.
     managed: bool = True
     #: The open pull request that keeps a delivered task's slot, when one does.
@@ -85,7 +85,7 @@ class WorktreeEntry:
 
     @property
     def slot(self) -> str:
-        """The pool slot name — the last path segment, which is what `du` shows."""
+        """The pool slot name - the last path segment, which is what `du` shows."""
         return Path(self.path).name
 
     @property
@@ -156,7 +156,7 @@ def open_pull_request(
     pushed its checkout is. The state is the PR watch record (`pr_observed`), read
     fresh from the forge when it is older than one round. A task with no pull request
     on record at all is left to the ordinary rules; one whose pull request exists but
-    cannot be read now is kept — unknown is not merged.
+    cannot be read now is kept - unknown is not merged.
     """
     import json
 
@@ -325,7 +325,7 @@ def _inspect(entry: WorktreeEntry) -> WorktreeEntry:
         # holds this instance's pools *and* the user's own for the same repository,
         # told apart only by the hash in the directory name. Ownership is settled by
         # the checkout's base clone, never by the directory it sits in. Not sized
-        # either — walking someone else's pool with `du` buys nothing.
+        # either - walking someone else's pool with `du` buys nothing.
         entry.reason = "not managed by this instance, leaving it alone"
         return entry
 
@@ -360,7 +360,7 @@ def _inspect(entry: WorktreeEntry) -> WorktreeEntry:
         return entry
     if entry.unpushed_commits != 0:
         count = "unknown" if entry.unpushed_commits < 0 else entry.unpushed_commits
-        entry.reason = f"{count} commit(s) exist only here — nothing on a remote holds them"
+        entry.reason = f"{count} commit(s) exist only here - nothing on a remote holds them"
         return entry
     entry.reclaimable = True
     entry.reason = (
@@ -372,7 +372,7 @@ def _inspect(entry: WorktreeEntry) -> WorktreeEntry:
 
 
 # --------------------------------------------------------------------------- #
-# Pool directories on disk — the slots no lease in this database owns
+# Pool directories on disk - the slots no lease in this database owns
 # --------------------------------------------------------------------------- #
 
 
@@ -398,7 +398,7 @@ def pool_roots(conn: sqlite3.Connection | None = None) -> list[Path]:
     Three sources, because no single one is complete: the plain pool this process
     creates, the treehouse pool root for each registered repo (treehouse names it
     ``<repo>-<hash>``, so it is matched by prefix), and the root implied by any
-    worktree path this database has ever recorded — which is how slots left by an
+    worktree path this database has ever recorded - which is how slots left by an
     earlier ppy instance are found at all.
     """
     conn = conn or init_db()
@@ -485,8 +485,8 @@ def orphan_slots(
     unrelated file someone dropped in a pool root is never a prune candidate.
 
     Sitting in a pool root does **not** make a slot ours. A treehouse home holds
-    this instance's pools next to the user's own for the same repositories —
-    ``papaya-backend-monorepo-58a49b`` beside ``papaya-backend-monorepo-e5cc8b`` —
+    this instance's pools next to the user's own for the same repositories -
+    ``papaya-backend-monorepo-58a49b`` beside ``papaya-backend-monorepo-e5cc8b`` -
     and both match the same name glob. So ownership is decided by the checkout's
     base clone: only a slot whose main repository is one of this instance's base
     clones under ``.ppy/repos/`` is ever a candidate. Anything else is marked
@@ -499,7 +499,7 @@ def orphan_slots(
         owned.add(_resolved(path))
         owned.add(_resolved(Path(path).parent))
     # A slot no lease owns can still be the recorded worktree of a task that is
-    # not over — a failed worker whose lease was handed back while its task is
+    # not over - a failed worker whose lease was handed back while its task is
     # still `ppy resume`-able. Task 158 lost its checkout that way on 2026-09-06
     # (issue #58). Such a slot is listed, with the task named, and never taken.
     resumable: dict[str, tuple[int, str]] = {}
@@ -589,7 +589,7 @@ def list_worktrees(
     """Every leased slot and every orphaned one, with task, cleanliness, and size.
 
     Leases come first (newest first), then the slots on disk that no active lease
-    owns. A failure to walk the pools never costs the caller the lease inventory —
+    owns. A failure to walk the pools never costs the caller the lease inventory -
     ``ppy dispatch`` asks this question before every dispatch. ``task_id`` narrows
     the inventory to that one task's slot, and then no pool is walked at all.
     """
@@ -662,7 +662,7 @@ def prune(
     Returns what went, what stayed and why, and the bytes involved. ``dry_run``
     changes nothing on disk or in the database. ``task_id`` prunes that one
     task's slot only. ``managed_only`` also holds a *leased* slot to the orphans'
-    ownership rule — its base clone must be under ``.ppy/repos/`` — which is what
+    ownership rule - its base clone must be under ``.ppy/repos/`` - which is what
     the manager's unattended hygiene asks for: nothing it did not clone is its to
     remove, even through a lease.
     """

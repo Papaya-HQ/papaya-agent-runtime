@@ -1,8 +1,8 @@
 """The sweep: `ppy serve` looks for its work as well as waiting for it.
 
 The event stream says what just happened; it does not say what is still owned.
-An assignment can be missed — the machine was off, every slot was busy for long
-enough, an earlier client aged the event out — and a ticket handed back while
+An assignment can be missed - the machine was off, every slot was busy for long
+enough, an earlier client aged the event out - and a ticket handed back while
 nobody was looking stays assigned with nothing that will ever pick it up. So on
 start, and then every `sweep_interval`, `serve` asks Papaya what is assigned to
 this agent and offers every open item this runtime is not already working to the
@@ -14,20 +14,20 @@ app exactly what an event-picked one asks and leaves the same task row behind.
 What the sweep adds is only the choosing:
 
 - **open** items only (`todo`, `in_progress`, `blocked`, `changes_requested`);
-- not one this loop already holds, and not one with a **live task** here —
+- not one this loop already holds, and not one with a **live task** here -
   looked up by work item id, whatever event first created the task. A task whose
   hold ended (released, handed back, stalled, declined) or whose status is closed
   is not live, so a ticket that is still assigned is offered again;
 - a subject someone else holds is a skip and a debug line, never an error, and it
-  is not remembered — the next sweep simply asks again;
+  is not remembered - the next sweep simply asks again;
 - an `in_progress` item somebody touched in the last `stale_after` (six hours by
-  default) is being worked somewhere else — another session, the hosted agent —
+  default) is being worked somewhere else - another session, the hosted agent -
   and offering it would only start the same work twice, so it is skipped and
   counted as in progress elsewhere; one left untouched for longer is fair game;
 - the most important first (`sweep_order`): priority, then the statuses somebody
   is waiting on, then the oldest;
-- an item Papaya refused to send here — it keeps the work with the agent in
-  Papaya, or with another person's or another machine's runtime — is **kept
+- an item Papaya refused to send here - it keeps the work with the agent in
+  Papaya, or with another person's or another machine's runtime - is **kept
   elsewhere**: remembered with its `updated_at` and not asked for again until
   that moves or `KEPT_RECHECK_EVERY` (thirty minutes) passes;
 - but a claim is not work. Kept work is left alone only while there is
@@ -54,8 +54,8 @@ route and offers the item, and the runner resumes the ticket from its recorded
 state. Nothing a live reservation of somebody else's or a live job shows being
 done is taken.
 
-A sweep says one line on stderr — what it found, why it left each one alone,
-what it offered — and nothing on the supervised protocol, which is for jobs, not
+A sweep says one line on stderr - what it found, why it left each one alone,
+what it offered - and nothing on the supervised protocol, which is for jobs, not
 for bookkeeping. Kept work is said as "being worked" or "idle for N minutes". A
 sweep that found exactly what the one before it found says so at most every half
 hour.
@@ -204,8 +204,8 @@ def parse_interval(raw: str | float, *, source: str) -> float:
 
 # ── the tickets this runtime already said no to ─────────────────────────────
 #
-# A declined ticket leaves no task row — declining is the opposite of taking work
-# on — so without a memory of its own the sweep would offer it again every round:
+# A declined ticket leaves no task row - declining is the opposite of taking work
+# on - so without a memory of its own the sweep would offer it again every round:
 # the app asks the person, the runner declines, the subject goes back as declined,
 # and Papaya writes another event, every five minutes, for every such item. So a
 # decline is remembered with the item's `updated_at` at the time, and the sweep
@@ -262,7 +262,7 @@ def remember_declined(work_item_id: str, *, updated_at: str | None, reason: str)
 def forget_declined(work_item_id: str) -> None:
     """Drop everything the sweep remembers about a ticket: it was taken, so it is stale.
 
-    That is a remembered decline and a remembered "kept elsewhere" alike — a
+    That is a remembered decline and a remembered "kept elsewhere" alike - a
     ticket this machine has just picked up is neither.
     """
     if not work_item_id:
@@ -358,7 +358,7 @@ def refused_detail(reason: str) -> str:
 
     Fingerprinted on the reason alone, and nothing else belongs in it: a refusal is
     Papaya's routing, ten tickets refused for one reason are one problem (one issue),
-    and every word added here — which ticket, what claim this runtime had on it — would
+    and every word added here - which ticket, what claim this runtime had on it - would
     split that one issue into one per ticket. Those go in the evidence.
     """
     return (
@@ -369,7 +369,7 @@ def refused_detail(reason: str) -> str:
 
 #: The refusal reasons Papaya gives for work it deliberately keeps somewhere else: not
 #: routed to this machine, held by another machine, taken over by the agent in Papaya.
-#: These are Papaya doing its job, so they are not deficiencies on their own — the
+#: These are Papaya doing its job, so they are not deficiencies on their own - the
 #: sweep keeps asking, the blocker names them, and `ppy workers` shows them as kept
 #: elsewhere. They become a deficiency only on work this runtime has a claim on
 #: (:func:`held_earlier`), which is the shape of the September storm: twelve items this
@@ -950,7 +950,7 @@ async def gate(
     Every path that offers or lists assigned work calls it: the sweep
     (`Sweeper._sweep`), the reclaim on start and reconnect (`Sweeper._reclaim_earlier`)
     and a session's list of waiting work (`supervision.assigned_unpicked`). It holds
-    the memories — live here, declined earlier and unchanged, parked on a person — and
+    the memories - live here, declined earlier and unchanged, parked on a person - and
     the whole un-park rule: a parked ticket is offered again when its `updated_at`
     moves past the stamp, or when somebody who is not an agent commented after the
     stamp (``comments`` is read only for a parked ticket that has not otherwise moved).
@@ -1102,7 +1102,7 @@ class Sweeper:
         """One round: list, choose, offer. Never raises; a failure is the result.
 
         `include_declined` offers tickets this runtime declined earlier even when
-        nobody has changed them since — the by-hand `ppy sweep --include-declined`.
+        nobody has changed them since - the by-hand `ppy sweep --include-declined`.
         `include_kept` asks again for items Papaya recently kept elsewhere
         (`ppy sweep --include-kept`). `by_hand` is a person asking, who always
         gets the line.
@@ -1342,8 +1342,8 @@ class Sweeper:
         Unless Papaya is only doing its job. A refusal whose reason is one of
         :data:`EXPECTED_REFUSALS` on work this runtime has no claim on is the routing
         working: it stays in the blocker and in `ppy workers` as kept elsewhere, and
-        nothing is recorded. With a claim — a ticket task here that was not given away,
-        a lease or a `run on this Mac` naming one of this runtime's connections — the
+        nothing is recorded. With a claim - a ticket task here that was not given away,
+        a lease or a `run on this Mac` naming one of this runtime's connections - the
         same refusal is a deficiency, because the work was sent here and this machine
         cannot have it. A reason the runtime cannot explain is always a deficiency.
         """

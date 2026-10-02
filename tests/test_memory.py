@@ -64,11 +64,11 @@ def test_seed_repo_memory_creates_dir_with_notes_and_tasks(ppy_home) -> None:
     repo_dir = memory.seed_repo_memory("widgets", origin="https://x/widgets", default_branch="main")
     assert repo_dir.is_dir()
     notes = memory.repo_notes_path("widgets").read_text()
-    assert "# widgets — notes" in notes
+    assert "# widgets - notes" in notes
     assert "https://x/widgets" in notes
     assert "main" in notes
     assert memory.repo_tasks_path("widgets").exists()
-    assert "# widgets — follow-ups" in memory.repo_tasks_path("widgets").read_text()
+    assert "# widgets - follow-ups" in memory.repo_tasks_path("widgets").read_text()
 
 
 def test_seed_repo_memory_preserves_existing_learnings(ppy_home) -> None:
@@ -83,7 +83,7 @@ def test_add_repo_seeds_per_repo_memory(tmp_path, ppy_home) -> None:
     source = _make_source_repo(tmp_path / "source")
     repos.add_repo(source)
     assert memory.repo_dir("source").is_dir()
-    assert "# source — notes" in memory.repo_notes_path("source").read_text()
+    assert "# source - notes" in memory.repo_notes_path("source").read_text()
     assert memory.repo_tasks_path("source").exists()
 
 

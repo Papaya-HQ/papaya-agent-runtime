@@ -216,7 +216,7 @@ def dm(monkeypatch) -> FakeDM:
     from papaya_agent_client import api_client
 
     # The shape `GET /workspaces/{id}/channels` answers an agent token with: public
-    # channels, plus the ones this agent is a member of — a person-to-person `dm`
+    # channels, plus the ones this agent is a member of - a person-to-person `dm`
     # it was added to, and its own DM with its owner, `agent_private`.
     fake = FakeDM(
         channels=[
@@ -454,8 +454,8 @@ class _Body:
 class FakePapaya:
     """Papaya's work-item routes, as an `urlopen` stand-in that records every call.
 
-    Comments are kept the way Papaya keeps them — a list per item, each with an id
-    and an author — because the runner now reads them back to check a turn's work.
+    Comments are kept the way Papaya keeps them - a list per item, each with an id
+    and an author - because the runner now reads them back to check a turn's work.
     Everything posted through a job's agent token is written by the agent.
     """
 
@@ -1145,7 +1145,7 @@ def test_extra_capabilities_are_offered_to_either_builder_only_when_it_names_the
 def test_a_machine_with_no_harness_still_listens_and_dms_what_needs_the_user(
     ppy_home, client_home, harnesses, dm
 ) -> None:
-    """Blocked is not a reason to refuse to start — it is a reason to say so.
+    """Blocked is not a reason to refuse to start - it is a reason to say so.
 
     A manager that would not come up until somebody signed a harness in would be
     unreachable at exactly the moment they wanted to be told to.
@@ -1586,7 +1586,7 @@ def test_the_items_status_follows_the_work_and_nowhere_else(
     assert [s for item, s in statuses if item == handed_back] == ["in_progress", "todo"]
     assert len(statuses) == len(set(statuses)) == 4
     # The ticket that could not be placed says it was picked up and is briefing, and
-    # why it was handed back — the pickup line once, however many attempts it took.
+    # why it was handed back - the pickup line once, however many attempts it took.
     assert [body for item, body in papaya_api.comments() if item == handed_back] == [
         "Picked up; choosing the repository and writing the brief.",
         "handed back: the manager turn ended 2 times without dispatching a worker; no branch",
@@ -2170,7 +2170,7 @@ def test_a_turn_is_launched_with_the_agents_mcp_server_and_plugin(
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert "mcp__papaya__*" in argv[argv.index("--allowedTools") + 1 :]
     assert "Bash(./bin/ppy:*)" in argv, "`ppy` stopped being callable"
-    # The plugin the client gave the job — it carries the write-boundary hook.
+    # The plugin the client gave the job - it carries the write-boundary hook.
     assert argv[argv.index("--plugin-dir") + 1] == job_env["PAPAYA_PLUGIN_DIR"]
     # Produced by the client binary the job names, for this agent, in the runtime dir.
     (invocation,) = calls.read_text(encoding="utf-8").splitlines()
@@ -2236,7 +2236,7 @@ def test_the_ticket_thread_carries_decisions_and_the_report_not_review_bookkeepi
     """PAP-218: thirteen agent comments, five of them review internals, two after the report.
 
     Two reviews send the worker back and a third delivers with its own report. The
-    thread gets pickup, dispatched, one sent-back line, and the report — last.
+    thread gets pickup, dispatched, one sent-back line, and the report - last.
     """
 
     def act(turn: Turn) -> None:
@@ -2279,7 +2279,7 @@ def test_the_ticket_thread_carries_decisions_and_the_report_not_review_bookkeepi
 def test_a_brief_that_left_no_acceptance_criteria_is_rerun_once_then_goes_on(
     ppy_home, client_home, ready, registered_repo, progress_lines
 ) -> None:
-    """Define done on the record is checked, not hoped for — and never a dead end."""
+    """Define done on the record is checked, not hoped for - and never a dead end."""
     from papaya_agent_runtime.preflight import archive_brief
 
     def act(turn: Turn) -> None:
@@ -2838,7 +2838,7 @@ def test_the_review_turn_reads_the_full_suite_run_once_at_the_head_and_is_told_n
     (worker,) = workers_in(int(ticket_task()["run_id"]))
     assert asked == [worker]
     review = " ".join(turns.calls[1].prompt.split())
-    fact = review.partition(f"- {serve.FULL_SUITE_FACT}: ")[2].partition(" - ")[0]
+    fact = turns.calls[1].prompt.partition(f"- {serve.FULL_SUITE_FACT}: ")[2].partition("\n")[0]
     assert full.result.line() in fact
     assert "already run once at this head; do not run it again" in fact
     assert "Do not run `ppy gate run --full` again at a head that has one" in review

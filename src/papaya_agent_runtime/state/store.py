@@ -163,7 +163,7 @@ def set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None
 #: are how far the work has got, in the order a ticket normally passes through
 #: them (`blocked` is a detour off `dispatched` and back). The next four are how
 #: the hold ended, in the client's own vocabulary rather than a second one
-#: invented here — the reason on `Job.stop` chooses between the first three. The
+#: invented here - the reason on `Job.stop` chooses between the first three. The
 #: last two are what the manager's rounds found afterwards: somebody else holds
 #: the ticket now (`handed_over`), or its pull request merged or its work item is no
 #: longer this agent's to run (`done`).
@@ -316,7 +316,7 @@ def record_turn_result(
     Written one at a time, a reader could see the task ``blocked`` while its runner
     row still said ``running``, and a resume sent the moment the status turned was
     refused as a duplicate of a worker that had already exited (task 259). Together
-    they also keep ``result_recorded`` — the crash-reconciliation boundary — in the
+    they also keep ``result_recorded`` - the crash-reconciliation boundary - in the
     same transaction as the state it vouches for.
     """
     if conn.in_transaction:
@@ -361,7 +361,7 @@ def close_dead_runner(
     The row becomes ``exited`` with no exit code (nobody saw one) and
     ``result_recorded``, so crash reconciliation leaves it alone; ``task_status``,
     when given, is written with the event. Returns False, changing nothing, when the
-    row is no longer live — its own runner recorded a result in the meantime.
+    row is no longer live - its own runner recorded a result in the meantime.
     """
     if conn.in_transaction:
         conn.commit()
@@ -663,7 +663,7 @@ def usage_totals(conn: sqlite3.Connection, run_id: int) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Todos — the manager's intent ledger
+# Todos - the manager's intent ledger
 # --------------------------------------------------------------------------- #
 
 TODO_STATUSES = ("open", "done", "dropped")
@@ -735,7 +735,7 @@ def open_todo_count(conn: sqlite3.Connection) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Watermarks — the newest processed timestamp per external record
+# Watermarks - the newest processed timestamp per external record
 # --------------------------------------------------------------------------- #
 
 
@@ -772,7 +772,7 @@ def delete_watermark(conn: sqlite3.Connection, key: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Worker progress — structured phase reports (events of kind ``worker_progress``)
+# Worker progress - structured phase reports (events of kind ``worker_progress``)
 # --------------------------------------------------------------------------- #
 
 

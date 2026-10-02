@@ -140,7 +140,7 @@ def test_verify_reads_a_finished_worker_as_finished(ppy_home) -> None:
     conn.close()
     seen = client_mod.verify_worker(task_id, since="2000-01-01T00:00:00+00:00", timeout=0.2)
     assert seen.verdict == "finished"
-    assert seen.describe(task_id) == f"task {task_id}: worker already finished — status worker_done"
+    assert seen.describe(task_id) == f"task {task_id}: worker already finished - status worker_done"
 
 
 def test_status_names_an_in_flight_worker_with_no_process(ppy_home, capsys) -> None:
@@ -156,7 +156,7 @@ def test_status_names_an_in_flight_worker_with_no_process(ppy_home, capsys) -> N
 
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert f"INCIDENT: 1 in-flight worker(s) with no live process — task(s) {gone}" in out
+    assert f"INCIDENT: 1 in-flight worker(s) with no live process - task(s) {gone}" in out
 
 
 def test_status_says_nothing_of_a_live_worker(ppy_home, capsys) -> None:

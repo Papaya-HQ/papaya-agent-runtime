@@ -7,7 +7,7 @@ say: everything it would need was on this machine's ledger and nowhere else (Sha
 into the hosted agent's `status_digest`. This module is the machine's half:
 
 - :func:`build` reads the ledger once, in one read transaction, into a
-  `MachineStatusSnapshot` exactly as the wire bounds it — what is in flight, what
+  `MachineStatusSnapshot` exactly as the wire bounds it - what is in flight, what
   waits on a person (with the instruction that person can send back), what is
   blocked, what finished, capacity and health. Nothing in it is private: every
   string is redacted (tokens, home paths, email addresses), made one line, and cut
@@ -326,7 +326,7 @@ def _needs_you(
                 key=key,
                 kind=outreach.CAPABILITY,
                 text=f"worker task {item.task_id} asks to run `{item.label}`"
-                + (f" — {item.why}" if item.why else ""),
+                + (f" - {item.why}" if item.why else ""),
                 how="",
                 task_id=item.task_id,
                 since=since["created_at"] if since is not None else None,
@@ -568,7 +568,7 @@ class Publisher:
     ``build`` returns the body now (or ``None``: nothing to publish, e.g. no ledger);
     ``put`` sends it and returns whether a call was made (``False``: not connected).
     Both are blocking and run on a thread. The body is built *inside* the lock, so
-    two callers — the round and the change watch — never interleave, and whichever
+    two callers - the round and the change watch - never interleave, and whichever
     goes second builds and sends the newer state.
     """
 

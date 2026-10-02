@@ -129,7 +129,7 @@ def test_missing_local_record_falls_back_to_tracked(tmp_path, monkeypatch) -> No
 
 
 def test_explicit_path_ignores_local_override(tmp_path, monkeypatch) -> None:
-    # An explicit path means "exactly this file" — no override consulted.
+    # An explicit path means "exactly this file" - no override consulted.
     _write_local(
         tmp_path,
         monkeypatch,

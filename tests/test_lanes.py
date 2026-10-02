@@ -278,7 +278,7 @@ def test_a_step_waiting_on_a_task_that_ended_is_released_on_the_interval(home) -
 
     assert lines == [
         f"todo #{freed} no longer waits on task {delivered} (delivered): its next step is due"
-        " — brief the Calendar layer"
+        " - brief the Calendar layer"
     ]
     assert store.get_todo(conn, freed)["blocked_on"] is None
     assert store.get_todo(conn, held)["blocked_on"] == f"task:{running}"

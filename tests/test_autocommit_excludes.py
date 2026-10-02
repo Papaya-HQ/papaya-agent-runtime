@@ -157,7 +157,7 @@ def test_gitignored_paths_are_never_candidates(worktree):
     finalized = _finalize_worktree(_spec(worktree), "s")
 
     assert finalized.committed == ["src/app.py"]
-    # Ignored paths are not "excluded" — git never offered them at all.
+    # Ignored paths are not "excluded" - git never offered them at all.
     assert finalized.excluded == []
     assert _committed_paths(worktree) == {"src/app.py"}
 

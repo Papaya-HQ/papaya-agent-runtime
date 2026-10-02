@@ -66,7 +66,7 @@ jobs:
       # PPY_HOME is pinned away from the checkout so a stray default can never make
       # the suite read or write real instance state next to the source tree.
       # Every asynchronous assertion in the suite is a poll that returns as soon as
-      # its predicate is true, so a longer deadline costs nothing on a green run —
+      # its predicate is true, so a longer deadline costs nothing on a green run -
       # it only makes a real failure slower to report. A two-core runner is roughly
       # half the speed of a laptop, which is what failed three unrelated supervisor
       # tests on the first run here.
@@ -78,7 +78,7 @@ jobs:
 
   # The single check branch protection points at. Matrix job names carry their
   # parameters ("test (py3.12)"), so requiring them directly means every change to
-  # the matrix silently breaks the rule that guards main — a required check that no
+  # the matrix silently breaks the rule that guards main - a required check that no
   # longer exists is a check that never runs. This one has a stable name and simply
   # fails unless every matrix job succeeded.
   ci-ok:

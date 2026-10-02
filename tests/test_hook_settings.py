@@ -3,7 +3,7 @@
 `registered_hooks` runs at every dispatch and every resume
 (`supervisor/core.py`), and it reads a file that belongs to somebody else's
 repository. Its docstring promised it never raises, and it raised
-`UnicodeDecodeError` on a non-UTF-8 settings file — which would have taken the
+`UnicodeDecodeError` on a non-UTF-8 settings file - which would have taken the
 dispatch down, not the read.
 
 It also has to read matchers the way Claude Code does: they are regular
@@ -149,7 +149,7 @@ def test_the_hooks_last_lines_are_kept_because_that_is_where_the_reason_is() -> 
     Keeping the FIRST twenty lines kept the banner and threw away the failure.
     """
     said = "\n".join(
-        ["make verify failed — fix issues before pushing.", *(f"log line {n}" for n in range(60))]
+        ["make verify failed - fix issues before pushing.", *(f"log line {n}" for n in range(60))]
         + ["make: *** [harness-check] Error 1"]
     )
 

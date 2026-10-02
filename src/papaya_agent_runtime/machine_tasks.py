@@ -6,8 +6,8 @@ Papaya (backend #1077) gives every task it routes to a machine one return addres
     {"id": ..., "origin": {"kind", "ref", "url"?, "label"?} | null,
      "reply": {"method": "POST", "path": ".../machine-tasks/<id>/reply", ...}}
 
-The origin is where a person asked for the work — a Papaya thread, their DM with
-this agent, or an object in a connected tool — and the reply route reaches it
+The origin is where a person asked for the work - a Papaya thread, their DM with
+this agent, or an object in a connected tool - and the reply route reaches it
 whatever it is. It takes four milestones (picked up, delivered, blocked, done), each
 said once per task. Shane, 2026-09-25: work started with "@agent start working on
 this" in a thread (PAP-319) was done, and every update landed only as work-item
@@ -16,7 +16,7 @@ comments; nothing came back to the thread.
 This module is the one decision both modes reach: whether a ticket has an origin to
 answer, and whether a milestone was already said there. A work item's block is kept
 on its ticket task when the event arrives (:func:`remember`), because what offers a
-ticket again later — the sweep, the rounds' reclaim — carries no block. A ticket
+ticket again later - the sweep, the rounds' reclaim - carries no block. A ticket
 with no block, or a block with no origin, is never sent anything: Papaya would keep
 such a reply as another comment on the item, beside the runtime's own.
 

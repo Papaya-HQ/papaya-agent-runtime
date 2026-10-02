@@ -3,15 +3,15 @@
 A worker that finishes without committing gets its work committed for it, so the
 manager always has a reviewable head. That commit used to be a blanket
 ``git add -A``, which swept in whatever else happened to be lying in the
-worktree: on 2026-09-02 a task's evidence directory — screenshots and receipts
-written for the review, never meant for the branch — landed in the commit and the
+worktree: on 2026-09-02 a task's evidence directory - screenshots and receipts
+written for the review, never meant for the branch - landed in the commit and the
 commit had to be rebuilt clean before it could ship.
 
 Three filters now decide what is staged:
 
 1. anything ``.gitignore`` ignores is never a candidate (``git status`` does not
    offer ignored paths, and we never use ``add -f``);
-2. an ordered exclusion list, last match wins, with ``!`` negating — so ``*.png``
+2. an ordered exclusion list, last match wins, with ``!`` negating - so ``*.png``
    can be excluded while ``docs/`` keeps its diagrams; and
 3. build and environment artifacts (:data:`ARTIFACTS`) the repository does not
    already track. A repository with no ``.gitignore`` has nothing to stop

@@ -19,7 +19,7 @@ QA marker `qa-relevance-3` is absent on staging rev 00323; row 812 in
 
 - The scorer skips cards without a `thread_id`.
   - Probe: `SELECT count(*) FROM radar_cards WHERE thread_id IS NULL AND score IS NULL`.
-- The nightly backfill never ran — Check: the `backfill` job log for 09-05.
+- The nightly backfill never ran - Check: the `backfill` job log for 09-05.
 
 ## Expected discrepancies
 
@@ -115,12 +115,12 @@ def test_every_hypothesis_needs_a_probe_as_sub_bullet_or_trailing_clause() -> No
 
 def test_probe_keywords_are_matched_only_as_a_clause_opener() -> None:
     text = GOOD_DEFECT.replace(
-        "- The nightly backfill never ran — Check: the `backfill` job log for 09-05.\n",
+        "- The nightly backfill never ran - Check: the `backfill` job log for 09-05.\n",
         "- The nightly backfill never ran, which the CI check: status page would show.\n",
     )
     assert any("no probe" in m for m in messages(text))
     text = GOOD_DEFECT.replace(
-        "- The nightly backfill never ran — Check: the `backfill` job log for 09-05.\n",
+        "- The nightly backfill never ran - Check: the `backfill` job log for 09-05.\n",
         "- The nightly backfill never ran.\n  - **Reproduce:** run the job once by hand.\n",
     )
     assert not any("no probe" in m for m in messages(text))
@@ -377,7 +377,7 @@ def test_every_brief_owes_the_four_outcome_sections() -> None:
     found = [m for m in messages(bare) if " section" in m]
     assert len(found) == 4
     for name in ("Goals", "Intent", "In scope", "Out of scope"):
-        assert any(f"no {name} section — add `## {name}`" in m for m in found), name
+        assert any(f"no {name} section - add `## {name}`" in m for m in found), name
     # Each message says what the section is for, not just that it is missing.
     assert any("acceptance criteria" in m for m in found)
     assert any("who benefits" in m for m in found)
@@ -395,7 +395,7 @@ def test_a_missing_or_empty_section_is_named_with_its_line() -> None:
         "## Out of scope\n\n",
     )
     (finding,) = [f for f in lint_brief(empty) if "Out of scope" in f.message]
-    assert finding.message.startswith("`## Out of scope` is empty — say the explicit exclusions")
+    assert finding.message.startswith("`## Out of scope` is empty - say the explicit exclusions")
     assert finding.line == GOOD_DEFECT.splitlines().index("## Out of scope") + 1
 
     # A heading with only a sub-heading under it is still empty.

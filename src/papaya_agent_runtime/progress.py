@@ -7,7 +7,7 @@ A dispatched worker reports where it is with ``ppy progress <task_id> --phase <p
 - ``ppy memory show --repo <name>`` renders the repo's progress log from events;
 - the health poller's "last heard" gets a semantic signal, and can tell that a
   worker never posted a plan (``plan_missing``, raised once per task after a grace
-  period — see :mod:`papaya_agent_runtime.health`).
+  period - see :mod:`papaya_agent_runtime.health`).
 
 The per-repo ``tasks.md`` stays a free-form place for durable follow-ups, backlog, and
 tech debt; the running narrative moves here.
@@ -216,7 +216,7 @@ def render_repo_log(
     conn = conn or init_db()
     repo = store.get_repo(conn, repo_name)
     if repo is None:
-        return f"# {repo_name} — progress log\n\n(repo not registered)\n"
+        return f"# {repo_name} - progress log\n\n(repo not registered)\n"
     rows = store.progress_events(conn, repo_id=repo["id"])[:limit]
     titles = {
         t["id"]: t["title"]
@@ -224,13 +224,13 @@ def render_repo_log(
             "SELECT id, title FROM tasks WHERE repo_id = ?", (repo["id"],)
         ).fetchall()
     }
-    out = [f"# {repo_name} — progress log (from `ppy progress`, newest first)", ""]
+    out = [f"# {repo_name} - progress log (from `ppy progress`, newest first)", ""]
     if not rows:
         out.append("- no progress reported yet")
     for row in rows:
         e = _entry(row)
         title = titles.get(e["task_id"], "?")
-        note = f" — {e['note']}" if e["note"] else ""
+        note = f" - {e['note']}" if e["note"] else ""
         out.append(f'- {e["at"]} · task {e["task_id"]} "{title}" · {e["phase"]}{note}')
     return "\n".join(out) + "\n"
 
@@ -238,5 +238,5 @@ def render_repo_log(
 def describe(entry: dict[str, Any] | None) -> str:
     if entry is None:
         return "no progress reported"
-    note = f" — {entry['note']}" if entry.get("note") else ""
+    note = f" - {entry['note']}" if entry.get("note") else ""
     return f"{entry['phase']}{note} (at {entry['at']})"

@@ -622,5 +622,5 @@ def test_review_show_lists_the_evidence_directory_even_when_the_report_did_not(
     assert cli.main(["review", "show", str(task_id)]) == 0
     out = capsys.readouterr().out
     assert "captures and receipts named in the worker's reports:" in out
-    assert f"{receipts} — directory, 1 item(s)" in out
+    assert f"{receipts} - directory, 1 item(s)" in out
     assert "gate.log" in out

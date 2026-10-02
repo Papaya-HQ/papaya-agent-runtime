@@ -3,16 +3,16 @@
 A worker that has finished (or given up on) a task files two short notes with
 ``ppy reflect <task_id> --self "..." --manager "..."``:
 
-- **self** — its own assessment: what it learned, what went well or badly, what it
+- **self** - its own assessment: what it learned, what went well or badly, what it
   would do differently, what would have made the task easier;
-- **manager** — its assessment of the manager: was the brief clear and complete, was
+- **manager** - its assessment of the manager: was the brief clear and complete, was
   the scope right, did steering and review help or hurt, what should change.
 
 Each reflection is an event of kind ``worker_reflection`` on the task, so it is
 durable, attributable, and visible to the manager (``ppy reflect <task_id>`` shows
 them). The assessment evidence packet (:mod:`papaya_agent_runtime.assessments`) carries
 every reflection filed since the previous review, so the workers' learnings and
-their view of the manager are first-class input to the next cycle — not something
+their view of the manager are first-class input to the next cycle - not something
 the manager has to remember to ask for.
 """
 

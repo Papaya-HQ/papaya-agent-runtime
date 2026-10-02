@@ -85,7 +85,7 @@ class Owed:
         ticket = f" [ticket task {self.ticket_task_id}]" if self.ticket_task_id else ""
         return (
             f"worker task {self.task_id}{where} {_WORDS.get(self.status, self.status)}: "
-            f"{self.reason} — next: {self.next_step}{ticket}"
+            f"{self.reason} - next: {self.next_step}{ticket}"
         )
 
     def public(self) -> dict[str, Any]:

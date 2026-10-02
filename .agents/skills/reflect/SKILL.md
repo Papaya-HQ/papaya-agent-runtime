@@ -21,7 +21,7 @@ next brief.
 
 ## When
 
-Right before the final `ppy progress <task_id> --phase done` — after verification,
+Right before the final `ppy progress <task_id> --phase done` - after verification,
 while the task is still fresh. Also after giving up on a task (`--phase blocked`),
 which is when the reflection matters most.
 
@@ -30,18 +30,18 @@ which is when the reflection matters most.
 Answer in plain sentences; two to five per note; concrete over general. Name files,
 commands, and moments, not feelings.
 
-**`--self` — your own assessment**
+**`--self` - your own assessment**
 - What did you learn that the next person should know? (Put durable facts in the
   repo's `notes.md` too; the reflection is for the *lesson*, the note is for the
   *fact*.)
 - What went well, and what did you do that caused it?
 - What went badly or cost time, and what would you do differently?
-- What would have made this task easier — a tool, a fixture, a fact in the brief?
+- What would have made this task easier - a tool, a fixture, a fact in the brief?
 
-**`--manager` — your assessment of the manager**
+**`--manager` - your assessment of the manager**
 - Was the brief clear, complete, and correct? Where did you have to guess, or find
   that it was wrong?
-- Was the scope right — anything you were told to build that the plan did not need,
+- Was the scope right - anything you were told to build that the plan did not need,
   or told not to touch that you had to?
 - Did steering or review help or hurt? Was it early enough to act on? Did a review
   finding surprise you, and should the brief have prevented it?

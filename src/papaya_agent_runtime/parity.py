@@ -11,14 +11,14 @@ This registry is how that rule is kept. Every method of the two classes where se
 decides things (`rounds.Rounds`, `serve.TicketRunner`) and every serve start remedy is
 listed here under one capability, with one of four kinds:
 
-- **shared** — the decision lives in a module both modes call (`shared`), serve acts on
+- **shared** - the decision lives in a module both modes call (`shared`), serve acts on
   it one way and an interactive session another (`interactive`: the heartbeat, the
   session hooks, a `ppy` command).
-- **host** — the Papaya hold protocol itself (reserving, keeping a lease alive, status
+- **host** - the Papaya hold protocol itself (reserving, keeping a lease alive, status
   lines, declining): only the process holding the ticket can do it, and an interactive
   session has no hold to keep.
-- **scaffold** — the loop, the turn launcher, facts plumbing: no decision of its own.
-- **gap** — serve-only today. Allowed only while it is on :data:`KNOWN_GAPS`, which only
+- **scaffold** - the loop, the turn launcher, facts plumbing: no decision of its own.
+- **gap** - serve-only today. Allowed only while it is on :data:`KNOWN_GAPS`, which only
   ever shrinks; every serve start and session start records each open gap as a runtime
   deficiency (:func:`record_gaps`), so it is reported until it is healed.
 

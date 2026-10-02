@@ -43,7 +43,7 @@ def test_record_latest_history_and_repo_log(ppy_home) -> None:
     assert store.has_progress_phase(conn, task_id, "plan")
 
     log = progress.render_repo_log("demo", conn=conn)
-    assert f'task {task_id} "build" · implement — module + tests' in log
+    assert f'task {task_id} "build" · implement - module + tests' in log
     assert log.index("implement") < log.index("plan")  # newest first
     assert "(repo not registered)" in progress.render_repo_log("nope", conn=conn)
 
@@ -90,7 +90,7 @@ def test_cli_progress_task_and_memory_show(ppy_home, capsys) -> None:
     _, task_id = _task(conn)
     assert main(["progress", str(task_id), "--phase", "plan", "--note", "do the thing"]) == 0
     assert main(["progress", str(task_id)]) == 0
-    assert "plan — do the thing" in capsys.readouterr().out
+    assert "plan - do the thing" in capsys.readouterr().out
     assert main(["progress", str(task_id), "--history", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["phase"] == "plan"
     assert main(["progress", str(task_id), "--phase", "plan"]) == 1

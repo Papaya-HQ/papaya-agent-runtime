@@ -22,8 +22,8 @@ It is always a valid PEP 440 version, so a reader may parse it; `0.0.0` and
 `0.0.0+g<sha7>` are what an untagged or un-gitted checkout honestly is.
 
 Two properties make it usable at connect time, and both are constraints on what may
-ever be added here. It reads **local state only** — no network, no harness probe, no
-state database — so it answers instantly on a machine that is offline, unconfigured,
+ever be added here. It reads **local state only** - no network, no harness probe, no
+state database - so it answers instantly on a machine that is offline, unconfigured,
 or both. And it **cannot fail**: an absent client is reported as `null` rather than
 raised, because "I could not tell you" is a worse answer than "the client is not
 installed here". Whether the runtime is *ready* is a different question with its own
@@ -86,7 +86,7 @@ def protocol() -> int:
 
     Read from the client rather than restated here, so the two cannot drift: the
     client owns the protocol and this command only reports it. Anything
-    unreadable — no client, no constant, a value that is not a number — falls
+    unreadable - no client, no constant, a value that is not a number - falls
     back to version 1, which is what such a client would in fact be speaking.
     """
     try:
@@ -144,7 +144,7 @@ def client_line(data: dict | None = None) -> str:
     version = caps["client_version"]
     if version is None:
         return (
-            f"{_CLIENT_DIST} NOT IMPORTABLE — run `uv sync` (assuming protocol v{caps['protocol']})"
+            f"{_CLIENT_DIST} NOT IMPORTABLE - run `uv sync` (assuming protocol v{caps['protocol']})"
         )
     return f"{_CLIENT_DIST} {version} (supervised protocol v{caps['protocol']})"
 
@@ -164,7 +164,7 @@ def _release(version: str) -> tuple[int, ...] | None:
     Deliberately small: a release comparison over `0.14.0` is all this needs, and
     the runtime has no version-parsing dependency to reach for. Anything with a
     suffix (`0.15.0rc1`, `0.15.0+local`) compares on its release segment, and
-    anything that is not a release at all compares against nothing — an
+    anything that is not a release at all compares against nothing - an
     unparseable version must not be reported as newer, because a warning nobody
     can act on is worse than silence.
     """
@@ -188,7 +188,7 @@ def client_behind_host() -> tuple[str, str] | None:
     """``(embedded, host)`` when the host's client is strictly newer, else ``None``.
 
     Strictly: an equal or older host is the normal case and says nothing. This is
-    only ever a warning — a runtime that refused to work because its checkout was
+    only ever a warning - a runtime that refused to work because its checkout was
     a patch release behind would be a worse failure than the drift it is naming.
     """
     host = host_client_version()
@@ -210,8 +210,8 @@ def client_behind_host() -> tuple[str, str] | None:
 def main(argv: list[str] | None = None) -> int:
     """Print the capabilities object. The whole of `ppy capabilities`.
 
-    This module is also an entry point of its own — ``python -m
-    papaya_agent_runtime.capabilities`` — and that is not a convenience. The
+    This module is also an entry point of its own - ``python -m
+    papaya_agent_runtime.capabilities`` - and that is not a convenience. The
     launcher runs every other command through ``uv run``, which *builds the
     environment* on first use: on a machine with no uv cache that is a download
     of sixty-odd packages, and the client's connect-time probe gives the answer
@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     So `bin/ppy` answers this one command from the standard library alone when
     the project environment does not exist yet. Nothing here imports the client,
     reads the database or touches the network, so the same code produces the
-    same document either way — and on a checkout with no environment
+    same document either way - and on a checkout with no environment
     ``client_version: null`` is not a stub, it is the truth.
 
     `cli._cmd_capabilities` calls this too, so the two roads cannot print

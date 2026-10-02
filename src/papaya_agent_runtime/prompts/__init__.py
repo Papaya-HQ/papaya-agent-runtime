@@ -17,8 +17,8 @@ They instruct; they do not template. Task 222 was closed for generating briefs i
 code, and the rule that came out of it is kept here structurally: the only thing
 substituted into a prompt is where this runtime lives, so the skill files can be
 named by absolute path. What the turn is *about* is appended after the prompt as a
-short list of facts — ids, the repository if one is known, a worker's question or
-failure, verbatim — and never as a Goals sentence, a definition of done or a
+short list of facts - ids, the repository if one is known, a worker's question or
+failure, verbatim - and never as a Goals sentence, a definition of done or a
 fill-in brief. Writing those is the turn's job.
 """
 
@@ -90,7 +90,7 @@ WAITING_PREFIX = "WAITING:"
 
 #: How a brief turn says the ticket needs no worker: its work is already delivered or
 #: merged, or a later ticket carries it. The runner ends the hold as reported, leaves the
-#: work item's status alone, and never counts it as a missed turn or hands it back — a
+#: work item's status alone, and never counts it as a missed turn or hands it back - a
 #: hand-back reset finished items to `todo` and told the owner "didn't run this" on every
 #: restart (Shane, 2026-09-18).
 NOTHING_TO_BUILD_PREFIX = "NOTHING TO BUILD:"
@@ -171,18 +171,18 @@ RUNTIME_PREFIX = "RUNTIME:"
 
 #: The rule every turn prompt carries verbatim, and a test holds them to. The two
 #: examples are load-bearing: a turn wrote `RUNTIME: the Papaya tools were loaded on
-#: demand this turn, so the work item could be read` — the runtime working, filed as a
-#: deficiency (issue #120) — because the rule never said the line is for an obstacle
+#: demand this turn, so the work item could be read` - the runtime working, filed as a
+#: deficiency (issue #120) - because the rule never said the line is for an obstacle
 #: and nothing else.
 RUNTIME_RULE = (
     "If the runtime itself got in the way of this turn, say so in one line of its own: "
     "`RUNTIME: <what got in the way>`. ONLY for something that stopped or degraded the job "
-    "this turn was sent to do — a tool you were refused, a fact you could not obtain, or a "
-    "contract such as these instructions or a `ppy` command's output that was not true — "
+    "this turn was sent to do - a tool you were refused, a fact you could not obtain, or a "
+    "contract such as these instructions or a `ppy` command's output that was not true - "
     "and never for the repository, the work itself, or anything that went fine. One that "
     "belongs: `RUNTIME: the instructions named a command that does not exist, so task 412 "
     "was never linked to its work item`. One that does not: `RUNTIME: the Papaya tools were "
-    "loaded on demand this turn, so the work item could be read` — that is the runtime "
+    "loaded on demand this turn, so the work item could be read` - that is the runtime "
     "working, reported as though it were an obstacle. A turn with nothing in its way writes "
     "no `RUNTIME:` line at all. Name ids, never people, and quote no code or ticket text."
 )

@@ -14,7 +14,7 @@ user-invocable: true
 # performance-review
 
 A review is only worth doing if it changes what happens next. This skill turns the
-evidence `ppy` has been collecting — and the team's own words — into a short, honest
+evidence `ppy` has been collecting - and the team's own words - into a short, honest
 review and a plan the user has signed off on. Never a vanity exercise, never a wall
 of numbers.
 
@@ -29,14 +29,14 @@ of numbers.
      was opened and why.
 2. **Read the evidence, all of it.** `./bin/ppy assessment show <id>` gives the packet:
    completed runs, task outcomes, rework and steering counts, incidents, usage,
-   decisions recorded and reused, cross-repo misses, the previous plan's actions —
+   decisions recorded and reused, cross-repo misses, the previous plan's actions -
    and **`reflections`**: every note a worker filed with `ppy reflect` since the last
    review, both its self-assessment and its assessment of you. Read the reflections
    first. They are the only channel where the team's view of *your* work reaches
    you; treat a pattern across two or more of them as a finding, and quote them
    where they change a conclusion. Separate observation from interpretation.
 3. **Judge.** What improved since the last plan (with the baseline)? What
-   underperformed, and what is the most likely cause — yours, the brief's, the
+   underperformed, and what is the most likely cause - yours, the brief's, the
    tooling's? Where do the workers' reflections agree with the numbers, and where do
    they contradict them? A contradiction is the interesting part.
 4. **Propose one to three experiments.** Each names the observed problem, likely
@@ -45,18 +45,18 @@ of numbers.
    Anything touching authority, ceilings, config, framework code, hooks, skills, or
    safety is a *proposal* until the user approves it. Record with
    `./bin/ppy assessment complete <id> --summary ... --action-json '[...]'`.
-5. **Align.** Give the user the review in plain terms — what improved, what did not,
+5. **Align.** Give the user the review in plain terms - what improved, what did not,
    what the team said, the experiments and how each is measured. Describe every
    reference as what it is; no internal labels. Ask only for the decisions that need
    their authority. Record their answer with `./bin/ppy assessment align <id> ...`.
 6. **Make it durable.** Append the aligned outcome to `.ppy/memory/improvements.md`
    (the curated history; SQLite stays authoritative). If a reflection named a
-   concrete fix to a brief, a rule, or a repo note, make that fix now — a team
+   concrete fix to a brief, a rule, or a repo note, make that fix now - a team
    member's learning that never reaches the next brief was wasted.
 
 ## Boundaries
 
 - One cycle at a time; never reopen an aligned plan unless its premises changed.
 - The team's reflections are evidence, not verdicts: weigh them, quote them, and say
-  where you disagree and why — never bury one because it is unflattering.
+  where you disagree and why - never bury one because it is unflattering.
 - The user sees a review, not a status dump: one screen, results first.

@@ -22,7 +22,7 @@ without any model. Behavior is driven by instruction markers:
   result with the head SHA.
 
 A worker that ends its turn without a done note, without pushing, or waiting on a
-backgrounded command is not done — the supervisor says so (see
+backgrounded command is not done - the supervisor says so (see
 :mod:`papaya_agent_runtime.turn_end`). The default path here models a worker that
 *finished*; the markers above model each way of not finishing.
 
@@ -79,7 +79,7 @@ def _check_push_target(worktree: str) -> None:
     if os.environ.get(ALLOW_REMOTE_PUSH_ENV) == "1":
         return
     raise RemotePushRefused(
-        f"the fake provider refuses to push to {url} — that is not a local path, and this "
+        f"the fake provider refuses to push to {url} - that is not a local path, and this "
         "worker only writes a stub. Dispatch with --provider claude or --provider codex, or "
         f"set {ALLOW_REMOTE_PUSH_ENV}=1 for a deliberate end-to-end test."
     )
@@ -92,7 +92,7 @@ def _finish_the_gate(spec: dict, session_id: str) -> None:
     so the compliant path has to do them; the ``NOPUSH`` / ``NODONE`` markers take
     each away to model a turn that ended mid-gate.
 
-    Raises :class:`RemotePushRefused` — before pushing anything — when the branch
+    Raises :class:`RemotePushRefused` - before pushing anything - when the branch
     would land on a remote that is not a local path.
     """
     instructions = spec.get("instructions", "")
@@ -171,7 +171,7 @@ def _work(spec: dict, session_id: str) -> int:
     hold = _hold_seconds(instructions)
     if hold:
         # A genuinely live turn. An interrupt lands here and exits non-zero with no
-        # result event — exactly what a real interrupted worker looks like.
+        # result event - exactly what a real interrupted worker looks like.
         _emit({"type": "progress", "session_id": session_id, "text": f"holding {hold}s"})
         time.sleep(hold)
 

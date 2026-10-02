@@ -1,10 +1,10 @@
 """Worker routing and hard ceiling enforcement.
 
-The runtime — not the manager prompt — enforces the configured worker ceiling.
+The runtime - not the manager prompt - enforces the configured worker ceiling.
 A dispatch that names a model or reasoning keeps it; one that names neither is
-routed by its brief (``routing.route``): a contract-heavy brief — an actual
+routed by its brief (``routing.route``): a contract-heavy brief - an actual
 database migration, new routes or endpoints, a state machine, or more than five
-numbered In scope items — takes the ceiling's model and reasoning, anything else
+numbered In scope items - takes the ceiling's model and reasoning, anything else
 the configured default. Every profile is checked here afterwards, so nothing is
 ever routed above the ceiling.
 """

@@ -2,12 +2,12 @@
 
 Papaya work items are the default, not the assumption. A workspace that has said
 it tracks work in Linear, Notion, Jira or anything else is telling every agent
-something true, and a runtime that hard-codes one tracker quietly overrides it —
+something true, and a runtime that hard-codes one tracker quietly overrides it -
 first in the pull request bodies it writes, then in the habits it teaches.
 
 So this module knows exactly two things: that a task may belong to some record
 somewhere, and how to say that in a sentence. It never talks to a tracker. Creating
-records, moving them, commenting on them — all of that is the agent's job through
+records, moving them, commenting on them - all of that is the agent's job through
 whatever tools the workspace actually has connected, and the runtime has no opinion
 about which those are.
 
@@ -15,7 +15,7 @@ about which those are.
 its tracker as durable knowledge in Papaya, which is injected into every connected
 agent's context at the start of a session. A new machine picks it up on its first
 turn with nothing to configure. That makes it a *preference* rather than a
-guarantee — an agent could still reach for the wrong tool — which is the tradeoff
+guarantee - an agent could still reach for the wrong tool - which is the tradeoff
 Shane chose on 2026-09-15 over enforcing it at the tool gate.
 """
 
@@ -67,7 +67,7 @@ def link_task(
 ) -> None:
     """Record which tracker record a dispatched task belongs to.
 
-    Not every task earns a record — most are a step inside one, and minting a
+    Not every task earns a record - most are a step inside one, and minting a
     ticket per step is the noise this runtime exists to avoid. The link exists so
     the tasks that *do* belong to tracked work carry it into the pull request body,
     instead of the connection living only in the session's head.
@@ -101,7 +101,7 @@ def link_sentence(link: dict | None) -> str:
     """How a tracker link reads in a pull request body or a report.
 
     Describes the record rather than citing a bare identifier, because a reader
-    outside this workspace cannot look one up — and names the tracker, because a
+    outside this workspace cannot look one up - and names the tracker, because a
     reviewer who wants to find it needs to know where to look.
     """
     if not link:

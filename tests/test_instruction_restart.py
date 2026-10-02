@@ -73,7 +73,7 @@ def _seed(
 ) -> tuple[int, int, papaya_events.Instruction]:
     """A ticket as a hold leaves it when the process under it goes away.
 
-    ``released``: how the hold ended, when it did — :data:`SHUTDOWN` (the listener
+    ``released``: how the hold ended, when it did - :data:`SHUTDOWN` (the listener
     cancelled it) or :data:`LOST_LEASE` (Papaya took it back, or a person released it).
     """
     payload = tis.instruction_event(text, origin=origin, intent=intent)["payload"]

@@ -2,8 +2,8 @@
 
 On 2026-09-23, three times in one local E2E on a repository with no `.gitignore`, a
 worker pushed a clean branch, the runtime committed again on its own and put
-`__pycache__/*.pyc` and `uv.lock` on the lease branch, and review — reading the
-worktree's local head — sent the worker back to remove files nobody wrote. These
+`__pycache__/*.pyc` and `uv.lock` on the lease branch, and review - reading the
+worktree's local head - sent the worker back to remove files nobody wrote. These
 tests pin both halves of the fix: the auto-commit leaves untracked artifacts out and
 names them, and a local head that adds nothing but artifacts over the pushed branch is
 dropped for the pushed head before review and delivery.

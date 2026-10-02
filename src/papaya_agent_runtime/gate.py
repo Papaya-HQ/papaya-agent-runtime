@@ -180,7 +180,7 @@ class GateResult:
         summary = self.summary or "(no output)"
         return (
             f"{self.label} {state} at {self.head_sha[:8]} after "
-            f"{_duration(self.duration_seconds)}: `{self.command}` — {summary}"
+            f"{_duration(self.duration_seconds)}: `{self.command}` - {summary}"
         )
 
     @property
@@ -783,7 +783,7 @@ def _run_started(
         failing_tests=failing_tests(text) if exit_code != 0 else [],
     )
     # A gate killed by a signal (its supervisor stopping) did not fail: it never
-    # finished, so it leaves no verdict to be steered on — only a note that it died.
+    # finished, so it leaves no verdict to be steered on - only a note that it died.
     _record(spec, GATE_KILLED if result.exit_code < 0 else GATE_RESULT, result.as_dict())
     from papaya_agent_runtime import budgets
 

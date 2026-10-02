@@ -91,7 +91,7 @@ def test_sync_fast_forwards_the_base_clone_to_the_remote_tip(tmp_path, ppy_home)
     assert res.fast_forwarded is True
     assert res.base_sha == tip
     assert res.previous_sha == added.base_sha
-    # The clone's own branch moved too — a worker leased from it starts at the tip.
+    # The clone's own branch moved too - a worker leased from it starts at the tip.
     assert _git(clone, "rev-parse", "HEAD") == tip
     assert _git(clone, "rev-parse", "main") == tip
     assert repos.list_repos()[0]["base_sha"] == tip
@@ -132,7 +132,7 @@ def test_sync_refuses_a_dirty_base_clone_and_names_the_paths(tmp_path, ppy_home)
 def test_sync_refuses_rather_than_rewriting_a_base_clone_that_has_diverged(
     tmp_path, ppy_home
 ) -> None:
-    """A base clone holding its own commits is never reset — that would destroy them."""
+    """A base clone holding its own commits is never reset - that would destroy them."""
     source = _make_source_repo(tmp_path / "source")
     added = repos.add_repo(source)
     clone = added.local_path
@@ -177,7 +177,7 @@ def test_sync_of_an_unregistered_repo_says_so(ppy_home) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Registration carries the forge — the place a pull request can be opened
+# Registration carries the forge - the place a pull request can be opened
 # --------------------------------------------------------------------------- #
 
 GITHUB_URL = "https://github.com/Papaya-HQ/papaya-infra"
@@ -544,7 +544,7 @@ def test_locate_reports_hits_only_in_the_clone_that_contains_the_string(
     """`ppy repo locate "hover card"` points at the code, and says nothing about the rest.
 
     Two registered clones, one of which renders a hover card. The locate reads the
-    base clones the runtime owns, and finds the one that does — without being told
+    base clones the runtime owns, and finds the one that does - without being told
     which repository sounds like it should.
     """
     from papaya_agent_runtime.cli import main

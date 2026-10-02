@@ -22,8 +22,8 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    lane's attempt failed; two failures mark the ticket `needs_a_person` with one
    comment. A pull request green and unmerged past `delivery.merge_after_hours` is said
    once, or merged on a repository with `auto_merge`.
-2. **Reclaim.** Every ticket this runtime was working and is not holding — after a
-   restart, all of them — is offered to the client's loop again, under the
+2. **Reclaim.** Every ticket this runtime was working and is not holding - after a
+   restart, all of them - is offered to the client's loop again, under the
    persisted session id, and the runner resumes it on its own task from its
    recorded phase; a worker already running is watched, never re-dispatched. A
    ticket whose hold the client ended as `stalled` while its worker's work went on
@@ -52,8 +52,8 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
    lands) gets the **check-in turn**; a person-wait older than fifteen minutes is said
    on the ticket once ("waiting on you: …") and the ticket is `blocked`.
 4. **The owed lane** (:mod:`papaya_agent_runtime.lanes`): every worker waiting on the
-   manager that no live ticket covers — dispatched from a session, or its ticket was
-   released, handed over or ended — is taken up the way a held ticket's would be: a
+   manager that no live ticket covers - dispatched from a session, or its ticket was
+   released, handed over or ended - is taken up the way a held ticket's would be: a
    stopped or done worker whose record calls for it is sent back to its gate, a
    question gets the answer turn and finished work the review turn, keyed on the task
    and run without a hold (:class:`~papaya_agent_runtime.lanes.TurnRunner`), and a
@@ -67,14 +67,14 @@ somebody at a terminal runs `ppy health`. The rounds are that somebody. Every
 7. **Hygiene**, at most once an hour: `ppy worktree prune`'s own rules, unattended
    (only terminal tasks, clean, every commit on a remote, base clone under
    `.ppy/repos`), then `git worktree prune` and `git fetch --prune` on the base
-   clones. A kept slot that is a loose end — terminal, dirty or unpushed, a day old
-   — becomes one "waiting on you" item.
+   clones. A kept slot that is a loose end - terminal, dirty or unpushed, a day old
+   - becomes one "waiting on you" item.
 8. **Instructions and status**: an instruction a person sent this machine that was
    answered at its origin and never reported (a crash between the two) is reported
    (:func:`instructions.recover`); one a restart left unanswered is offered back, or,
    refused, told to the person as not finished and closed
    (:meth:`Rounds._reclaim_instructions`); and this machine's status snapshot is published to
-   Papaya (:mod:`papaya_agent_runtime.machine_status`) — once a round, and between
+   Papaya (:mod:`papaya_agent_runtime.machine_status`) - once a round, and between
    rounds whenever the board changes (:meth:`Rounds.watch_changes`).
 9. **Runtime updates**, every `update.CHECK_EVERY_SECONDS` (six hours): one fetch of
    this checkout's own default branch; when it is behind, the owner is told once per
@@ -616,8 +616,8 @@ def gate_state(worker_task_id: int) -> GateState:
 
     A `gate_started` (or `gate_queued`) with no result after it names the gate's key;
     the supervisor is then asked (without waiting) whether that gate is still running
-    or queued. A start with no gate behind it — the supervisor restarted, the gate was
-    killed — is not running.
+    or queued. A start with no gate behind it - the supervisor restarted, the gate was
+    killed - is not running.
     """
     from papaya_agent_runtime import gate
 
@@ -1086,7 +1086,7 @@ def unfinished_instructions(conn: Any) -> list[InstructionTicket]:
     What a restart leaves: the hold was cancelled at shutdown (`released`, marked
     `instructions.SHUTDOWN`), or the process died under it (`picked_up`, a working
     phase), and Papaya still has the request `picked_up` with nobody holding it. Not a
-    lost lease — Papaya took it back, or a person released it in the app — nor a
+    lost lease - Papaya took it back, or a person released it in the app - nor a
     decline, nor anything answered (`instructions.live`). One replied to and not
     reported is `instructions.recover`'s.
     """
@@ -1125,7 +1125,7 @@ def close_instruction(
     person hears it once, where they asked, with what it was waiting on, and the result
     is reported `failed` so Papaya stops showing it `picked_up`. Not ``tell``: Papaya
     has it closed already (answered, failed, cancelled), and nothing is said or
-    reported — it is only closed on this side. Either way what it was blocked on is
+    reported - it is only closed on this side. Either way what it was blocked on is
     closed with it, so no report says it later, and phase `done` keeps every later
     round from finding it again.
     """
@@ -1796,8 +1796,8 @@ class Rounds:
         hold lands on the same ticket and resumes from its state (its worker, what it
         already said). Only a reserve Papaya refused (`SubjectHeld`, with its holder) is
         told to the person at the origin as not finished, with what it waited on, and
-        closed. Anything else — a bare `done` (already running here, a playbook or scope
-        skip), a busy loop, an offer that raised — changes nothing and is looked at
+        closed. Anything else - a bare `done` (already running here, a playbook or scope
+        skip), a busy loop, an offer that raised - changes nothing and is looked at
         again next round.
         """
         loop = getattr(self._built, "loop", None)
@@ -2295,8 +2295,8 @@ class Rounds:
                 continue
             # A pull request whose ticket this process can offer back to the loop goes
             # through that ticket's review turn (attention sets it `dispatched`, and the
-            # reclaim above takes it up). Every other one — no ticket, a ticket done or
-            # handed over, or anything standalone with no loop to offer to — is the
+            # reclaim above takes it up). Every other one - no ticket, a ticket done or
+            # handed over, or anything standalone with no loop to offer to - is the
             # repair step's below, the same one a session's heartbeat runs
             # (`supervision.repair_untracked`), so every delivered pull request is
             # somebody's and none is two people's (#72).
@@ -2475,7 +2475,7 @@ class Rounds:
                 outcome = reconcile.OUTCOME_MERGED
             elif entry is None:
                 # The forge was read this round and does not list this pull request at
-                # all — merged, closed, or dropped from the watch. It never will again,
+                # all - merged, closed, or dropped from the watch. It never will again,
                 # so the attempt is closed on what is known rather than holding a slot.
                 outcome = reconcile.OUTCOME_ENDED
             elif not entry.get("head"):
@@ -2505,8 +2505,8 @@ class Rounds:
         """Green, mergeable, nobody asking for changes, and nobody merging: also a state.
 
         The clock starts the first round that sees it green at its head. Past
-        `delivery.merge_after_hours`, the ticket says so once, or — on a repository
-        that opted into `auto_merge` — the runtime merges and the ticket is done.
+        `delivery.merge_after_hours`, the ticket says so once, or - on a repository
+        that opted into `auto_merge` - the runtime merges and the ticket is done.
         """
         from papaya_agent_runtime import reconcile
 

@@ -19,8 +19,8 @@ Every step checks first and acts only when it has to:
 
 A step that cannot finish stops the run with one line naming the one thing to do,
 so re-running picks up exactly there. Everything the flow touches outside this
-process goes through three seams — :class:`Shell`, :class:`Picker` and the
-``platform``/``env`` arguments — so the tests never sign anything in.
+process goes through three seams - :class:`Shell`, :class:`Picker` and the
+``platform``/``env`` arguments - so the tests never sign anything in.
 
 ``--non-interactive`` with ``--agent``/``--workspace``/``--repo`` runs the same steps
 with no prompts and never attaches a terminal. ``--non-interactive`` without them is
@@ -172,7 +172,7 @@ class Repo:
 
     @property
     def title(self) -> str:
-        return f"{self.slug} — {self.description}" if self.description else self.slug
+        return f"{self.slug} - {self.description}" if self.description else self.slug
 
 
 class Picker:

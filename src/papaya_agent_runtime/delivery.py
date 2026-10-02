@@ -42,7 +42,7 @@ class DeliveryResult:
     note: str
     #: What tearing down the task's compose stack did, when it owned one.
     compose: dict | None = None
-    #: Whether a pull request exists for the branch after this delivery — created
+    #: Whether a pull request exists for the branch after this delivery - created
     #: now, or found already open. ``True`` with ``pr_url`` None means the PR is
     #: real but its address could not be read back; retrying creation would only
     #: be refused as a duplicate.
@@ -107,7 +107,7 @@ def _lookup_pr_url(tool: str, branch: str, forge_slug: str | None, cwd: str) -> 
     url = extract_pr_url(proc.stdout)
     if url or not forge_slug:
         return url
-    # `gh-axi pr list` prints a row per pull request — `724,"title",open,…` — with
+    # `gh-axi pr list` prints a row per pull request - `724,"title",open,…` - with
     # its number but no URL, so searching the text for one finds nothing and the
     # caller goes on to create a second pull request, which the forge then refuses
     # (2026-09-17, task 37). The number plus the forge is the URL.
@@ -195,7 +195,7 @@ def _own_commits(
 def composition_tasks(conn, task, *, remote: str, base: str | None, head: str) -> list[dict]:
     """Open sibling tasks whose own commits appear in this task's proposed PR diff.
 
-    A commit counts when its SHA is in the diff, or when a copy of it is — the same
+    A commit counts when its SHA is in the diff, or when a copy of it is - the same
     patch cherry-picked under a new SHA carries the sibling's work just the same.
     """
     worktree = task["worktree_path"]
@@ -279,7 +279,7 @@ def _pr_tool() -> str | None:
 def _pr_body(task_id: int, head: str, body_file: str | None) -> str:
     """The pull request body: the caller's file if given, else the reviewer's description.
 
-    ``--body-file`` overrides everything — a manager who has written the body by
+    ``--body-file`` overrides everything - a manager who has written the body by
     hand should never have it second-guessed. Otherwise the body is the description
     the reviewer wrote with the approval of this head; see
     :mod:`papaya_agent_runtime.pr_body`. With neither, delivery is refused: a pull
@@ -311,7 +311,7 @@ def _forge_for_task(conn, task) -> tuple[str, str | None]:
     A repo registered from a local path has a local ``origin``: pushing there
     reaches nobody and there is no forge to open a pull request on. The
     registration now carries the forge URL, and the base clone gets a ``forge``
-    remote when its ``origin`` is not it — so delivery pushes and opens the pull
+    remote when its ``origin`` is not it - so delivery pushes and opens the pull
     request where the work is actually reviewed.
     """
     from papaya_agent_runtime import repos
@@ -356,7 +356,7 @@ def deliver(
 
     # A cascade may have rewritten this branch since the worker last touched it.
     # Delivering from a stale worktree force-pushes the cascade away, so move onto
-    # the remote first — or refuse, when both sides hold commits.
+    # the remote first - or refuse, when both sides hold commits.
     from papaya_agent_runtime import stacks
 
     cascaded = None
@@ -415,8 +415,8 @@ def deliver(
         if tool is None:
             note = "pushed; no gh/gh-axi found, PR not opened"
         elif existing:
-            # A second delivery of the same task — the reconcile lane fixing a red
-            # pull request — updates the one that is open. Creating another is what
+            # A second delivery of the same task - the reconcile lane fixing a red
+            # pull request - updates the one that is open. Creating another is what
             # `gh` refuses, and on PAP-222 that refusal read as "PR creation failed".
             pr_url, pr_exists = existing, True
             number = pr_number(existing)
@@ -460,7 +460,7 @@ def deliver(
                     "pushed; PR opened"
                     if pr_url
                     else "pushed; PR opened, but its URL could not be read from the tool's "
-                    f"output or looked up by branch — find it with `{Path(tool).name} pr list "
+                    f"output or looked up by branch - find it with `{Path(tool).name} pr list "
                     f"--head {branch}`; do not create another"
                 )
             else:
@@ -637,7 +637,7 @@ def record_merged(task_id: int, merged_sha: str, *, note: str | None = None) -> 
     When the manager merges a task's PR on GitHub outside ``ppy deliver``, the task
     stays ``worker_done``: the heartbeat keeps listing it as work awaiting the
     manager, and the worktree is never eligible for reclamation. There is nothing
-    left to push and no review gate to satisfy — the commit shipped — so this is
+    left to push and no review gate to satisfy - the commit shipped - so this is
     pure bookkeeping: it names the merge commit and closes the task out.
 
     A squash or rebase merge produces a *new* commit that the task's worktree has

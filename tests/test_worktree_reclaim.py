@@ -262,7 +262,7 @@ def test_cli_prune_dry_run_reports_and_leaves_the_slot(repo, capsys):
 # Orphans: slot directories on disk that no active lease owns
 #
 # The first real prune reclaimed nine backend slots while thirteen frontend slot
-# directories — clean, delivered, about 10 GB — were invisible, because their
+# directories - clean, delivered, about 10 GB - were invisible, because their
 # leases had been released or were created by an earlier ppy instance.
 # --------------------------------------------------------------------------- #
 
@@ -435,7 +435,7 @@ def test_a_pool_directory_that_is_not_a_checkout_is_left_alone(repo):
 # Sitting in a pool root is not proof of ownership
 #
 # One treehouse home holds this instance's pools next to the user's own for the
-# same repositories — papaya-backend-monorepo-58a49b is ours, -e5cc8b is theirs —
+# same repositories - papaya-backend-monorepo-58a49b is ours, -e5cc8b is theirs -
 # and both match the same name glob. A clean, fully pushed personal worktree is
 # the most reclaimable-looking thing on the disk and the least ours to take.
 # --------------------------------------------------------------------------- #
@@ -465,7 +465,7 @@ def test_a_slot_from_a_clone_we_do_not_manage_is_never_reclaimable(
     yours = found[str(theirs)]
 
     assert mine.managed is True and mine.reclaimable is True
-    # Clean, and every commit is on a remote — reclaimable by every rule but ownership.
+    # Clean, and every commit is on a remote - reclaimable by every rule but ownership.
     assert yours.managed is False
     assert yours.reclaimable is False
     assert "not managed by this instance" in yours.reason
@@ -573,7 +573,7 @@ def test_disk_refusal_says_so_when_there_is_nothing_to_reclaim(repo):
 
 def test_prune_never_takes_a_slot_a_resumable_task_still_names(repo):
     """Task 158 (issue #58): lease released on failure, slot still on disk, task
-    still resumable — prune called it an orphan and removed it."""
+    still resumable - prune called it an orphan and removed it."""
     task_id, lease = _lease_a_task(repo, status="failed")
     # The lease is handed back but the checkout stays on disk (a pooled slot).
     store.release_lease(init_db(), lease.id)

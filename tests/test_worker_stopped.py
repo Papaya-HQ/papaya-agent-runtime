@@ -120,7 +120,7 @@ def test_a_stream_progress_event_recorded_after_the_done_note_does_not_hide_it(p
     """CI runs 35129973517 / 35132060840: a finished worker was recorded `worker_stopped`.
 
     The runner records every stream event as `worker_<type>`, so a provider's
-    `{"type": "progress"}` line is a `worker_progress` event too — with no phase. The
+    `{"type": "progress"}` line is a `worker_progress` event too - with no phase. The
     worker emits it *before* filing its done note, but the note is the worker's own
     database write while the stream line waits for the runner thread to read stdout.
     When the runner is the slower of the two, the phaseless event lands after the note,

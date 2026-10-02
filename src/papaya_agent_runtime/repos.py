@@ -14,7 +14,7 @@ branched from their feature branch. Registration and sync now read the forge's `
 only ``ppy repo set --default-branch`` overrides the forge, as a lock.
 
 ``sync`` is the command that keeps a base clone honest. It used to fetch and then
-record the base clone's *local* ``HEAD``, which never moved — so a base clone that
+record the base clone's *local* ``HEAD``, which never moved - so a base clone that
 had been registered weeks earlier kept reporting a stale commit and every worker
 dispatched without an explicit starting branch began from it (2026-08-31: a
 backend base clone sat on a local `main` far behind the remote). Sync now
@@ -53,7 +53,7 @@ FORGE_TIMEOUT_SECONDS = 60.0
 # and ``ensure_layout()`` then creates the whole tree wherever the command ran.
 # The ``bin/ppy`` launcher exports ``PPY_HOME``, so this only happens when ``ppy`` is
 # invoked another way (``python -m papaya_agent_runtime``, or a ``ppy`` shim that is not
-# the launcher) from inside a base clone — which is exactly what a `cd` into
+# the launcher) from inside a base clone - which is exactly what a `cd` into
 # ``.ppy/repos/<name>` followed by a bare ``ppy ...`` does. The directory is empty
 # state nobody reads; sync reports it and ``--clean-stray-ppy`` removes it.
 STRAY_PPY_CAUSE = (
@@ -98,7 +98,7 @@ def forge_slug(url: str | None) -> str | None:
 
 
 def is_forge_url(url: str | None) -> bool:
-    """True for a GitHub URL (https or ssh) — somewhere a pull request can be opened."""
+    """True for a GitHub URL (https or ssh) - somewhere a pull request can be opened."""
     return forge_slug(url) is not None
 
 
@@ -531,8 +531,8 @@ def check_out(local_path: str, branch: str) -> None:
 def ensure_forge_remote(local_path: str, forge_url: str | None) -> str:
     """Make the forge reachable from the base clone, and name the remote to use.
 
-    When the clone's own ``origin`` is the forge — every clone made or repaired
-    since 2026-09-16 — that is the remote. A clone whose ``origin`` has not been
+    When the clone's own ``origin`` is the forge - every clone made or repaired
+    since 2026-09-16 - that is the remote. A clone whose ``origin`` has not been
     repaired yet (see :func:`repair_origin`) gets the forge as a *second* remote
     (``forge``) meanwhile. Returns the remote name to fetch and push with.
     """
@@ -561,8 +561,8 @@ def _resolve_forge_url(source: str, forge_url: str | None) -> str:
 
     An explicit ``--forge-url`` always wins. Otherwise a forge URL registered
     directly is its own forge, and a local path inherits the forge from its own
-    ``origin``. A local path whose origin is another local path — or which has no
-    origin at all — has no forge, and registering it silently is what left a
+    ``origin``. A local path whose origin is another local path - or which has no
+    origin at all - has no forge, and registering it silently is what left a
     delivered task with nowhere to open a pull request.
     """
     if forge_url:
@@ -680,7 +680,7 @@ def locate(terms: list[str]) -> list[LocateHit]:
 
     A mechanical primitive and nothing more: it greps, counts and sorts. Whether
     a hit means the ticket belongs to that repository is a judgment, and it
-    belongs to the manager turn that asked — this only stops the turn guessing
+    belongs to the manager turn that asked - this only stops the turn guessing
     from a repository name when the code could simply have been read.
 
     Every term must occur somewhere in the file for it to count, so two words
@@ -846,7 +846,7 @@ def set_provision(
     """Configure (or clear) a repo's worktree provisioning.
 
     ``None`` leaves a field as it was; an empty string clears that one field, and
-    ``clear`` clears both — so turning provisioning off never needs a DB edit.
+    ``clear`` clears both - so turning provisioning off never needs a DB edit.
     """
     conn, _row = _require_repo(name)
     fields: dict[str, object] = {}
@@ -877,7 +877,7 @@ def dirty_paths(local_path: str) -> list[str]:
 
     A base clone is meant to be read-only: worktrees branch from it, nobody edits
     it. Anything here is either a hand edit that a fast-forward would clobber, or
-    build output nobody meant to keep — both are reasons to stop and say so. The
+    build output nobody meant to keep - both are reasons to stop and say so. The
     one exception is ``.ppy/``, which is machine state accidentally created inside
     the clone (see ``STRAY_PPY_CAUSE``) and is reported separately.
     """
@@ -1014,7 +1014,7 @@ def _fast_forward(local_path: str, branch: str, remote: str) -> tuple[str, bool]
     if rc != 0:
         raise RepoError(
             f"the base clone's {branch!r} cannot fast-forward to {remote}/{branch} "
-            f"({(before or '?')[:8]} vs {target[:8]}) — it holds commits the remote does "
+            f"({(before or '?')[:8]} vs {target[:8]}) - it holds commits the remote does "
             f"not: {err or 'non-fast-forward'}"
         )
     after = _git(["rev-parse", branch], cwd=local_path)
@@ -1059,8 +1059,8 @@ def sync_repo(name: str, *, clean_stray_ppy: bool = False) -> SyncResult:
     """Fetch, fast-forward the base clone's default branch, and record that commit.
 
     Refuses (changing nothing) when the base clone has uncommitted changes or
-    untracked files outside ``.ppy/`` — a fast-forward over a hand edit is how work
-    disappears — and reports a stray ``.ppy/`` directory so it can be cleaned.
+    untracked files outside ``.ppy/`` - a fast-forward over a hand edit is how work
+    disappears - and reports a stray ``.ppy/`` directory so it can be cleaned.
     """
     conn = init_db()
     row = store.get_repo(conn, name)
@@ -1075,7 +1075,7 @@ def sync_repo(name: str, *, clean_stray_ppy: bool = False) -> SyncResult:
         more = f" (+{len(dirty) - 10} more)" if len(dirty) > 10 else ""
         raise RepoError(
             f"refusing to sync {name!r}: the base clone has uncommitted changes or "
-            f"untracked files — {shown}{more}. A base clone is read-only; move or "
+            f"untracked files - {shown}{more}. A base clone is read-only; move or "
             "remove these, then sync again."
         )
 

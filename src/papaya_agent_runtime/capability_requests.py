@@ -23,7 +23,7 @@ Now there is one loop, the same whether the worker declared the need or was deni
    yourself"): `ppy serve`'s rounds hand it to the answer turn, a session sees it as the
    manager's readiness problem, and either grants or denies it with a reason.
 5. **Escalated** (`ppy capability escalate <id> --why "..."`) only when it needs what
-   only a person has — a credential, money, access nobody here can judge. Only then is
+   only a person has - a credential, money, access nobody here can judge. Only then is
    it a person's blocker, which the outreach procedure says to them.
 
 Requests live on the event log (``capability_request``, ``capability_decision``), so
@@ -43,9 +43,9 @@ A request carries the pattern that makes the refused call run, which is not alwa
   to every worker: it names one worktree's files.
 
     state \\ event  auto_grant    never     other     approve   approve --always  deny     escalate
-    (new)          auto_granted  refused   pending   —         —                 —        —
-    pending        —             —         —         granted   granted (+policy) denied   escalated
-    escalated      —             —         —         granted   granted (+policy) denied   —
+    (new)          auto_granted  refused   pending   -         -                 -        -
+    pending        -             -         -         granted   granted (+policy) denied   escalated
+    escalated      -             -         -         granted   granted (+policy) denied   -
     resolved        a repeat returns the existing request; approve/deny say it is resolved
     (task ended)    a pending or escalated request reads `moot` and asks nobody
 """
@@ -528,7 +528,7 @@ def _grant_for_install(granted: Request, *, by: str) -> None:
         after=list(cfg.claude.extra_tools),
         why=(
             f"granted {granted.pattern} to every worker ({by}): task {granted.task_id} "
-            f"asked for `{granted.program}`" + (f" — {granted.why}" if granted.why else "")
+            f"asked for `{granted.program}`" + (f" - {granted.why}" if granted.why else "")
         ),
         evidence={"request_id": granted.id, "task_id": granted.task_id},
     )
@@ -603,7 +603,7 @@ def problems() -> list[Any]:
         return []
     found = []
     for item in waiting:
-        why = f" — {item.why}" if item.why else ""
+        why = f" - {item.why}" if item.why else ""
         command = f" (denied `{item.command}`)" if item.command else ""
         why += where(item)
         if item.state == PENDING:

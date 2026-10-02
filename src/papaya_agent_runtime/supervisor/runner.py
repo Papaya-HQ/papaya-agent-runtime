@@ -2,7 +2,7 @@
 
 Owns exactly one worker subprocess: spawns it in its own process group, streams
 its normalized event stream to the spool and SQLite, and records a fail-closed
-result. It never infers success from a missing process — a worker that exits
+result. It never infers success from a missing process - a worker that exits
 without a result event is a failure to be reconciled, not a silent success.
 """
 
@@ -45,7 +45,7 @@ def _finalize_worktree(spec: TaskSpec, summary: str) -> Finalized:
 
     Workers may or may not commit. The manager owns the reviewable commit, so a
     completed task with a dirty worktree is committed here with a generated
-    message — but only for the paths that belong on the branch. Evidence and
+    message - but only for the paths that belong on the branch. Evidence and
     receipt directories a worker wrote for the review are held back (see
     ``supervisor.autocommit``); they stay in the worktree and are named in the
     task's event, never silently swept into the commit.
@@ -86,21 +86,21 @@ def worker_env(
     """Environment for a worker process: it can call ``ppy``, and it can install things.
 
     ``ppy`` resolves ``.ppy`` from the cwd unless ``PPY_HOME`` is set, and a worker's cwd
-    is its leased worktree — so pin ``PPY_HOME`` to this instance and put the repo's
+    is its leased worktree - so pin ``PPY_HOME`` to this instance and put the repo's
     ``bin/`` first on PATH. That is what makes ``ppy progress`` work for workers.
 
     Both directories are created here rather than assumed. Three workers in the
     2026-08-31 window lost roughly ten minutes each before touching the task:
     ``uv``'s default cache was not writable from a Codex sandbox, and writing
     progress needed a sandbox escalation. A cache under ``.ppy`` is inside the
-    sandbox's writable root, and it is shared rather than per-task on purpose —
+    sandbox's writable root, and it is shared rather than per-task on purpose -
     the cost being paid was re-downloading the same wheels for every dispatch, so
     a cold cache per task would give back nothing.
 
     With ``worktree``, the Papaya plugin's write guard is pinned to exactly that
     worktree and ``PPY_HOME``, after the task's values so nothing a repository sets
     can widen it. Unset, the guard falls back to the connection's
-    ``allowed_working_directories`` — the runtime directory `connect` recorded — and
+    ``allowed_working_directories`` - the runtime directory `connect` recorded - and
     refuses every write in the worktree (seen 2026-09-22 on the owner's runtime).
     """
     from papaya_agent_runtime.manager.launch import repo_root
@@ -273,8 +273,8 @@ class RunnerGuardian:
             )
 
         # A runner superseded by a resume (or by a steer's interrupt) is no longer
-        # the task's session. Its exit — usually a nonzero code from the interrupt
-        # that ended it — must not rewrite the task's status or raise an actionable
+        # the task's session. Its exit - usually a nonzero code from the interrupt
+        # that ended it - must not rewrite the task's status or raise an actionable
         # error, or a live resumed worker reads as `failed` (2026-09-01, codex).
         session_id = result.session_id or session_seen
         if store.is_runner_superseded(conn, runner_id):
@@ -355,13 +355,13 @@ class RunnerGuardian:
             )
 
         # A worker that filed its done note and left commits behind is missing one
-        # thing only its own lease branch can be given, so the harness pushes it —
-        # after the auto-commit, so the safety commit goes up with the rest — and
+        # thing only its own lease branch can be given, so the harness pushes it -
+        # after the auto-commit, so the safety commit goes up with the rest - and
         # judges the turn again on what is true afterwards.
         # ONE push decision for this ending, after the auto-commit so the safety
         # commit goes up with the rest, and before anything reviews this head. Where
-        # the repository gates pushes the worker never pushed at all — its rules told
-        # it not to — and the runtime pushes only with its own gate green at this
+        # the repository gates pushes the worker never pushed at all - its rules told
+        # it not to - and the runtime pushes only with its own gate green at this
         # exact SHA (issue #83). Anywhere else this is the old rescue, unchanged.
         # Never two pushes, and never a push the gate has not seen.
         verdict, _pushed = turn_end.deliver_after_turn(conn, spec.task_id, verdict)

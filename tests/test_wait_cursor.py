@@ -42,7 +42,7 @@ def test_wait_with_a_cursor_skips_events_already_handled(server, source_repo) ->
     assert again["actionable"] == []
     assert again["all_terminal"] is True
 
-    # Without the cursor the same old event comes back — the behaviour the cursor exists to avoid.
+    # Without the cursor the same old event comes back - the behaviour the cursor exists to avoid.
     stale = client.wait_actionable(run_id, timeout=5)
     assert [e["seq"] for e in stale["actionable"]] == [e["seq"] for e in first["actionable"]]
 

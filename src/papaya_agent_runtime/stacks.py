@@ -12,8 +12,8 @@ Three things live here:
 
 - **The chain.** A task records the task it is stacked on, so `ppy stack` can walk
   a stack bottom-up without the manager remembering branch names.
-- **The view.** Each layer's branch, pull request, base, review state, and — the
-  question that decides whether the next merge is safe — whether the pull
+- **The view.** Each layer's branch, pull request, base, review state, and - the
+  question that decides whether the next merge is safe - whether the pull
   request's base still matches the layer below it, i.e. whether GitHub's cascade
   has run.
 - **Cascade awareness.** A cascade *rewrites* the upper branches. Before a resume
@@ -47,7 +47,7 @@ class BranchState:
     """How a worktree stands against the branch it pushes to.
 
     ``ahead`` counts commits whose *patch* is not upstream, not commits whose SHA
-    is not upstream. A rebase — which is what GitHub's cascade does — gives every
+    is not upstream. A rebase - which is what GitHub's cascade does - gives every
     replayed commit a new SHA, so counting SHAs would report a freshly cascaded
     branch as full of unpushed work and refuse every resume and delivery in the
     stack. ``git cherry`` answers the question that actually matters: is there
@@ -87,7 +87,7 @@ def branch_state(worktree: str, branch: str, remote: str = "origin") -> BranchSt
     """Compare the worktree's head with ``<remote>/<branch>``, fetching first.
 
     A branch the remote has never seen comes back with ``remote_sha`` unset and no
-    counts — there is nothing to be behind or ahead of yet.
+    counts - there is nothing to be behind or ahead of yet.
     """
     rc, local = _git(worktree, "rev-parse", "HEAD")
     if rc != 0:
@@ -124,7 +124,7 @@ def push_remote(conn, task) -> str:
 
     A worktree inherits the base clone's ``origin``, which for a repo registered
     from a local path reaches nobody. Every question about where this branch
-    stands — and every push of it — goes through the same answer.
+    stands - and every push of it - goes through the same answer.
     """
     from papaya_agent_runtime import repos
 
@@ -154,7 +154,7 @@ def unpushed_commits(conn, task) -> int:
     The same question ``ppy worktree prune`` asks before removing a slot, and the
     one that says whether a worker actually pushed its work. It is answered by
     patch, not by SHA (see :class:`BranchState`), so a branch that GitHub's
-    cascade rebased upstream reads as pushed — which it is — instead of as a pile
+    cascade rebased upstream reads as pushed - which it is - instead of as a pile
     of unpushed work. A branch the remote has never seen falls back to "commits on
     no remote at all", because there is no branch to compare against yet.
     """
@@ -270,7 +270,7 @@ def _sync_worktree(conn, task) -> dict:
     if state.diverged:
         raise StackError(
             f"task {task_id}: the worktree and {state.remote}/{state.branch} have both moved "
-            f"— worktree at {state.local_sha[:8]} with {state.ahead} commit(s) the remote "
+            f"- worktree at {state.local_sha[:8]} with {state.ahead} commit(s) the remote "
             f"lacks (nothing upstream matches those patches), remote at "
             f"{state.remote_sha[:8]} with {state.behind} the worktree lacks. "
             "This is what a cascade plus local work looks like; sort out which commits "
@@ -295,7 +295,7 @@ def _sync_worktree(conn, task) -> dict:
         "summary": (
             f"{state.remote}/{state.branch} was rewritten upstream (a stack cascade); "
             f"moved the worktree from {state.local_sha[:8]} to {(state.remote_sha or '')[:8]} "
-            f"— its {state.replayed} commit(s) are already there under new SHAs and it held "
+            f"- its {state.replayed} commit(s) are already there under new SHAs and it held "
             "nothing else"
         ),
     }
@@ -317,14 +317,14 @@ def drop_artifact_commits(conn, task) -> dict | None:
     """Put the worktree back on its pushed head when all it adds is build artifacts.
 
     On 2026-09-23 a worker pushed a clean branch, the runtime committed again on its
-    own and put ``__pycache__/*.pyc`` and ``uv.lock`` on top, and review — which reads
-    the worktree's head — sent the worker back to undo a commit it never made. The
+    own and put ``__pycache__/*.pyc`` and ``uv.lock`` on top, and review - which reads
+    the worktree's head - sent the worker back to undo a commit it never made. The
     worker cannot be the one to fix that, and review cannot either (it may not write
     in the worktree); the runtime can.
 
     Only when the pushed lease branch is an ancestor of the local head and every path
     between them is *added* and is an artifact by :data:`autocommit.ARTIFACTS`. Any
-    real change — a modified file, a deletion, a source file — leaves the head alone.
+    real change - a modified file, a deletion, a source file - leaves the head alone.
     The reset is ``--mixed``: the files stay in the worktree, untracked, so a
     worker's environment is not taken from it. Returns the recorded payload, or
     ``None`` when nothing was dropped. Never raises.
@@ -498,7 +498,7 @@ def _review_state(task_id: int) -> str:
 def _chain_for_task(conn, task_id: int) -> list:
     """The whole stack a task belongs to, bottom-up.
 
-    Walks to the bottom of the chain, then back up through the children — naming
+    Walks to the bottom of the chain, then back up through the children - naming
     any layer renders the same stack, because "what has to merge before this" is
     the question, whichever layer the manager happens to be looking at.
     """
@@ -533,7 +533,7 @@ def stack_layers(identifier: int) -> list[Layer]:
     """The stack containing task ``identifier``, bottom-up.
 
     When no task has that id, ``identifier`` is read as a run id and every stacked
-    task in the run is rendered instead — the two ways a manager refers to work in
+    task in the run is rendered instead - the two ways a manager refers to work in
     flight.
     """
     conn = init_db()
@@ -595,7 +595,7 @@ def stack_layers(identifier: int) -> list[Layer]:
                 if layer.cascade_pending:
                     layer.notes.append(
                         f"pull request targets {layer.pr_base!r}, not the layer below "
-                        f"({expected_base!r}) — the cascade has already retargeted it, or "
+                        f"({expected_base!r}) - the cascade has already retargeted it, or "
                         "it was opened against the wrong branch"
                     )
         layers.append(layer)
@@ -767,7 +767,7 @@ def merge_stack(
 
     A layer whose pull request already merged on the forge is *adopted* rather than
     refused: the merge is written down and the stack moves up to the next layer. That
-    costs no merge authority, because it merges nothing — without it a stack sat
+    costs no merge authority, because it merges nothing - without it a stack sat
     behind a shipped pull request with no command able to clear it, since
     ``ppy stack merge`` was both the advice ``stack_layers`` gave and the thing that
     refused (PAP: task 142).

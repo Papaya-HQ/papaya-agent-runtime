@@ -767,7 +767,7 @@ def test_serve_says_at_start_when_deficiencies_are_waiting(ppy_home) -> None:
     stderr = io.StringIO()
     serve.announce_deficiencies(stderr=stderr)
     assert stderr.getvalue() == (
-        "ppy serve: 1 self-reported deficiency is waiting to open as issues — "
+        "ppy serve: 1 self-reported deficiency is waiting to open as issues - "
         "`ppy deficiency list`\n"
     )
 

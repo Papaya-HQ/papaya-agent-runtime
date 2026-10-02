@@ -20,8 +20,8 @@ from papaya_agent_runtime.lifecycle import TASK_STATUSES
 def _cmd_version(args: argparse.Namespace) -> int:
     """The build somebody is running, derived from this checkout's tags.
 
-    Imported here rather than at module scope so that importing the CLI — which
-    every `ppy` command does, whatever it was asked for — does not spend a
+    Imported here rather than at module scope so that importing the CLI - which
+    every `ppy` command does, whatever it was asked for - does not spend a
     `git describe` on a number only this command prints. It is the same value
     `ppy capabilities --json` reports and the same one `serve` sends in `hello`,
     because all three read `papaya_agent_runtime.__version__`.
@@ -41,7 +41,7 @@ def _cmd_update(args: argparse.Namespace) -> int:
 
 
 def _cmd_capabilities(args: argparse.Namespace) -> int:
-    """What this runtime is, from local state only — the client's connect-time probe.
+    """What this runtime is, from local state only - the client's connect-time probe.
 
     One JSON object on one line, or the same fields one per line for a person. It
     reads no network and no database, so it answers on an unconfigured machine as
@@ -133,7 +133,7 @@ def _print_provision(results: list) -> None:
     glyph = {"installed": "+", "present": "=", "skipped": "-", "failed": "x"}
     for r in results:
         ver = f" {r.version}" if r.version else ""
-        detail = f" — {r.detail}" if r.detail else ""
+        detail = f" - {r.detail}" if r.detail else ""
         print(f"  [{glyph.get(r.status, '?')}] {r.name}{ver}: {r.status}{detail}")
 
 
@@ -351,7 +351,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
             for entry in entries:
                 print(
                     f"#{entry['id']} {entry['at']} {entry['key']}: "
-                    f"{json.dumps(entry['before'])} -> {json.dumps(entry['after'])} — "
+                    f"{json.dumps(entry['before'])} -> {json.dumps(entry['after'])} - "
                     f"{entry['why']}"
                 )
             return 0
@@ -492,7 +492,7 @@ def _cmd_repo(args: argparse.Namespace) -> int:
                 return 0
             for r in repos:
                 sha = (r.get("base_sha") or "?")[:8]
-                forge = r.get("forge_url") or "NO FORGE — deliver cannot open PRs"
+                forge = r.get("forge_url") or "NO FORGE - deliver cannot open PRs"
                 print(
                     f"{r['name']:<24} {r['default_branch'] or '?':<12} {sha}  "
                     f"{r['origin']}  ->  {forge}"
@@ -641,7 +641,7 @@ def _repo_locate(args: argparse.Namespace) -> int:
         return 0
     for hit in hits:
         if hit.note:
-            print(f"{hit.repo}: not searched — {hit.note}")
+            print(f"{hit.repo}: not searched - {hit.note}")
             continue
         if not hit.found:
             print(f"{hit.repo}: no hits")
@@ -854,7 +854,7 @@ def _papaya_connect(args: argparse.Namespace) -> int:
         )
         return 1
     print(
-        f"not connected ({reason}): {result['detail']} — "
+        f"not connected ({reason}): {result['detail']} - "
         "the runtime still works on registered repositories without Papaya",
         file=sys.stderr,
     )
@@ -918,10 +918,10 @@ def _papaya_status_line(data: dict) -> str:
         suffix = f" ({role})" if role else ""
         return f"connected as {data['addressed']}{suffix}"
     if state == "signed_in":
-        return "signed in to Papaya but not pinned to an agent — `ppy papaya connect` finishes it"
+        return "signed in to Papaya but not pinned to an agent - `ppy papaya connect` finishes it"
     if state == "installed":
         return (
-            "the Papaya client is installed but this machine is not signed in — "
+            "the Papaya client is installed but this machine is not signed in - "
             "`ppy papaya connect` signs it in"
         )
     return "no Papaya client on this machine; `ppy papaya connect` installs and connects one"
@@ -1095,7 +1095,7 @@ def _cmd_deficiency(args: argparse.Namespace) -> int:
             deficiencies.RECLASSIFIED: "re-classified; not a profile gap",
         }.get(row.status, "below threshold")
         print(f"{row.status:<9} {row.count:>3}x  {row.last_seen}  {row.title}")
-        print(f"{'':<16}{row.kind} {row.fingerprint} — {where}")
+        print(f"{'':<16}{row.kind} {row.fingerprint} - {where}")
     # Denials that are never issues are still counted, so a person can see them.
     for repo, kinds in sorted(tool_learning.counts().items()):
         quiet = [
@@ -1254,7 +1254,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         title = preflight.title_from_brief(instructions)
         if not title:
             print(
-                f"dispatch: {args.brief} has no Markdown heading to take the objective from — "
+                f"dispatch: {args.brief} has no Markdown heading to take the objective from - "
                 "open the brief with a '# ...' heading, or pass --title",
                 file=sys.stderr,
             )
@@ -1271,7 +1271,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         origin = _registered_repo_origin(args.repo)
         if origin and not repos.is_local_remote(origin):
             print(
-                f"warning: --provider fake on {args.repo}, whose origin is {origin} — the fake "
+                f"warning: --provider fake on {args.repo}, whose origin is {origin} - the fake "
                 "worker writes a stub and refuses to push to a remote that is not a local path; "
                 "pass --provider claude or --provider codex for real work"
             )
@@ -1395,23 +1395,23 @@ def _cmd_worktree(args: argparse.Namespace) -> int:
         line = f"{len(entries)} slot(s), {human_bytes(total)} on disk, {human_bytes(free)} prunable"
         if orphans:
             line += (
-                f" — {len(orphans)} of them orphaned "
+                f" - {len(orphans)} of them orphaned "
                 f"({human_bytes(sum(e.size_bytes for e in orphans))}, no active lease owns them)"
             )
         print(line)
         if foreign:
             print(
                 f"{len(foreign)} slot(s) in those pools belong to a checkout this instance "
-                "does not manage — listed as unmanaged, never counted, never pruned"
+                "does not manage - listed as unmanaged, never counted, never pruned"
             )
         return 0
 
     res = prune(args.repo, dry_run=args.dry_run)
     verb = "would remove" if res["dry_run"] else "removed"
     for r in res["removed"]:
-        print(f"  {verb} {r['path']} ({human_bytes(r['size_bytes'])}) — {r['reason']}")
+        print(f"  {verb} {r['path']} ({human_bytes(r['size_bytes'])}) - {r['reason']}")
     for r in res["skipped"]:
-        print(f"  kept {r['path']} ({human_bytes(r['size_bytes'])}) — {r['reason']}")
+        print(f"  kept {r['path']} ({human_bytes(r['size_bytes'])}) - {r['reason']}")
     from papaya_agent_runtime import compose
 
     for stack in res.get("compose") or []:
@@ -1446,7 +1446,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     """Non-blocking snapshot of a run: task states, actionable events, usage.
 
     Reads the supervisor's live state (workers run in the background daemon) and
-    returns immediately — it never waits. Use this to track progress inside a turn
+    returns immediately - it never waits. Use this to track progress inside a turn
     instead of the blocking ``ppy wait``.
     """
     from papaya_agent_runtime.supervisor.client import SupervisorClient, SupervisorUnavailable
@@ -1464,7 +1464,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(json.dumps(snap, indent=2))
         return 0
     run = snap["run"]
-    print(f'run {run["id"]} "{run.get("title", "")}" — {run.get("status", "?")}')
+    print(f'run {run["id"]} "{run.get("title", "")}" - {run.get("status", "?")}')
     for t in snap.get("tasks", []):
         prov = t.get("provider") or "?"
         print(f'  task {t["id"]} "{t.get("title", "")}" [{prov}] {t.get("status", "?")}')
@@ -1517,7 +1517,7 @@ def _cmd_task(args: argparse.Namespace) -> int:
             return _cmd_task_push(args)
         if args.task_cmd == "set-status":
             res = set_task_status(args.task_id, args.status, args.note)
-            note = f" — {args.note}" if args.note else ""
+            note = f" - {args.note}" if args.note else ""
             print(f"task {args.task_id}: {res['from']} -> {res['to']}{note}")
             return 0
     except LifecycleError as exc:
@@ -1530,7 +1530,7 @@ def _cmd_task_push(args: argparse.Namespace) -> int:
     """Push a task's lease branch by hand: the manual form of the harness's rescue.
 
     The supervisor does this itself when a worker files a done note it could not
-    push. This is the same push for every other case — a task whose rescue was
+    push. This is the same push for every other case - a task whose rescue was
     refused and whose hook has since been fixed, or a worktree the manager wants
     on the remote before reviewing it.
     """
@@ -1546,7 +1546,7 @@ def _cmd_task_push(args: argparse.Namespace) -> int:
 
 
 def _cmd_task_env(args: argparse.Namespace) -> int:
-    """Small facts attached to a task — today, the compose stack it owns."""
+    """Small facts attached to a task - today, the compose stack it owns."""
     from papaya_agent_runtime import compose
     from papaya_agent_runtime.state import init_db, store
 
@@ -1752,7 +1752,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         print(f"resume failed: {resp.get('error')}", file=sys.stderr)
         return 1
     print(
-        f"resuming task {args.task_id} (session {resp.get('resumed_session')}) — "
+        f"resuming task {args.task_id} (session {resp.get('resumed_session')}) - "
         f"status {resp.get('status', 'in_progress')} (ends at {resp.get('ends_at', args.ends_at)})"
     )
     return _verify_started(args.task_id, since, args.verify_seconds)
@@ -1893,7 +1893,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
                     print(flag)
                     print()
                 # Where this layer sits in its stack and what has to merge before
-                # it — the line ten reflections said the brief should have carried.
+                # it - the line ten reflections said the brief should have carried.
                 from papaya_agent_runtime import stacks
 
                 order = stacks.merge_order(init_db(), task)
@@ -1930,7 +1930,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             if problems:
                 print(
                     "not approved: the pull request description would not help the person "
-                    "reading it —\n  - " + "\n  - ".join(problems),
+                    "reading it -\n  - " + "\n  - ".join(problems),
                     file=sys.stderr,
                 )
                 return 1
@@ -1947,7 +1947,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
             return 0
         if args.review_cmd == "status":
             approved, reason = is_approved_at_head(args.task_id)
-            print(f"task {args.task_id}: {'APPROVED' if approved else 'NOT approved'} — {reason}")
+            print(f"task {args.task_id}: {'APPROVED' if approved else 'NOT approved'} - {reason}")
             note = approval_note(args.task_id)
             if note:
                 print(f"note on that approval: {note}")
@@ -2187,7 +2187,7 @@ def _cmd_watermark(args: argparse.Namespace) -> int:
         row = watermarks.get_watermark(conn, args.key)
         if row is None:
             print(
-                f"no watermark for {args.key} — the first sweep reads everything, then "
+                f"no watermark for {args.key} - the first sweep reads everything, then "
                 f"`ppy watermark set {args.key} <newest comment timestamp>`",
                 file=sys.stderr,
             )
@@ -2300,7 +2300,7 @@ class _TextFileError(Exception):
 def _task_readable_roots(task_id: int) -> list[Path]:
     """The directories a task may read a note out of: its worktree and its evidence dir.
 
-    Resolved from the TASK, never from the process's working directory — the caller
+    Resolved from the TASK, never from the process's working directory - the caller
     naming the task is what decides which worktree is meant, and a worker's shell can
     be anywhere. A task with no worktree has no roots, and so may not pass a file at
     all.
@@ -2342,7 +2342,7 @@ def _text_from_file(path: str, flag: str, task_id: int) -> str:
     """The text in ``path``, for a flag that exists because the shell refuses text.
 
     A note with a newline before a `#`, a backtick, `$(`, or a brace holding a quote
-    is refused as a *command* whatever the program is — the harness will not analyse
+    is refused as a *command* whatever the program is - the harness will not analyse
     the argument (issue #115). Passing a path sidesteps that entirely, so nothing
     about the note has to be reshaped to be recorded.
 
@@ -2486,7 +2486,7 @@ def _cmd_reflect(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(entries, indent=2))
             return 0
-        print(reflections.render(entries, heading=f"# task {args.task_id} — reflections"), end="")
+        print(reflections.render(entries, heading=f"# task {args.task_id} - reflections"), end="")
         return 0
     try:
         reflections.record(args.task_id, self_note=args.self_note, manager_note=args.manager_note)
@@ -2508,7 +2508,7 @@ def _cmd_need(args: argparse.Namespace) -> int:
         return _need_reference_repo(args)
     if not args.capability:
         print(
-            "need: name what is missing — --capability <program> or --reference-repo <name>",
+            "need: name what is missing - --capability <program> or --reference-repo <name>",
             file=sys.stderr,
         )
         return 1
@@ -2561,7 +2561,7 @@ def _need_reference_repo(args: argparse.Namespace) -> int:
             message = (
                 f"recorded: this task wants to read {name}. The manager grants it with "
                 "`ppy reference grant`, which relaunches you with the directory readable. "
-                "Until then, do not work around it — say what it blocks in a progress note"
+                "Until then, do not work around it - say what it blocks in a progress note"
             )
         store.append_event(
             conn,
@@ -2633,7 +2633,7 @@ def _cmd_reference(args: argparse.Namespace) -> int:
         # a reference into a readable directory today.
         print(
             "note: this task runs on codex, which this runtime does not yet hand a "
-            "read-only directory — the grant is recorded but the worker will not see it"
+            "read-only directory - the grant is recorded but the worker will not see it"
         )
     if not args.resume:
         print("not resumed: the directory reaches the worker at its next launch")
@@ -2757,7 +2757,7 @@ def _cmd_followup(args: argparse.Namespace) -> int:
     decision = supervision.gate_followup(
         args.task_id, stopped=task["status"] == "worker_stopped", detail=""
     )
-    print(f"task {args.task_id}: {decision.action} — {decision.line}")
+    print(f"task {args.task_id}: {decision.action} - {decision.line}")
     if decision.action == supervision.PLAN:
         # Nothing to send: the reply to a plan is somebody's to write, never `--send`'s.
         print(decision.message)
@@ -3215,7 +3215,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         gone = _gone_workers(conn)
         if gone:
             print(
-                f"INCIDENT: {len(gone)} in-flight worker(s) with no live process — task(s) "
+                f"INCIDENT: {len(gone)} in-flight worker(s) with no live process - task(s) "
                 + ", ".join(str(t) for t in gone)
                 + "; run `ppy health`, then `ppy reconcile`, then `ppy resume <id>`"
             )
@@ -3866,7 +3866,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         default="papaya",
         help=(
-            "which tracker holds it — papaya, linear, notion, jira, or any name a "
+            "which tracker holds it - papaya, linear, notion, jira, or any name a "
             "workspace uses. Defaults to papaya only when nobody has said otherwise"
         ),
     )
@@ -4015,7 +4015,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "let the worker READ another registered repository's base clone, for a brief "
             "that names it as a reference (a contract, a schema, the other half of a "
-            "change). Repeatable. Writing there is refused — it is a reference, not the "
+            "change). Repeatable. Writing there is refused - it is a reference, not the "
             "work. A worker that finds it needs one asks with `ppy need --reference-repo`"
         ),
     )
@@ -4096,7 +4096,7 @@ def build_parser() -> argparse.ArgumentParser:
     wtlist = wtsub.add_parser(
         "list",
         help=(
-            "slot, task, status, branch, dirty/clean, size — leased slots plus the "
+            "slot, task, status, branch, dirty/clean, size - leased slots plus the "
             "pool directories on disk no active lease owns (shown as orphaned)"
         ),
     )
@@ -4163,7 +4163,7 @@ def build_parser() -> argparse.ArgumentParser:
     tkenv = tksub.add_parser(
         "env",
         help=(
-            "small facts attached to a task — set `compose_project=<name>` and the "
+            "small facts attached to a task - set `compose_project=<name>` and the "
             "task's compose stack is torn down when the task ends"
         ),
     )
@@ -4397,7 +4397,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="note_file",
         default=None,
         help=(
-            "read the note from this file — for a note of more than one line, or one "
+            "read the note from this file - for a note of more than one line, or one "
             "holding backticks, $, # or braces, which the shell refuses as a command"
         ),
     )
@@ -4525,7 +4525,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="why_file",
         default=None,
         help=(
-            "read the reason from this file — for a reason of more than one line, or one "
+            "read the reason from this file - for a reason of more than one line, or one "
             "holding backticks, $, # or braces, which the shell refuses as a command"
         ),
     )
@@ -4642,7 +4642,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval",
         type=float,
         default=300.0,
-        help="seconds between ticks (default 300 — the 5-minute check-in)",
+        help="seconds between ticks (default 300 - the 5-minute check-in)",
     )
     watch_cmd.add_argument(
         "--once",

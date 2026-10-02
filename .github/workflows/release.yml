@@ -2,13 +2,13 @@
 #
 # The `main` ruleset requires a pull request and a green `ci-ok`, with no bypass
 # actors, so no workflow can commit a version bump to it. A tag, however, a
-# workflow may push — so the tag *is* the version, and this is what creates it:
+# workflow may push - so the tag *is* the version, and this is what creates it:
 # the newest `v<major>.<minor>.<patch>` with its patch bumped by one, or `v0.1.0`
 # if the repository has never been released.
 #
 # The computation is not in this file. `src/papaya_agent_runtime/version.py` owns
-# it, and this workflow calls it, because `git tag` sorts lexically — it puts
-# `v0.1.10` before `v0.1.9` — and because the same code has to read the tag back
+# it, and this workflow calls it, because `git tag` sorts lexically - it puts
+# `v0.1.10` before `v0.1.9` - and because the same code has to read the tag back
 # out again at runtime. One sort, one place, unit-tested.
 #
 # There is nothing to gate on: the ruleset already guarantees every commit on
@@ -29,7 +29,7 @@ permissions:
 # Serialised, because two runs racing would both compute the same next tag and
 # the second `git push` would fail on a tag that already exists. The cost is that
 # three merges inside one run's lifetime leave the middle commit untagged (GitHub
-# keeps only the newest pending run in a group) — a quiet gap rather than a red
+# keeps only the newest pending run in a group) - a quiet gap rather than a red
 # release job, and the next merge releases normally.
 concurrency:
   group: release
@@ -54,7 +54,7 @@ jobs:
       # precisely so it can be read by a bare interpreter, here and in `bin/ppy`.
       #
       # Prints the tag to create, or an empty line when HEAD already carries a
-      # release tag — which is what makes this idempotent. A re-run of a push
+      # release tag - which is what makes this idempotent. A re-run of a push
       # that already tagged, or a `main` commit somebody tagged by hand to cut a
       # minor, tags nothing and exits green. Exit 2 (a git it could not read at
       # all) fails the job rather than releasing on a guess.
@@ -89,7 +89,7 @@ jobs:
       # If this fails the job goes red and the tag stays pushed. That is on
       # purpose: re-running must not create a second tag for one build, so the
       # re-run sees the tag on HEAD and does nothing. Publish the missing release
-      # by hand instead — `gh release create <tag> --generate-notes` — which is
+      # by hand instead - `gh release create <tag> --generate-notes` - which is
       # also all this step does.
       - name: Publish the release
         if: steps.next.outputs.tag != ''

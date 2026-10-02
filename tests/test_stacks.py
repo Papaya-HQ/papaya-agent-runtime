@@ -114,7 +114,7 @@ def test_stack_on_accepts_a_parent_whose_branch_has_not_been_pushed_yet(
 
     # A parent still in progress: a real lease worktree on the registered clone
     # with one commit of its own and no push. (A finished worker no longer models
-    # this — the harness pushes a done-but-unpushed lease branch for it.)
+    # this - the harness pushes a done-but-unpushed lease branch for it.)
     conn = init_db()
     repo_row = store.get_repo(conn, added.name)
     run_id = store.create_run(conn, "stack")
@@ -401,7 +401,7 @@ def _task_on_a_pushed_branch(client, source_repo, title="layer") -> dict:
 def _cascade_remote_branch(source_repo, branch: str) -> str:
     """Stand in for GitHub's cascade: the branch is rebased onto a moved default.
 
-    This is the shape that matters — every commit on the branch is *replayed*
+    This is the shape that matters - every commit on the branch is *replayed*
     under a new SHA. A check that counts SHAs sees that as unpushed work and
     refuses; the branch is not diverged, it is exactly one rebase ahead.
     """
@@ -589,7 +589,7 @@ def test_deliver_refuses_an_upper_layer_against_main_while_its_parent_is_unmerge
 ) -> None:
     conn = init_db()
     _run_id, bottom, top = _two_layer_stack(conn)
-    # The recorded starting branch is main — the shape a hand-repaired row takes —
+    # The recorded starting branch is main - the shape a hand-repaired row takes -
     # while the chain still says this layer sits on the bottom one.
     store.update_task_fields(conn, top, worktree_path="/tmp/wt", stacked_on="main")
     calls: list[list[str]] = []

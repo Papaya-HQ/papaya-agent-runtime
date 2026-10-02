@@ -9,23 +9,23 @@ launcher by hand. This module is the decision that person made, made by the runt
 When `ppy serve` starts, the lock at ``<PPY_HOME>/run/supervisor.lock`` is in one of
 four states, and each has exactly one answer:
 
-- **free** — nobody is running. Start.
-- **stale** — free, but the lock file (or ``supervisor.pid``) names a pid that is no
+- **free** - nobody is running. Start.
+- **stale** - free, but the lock file (or ``supervisor.pid``) names a pid that is no
   longer running: a crashed holder. Take it, clear what it left, say so in one line.
-- **adopt** — held by a live supervisor whose recorded build (``supervisor.json``: git
+- **adopt** - held by a live supervisor whose recorded build (``supervisor.json``: git
   head, package version, start time) is this checkout's. Connect to it and carry on;
   its workers keep running.
-- **retire** — held by a live supervisor from another build (the checkout was pulled),
+- **retire** - held by a live supervisor from another build (the checkout was pulled),
   or one that wrote no build at all (every build before this one), or whenever the
   environment has to be rebuilt under it. Ask it to shut down over its socket, wait for
-  it to let go — a supervisor of this build first waits for its workers to be recorded
-  stopped, sessions intact — then SIGTERM, then SIGKILL, and start fresh. The rounds'
+  it to let go - a supervisor of this build first waits for its workers to be recorded
+  stopped, sessions intact - then SIGTERM, then SIGKILL, and start fresh. The rounds'
   reclaim resumes each stopped worker by its session. One line says what happened.
 
 `bin/ppy` runs this before the environment sync, so the sync's refusal can only ever
 be about a supervisor this start chose to keep; `serve` runs the same decision in
-Python when it finds the lock held anyway. A start that cannot go on — the holder
-would not let go even to SIGKILL — prints one sentence, records it for the blockers
+Python when it finds the lock held anyway. A start that cannot go on - the holder
+would not let go even to SIGKILL - prints one sentence, records it for the blockers
 ledger, and exits 1. Never 75: that status means "somebody else has this", and the
 condition here is one the runtime either fixed or could not.
 
@@ -136,7 +136,7 @@ def checkout_build(root: str) -> dict[str, str]:
         version = "unknown"
     # The build id drops the version's local segment. Since the version became
     # git-derived, that segment carries `.dirty`, and a build id that moved
-    # whenever the working tree did would read as "another build" to `decide()` —
+    # whenever the working tree did would read as "another build" to `decide()` -
     # so editing one file under a running supervisor would retire it, workers and
     # all. The commit is already named here; the release is all the version needs
     # to contribute, and it does not flicker.
@@ -178,7 +178,7 @@ def read_record(home: str) -> dict[str, Any] | None:
 
 
 def remove_record(home: str, pid: int) -> None:
-    """Remove ``supervisor.json`` if it is ``pid``'s — never a successor's."""
+    """Remove ``supervisor.json`` if it is ``pid``'s - never a successor's."""
     record = read_record(home)
     if record is not None and record.get("pid") == pid:
         with contextlib.suppress(OSError):
@@ -481,7 +481,7 @@ def retire(
 # supervisor, both listened, and for seven hours the machine worked every ticket
 # twice and handed tickets over to itself. The supervisor lock makes the supervisor
 # single; this lock makes `serve` single. A `serve` takes ``<PPY_HOME>/run/serve.lock``
-# before anything else and holds it for its whole life — the kernel drops a `flock`
+# before anything else and holds it for its whole life - the kernel drops a `flock`
 # however the process ends, SIGKILL included. The newest start wins: the owner
 # switches agents by starting `ppy serve` again, so a second start retires the
 # running one (whatever agent it is connected as) rather than giving way to it.
@@ -736,7 +736,7 @@ def take_serve(
     retire asks (the supervisor socket's `shutdown`, when that serve owns the
     supervisor: its listener stops, its workers are recorded stopped with their
     sessions kept, and its tickets are left for the rounds' reclaim), then sent
-    SIGTERM — `serve`'s own orderly stop — then SIGKILL, each with a bounded wait.
+    SIGTERM - `serve`'s own orderly stop - then SIGKILL, each with a bounded wait.
     Between every step this tries to take the lock rather than merely looking at
     it, so two starts racing each other end with exactly one holder. A holder that
     survives all of it leaves ``lock`` None and a one-sentence ``line``.

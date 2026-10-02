@@ -2,7 +2,7 @@
 
 Claude workers run under a tool allowlist that matches one plain command per
 call: pipes, `&&`, `;`, inline env assignments and redirection are denied, `cd`
-must stand alone, and there is no `gh` — so a Claude worker cannot open a pull
+must stand alone, and there is no `gh` - so a Claude worker cannot open a pull
 request. Every brief was restating that by hand. Hand-copied rules drift.
 """
 
@@ -119,7 +119,7 @@ def test_the_evidence_command_is_never_rewritten_into_itself():
 
 
 def test_the_block_tells_the_worker_to_run_the_suite_in_the_foreground():
-    """A backgrounded suite dies with the session — task 103 lost a whole turn to it."""
+    """A backgrounded suite dies with the session - task 103 lost a whole turn to it."""
     text = command_rules("claude", "ppy/task-7-abc")
     assert "in the foreground" in text
     assert "never as a background task" in text

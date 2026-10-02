@@ -1,7 +1,7 @@
 """A heartbeat for the manager: one line of team state on a cadence.
 
 The runtime contract asks the manager to check on every in-flight worker every
-5–10 minutes and relay what it sees — even when nothing changed. This command is
+5–10 minutes and relay what it sees - even when nothing changed. This command is
 the mechanism. Each tick prints one digest line: the in-flight tasks with their
 liveness and current phase, the tasks waiting on the manager, the pull requests
 the finished work is sitting in (with their CI verdict), the events that arrived
@@ -11,20 +11,20 @@ tick for scripts and tests.
 
 It exists because on 2026-08-31 a finished worker sat unpushed and a steer went
 undelivered while the manager waited, silently, on completion watchers that had
-nothing to say — and the user had to ask whether anyone was watching. The pull
+nothing to say - and the user had to ask whether anyone was watching. The pull
 request segment exists for the other half of that wait: once work is delivered,
 what the manager is actually waiting on is CI, and hand-arming one watcher per
 pull request is the same silent failure in a different costume.
 
 The heartbeat is loud while there is something to watch and silent when there is
 not. After two consecutive idle ticks it says so once and then prints nothing
-until the team has news again — because on 2026-09-04 a finished run left the
+until the team has news again - because on 2026-09-04 a finished run left the
 watch announcing "no workers in flight" every five minutes for over an hour, and
 every one of those ticks woke the manager to relay nothing.
 
 While no `ppy serve` runs, the heartbeat is also what acts: the same lanes serve's
-rounds run (:mod:`papaya_agent_runtime.lanes`) — a stopped worker sent back to its
-gate, a decision handed to a person, deficiencies opened as issues — and the turns
+rounds run (:mod:`papaya_agent_runtime.lanes`) - a stopped worker sent back to its
+gate, a decision handed to a person, deficiencies opened as issues - and the turns
 only a session can take (a review, an answer) named on the line as ``your turn``. Every
 tick ends in the delta since the last check (:mod:`papaya_agent_runtime.digest`).
 """
@@ -151,7 +151,7 @@ def _ci_verdict(checks: list[dict[str, Any]]) -> tuple[str, list[str]]:
         return ("fail", failing)
     if "pending" in buckets:
         return ("pending", [])
-    # Everything else — green, or skipped, which blocks nothing — reads as pass.
+    # Everything else - green, or skipped, which blocks nothing - reads as pass.
     return ("pass", [])
 
 
@@ -425,10 +425,10 @@ def pr_states(
     the length of the history:
 
     - a task whose merge is on the record (``ppy deliver --merged``) is never
-      asked about again — a ``delivered`` task stays delivered forever, so
+      asked about again - a ``delivered`` task stays delivered forever, so
       without this every task ever shipped would cost a query every tick;
     - a pull request already observed merged or closed in this process is served
-      from ``settled`` — terminal states cannot change, so asking again is waste;
+      from ``settled`` - terminal states cannot change, so asking again is waste;
     - within a tick, results are cached per branch, so two tasks stacked on one
       branch cost one lookup pair.
     """
@@ -522,7 +522,7 @@ def pr_changes(
 ) -> list[str]:
     """What flipped on the forge since the last tick, in words the manager can relay.
 
-    ``previous`` is ``None`` on the very first tick — there is no "since" yet, so
+    ``previous`` is ``None`` on the very first tick - there is no "since" yet, so
     nothing has changed. An empty mapping is different: the last tick genuinely
     saw no pull requests, and one showing up now is news.
     """
@@ -790,8 +790,8 @@ def is_idle(snapshot: dict[str, Any]) -> bool:
 
     Idle is the conjunction of every reason a tick could matter: no worker in
     flight, nothing waiting on the manager, no pull request whose checks are
-    still running or already failing, and nothing new — no event, no pull request
-    that flipped — since the last tick. An open ledger is *not* a reason to keep
+    still running or already failing, and nothing new - no event, no pull request
+    that flipped - since the last tick. An open ledger is *not* a reason to keep
     ticking: a todo waits on the manager's next move, not on the team.
 
     A pull request whose state is ``unknown`` (no ``gh``, or a query that failed)
@@ -833,7 +833,7 @@ def render(snapshot: dict[str, Any]) -> str:
         or "none"
     )
     new = ", ".join(f"{k}×{v}" for k, v in sorted(snapshot["new_events"].items())) or "none"
-    line = f"TEAM {when} — {in_flight} | needs me: {needs}"
+    line = f"TEAM {when} - {in_flight} | needs me: {needs}"
     if snapshot.get("repairs"):
         line += " | repair: " + "; ".join(_clip(r, 120) for r in snapshot["repairs"])
     if snapshot.get("checkins"):
@@ -891,7 +891,7 @@ def run(
 
     The watch keeps ticking, but it stops talking. After two consecutive idle
     ticks it says so once and then prints nothing at all until something changes
-    — a dispatch, a resume, an event, a check flipping, a worker going quiet —
+    - a dispatch, a resume, an event, a check flipping, a worker going quiet -
     at which point the normal line and the five-minute cadence resume on their
     own. The process stays alive through all of it, deliberately: the manager
     runs this under a persistent monitor, and a silent process keeps that monitor
@@ -960,11 +960,11 @@ def _loop(
             return 0
         idle_ticks = idle_ticks + 1 if snapshot["idle"] else 0
         if idle_ticks >= 2 and exit_when_idle:
-            emit(snapshot, f"TEAM {_when(snapshot)} — idle; watch exiting (--exit-when-idle)")
+            emit(snapshot, f"TEAM {_when(snapshot)} - idle; watch exiting (--exit-when-idle)")
             return 0
         if idle_ticks < 2:
             emit(snapshot, render(snapshot))
         elif idle_ticks == 2:
-            emit(snapshot, f"TEAM {_when(snapshot)} — idle; watch quiet until something changes")
+            emit(snapshot, f"TEAM {_when(snapshot)} - idle; watch quiet until something changes")
         # Past that, an idle tick says nothing at all: silence is the report.
         sleep(interval)

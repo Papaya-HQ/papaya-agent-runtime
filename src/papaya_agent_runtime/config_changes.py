@@ -4,7 +4,7 @@ On 2026-09-16 a person had to type `ppy config claude --reset` because their
 `config.toml` held a copy of the tool profile from the day the runtime set itself up.
 PR 19 had widened the profile, the stored copy kept winning, and readiness could only
 warn. Configuration is the runtime's to keep right, so a finding with a safe remedy is
-*applied* — at `ppy serve` start and whenever a repository is ensured — rather than
+*applied* - at `ppy serve` start and whenever a repository is ensured - rather than
 described to somebody who then has to run a command.
 
 Two remedies exist today:
@@ -14,8 +14,8 @@ Two remedies exist today:
 - a worker was denied a command in the documented safe family
   (:mod:`papaya_agent_runtime.tool_learning`): its pattern is added.
 
-Every change — these, a load-time migration, and a person's own `ppy config claude`
-— is a `config_change` event carrying key, before, after, why and evidence;
+Every change - these, a load-time migration, and a person's own `ppy config claude`
+- is a `config_change` event carrying key, before, after, why and evidence;
 `ppy config history` lists them. A person stops the runtime changing a key by locking
 it (`claude.locked`); a remedy a lock refuses becomes a readiness warning naming the
 lock, and nothing is changed.
@@ -70,7 +70,7 @@ def history(*, after_id: int = 0, limit: int | None = None) -> list[dict]:
 
 def line(entry: dict) -> str:
     """One change, in one line a person can read."""
-    return f"config: {entry['key']} — {entry['why']}"
+    return f"config: {entry['key']} - {entry['why']}"
 
 
 def unannounced() -> list[dict]:

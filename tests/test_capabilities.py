@@ -4,7 +4,7 @@ The client used to learn what a runtime checkout supported by reading the
 runtime's `cli.py` and looking for a subcommand name. When that subcommand was
 removed the probe kept "working" and kept being wrong, silently. These tests hold
 the replacement to the two properties that make it safe to read at connect time:
-the object's shape is a contract, and the command cannot fail — an absent client
+the object's shape is a contract, and the command cannot fail - an absent client
 is reported, not raised.
 """
 
@@ -60,7 +60,7 @@ def test_capabilities_json_is_one_object_with_exactly_the_contracted_keys(capsys
 
     assert set(data) == {"runtime", "version", "client_version", "protocol", "modes"}
     assert data["runtime"] == "papaya-agent-runtime"
-    # Derived from this checkout's git tags, never a literal — the desktop machine
+    # Derived from this checkout's git tags, never a literal - the desktop machine
     # card prints it verbatim. `tests/test_version.py` holds the derivation itself;
     # what belongs here is that what comes out is a version a reader can parse.
     assert data["version"] == version.version()
@@ -119,7 +119,7 @@ def test_both_modes_are_announced_now_that_serve_can_keep_the_promise(capsys) ->
 
     This list is what a client execs on: reading `supervised` here and finding
     nothing that speaks the protocol is a connection that hangs rather than one
-    that fails. `ppy serve` speaks both, so both are named — and the check that
+    that fails. `ppy serve` speaks both, so both are named - and the check that
     they are the same two `serve` implements is what keeps this honest.
     """
     from papaya_agent_runtime import serve
@@ -156,7 +156,7 @@ def test_the_probe_answers_before_the_environment_has_been_built(tmp_path) -> No
     """The one command that has to work on a checkout nobody has synced yet.
 
     `bin/ppy` runs everything through `uv run`, which *builds* the environment on
-    first use — sixty-odd packages on a machine with no uv cache. The client gives
+    first use - sixty-odd packages on a machine with no uv cache. The client gives
     this probe ten seconds when it connects a machine, so a fresh clone (exactly
     the machine somebody has just pointed the desktop app at) would time out on
     the only question asked before anything is installed.

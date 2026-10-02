@@ -11,9 +11,9 @@ the manager schedules, nags, and reports off it, and the heartbeat treats
 | `requested` | The task row exists; no worker has started. |
 | `in_progress` | A worker session is live, or is being started right now. |
 | `worker_done` | The worker finished a turn and reached its stored terminal phase. A `done` task also has nothing unpushed; a `review` task stays local for manager review and delivery. Neither may leave a backgrounded command hanging. |
-| `worker_stopped` | The turn ended mid-gate. Not terminal, not a failure — the work is there and unfinished, and `ppy resume` picks it up. |
+| `worker_stopped` | The turn ended mid-gate. Not terminal, not a failure - the work is there and unfinished, and `ppy resume` picks it up. |
 | `blocked` | The worker asked a question and stopped. |
-| `failed` | The worker's *current* session ended without a result — or no worker ever started: dispatch refused the lease because it was not on the intended base (a `preflight_refused` event with `check: lease`, `expected` and `actual`; the lease is released). |
+| `failed` | The worker's *current* session ended without a result - or no worker ever started: dispatch refused the lease because it was not on the intended base (a `preflight_refused` event with `check: lease`, `expected` and `actual`; the lease is released). |
 | `needs_recovery` | The runner process vanished without recording a result. |
 | `delivered` | Pushed (and normally a PR opened) after an approved review. |
 
@@ -22,7 +22,7 @@ the manager schedules, nags, and reports off it, and the heartbeat treats
 A Claude worker started the full backend suite, the tool's foreground cap pushed
 it into the background, and the worker ended its turn to wait for it. The
 backgrounded suite was killed with the session, the branch was never pushed, no
-`done` note was ever filed — and the harness recorded `worker_done` (task 103,
+`done` note was ever filed - and the harness recorded `worker_done` (task 103,
 2026-09-04; task 104 repeated it with browser smoke retries).
 
 `ppy dispatch --ends-at review|done` records the task's terminal phase (`done` by
@@ -47,7 +47,7 @@ work.
 
 `ppy run` surfaces the reason next to the event, `ppy task <id>` shows it, and
 `ppy resume <id>` **with no `--message`** sends the worker back in with what was cut
-short — the unfinished gate, the unpushed commits, and the instruction to run the
+short - the unfinished gate, the unpushed commits, and the instruction to run the
 suite in the foreground, file the done note, and push. Claude workers are told the
 same thing up front in the injected command rules.
 
@@ -60,8 +60,8 @@ propagates failures.
 
 Unpushed commits are the one signal that does not need a resume. On 2026-09-04
 three of four workers filed a done note and still could not get their commits onto
-the remote — a push hook failing on advisories already on the default branch, a
-push held by the permission layer, a turn that ended first — and the manager
+the remote - a push hook failing on advisories already on the default branch, a
+push held by the permission layer, a turn that ended first - and the manager
 pushed each lease branch by hand. A lease branch is named after its task and
 nothing else writes to it, so that push is always safe and the harness makes it.
 
@@ -79,7 +79,7 @@ That post-turn push first proves the task's recorded lease is still active. If a
 
 If the remote refuses the push, the task stays `worker_stopped` and the reason
 carries the last 20 lines of the push's stderr, so `ppy task <id>` shows the hook's
-own words rather than a guess. `ppy task push <id>` is the same push run by hand —
+own words rather than a guess. `ppy task push <id>` is the same push run by hand -
 for that task once the hook is fixed, or for any task whose lease worktree is
 still on disk. It prints the SHA it pushed, or the refusal it got.
 
@@ -93,21 +93,21 @@ probe wrote one for that provider, otherwise the tracked
 | Mode | When | What happens |
 | --- | --- | --- |
 | `interrupt_resume` | The provider proved resumable mid-work interrupts (Claude) **and** a turn is live | The live runner is retired, the turn is interrupted, and the session is auto-resumed with the steer text. **The task stays `in_progress` throughout.** |
-| `checkpoint_pending` | The provider cannot take a mid-flight steer (Codex) and a turn is live | The message is queued and delivered by resuming the session the moment the current turn ends. Queued messages are **additive**: every message since the last delivery goes into that one resume, in the order sent, each labelled — a later message supplements the earlier ones. `ppy steer --replace` queues a message that **supersedes** everything queued before it; superseded messages are named in the `steer_applied` event and never replayed. The response lists the queue and says which messages will be delivered and which superseded, so the CLI never promises delivery of a message that will not survive. |
+| `checkpoint_pending` | The provider cannot take a mid-flight steer (Codex) and a turn is live | The message is queued and delivered by resuming the session the moment the current turn ends. Queued messages are **additive**: every message since the last delivery goes into that one resume, in the order sent, each labelled - a later message supplements the earlier ones. `ppy steer --replace` queues a message that **supersedes** everything queued before it; superseded messages are named in the `steer_applied` event and never replayed. The response lists the queue and says which messages will be delivered and which superseded, so the CLI never promises delivery of a message that will not survive. |
 | `resume` | No turn is live (finished, delivered, blocked, failed, or the process is gone) | The session is resumed immediately with the steer text, because there is no checkpoint coming. |
 
 The interrupt path used to leave the task `failed`. The interrupted process exits
 non-zero with no result event, which the adapter correctly reads as a failed
-*session* — but a steer is a redirection, not a failure. So the runner is marked
+*session* - but a steer is a redirection, not a failure. So the runner is marked
 **superseded** before the signal goes out; its exit is recorded as a
 `runner_superseded` event against the retired session id and never touches the
 task. A manual `ppy resume` is no longer needed after a steer.
 
 ## Continuations that admission refuses
 
-A worker ending releases its slot before its automatic continuation — a queued
-checkpoint steer, a stored-decision answer, the resume after a steer's interrupt
-— and a competing dispatch can take that slot, or the ceiling may have been
+A worker ending releases its slot before its automatic continuation (a queued
+checkpoint steer, a stored-decision answer, the resume after a steer's interrupt),
+and a competing dispatch can take that slot, or the ceiling may have been
 lowered since the worker launched. A continuation is **consumed only by the
 launch that carries it**: the `resumed` event records the `steer_events` or the
 `answered_question` it delivered, and `steer_applied` / `auto_answered` are
@@ -115,21 +115,21 @@ written after that launch, never before. A refused resume therefore changes
 nothing about what is pending. It writes one `continuation_deferred` event
 (actionable; repeated refusals for the same reason add nothing) and leaves the
 task in a truthful status: `worker_done` or `worker_stopped` with the steer
-still queued, `blocked` with the question still open, and — for an interrupted
-worker whose resume was refused — `worker_stopped` rather than an `in_progress`
+still queued, `blocked` with the question still open, and - for an interrupted
+worker whose resume was refused - `worker_stopped` rather than an `in_progress`
 that no process backs.
 
 Pending continuations are retried, each at most once per pass, whenever a
 worker slot frees, at the end of `ppy reconcile`, and on the supervisor's health
-tick — which is how they survive a supervisor restart. Every retry goes through
+tick - which is how they survive a supervisor restart. Every retry goes through
 ordinary admission and the ceiling; nothing is bypassed to make a continuation
 land. A manual `ppy resume --message` in the meantime supersedes nothing: queued
 steers are still delivered at the next checkpoint.
 
 ## Superseded sessions
 
-Every resume — an explicit `ppy resume`, an auto-answer, a queued steer landing at
-its checkpoint, or the auto-resume after a steer's interrupt — starts a *new*
+Every resume - an explicit `ppy resume`, an auto-answer, a queued steer landing at
+its checkpoint, or the auto-resume after a steer's interrupt - starts a *new*
 provider session and retires the old one. Retired runners are recorded with
 `superseded_at` and their session id, and at finalization they:
 
@@ -173,4 +173,4 @@ worktree can be sitting on commits that no longer exist on its own branch. Both
 (`git cherry`): a rebase gives every replayed commit a new SHA, so counting SHAs
 would read a freshly cascaded branch as full of unpushed work and refuse the whole
 stack. A cascade does move the head, so a review approved before it no longer
-binds — the delivery gate asks for a re-review at the new commit.
+binds - the delivery gate asks for a re-review at the new commit.

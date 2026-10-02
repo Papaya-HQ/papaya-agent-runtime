@@ -14,7 +14,7 @@ warn() { printf '[install] WARNING: %s\n' "$1" >&2; }
 
 require() {
     if ! command -v "$1" >/dev/null 2>&1; then
-        warn "$1 not found — $2"
+        warn "$1 not found - $2"
         MISSING=1
     fi
 }
@@ -23,12 +23,12 @@ MISSING=0
 require git "install Git"
 require uv "install uv (https://docs.astral.sh/uv/)"
 if ! command -v python3 >/dev/null 2>&1; then
-    warn "python3 not found — install Python 3.12+"
+    warn "python3 not found - install Python 3.12+"
     MISSING=1
 fi
 # Node and gh are needed for companion tools (provisioned by `ppy setup`) and delivery.
-command -v node >/dev/null 2>&1 || warn "node not found — needed for companion tools (Node 22+)"
-command -v gh >/dev/null 2>&1 || warn "gh not found — needed for GitHub delivery"
+command -v node >/dev/null 2>&1 || warn "node not found - needed for companion tools (Node 22+)"
+command -v gh >/dev/null 2>&1 || warn "gh not found - needed for GitHub delivery"
 
 if [ "$MISSING" -ne 0 ]; then
     warn "install the missing prerequisites above, then rerun ./bin/install"

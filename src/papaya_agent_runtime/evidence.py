@@ -8,13 +8,13 @@ a worker copying ITS OWN saved output into its evidence directory, filed as a pr
 gap because `cp` reaches outside the worktree.
 
 The refusals were right. `cp` takes any path, and a worker with `cp` could put
-`~/.ssh/id_rsa` into a pull request body — the same hole review found in `--note-file`
+`~/.ssh/id_rsa` into a pull request body - the same hole review found in `--note-file`
 before PR #124 confined it. So the answer is not a wider tool profile but a narrower
 command: :func:`add` copies exactly ONE file, and only from somewhere that is already
 the task's own.
 
-**The confinement rule.** After strict resolution — symlinks followed, so a link out of
-either place lands outside and is refused by the same check — the source must be either
+**The confinement rule.** After strict resolution - symlinks followed, so a link out of
+either place lands outside and is refused by the same check - the source must be either
 
 - inside the named task's own worktree, or
 - ``<claude projects>/<project>/<session id>/tool-results/<file>``, where the session id
@@ -28,8 +28,8 @@ Pinning the session id is what makes the second place safe. The project director
 is derivable from the worktree path (`/` and `.` both become `-`), but it is not relied
 on: a session id is a UUID the supervisor wrote down against this task, so another
 task's sessions, and another project's tool-results, are refused whatever they are
-called. A task that was resumed has several — `sessions` keeps only the newest, and the
-rest are recoverable from its events — so :func:`session_ids` reads both.
+called. A task that was resumed has several - `sessions` keeps only the newest, and the
+rest are recoverable from its events - so :func:`session_ids` reads both.
 """
 
 from __future__ import annotations
@@ -48,8 +48,8 @@ MAX_BYTES = 8 * 1024 * 1024
 #: The directory Claude Code writes a large tool result into, under the session.
 TOOL_RESULTS = "tool-results"
 
-#: A session id as the supervisor records it. Anything else in the record — a crafted
-#: payload, a truncated write — is not a directory name this will ever look for.
+#: A session id as the supervisor records it. Anything else in the record - a crafted
+#: payload, a truncated write - is not a directory name this will ever look for.
 _SESSION_ID = re.compile(r"\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 
 #: What a receipt may be called: one bare filename, nothing that could traverse.
@@ -94,7 +94,7 @@ def _receipt_name(source: Path, given: str | None) -> str:
     if not _NAME.match(name):
         raise EvidenceError(
             f"{name!r} is not a name a receipt may have: one filename of letters, digits, "
-            "dots, dashes and underscores, starting with a letter or digit — no directory "
+            "dots, dashes and underscores, starting with a letter or digit - no directory "
             "separators, no `..`, at most 128 characters"
         )
     return name
@@ -125,11 +125,11 @@ def _checked_file(resolved: Path) -> int:
     info = os.stat(resolved)  # the resolved path, so a link to a device is seen as one
     if not stat.S_ISREG(info.st_mode):
         raise EvidenceError(
-            f"{resolved} is not a regular file — a receipt is one file, never a directory, "
+            f"{resolved} is not a regular file - a receipt is one file, never a directory, "
             "a device or a pipe"
         )
     if info.st_uid != os.getuid():
-        raise EvidenceError(f"{resolved} is not yours — only your own files may be kept")
+        raise EvidenceError(f"{resolved} is not yours - only your own files may be kept")
     if info.st_size > MAX_BYTES:
         raise EvidenceError(
             f"{resolved} is {info.st_size} bytes, over the {MAX_BYTES} byte limit for a receipt"

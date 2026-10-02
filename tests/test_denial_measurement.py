@@ -2,7 +2,7 @@
 
 The brief's last goal: "the most common rule-shape violations get the exact
 replacement in the refusal, and their rate is measurable". A count with no window
-cannot answer "did last week's change work" — the all-time tally moves too slowly
+cannot answer "did last week's change work" - the all-time tally moves too slowly
 to show anything. So the tally takes a window, and command-shape denials are
 bucketed by the rewrite row they match, which is the same bucket the steer now
 tells the worker about.

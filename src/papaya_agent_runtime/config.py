@@ -119,14 +119,14 @@ _ABSOLUTE_LAUNCHER = re.compile(r"^Bash\(/.*/bin/ppy:\*\)$")
 #: The first entries are the profile the Claude Code permission classifier accepted
 #: on 2026-09-02, proved end to end by smoke task 77: progress reporting, uv, a
 #: commit, and a push. A broader list including ``rm``, ``gh`` and ``export`` was
-#: classifier-blocked, so it is deliberately absent — and workers never open PRs or
+#: classifier-blocked, so it is deliberately absent - and workers never open PRs or
 #: hold forge credentials anyway.
 #:
 #: The JavaScript toolchain, the file verbs and the read-only text tools arrived on
 #: 2026-09-16, when every worker dispatched into a JavaScript repository reported
 #: ``node --test`` denied and one could not ``cp`` its evidence into place: the list
 #: had been copied from a Python-only manager. Containment is the write boundary,
-#: not this verb list — a worker that may ``cp`` inside its worktree is still refused
+#: not this verb list - a worker that may ``cp`` inside its worktree is still refused
 #: outside it.
 CLAUDE_PROFILE: tuple[str, ...] = (
     "Read",
@@ -567,7 +567,7 @@ class MMConfig:
                 )
 
     def to_dict(self) -> dict:
-        """Every setting, resolved — what the runtime runs with, not what is stored."""
+        """Every setting, resolved - what the runtime runs with, not what is stored."""
         claude = asdict(self.claude)
         if claude["allowed_tools"] is None:
             del claude["allowed_tools"]
@@ -768,7 +768,7 @@ def _resolved(data: dict) -> dict | None:
 def _stored_dict(cfg: MMConfig) -> dict:
     """What belongs in the file: only the values the code would not arrive at itself.
 
-    A key is kept exactly when removing it would change the loaded config — which
+    A key is kept exactly when removing it would change the loaded config - which
     covers the plain schema defaults and the resolved ones alike (a worker provider
     equal to the manager's, a model equal to its provider's default, a
     ``default_model`` equal to the ceiling).
@@ -829,7 +829,7 @@ def is_locked(cfg: MMConfig, key: str) -> bool:
 def default_worker_provider() -> str:
     """The provider a dispatch uses when the caller named none.
 
-    It is the configured worker ceiling's provider — the same ceiling ``--model``
+    It is the configured worker ceiling's provider - the same ceiling ``--model``
     and ``--reasoning`` are clamped to. It is deliberately never ``fake``: the
     dispatch ``--provider`` flag used to default to ``fake``, so a manager who
     omitted it on 2026-09-04 got a stub-writing worker that pushed a branch to a

@@ -3,7 +3,7 @@
 Delivering #72 on 2026-09-07 printed `PR: Run gh-axi pr checks 72 -R ... to
 monitor CI` and persisted that help line as ``pr_url`` (issue #73): ``gh-axi``
 prints a structured record followed by suggestions, and delivery took stdout's
-last line on faith. No live GitHub call is made here — the tool is a stub.
+last line on faith. No live GitHub call is made here - the tool is a stub.
 """
 
 from __future__ import annotations
@@ -287,7 +287,7 @@ def test_a_list_naming_only_the_number_still_finds_the_open_pull_request(
     """`gh-axi pr list` prints the number and no URL; the PR is still findable.
 
     Searching that output for a URL found none, so delivery went on to create a
-    second pull request, which the forge refused — and a delivery that had in fact
+    second pull request, which the forge refused - and a delivery that had in fact
     landed was recorded as "PR creation failed" (2026-09-17, task 37).
     """
     calls = _stub_tool(

@@ -37,7 +37,7 @@ def test_session_start_injects_pickup_context(ppy_home) -> None:
     context = response["hookSpecificOutput"]["additionalContext"]
     assert "Papaya Agent Runtime pickup context" in context
     assert "- Next (todo ledger): #1 review task's diff and deliver" in context
-    assert f'Run {run_id} "ship it": task {task_id} "build" — worker_done' in context
+    assert f'Run {run_id} "ship it": task {task_id} "build" - worker_done' in context
     assert "finished and waiting on review" in context
     assert response["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 

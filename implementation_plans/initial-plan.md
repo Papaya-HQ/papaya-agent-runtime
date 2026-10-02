@@ -5,7 +5,7 @@ This is the milestone-gated implementation plan derived from the approved
 gated by the current milestone. After each milestone: run `make lint`,
 `make fmt`, `make test`; create a checkpoint commit whose message records what
 landed and what drifted; re-read this plan; then wait for human approval before the
-next milestone. There is no checked-in task log — the record of a change is its
+next milestone. There is no checked-in task log - the record of a change is its
 commit message and pull request body.
 
 The [`design/papaya-agent-runtime-plan.html`](../design/papaya-agent-runtime-plan.html) surface
@@ -25,7 +25,7 @@ checkpoint-at-completion steering plus a compact fresh-session recovery packet.
 
 ## Milestones
 
-### M0 — Live Claude/Codex interrupt and resume
+### M0 - Live Claude/Codex interrupt and resume
 
 First code. Measure the installed CLIs; build no supervisor, Treehouse, setup
 wizard, or real adapters yet.
@@ -34,11 +34,11 @@ Deliverables:
 
 - `pyproject.toml`, `Makefile`, Ruff + pytest, `src/papaya_agent_runtime/` package
   stub, zero runtime dependencies.
-- `schemas/provider-capability.schema.json` — fail-closed capability schema.
-- `src/papaya_agent_runtime/probes/` — isolated-fixture probe harness that spawns real
+- `schemas/provider-capability.schema.json` - fail-closed capability schema.
+- `src/papaya_agent_runtime/probes/` - isolated-fixture probe harness that spawns real
   `claude -p` and `codex exec`, applies interrupts, attempts resume, and records
   a fail-closed matrix.
-- `docs/provider-capabilities.md` — recorded matrix for the installed versions.
+- `docs/provider-capabilities.md` - recorded matrix for the installed versions.
 - Hermetic unit tests plus an opt-in `-m live` probe test (`make test-live`).
 
 Probe matrix: clean complete + resume; SIGINT during a model turn; SIGINT during
@@ -51,37 +51,37 @@ Acceptance: both installed CLIs have a recorded capability row; default tests
 stay hermetic; `make test-live` documented and opt-in; checkpoint commit and
 drift review exist; no later milestone started.
 
-### M1 — Kernel foundation (after approval)
+### M1 - Kernel foundation (after approval)
 
 Idempotent `bin/install`, shared setup skill, task-oriented `README.md`, harness
 discovery, `ppy setup` / `ppy config` / `ppy doctor` stubs, SQLite schema,
 `ppy repo add`, config validation. No live workers.
 
-### M2 — Kernel runtime (after approval)
+### M2 - Kernel runtime (after approval)
 
 Supervisor Unix socket, per-task runner guardian, append-only spool, fake
 provider, Treehouse lease lifecycle, `ppy wait --until-actionable`,
 `ppy reconcile`. Lands the technical-plan Phase 1 acceptance, including a
 feedback-capable artifact and run reconcile.
 
-### M3 — Real workers (after approval)
+### M3 - Real workers (after approval)
 
 Claude and Codex adapters behind `probe/start/resume/steer/interrupt/reconcile/
 parse_event/parse_usage/result`, consuming the M0 capability flags. Task/result
 schemas, usage accounting, ceiling enforcement, checkpoint steer, blocked-worker
 resume. Mixed-provider fixture task.
 
-### M4 — Autonomous completion (after approval)
+### M4 - Autonomous completion (after approval)
 
 Lifecycle hooks, question routing, durable scoped decisions, Lavish feedback
 loop, exact-HEAD review gate, `gh-axi` push/PR, cross-repo dependency checks.
 
-### M5 — Hardening (after approval)
+### M5 - Hardening (after approval)
 
 Crash/replay/CLI-drift tests, memory controls, usage reports, doctor polish,
 docs. Re-estimate delivery after M0 evidence, per the technical plan.
 
-### Approved cross-cutting addition — proactive self-assessment
+### Approved cross-cutting addition - proactive self-assessment
 
 The user explicitly authorized this addition on 2026-08-29. It spans M4's
 autonomous manager loop and M5's durable-state/hardening work without advancing

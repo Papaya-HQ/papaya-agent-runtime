@@ -597,7 +597,7 @@ def test_a_ticket_comment_carries_a_real_mention_of_the_owner(monkeypatch) -> No
         "PAP-1", "Waiting on a person", environ={"PAPAYA_AGENT_TOKEN": "t"}, mention=mention
     )
     body, extra = sent[0]
-    assert body.startswith("@shanewolf — Waiting on a person")
+    assert body.startswith("@shanewolf - Waiting on a person")
     assert extra["mentions"] == [mention]
     # No owner known: the comment still lands, unmentioned.
     outreach._OWNER_MENTION["owner"] = None

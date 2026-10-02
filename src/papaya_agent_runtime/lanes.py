@@ -10,15 +10,15 @@ held ticket or not, in `serve` and in an interactive session alike.
 
 Three lanes, each one decision over `state.db`, on the same clock as the rounds:
 
-- **owed** — every worker waiting on the manager with no live ticket
+- **owed** - every worker waiting on the manager with no live ticket
   (:func:`owed_decisions`): a stopped or done worker whose record says so is sent back
   to its gate (:data:`STEER`); a question or finished work gets a manager turn keyed on
   the task (:data:`TURN`); a decision only a person can make is recorded as a
   person-wait on the task (:data:`PERSON`), which `ppy status --team` lists.
-- **ledger** — open, unblocked next steps that have sat past :data:`LEDGER_GRACE_SECONDS`
+- **ledger** - open, unblocked next steps that have sat past :data:`LEDGER_GRACE_SECONDS`
   (:func:`ledger_due`): a recorded next step is a queue item, not a diary entry, and gets
   executed or explicitly deferred with a reason.
-- **deficiencies** — what the runtime recorded about itself is opened as issues
+- **deficiencies** - what the runtime recorded about itself is opened as issues
   (:func:`deficiency_step`), on the clock rather than only when the next record lands.
 
 `ppy serve` acts through :class:`TurnRunner`: headless turns keyed on a task, with the
@@ -665,7 +665,7 @@ def release_finished_waits(conn: sqlite3.Connection, *, now: datetime | None = N
                 payload={"todo_id": int(row["id"]), "access": True},
             )
             lines.append(
-                f"todo #{int(row['id'])} is tried again after waiting on access — {row['text']}"
+                f"todo #{int(row['id'])} is tried again after waiting on access - {row['text']}"
             )
         rows = conn.execute(
             "SELECT id, text, blocked_on FROM todos WHERE status = 'open' "
@@ -688,7 +688,7 @@ def release_finished_waits(conn: sqlite3.Connection, *, now: datetime | None = N
             )
             lines.append(
                 f"todo #{int(row['id'])} no longer waits on task {waited} ({status}): "
-                f"its next step is due — {row['text']}"
+                f"its next step is due - {row['text']}"
             )
         if lines:
             conn.commit()
@@ -792,7 +792,7 @@ def recover_limit_blocked_steps(conn: sqlite3.Connection) -> list[str]:
             )
             lines.append(
                 f"todo #{todo_id} is due again: the ledger turns that left it were ended by "
-                f"the usage limit, not by the work — {row['text']}"
+                f"the usage limit, not by the work - {row['text']}"
             )
     except Exception as exc:  # noqa: BLE001 - a round keeps going
         lines.append(f"could not recover next steps blocked by limit endings: {exc}")

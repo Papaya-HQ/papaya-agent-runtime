@@ -608,7 +608,7 @@ def test_a_merge_made_on_the_forge_outside_ppy_is_adopted_and_frees_the_lane(
 
     The merge leaves no `merged_sha` and takes the branch out of `watch.pr_states` at
     the same moment, so before this the attempt could never be judged over and held its
-    slot forever — task 142 held one for 46h with eight attempts queued behind it.
+    slot forever - task 142 held one for 46h with eight attempts queued behind it.
     """
     _ticket, worker = delivered()
     world = World()
