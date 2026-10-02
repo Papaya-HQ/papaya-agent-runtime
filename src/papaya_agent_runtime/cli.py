@@ -1768,6 +1768,13 @@ def _cmd_steer(args: argparse.Namespace) -> int:
     client = SupervisorClient()
     replace = args.replace or getattr(args, "stop", False)
     since = _now_stamp()
+    run_id = _ticket_run_id()
+    if run_id is not None and not getattr(args, "stop", False):
+        # Before the steer, so the worker's next progress lands in this ticket's run.
+        from papaya_agent_runtime.serve import adopt_worker
+
+        if adopt_worker(args.task_id, run_id):
+            print(f"task {args.task_id} is now this ticket's worker")
     try:
         resp = client.steer_task(
             args.task_id, args.message, delivery="replace" if replace else "append", by=_actor()
