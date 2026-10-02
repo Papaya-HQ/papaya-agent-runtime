@@ -5561,13 +5561,22 @@ def turn_environment(job_env: dict[str, str], *, root: str, run_id: int) -> dict
     stamp fresh. Then two overrides: the write boundary is the runtime directory
     and nothing else, so a turn can register and dispatch but never edit a
     repository by hand; and the ticket's run, so a dispatch lands in it.
+
+    "The runtime directory" includes its state, `PPY_HOME`, wherever that really
+    is. On a cloud runner the checkout's `.ppy` is a link to the data disk, and
+    the boundary resolves paths, so without its real location a turn could not
+    write the repository notes its prompt tells it to.
     """
     from papaya_agent_client.write_boundary import ALLOWED_ROOTS_ENV
 
     from papaya_agent_runtime.manager.launch import AGENT_BIN_ENV, papaya_agent_command
 
     env = dict(job_env)
-    env[ALLOWED_ROOTS_ENV] = json.dumps([root])
+    roots = [root]
+    state = ppy_home().resolve()
+    if not state.is_relative_to(Path(root).resolve()):
+        roots.append(str(state))
+    env[ALLOWED_ROOTS_ENV] = json.dumps(roots)
     env["PAPAYA_WORKING_DIRECTORY"] = root
     env[papaya_events.TICKET_RUN_ENV] = str(run_id)
     # The plugin's hooks and `mcp runner-config` call back into the client as

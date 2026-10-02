@@ -482,12 +482,13 @@ What is different, all of it in `src/papaya_agent_runtime/cloud.py` and the clie
 - **You sign it in yourself, in its terminal.** Open the runner's terminal from Papaya.
   It runs `./bin/ppy setup`, the same steps as on a laptop: Claude Code
   (`claude auth login`, with your subscription or key), GitHub (`gh auth login` and
-  `gh auth setup-git`), and the repositories it may work on. For Codex, run
-  `codex login --device-auth` in the shell it leaves you in. The link Papaya gives you
+  `gh auth setup-git`), and the repositories it may work on. A runner made for Codex
+  signs Codex in instead (`codex login --device-auth`). The link Papaya gives you
   is good for one use, by you, for two minutes; what you type goes to the VM, never
   through Papaya. Until setup is done, the runner says what is missing the way any
   machine does, as a blocker in your DM.
-- **What lasts lives on `/data`.** `PPY_HOME` (`/data/ppy`), the client home
+- **What lasts lives on `/data`.** The runtime's state (the checkout's `.ppy`, a link to
+  `/data/ppy`), the client home
   (`/data/papaya-agent`), and `HOME` itself (`/data/home`), where Claude Code, Codex
   and `gh` keep the sign-ins, all survive the VM sleeping.
 

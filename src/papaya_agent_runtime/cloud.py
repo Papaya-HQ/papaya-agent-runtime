@@ -40,6 +40,8 @@ CHECKOUT = Path(__file__).resolve().parents[2]
 DATA_DIR_ENV = "PPY_CLOUD_DATA_DIR"
 #: Which harness the runner was created for (`claude-code` or `codex`), set by Papaya.
 HARNESS_ENV = "PAPAYA_AGENT_HARNESS"
+#: Set for everything `serve --cloud` starts (`setup.guided.CLOUD_RUNNER_ENV`).
+CLOUD_RUNNER_ENV = "PPY_CLOUD_RUNNER"
 DEFAULT_HARNESS = "claude-code"
 
 
@@ -66,6 +68,9 @@ def take_start(env: MutableMapping[str, str] | None = None) -> CloudStart:
     cloud_host.prepare_environment(data_dir)
     token = cloud_host.take_token(env)
     harness = (env.get(HARNESS_ENV) or DEFAULT_HARNESS).strip() or DEFAULT_HARNESS
+    # Said to everything serve starts, the sign-in terminal's `ppy setup` included,
+    # which then ends with "already serving" instead of "start ./bin/ppy serve".
+    env[CLOUD_RUNNER_ENV] = "1"
     return CloudStart(token=token, harness=harness, data_dir=data_dir)
 
 
@@ -124,6 +129,7 @@ async def open_host(
 
 __all__ = [
     "CHECKOUT",
+    "CLOUD_RUNNER_ENV",
     "DATA_DIR_ENV",
     "HARNESS_ENV",
     "CloudStart",

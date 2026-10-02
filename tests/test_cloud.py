@@ -60,3 +60,37 @@ def test_the_terminal_runs_this_checkouts_setup_then_a_shell(tmp_path) -> None:
 
 def test_the_checkout_is_this_repository() -> None:
     assert (cloud.CHECKOUT / "bin" / "ppy").is_file()
+
+
+def test_turns_may_write_the_runtime_state_wherever_it_really_lives(tmp_path, monkeypatch) -> None:
+    """On a cloud runner `.ppy` links to the data disk; the boundary resolves paths."""
+    import json
+
+    from papaya_agent_runtime import serve
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    data = tmp_path / "data" / "ppy"
+    data.mkdir(parents=True)
+    (checkout / ".ppy").symlink_to(data)
+    monkeypatch.setenv("PPY_HOME", str(checkout / ".ppy"))
+
+    env = serve.turn_environment({}, root=str(checkout), run_id=1)
+
+    assert json.loads(env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [
+        str(checkout),
+        str(data.resolve()),
+    ]
+
+
+def test_state_inside_the_checkout_adds_no_second_root(tmp_path, monkeypatch) -> None:
+    import json
+
+    from papaya_agent_runtime import serve
+
+    (tmp_path / ".ppy").mkdir()
+    monkeypatch.setenv("PPY_HOME", str(tmp_path / ".ppy"))
+
+    env = serve.turn_environment({}, root=str(tmp_path), run_id=1)
+
+    assert json.loads(env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [str(tmp_path)]

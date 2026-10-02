@@ -737,6 +737,69 @@ def test_claude_code_not_signed_in_runs_its_sign_in_on_the_terminal(world):
     ]
 
 
+def test_a_cloud_runner_made_for_codex_signs_codex_in_instead(world):
+    _set_up_fully(world)
+    status = ("codex", "login", "status")
+    shell = _healthy(
+        failing={status},
+        on_attach={("codex", "login", "--device-auth"): lambda sh: sh.failing.discard(status)},
+    )
+
+    code, lines = _setup(
+        world, shell=shell, picker=ScriptedPicker(), env={guided.HARNESS_ENV: "codex"}
+    )
+
+    assert code == 0
+    assert shell.attached == [["codex", "login", "--device-auth"]]
+    assert lines[1:7] == [
+        "→ Codex         Not signed in; starting its sign-in…",
+        *_framed("codex login --device-auth"),
+        "✓ Codex         Signed in",
+    ]
+    assert ["claude", "auth", "status", "--text"] not in shell.captured
+
+
+def test_a_codex_runner_still_not_signed_in_stops_naming_the_command(world, capsys):
+    shell = _healthy(failing={("codex", "login", "status")})
+
+    code, _ = _setup(world, shell=shell, picker=ScriptedPicker(), env={guided.HARNESS_ENV: "codex"})
+
+    assert code == 1
+    assert "codex login --device-auth" in capsys.readouterr().err
+
+
+def test_on_a_cloud_runner_setup_ends_saying_it_is_already_serving(world):
+    _set_up_fully(world)
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=ScriptedPicker(), env={guided.CLOUD_RUNNER_ENV: "1"}
+    )
+
+    assert code == 0
+    assert lines[-1] == guided.DONE_CLOUD
+    assert guided.START not in "\n".join(lines)
+
+
+def test_a_cloud_runner_never_offers_to_switch_agents(world):
+    _set_up_fully(world)
+
+    code, lines = _setup(
+        world, shell=_healthy(), picker=Silent(), env={guided.CLOUD_RUNNER_ENV: "1"}
+    )
+
+    assert code == 0
+    assert ADA in lines
+    assert world.connects == []
+
+
+def test_a_cloud_runner_that_lost_its_connection_says_to_make_another(world, capsys):
+    code, _ = _setup(world, shell=_healthy(), picker=Silent(), env={guided.CLOUD_RUNNER_ENV: "1"})
+
+    assert code == 1
+    assert "Delete it in Papaya and create another" in capsys.readouterr().err
+    assert world.connects == []
+
+
 def test_claude_code_still_not_signed_in_stops(world, capsys):
     shell = _healthy(failing={("claude", "auth", "status")})
     code, _ = _setup(world, shell=shell, picker=ScriptedPicker())

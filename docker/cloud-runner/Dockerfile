@@ -35,9 +35,12 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
-# The harness CLIs, unmodified, from their publishers' own packages.
+# The harness CLIs, unmodified, from their publishers' own packages. Corepack puts
+# pnpm and yarn on the PATH (fetched at the version a repository pins, on first
+# use), so a JavaScript repository's own checks can run.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
- && npm cache clean --force
+ && npm cache clean --force \
+ && corepack enable
 
 # uv, and the Python it manages, outside /data so the volume does not hide them.
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /usr/local/bin/
@@ -54,16 +57,19 @@ COPY . .
 RUN if [ -f .git ]; then rm .git; fi \
  && UV_CACHE_DIR=/tmp/uv-cache ./bin/ppy env sync \
  && rm -rf /tmp/uv-cache \
- && git -C / config --system --add safe.directory /opt/papaya-agent-runtime
+ && git -C / config --system --add safe.directory /opt/papaya-agent-runtime \
+ && rm -rf /opt/papaya-agent-runtime/.ppy \
+ && ln -s /data/ppy /opt/papaya-agent-runtime/.ppy
 # On PATH as the checkout's own launcher: bin/ppy finds its checkout from its own
 # path, so a symlink elsewhere would point it at the wrong one.
 ENV PATH="/opt/papaya-agent-runtime/bin:${PATH}"
 
 # Everything that must outlive the VM sleeping lives under /data: the runtime's
 # state, the client home, and HOME itself, where Claude Code, Codex and gh keep
-# the sign-ins the owner makes in the terminal.
-ENV PPY_HOME=/data/ppy \
-    PAPAYA_AGENT_HOME=/data/papaya-agent \
+# the sign-ins the owner makes in the terminal. The state stays where it is on
+# a laptop, the checkout's own `.ppy`, as a link to /data/ppy: every path the
+# runtime's prompts name (`.ppy/memory/...` in the runtime directory) is then true.
+ENV PAPAYA_AGENT_HOME=/data/papaya-agent \
     HOME=/data/home \
     UV_CACHE_DIR=/data/uv-cache \
     PORT=18789 \
