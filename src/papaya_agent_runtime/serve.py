@@ -357,6 +357,9 @@ class ServeOptions:
     sweep_interval: float = sweep.DEFAULT_SWEEP_INTERVAL
     #: Seconds between the manager's rounds; zero reclaims once, at start, and stops.
     rounds_interval: float = 300.0
+    #: Running as a runner Papaya hosts on a cloud provider (`ppy serve --cloud`):
+    #: connected from `PAPAYA_AGENT_TOKEN`, serving the provider's HTTP port.
+    cloud: bool = False
     #: Unknown `listen` flags, deduplicated, in the order they were given.
     ignored: tuple[str, ...] = ()
     invalid_arguments: str | None = None
@@ -388,6 +391,14 @@ def _parser() -> argparse.ArgumentParser:
         "--harness",
         default=None,
         help=f"which bundled harness this connection is labelled as ({', '.join(HARNESSES)})",
+    )
+    parser.add_argument(
+        "--cloud",
+        action="store_true",
+        help=(
+            "run as a cloud runner Papaya hosts: connect from $PAPAYA_AGENT_TOKEN and serve "
+            "the provider's health check, doorbell and sign-in terminal on $PORT"
+        ),
     )
     parser.add_argument(
         "--approval-timeout",
@@ -487,6 +498,7 @@ def parse_args(argv: list[str]) -> ServeOptions:
     return ServeOptions(
         supervised=bool(known.supervised),
         harness=known.harness,
+        cloud=bool(known.cloud),
         approval_timeout=known.approval_timeout,
         working_directory=known.working_directory,
         sweep_interval=interval,
@@ -6094,6 +6106,8 @@ async def run(
     self_report: deficiencies.Reporter | None = None,
     blocker_seams: dict[str, Any] | None = None,
     keeper: SupervisorKeeper | None = None,
+    cloud_start: Any = None,
+    cloud_seams: dict[str, Any] | None = None,
 ) -> int:
     """Set this checkout up, build the listener, report once, sweep, run until stopped.
 
@@ -6109,8 +6123,74 @@ async def run(
     `blocker_seams` are keyword seams for the blocker watch
     (:class:`~papaya_agent_runtime.blockers.Watch`): its timer, clock and GitHub
     device flow. `keeper` is `serve`'s hold on its supervisor (:class:`SupervisorKeeper`),
-    which every round checks; None runs no such check.
+    which every round checks; None runs no such check. `cloud_start` is what
+    `serve --cloud` took from the environment (:func:`cloud.take_start`): the
+    provider's port is opened first, so its health check answers while the rest
+    starts. `cloud_seams` reach :func:`cloud.open_host` in tests.
     """
+    host = None
+    if cloud_start is not None:
+        host = await _open_cloud_host(cloud_start, stderr=stderr, seams=cloud_seams)
+        if host is None:
+            return 1
+    try:
+        return await _run_reporting(
+            options,
+            stdout=stdout,
+            stderr=stderr,
+            extra=extra,
+            runner=runner,
+            server=server,
+            sweep_sleep=sweep_sleep,
+            rounds_seams=rounds_seams,
+            self_report=self_report,
+            blocker_seams=blocker_seams,
+            keeper=keeper,
+            host=host,
+        )
+    finally:
+        if host is not None:
+            await host.close()
+
+
+async def _open_cloud_host(start: Any, *, stderr, seams: dict[str, Any] | None) -> Any:
+    """The cloud runner's HTTP port, connected; None, having said why, when it cannot be."""
+    import httpx
+    from papaya_agent_client.cloud_host import CloudHostError
+
+    from papaya_agent_runtime import cloud
+
+    try:
+        host = await cloud.open_host(start, **(seams or {}))
+    except CloudHostError as exc:
+        print(f"ppy serve: {exc}", file=stderr)
+        return None
+    except httpx.HTTPError as exc:
+        # The type only: the request can carry the token.
+        print(
+            f"ppy serve: Papaya did not accept the runner's token ({type(exc).__name__})",
+            file=stderr,
+        )
+        return None
+    _say(f"cloud runner: serving the provider on :{host.bound_port}", stderr=stderr)
+    return host
+
+
+async def _run_reporting(
+    options: ServeOptions,
+    *,
+    stdout,
+    stderr,
+    extra: dict[str, Any],
+    runner: TicketRunner | None,
+    server: Any,
+    sweep_sleep: Any,
+    rounds_seams: dict[str, Any] | None,
+    self_report: deficiencies.Reporter | None,
+    blocker_seams: dict[str, Any] | None,
+    keeper: SupervisorKeeper | None,
+    host: Any,
+) -> int:
     reporter = self_report or deficiencies.Reporter()
     # Before anything can open an issue: close the ones an older classifier got wrong.
     await asyncio.to_thread(reporter.reclassify)
@@ -6133,6 +6213,7 @@ async def run(
             },
             blocker_seams=blocker_seams,
             keeper=keeper,
+            host=host,
         )
     finally:
         deficiencies.remove_listener(reporter.flush_soon)
@@ -6185,6 +6266,7 @@ async def _run(
     rounds_seams: dict[str, Any] | None,
     blocker_seams: dict[str, Any] | None = None,
     keeper: SupervisorKeeper | None = None,
+    host: Any = None,
 ) -> int:
     from papaya_agent_client.embed import ListenerSetupError
 
@@ -6225,6 +6307,10 @@ async def _run(
         # One line: the client and the app show the last thing said, not a transcript.
         print(f"ppy serve: {exc.message}" + (f" — {exc.advice}" if exc.advice else ""), file=stderr)
         return exc.status
+    if host is not None:
+        # From here the provider's doorbell wakes this listener's pull; a ring
+        # that came while it was being built is passed on now.
+        host.attach(built.loop)
 
     for problem in unremedied_readiness(verdict):
         await asyncio.to_thread(
@@ -6505,6 +6591,22 @@ def serve(
     # one stray log line on it is a parse error in the host.
     logging.basicConfig(stream=stderr, level=logging.INFO, format="%(message)s")
 
+    # A cloud runner's token comes out of the environment before anything below
+    # can start a process that would inherit it.
+    start = None
+    if options.cloud:
+        from papaya_agent_client.cloud_host import CloudHostError
+
+        from papaya_agent_runtime import cloud
+
+        try:
+            start = cloud.take_start()
+        except CloudHostError as exc:
+            print(f"ppy serve: {exc}", file=stderr)
+            return 1
+        if options.harness is None:
+            options = replace(options, harness=start.harness)
+
     # One serve per home, before anything else: a second one listening beside this
     # would work every ticket twice over the same state.
     lock, status = hold_serve(stderr=stderr, seams=serve_seams, supervised=options.supervised)
@@ -6512,7 +6614,12 @@ def serve(
         return status if status is not None else takeover.EXIT_CANNOT_START
     try:
         return _serve_holding(
-            options, stdout=stdout, stderr=stderr, extra=extra, takeover_seams=takeover_seams
+            options,
+            stdout=stdout,
+            stderr=stderr,
+            extra=extra,
+            takeover_seams=takeover_seams,
+            cloud_start=start,
         )
     finally:
         # Every exit that runs Python lets go here; one that does not (SIGKILL) has
@@ -6527,6 +6634,7 @@ def _serve_holding(
     stderr,
     extra: dict[str, Any],
     takeover_seams: dict[str, Any] | None,
+    cloud_start: Any = None,
 ) -> int:
     """`serve` once it holds this home's serve lock: its supervisor, then the manager."""
     from papaya_agent_runtime.supervisor import lifeline
@@ -6541,7 +6649,15 @@ def _serve_holding(
     keeper = SupervisorKeeper(server, stderr=stderr, takeover_seams=takeover_seams)
     try:
         return asyncio.run(
-            run(options, stdout=stdout, stderr=stderr, extra=extra, server=server, keeper=keeper)
+            run(
+                options,
+                stdout=stdout,
+                stderr=stderr,
+                extra=extra,
+                server=server,
+                keeper=keeper,
+                cloud_start=cloud_start,
+            )
         )
     except KeyboardInterrupt:
         return 0

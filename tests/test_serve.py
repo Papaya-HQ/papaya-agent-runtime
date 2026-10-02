@@ -801,6 +801,108 @@ def test_it_picks_up_one_assignment_holds_it_and_releases_it_on_stop(
     conn.close()
 
 
+def test_a_cloud_runner_answers_the_provider_and_its_doorbell_wakes_the_pull(
+    ppy_home, client_home, ready, monkeypatch
+) -> None:
+    """`--cloud`: the provider's port opens first, and `/chat` rings the listener."""
+    import httpx
+
+    from papaya_agent_runtime import cloud
+
+    harness = Harness(FakeEvents([]))
+    hosts: list[Any] = []
+    connected: list[dict[str, Any]] = []
+    real_open = cloud.open_host
+
+    async def _connect(token: str, **kwargs: Any) -> dict[str, Any]:
+        connected.append({"token": token, **kwargs})
+        return {"kind": "agent", "agent": {"id": "agent-1"}}
+
+    async def _open(start: Any, **_kwargs: Any) -> Any:
+        host = await real_open(start, port=0, connect=_connect)
+        hosts.append(host)
+        return host
+
+    monkeypatch.setattr(cloud, "open_host", _open)
+    options = serve.parse_args(["--cloud", "--working-directory", str(client_home.work_dir)])
+    start = cloud.CloudStart(token="pagc_runner", harness="claude-code", data_dir="/unused")
+    rings: list[int] = []
+
+    async def scenario() -> tuple[int, int, int]:
+        running = asyncio.create_task(
+            serve.run(
+                options,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                extra=harness.extra(),
+                runner=_runner(FakeTurns(lambda turn: None), FakePapaya()),
+                cloud_start=start,
+            )
+        )
+        await _until(
+            lambda: (hosts and harness.loop is not None) or running.done(),
+            what="the host and the loop",
+        )
+        if running.done():
+            # A start that failed says why, rather than waiting out the timeout.
+            running.result()
+        harness.loop.notify_events_available = lambda: rings.append(1)
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{hosts[0].bound_port}") as client:
+            health = await client.get("/health")
+            chat = await client.post(
+                "/chat",
+                content=json.dumps(
+                    {"message": json.dumps({"event": "papaya.events_available"}), "webhook": True}
+                ),
+            )
+        await _until(lambda: rings, what="the doorbell to reach the listener")
+        harness.loop.request_stop()
+        return await running, health.status_code, chat.status_code
+
+    status, health, chat = asyncio.run(scenario())
+
+    assert (status, health, chat) == (0, 200, 200)
+    assert options.cloud is True
+    # Connected as this checkout's own connection, from the token serve took.
+    assert connected[0]["token"] == "pagc_runner"
+    assert connected[0]["working_directory"] == cloud.CHECKOUT
+    # And the port is closed again once serve stops.
+    assert not hosts[0]._server.is_serving()
+
+
+def test_a_cloud_runner_whose_token_papaya_refuses_does_not_start(
+    ppy_home, client_home, ready, monkeypatch
+) -> None:
+    import httpx
+
+    from papaya_agent_runtime import cloud
+
+    async def _refused(start: Any, **_kwargs: Any) -> Any:
+        raise httpx.HTTPStatusError(
+            "401 for https://papaya/whoami?pagc_secret",
+            request=httpx.Request("GET", "https://papaya/whoami"),
+            response=httpx.Response(401),
+        )
+
+    monkeypatch.setattr(cloud, "open_host", _refused)
+    stderr = io.StringIO()
+    start = cloud.CloudStart(token="pagc_secret", harness="claude-code", data_dir="/unused")
+
+    status = asyncio.run(
+        serve.run(
+            serve.parse_args(["--cloud"]),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            extra={},
+            cloud_start=start,
+        )
+    )
+
+    assert status == 1
+    assert "did not accept the runner's token" in stderr.getvalue()
+    assert "pagc_secret" not in stderr.getvalue()
+
+
 def test_an_event_whose_repository_cannot_be_resolved_is_declined(
     ppy_home, client_home, ready, monkeypatch
 ) -> None:

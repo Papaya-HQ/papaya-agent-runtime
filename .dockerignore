@@ -1,0 +1,7 @@
+# The cloud runner image (docker/cloud-runner/Dockerfile) takes the checkout and
+# its git history; never this machine's runtime state or environment.
+.ppy
+.venv
+**/__pycache__
+.pytest_cache
+.ruff_cache
