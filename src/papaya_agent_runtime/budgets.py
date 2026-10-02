@@ -16,7 +16,7 @@ its repository instead:
   shortest observation) and capped at :data:`CAPS`;
 - **window** = the newest :data:`WINDOW_COUNT` observations within
   :data:`WINDOW_DAYS` days, whichever is fewer, leaving out anything flagged
-  ``stall`` or ``kill`` — a worker that stalled is what the silence budget protects
+  ``stall`` or ``kill`` - a worker that stalled is what the silence budget protects
   against, not an example of normal silence;
 - with fewer than :data:`MIN_OBSERVATIONS` in the window the default applies, and the
   budget says so;

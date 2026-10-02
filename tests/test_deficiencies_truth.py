@@ -731,7 +731,7 @@ def test_nothing_private_is_in_a_closing_comment(ppy_home, privacy_leaks) -> Non
 # evidence was five different tickets, each steered once at its midpoint; the midpoint
 # check-in fires at most once per worker, so no worker had been steered twice at all.
 # The threshold is documented as occurrences "within one scope", and it was counted
-# that way — but the scope went through `redact` before it was stored, and a Papaya
+# that way - but the scope went through `redact` before it was stored, and a Papaya
 # work item id is a UUID, which redaction reads as an opaque key. Every ticket reached
 # the ledger as the one scope `ticket:[redacted]`, so two tickets were one.
 
@@ -1022,7 +1022,7 @@ def test_an_issue_opened_on_a_miscount_corrects_itself_and_closes_once(ppy_home)
     assert comment.startswith("closing: this never happened 2 times in one place.")
     assert "5 occurrence(s) across 5 scope(s)" in comment
 
-    # The row keeps its fingerprint — the rule changed how occurrences are counted, not
+    # The row keeps its fingerprint - the rule changed how occurrences are counted, not
     # what a deficiency is called, so no alias is needed and none is written.
     corrected = _row(row.fingerprint)
     assert corrected.status == deficiencies.WATCHING

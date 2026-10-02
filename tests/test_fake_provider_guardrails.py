@@ -2,7 +2,7 @@
 
 On 2026-09-04 a dispatch that fell back to the fake provider pushed a stub branch
 to github.com within seconds and the branch had to be deleted by hand (issue
-#49). The default is fixed elsewhere; this pins the second lock — the worker
+#49). The default is fixed elsewhere; this pins the second lock - the worker
 itself refuses the push, whatever sent it.
 """
 
@@ -94,7 +94,7 @@ def test_fake_worker_still_pushes_to_a_local_bare_repo(
 def test_the_escape_hatch_allows_a_deliberate_push_to_a_url(
     worktree, git_spy, tmp_path, monkeypatch, capsys
 ) -> None:
-    """A ``file://`` URL is a scheme, so it is refused — until the hatch is set.
+    """A ``file://`` URL is a scheme, so it is refused - until the hatch is set.
 
     Same bare repo either way, so this pins the hatch and not the reachability of
     whatever is on the other end.
@@ -121,7 +121,7 @@ def test_the_adapter_reports_the_refusal_as_a_failure_naming_the_remote() -> Non
             kind="error",
             raw={},
             session_id="s1",
-            text=f"the fake provider refuses to push to {REMOTE_URL} — that is not a local path",
+            text=f"the fake provider refuses to push to {REMOTE_URL} - that is not a local path",
         ),
     ]
 

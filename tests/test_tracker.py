@@ -2,7 +2,7 @@
 
 Papaya work items are the default, never the assumption. A workspace that tracks
 work in Linear is telling every agent something true, and a runtime that hard-codes
-one tracker overrides it quietly — first in the pull request bodies it writes, then
+one tracker overrides it quietly - first in the pull request bodies it writes, then
 in the habits it teaches. These pin that the runtime stays a recorder: it names
 where the work lives and never decides it.
 """

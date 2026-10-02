@@ -1,7 +1,7 @@
 """The shipped review-surface default: an Atlassian-style stylesheet and template.
 
-`lavish-review new` must produce one self-contained file — stylesheet inlined, no
-CDN, no framework — that renders the same with or without lavish-axi running, in
+`lavish-review new` must produce one self-contained file - stylesheet inlined, no
+CDN, no framework - that renders the same with or without lavish-axi running, in
 light and dark. These tests pin that contract so the default cannot quietly regress
 into "fetch Tailwind from a CDN".
 """
@@ -84,7 +84,7 @@ def test_template_is_self_contained_and_uses_the_input_pattern() -> None:
     lowered = html.lower()
     for needle in ("tailwind", "daisyui", "cdn."):
         assert needle not in lowered
-    # One queued prompt per decision, from the form's submit — never from a radio change.
+    # One queued prompt per decision, from the form's submit - never from a radio change.
     assert 'data-lavish-question="q1"' in html
     assert "window.lavish.queuePrompt(" in html
     assert "queueKey" in html

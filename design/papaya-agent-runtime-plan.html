@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Papaya Agent Runtime — technical plan</title>
+  <title>Papaya Agent Runtime - technical plan</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
@@ -180,7 +180,7 @@ flowchart TD
     <section id="setup" class="section-anchor space-y-6">
       <div class="max-w-3xl">
         <p class="eyebrow">First-run experience</p>
-        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Model economics are the setup—not an advanced setting.</h2>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Model economics are the setup - not an advanced setting.</h2>
         <p class="opacity-70 mt-3">The wizard first discovers installed and authenticated harnesses, then creates a manager profile and hard worker ceiling from viable choices only.</p>
       </div>
       <div class="grid lg:grid-cols-[1.1fr_.9fr] gap-6">
@@ -193,14 +193,14 @@ flowchart TD
             <div class="grid sm:grid-cols-2 gap-4">
               <fieldset class="fieldset rounded-box bg-base-200 border border-base-content/10 p-4">
                 <legend class="fieldset-legend text-base">Manager profile</legend>
-                <label class="label">Installed harness</label><select class="select w-full"><option>OpenAI / Codex — ready</option><option>Anthropic / Claude — ready</option></select>
+                <label class="label">Installed harness</label><select class="select w-full"><option>OpenAI / Codex - ready</option><option>Anthropic / Claude - ready</option></select>
                 <label class="label mt-2">Model</label><select class="select w-full"><option>Detected manager models…</option></select>
                 <label class="label mt-2">Reasoning</label><select class="select w-full"><option>High</option><option>Medium</option><option>XHigh</option></select>
                 <p class="label opacity-60">The manager does planning and final review.</p>
               </fieldset>
               <fieldset class="fieldset rounded-box bg-base-200 border border-base-content/10 p-4">
                 <legend class="fieldset-legend text-base">Worker ceiling</legend>
-                <label class="label">Installed harness</label><select class="select w-full"><option>Anthropic / Claude — ready</option><option>OpenAI / Codex — ready</option></select>
+                <label class="label">Installed harness</label><select class="select w-full"><option>Anthropic / Claude - ready</option><option>OpenAI / Codex - ready</option></select>
                 <label class="label mt-2">Maximum model</label><select class="select w-full"><option>Detected worker models…</option></select>
                 <label class="label mt-2">Maximum reasoning</label><select class="select w-full"><option>High</option><option>Medium</option><option>XHigh</option></select>
                 <p class="label opacity-60">The router starts below this ceiling whenever possible.</p>
@@ -273,7 +273,7 @@ flowchart TD
     <section id="routing" class="section-anchor space-y-6">
       <div class="max-w-3xl">
         <p class="eyebrow">Routing policy</p>
-        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Choose the smallest profile likely to finish—not the cheapest call.</h2>
+        <h2 class="text-3xl sm:text-4xl font-bold mt-2">Choose the smallest profile likely to finish - not the cheapest call.</h2>
         <p class="opacity-70 mt-3">A failed tiny model can cost more than a correctly chosen small model. The manager routes by expected total cost and escalates only on evidence.</p>
       </div>
       <div class="card card-border bg-base-100 shadow-xl"><div class="card-body p-3 sm:p-8"><div class="mermaid">
@@ -477,7 +477,7 @@ stateDiagram-v2
           </tbody>
         </table>
       </div>
-      <div class="alert alert-success alert-soft"><span>Learning means preserving explicit, context-aware decisions and verified facts—not silently inferring a personality from chat or turning a one-off answer into permanent policy. Users can inspect, supersede, review, and forget every durable record.</span></div>
+      <div class="alert alert-success alert-soft"><span>Learning means preserving explicit, context-aware decisions and verified facts - not silently inferring a personality from chat or turning a one-off answer into permanent policy. Users can inspect, supersede, review, and forget every durable record.</span></div>
     </section>
 
     <section id="phases" class="section-anchor space-y-6">
@@ -634,7 +634,7 @@ stateDiagram-v2
       const answer = data.get('answer');
       const notes = String(data.get('notes') || '').trim();
       if (!answer) return;
-      const message = `Papaya Agent Runtime plan decision — ${label}: ${answer}${notes ? `. Notes: ${notes}` : ''}`;
+      const message = `Papaya Agent Runtime plan decision - ${label}: ${answer}${notes ? `. Notes: ${notes}` : ''}`;
       if (window.lavish?.queuePrompt) {
         window.lavish.queuePrompt(message, {
           tag: 'decision',

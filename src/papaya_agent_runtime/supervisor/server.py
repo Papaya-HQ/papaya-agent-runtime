@@ -5,7 +5,7 @@ handled in its own thread so a blocking ``wait_actionable`` never stalls other
 control requests. Startable in a background thread (tests) or blocking (CLI).
 
 One supervisor per ``PPY_HOME`` is enforced with an exclusive OS lock, not with
-a probe. The probe — connect to the socket, refuse if something answers — was
+a probe. The probe - connect to the socket, refuse if something answers - was
 the only guard until issue #69, and it protects nothing during a simultaneous
 start: two processes can both find no listener, both unlink the entry, both
 bind, and the second one's ``unlink`` takes the first one's socket with it.
@@ -14,7 +14,7 @@ first deletes the other's socket and pid file. So :meth:`_bind` first takes
 ``flock(LOCK_EX | LOCK_NB)`` on ``<PPY_HOME>/run/supervisor.lock`` and holds it
 until the server stops. The loser sees ``EWOULDBLOCK`` and refuses without
 having touched the socket or the pid file. A crashed owner's lock dies with
-its process, so its stale files are replaceable by the next start — which is
+its process, so its stale files are replaceable by the next start - which is
 also the only start allowed to remove them.
 
 The owner also writes ``<PPY_HOME>/run/supervisor.json``: its pid, role (`serve`
@@ -49,7 +49,7 @@ class SupervisorOwned(RuntimeError):
 
 
 def owner_lock_path() -> str:
-    """Where the owner lock for this ``PPY_HOME`` lives — one per canonical home."""
+    """Where the owner lock for this ``PPY_HOME`` lives - one per canonical home."""
     return str(ppy_home().resolve() / "run" / "supervisor.lock")
 
 
@@ -123,8 +123,8 @@ class SupervisorServer:
     def _close_dead_runners(self) -> None:
         """A start owns every runner row: one whose process is gone gives its slot back now.
 
-        Nothing else would close it — the previous supervisor is gone, and the rounds
-        only run once `serve` is listening — so admission would count it until then.
+        Nothing else would close it - the previous supervisor is gone, and the rounds
+        only run once `serve` is listening - so admission would count it until then.
         """
         try:
             self.closed_at_start = self.supervisor.close_dead_runners(source="supervisor start")
@@ -144,7 +144,7 @@ class SupervisorServer:
             raise SupervisorOwned(
                 f"a supervisor already owns {ppy_home()}"
                 + (f" (pid {owner})" if owner else "")
-                + "; one supervisor per PPY_HOME is supported — stop that one first"
+                + "; one supervisor per PPY_HOME is supported - stop that one first"
             ) from exc
         # The lock is ours. A pid still in it is a holder that never stopped in order.
         previous = os.pread(fd, 32, 0).decode("utf-8", "replace").strip()
@@ -177,7 +177,7 @@ class SupervisorServer:
 
     def _bind_socket(self) -> None:
         if os.path.exists(self.socket_path):
-            # Holding the lock, an existing entry is a crashed owner's — unless a
+            # Holding the lock, an existing entry is a crashed owner's - unless a
             # supervisor from before the lock existed is still serving on it, in
             # which case refuse rather than pull its socket out from under it.
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -461,7 +461,7 @@ class SupervisorServer:
                 self._sock.close()
             self._sock = None
         # Only the owner removes the socket and pid file, and only while it still
-        # holds the lock — a stop that lost the race must not delete the winner's.
+        # holds the lock - a stop that lost the race must not delete the winner's.
         if self._lock_fd is not None:
             for path in (self.socket_path, str(run_dir() / "supervisor.pid")):
                 if os.path.exists(path):

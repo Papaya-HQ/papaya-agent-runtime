@@ -1,8 +1,8 @@
 """`ppy evidence add`: a worker may keep its own saved output, and nothing else.
 
 Issue #127 is ten refused `cp` commands, every one a worker copying its own session's
-saved tool output into its evidence directory. The refusals were right — `cp` takes any
-path — so the answer is a narrower command, confined the way `--note-file` was confined
+saved tool output into its evidence directory. The refusals were right - `cp` takes any
+path - so the answer is a narrower command, confined the way `--note-file` was confined
 in PR #124 after review found it could read any file.
 
 Every row of the confinement rule is a test here, and the negatives matter more than the

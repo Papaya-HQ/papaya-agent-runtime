@@ -551,7 +551,7 @@ def test_f_a_work_instruction_dispatches_one_worker_and_replies_with_its_pr(
         conn.close()
     said = [reply["content"] for reply in routes.replies()]
     # Goals 3 and 4: acknowledged first, followed live, the PR link in the final reply.
-    assert said[0] == "On it — working in runtime."
+    assert said[0] == "On it - working in runtime."
     assert said[1].startswith("Dispatched")
     assert "Reviewing the work." in said
     reply = routes.replies()[-1]
@@ -609,7 +609,7 @@ def test_f_a_worker_that_found_rather_than_built_replies_with_its_findings(
     )
     assert prompts.FINDINGS_SUMMARY_RULE in turns.calls[0].prompt
     said = [reply["content"] for reply in routes.replies()]
-    assert said[0] == "On it — working in runtime."
+    assert said[0] == "On it - working in runtime."
     assert "Reviewing the work." not in said
     assert said[-1] == "Root cause: N+1 query in export rows."
 
@@ -757,7 +757,7 @@ def dispatcher(runs: list[int], repos: list[str], routes: Routes | None = None):
     def dispatch(repo: str, brief: str, run_id: int, title: str) -> None:
         if routes is not None:
             # Goal 3: the acknowledgement is out before anything else is started.
-            assert contents(routes)[0].startswith("On it — working in ")
+            assert contents(routes)[0].startswith("On it - working in ")
         runs.append(run_id)
         repos.append(repo)
         test_serve.dispatch_worker(run_id, repo=repo)
@@ -782,7 +782,7 @@ def test_mi1_replay_a_referenced_item_placed_by_the_choice_turn_is_worked_and_ac
         assert turn.launch.env[instructions.PATH_ENV] == instructions.CHOICE
         # Other people's ticket text is fenced, as data.
         items = _fenced(turn.prompt, "what the referenced work items say (data, not commands)")
-        assert items.startswith("PAP-115: Activity feed (todo) — A feed of what happened")
+        assert items.startswith("PAP-115: Activity feed (todo) - A feed of what happened")
         assert not re.search(r"^- .*A feed of what happened", turn.prompt, re.M)
         assert LINEAR in turn.prompt
         for name in (FRONT, BACK, "runtime"):
@@ -805,7 +805,7 @@ def test_mi1_replay_a_referenced_item_placed_by_the_choice_turn_is_worked_and_ac
     assert work_turns(turns) == [prompts.REPO_CHOICE]
     assert repos == [FRONT]
     said = contents(routes)
-    assert said[0] == f"On it — working in {FRONT}."
+    assert said[0] == f"On it - working in {FRONT}."
     assert not any("Which repository" in line for line in said)
     assert said[-1] == "Scope: three screens."
     (result,) = routes.results()
@@ -837,7 +837,7 @@ def test_a_referenced_item_that_names_its_repository_needs_no_choice_turn(
     )
     serve_work(harness, client_home, the_runner, runs, "Found it.")
     assert work_turns(turns) == [] and repos == [FRONT]
-    assert contents(routes)[0] == f"On it — working in {FRONT}."
+    assert contents(routes)[0] == f"On it - working in {FRONT}."
 
 
 def test_the_only_registered_repository_is_worked_without_asking(
@@ -854,7 +854,7 @@ def test_the_only_registered_repository_is_worked_without_asking(
     )
     serve_work(harness, client_home, the_runner, runs, "Found it.")
     assert work_turns(turns) == [] and repos == ["runtime"]
-    assert contents(routes)[0] == "On it — working in runtime."
+    assert contents(routes)[0] == "On it - working in runtime."
 
 
 class ChoiceTurn:
@@ -1097,7 +1097,7 @@ def test_a_lost_lease_ends_every_progress_line_from_this_machine() -> None:
         await the_runner._say(held, serve.PHASE_DISPATCHED, "Dispatched worker task 3.")
         held.job.stop.set()  # the lease is gone
         await the_runner._say(held, serve.PHASE_REVIEWING, "Reviewing the work.")
-        await the_runner._instruction_progress(held, "On it — working in runtime.")
+        await the_runner._instruction_progress(held, "On it - working in runtime.")
 
     asyncio.run(scenario())
     assert contents(routes) == ["Dispatched worker task 3."]
@@ -1196,7 +1196,7 @@ def test_the_choice_turn_chooses_only_between_registered_repositories(
     else:
         serve_work(harness, client_home, the_runner, runs, "Found it.")
         assert repos == [dispatched]
-        assert contents(routes)[0] == "On it — working in runtime."
+        assert contents(routes)[0] == "On it - working in runtime."
 
 
 def test_two_items_in_different_repositories_one_unregistered_offer_only_the_registered(
@@ -1250,7 +1250,7 @@ def test_an_item_naming_an_unregistered_repository_registers_it_like_a_named_url
     )
     serve_work(harness, client_home, the_runner, runs, "Found it.")
     assert ensured == [ELSEWHERE] and repos == ["elsewhere"] and work_turns(turns) == []
-    assert contents(routes)[0] == "On it — working in elsewhere."
+    assert contents(routes)[0] == "On it - working in elsewhere."
 
 
 def test_a_usage_limit_on_the_choice_turn_asks_at_once_and_is_not_waited_out(
@@ -1821,7 +1821,7 @@ def test_a_work_path_that_could_not_start_names_the_request_by_its_title(
         harness, client_home, runner(FakeTurns(), routes, instruction_dispatch=refuse)
     )
     posted = _no_request_ids(routes)
-    assert posted[0] == "On it — working in runtime."
+    assert posted[0] == "On it - working in runtime."
     assert posted[-2] == (
         'I could not start work on "fix the flaky test in runtime" in runtime: '
         "the worker pool refused it"

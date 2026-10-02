@@ -399,8 +399,8 @@ def set_work_item_status(
 ) -> bool:
     """Move this event's work item to ``status``. Returns whether a call was made.
 
-    ``False`` means there was nothing to call with — no API url, no workspace, no
-    token, no work item — which is the ordinary state of a machine that is not
+    ``False`` means there was nothing to call with - no API url, no workspace, no
+    token, no work item - which is the ordinary state of a machine that is not
     connected and never an error. A route that *is* reachable and refuses raises
     :class:`PapayaEventError`, because that is a fact the caller should report.
     """
@@ -438,7 +438,7 @@ def post_work_item_comment(
     ``display_name``), carried in the comment's ``metadata`` the way the app's own
     comments carry them, so the person is notified rather than merely named.
 
-    For the runner's single mechanical sentence only — the hand-back line. What a
+    For the runner's single mechanical sentence only - the hand-back line. What a
     manager has to *say* about a ticket is said by a manager turn through MCP.
     Same connection rules as :func:`set_work_item_status`.
     """
@@ -561,7 +561,7 @@ class Instruction:
     #: Where the answer goes, exactly as the event said: never taken from anything else.
     reply: dict[str, Any]
     #: What the person meant, when Papaya said: `ask` or `work`. ``None`` when the event
-    #: carries no `intent` key at all — an older Papaya, whose reply routes also take
+    #: carries no `intent` key at all - an older Papaya, whose reply routes also take
     #: no `kind` (:attr:`speaks_kind`).
     intent: str | None = None
 
@@ -755,7 +755,7 @@ def post_instruction_reply(
 
     An instruction asked from a connected tool answers through the machine-task
     route, which takes one reply per ``milestone``: the final answer is ``done``, and
-    a progress line reaches it only when it is one (``milestone``) — any other line
+    a progress line reaches it only when it is one (``milestone``) - any other line
     is not sent and answers ``None``.
     """
     env = os.environ if environ is None else environ
@@ -874,7 +874,7 @@ def list_instruction_follow_ups(
 
     Read beside the instruction's result route (`.../machine-instructions/<ref>/follow-ups`),
     checked against this workspace the same way. ``None`` when there is nothing to call
-    with (not connected). A refusal raises :class:`PapayaHTTPError` — a 404 is a Papaya
+    with (not connected). A refusal raises :class:`PapayaHTTPError` - a 404 is a Papaya
     that has no follow-ups yet, which the caller reads as none.
     """
     env = os.environ if environ is None else environ
@@ -1017,8 +1017,8 @@ def repository_spec(event: PapayaEvent) -> str:
     """Return the repository this event names, or refuse.
 
     There is deliberately no fallback to the listener's working directory. That
-    directory is the *runtime's own checkout* — the one place a ticket can never
-    belong — and on the first real run (2026-09-16, PAP-217, a desktop-app ticket)
+    directory is the *runtime's own checkout* - the one place a ticket can never
+    belong - and on the first real run (2026-09-16, PAP-217, a desktop-app ticket)
     the fallback silently placed the ticket there. An event that names nothing is
     a question for the manager's brief turn, which has six ordered ways to answer
     it and a person to ask when none of them do; a mechanical guess is not one.

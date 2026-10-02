@@ -91,7 +91,7 @@ def decide_gate(
     its session "ended before your verification gate finished" two seconds after posting
     a plan, and where a brief made the plan gate blocking that steer defeated the gate a
     person had asked for. Every stopped worker at its plan is answered, blocking or not
-    — a stopped worker is waiting either way — and ``plan_gate`` tells the answer whether
+    - a stopped worker is waiting either way - and ``plan_gate`` tells the answer whether
     approval was required or it may simply say proceed.
     """
     from papaya_agent_runtime import gate, serve

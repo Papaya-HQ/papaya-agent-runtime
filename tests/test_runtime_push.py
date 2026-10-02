@@ -9,7 +9,7 @@ from the manager after its own gate; this is that, in the supervisor.
 The rule is narrow on purpose. The runtime pushes only when the repository gates
 pushes, the worker's newest note reached the task's own terminal phase (``done``,
 or ``review`` for a task that ends at review), and the runtime's own gate is green
-at the worktree's exact SHA — never with ``--no-verify``, never forced, never
+at the worktree's exact SHA - never with ``--no-verify``, never forced, never
 twice, and never again after a refusal. There is exactly ONE push decision per
 ending (:func:`turn_end.deliver_after_turn`), which is why several of these tests
 drive the real ``RunnerGuardian`` rather than the push alone.
@@ -111,7 +111,7 @@ def _through_the_runner(world) -> list[list[str]]:
     """Run a whole worker ending and return every `git push` argv it attempted.
 
     The decision under test is made at the END of a run, so testing
-    `deliver_finished_branch` alone cannot see a second push made before it — which
+    `deliver_finished_branch` alone cannot see a second push made before it - which
     is exactly the defect: `rescue_unpushed` pushed first, with no gate check.
     """
     attempted: list[list[str]] = []
@@ -278,7 +278,7 @@ def test_a_stream_line_after_the_done_note_does_not_hide_it(world) -> None:
 def test_a_repository_that_does_not_gate_pushes_keeps_the_old_rescue_path(world) -> None:
     """Unchanged where nothing gates pushes: the worker pushes, and this is the net.
 
-    `rescue_unpushed` is what runs there, exactly as it did before this task — it
+    `rescue_unpushed` is what runs there, exactly as it did before this task - it
     asks no gate, because in an ungated repository the worker pushes its own branch
     and this only catches one that finished without doing so.
     """
@@ -388,7 +388,7 @@ def test_a_gated_push_waits_on_the_repositorys_own_budget(world, monkeypatch) ->
     """Not a fixed short timeout: a hook with a suite behind it needs the real number.
 
     Neither repository on record has a git pre-push hook today, so this push is
-    network-only — but `solicit` does detect and record one, and a fixed 30s would
+    network-only - but `solicit` does detect and record one, and a fixed 30s would
     kill a healthy gated push part-way the day a repository grows one.
     """
     monkeypatch.setattr(gate, "expected_seconds", lambda repo, full: 1800.0)
@@ -471,7 +471,7 @@ def test_the_runner_pushes_nothing_when_the_gate_is_green_for_an_older_sha(world
 def test_the_runner_pushes_once_when_the_gate_is_green_at_head(world) -> None:
     _note(world)
     # The fake worker commits its own file, so the gate has to be green at whatever
-    # head the run ends on — record it after the run and drive the decision again.
+    # head the run ends on - record it after the run and drive the decision again.
     attempted = _through_the_runner(world)
     assert attempted == []  # nothing yet: no gate at that head
 
@@ -587,7 +587,7 @@ def test_a_timed_out_push_takes_the_whole_process_group_with_it(world) -> None:
 
     A repository's pre-push hook starts `make verify`, which starts a compiler, a
     test runner, Docker and a database. Killing `git` alone leaves all of them
-    running while the runtime records "was stopped" — the machine stays busy for
+    running while the runtime records "was stopped" - the machine stays busy for
     another twenty minutes and nothing knows why.
     """
     marker = world["worktree"] / "child-survived.txt"

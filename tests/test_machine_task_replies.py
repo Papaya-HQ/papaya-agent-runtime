@@ -3,8 +3,8 @@
 Shane, 2026-09-25: work started with "@agent start working on this" in a Papaya thread
 (PAP-319) was done by his machine, and every update landed only as work-item comments.
 Papaya now carries a `machine_task` block on `work_item.assigned` and
-`machine.instruction` — the task's id, where it was asked (`origin`) and one reply
-route that takes four milestones — and `ppy serve` says those milestones there, once
+`machine.instruction` - the task's id, where it was asked (`origin`) and one reply
+route that takes four milestones - and `ppy serve` says those milestones there, once
 each, while still commenting on the work item as before.
 
 Driven through the client's own loop with the same fakes as `test_serve.py`:
@@ -303,7 +303,7 @@ def _ticket_with(conn, payload: dict[str, Any], item: str = "item-9") -> int:
 
 
 def test_a_milestone_is_sent_once_whoever_asks_and_however_often(ppy_home) -> None:
-    """Goal 2: the ledger keeps the once — a resumed hold, a restart, a second ticket."""
+    """Goal 2: the ledger keeps the once - a resumed hold, a restart, a second ticket."""
     papaya_api = FakePapaya()
     conn = init_db()
     try:
@@ -517,7 +517,7 @@ def test_a_work_instruction_from_a_connected_tool_is_answered_there_with_milesto
     # Only milestones reach the route: "On it" is picked up, the answer (naming the PR) is
     # done. Progress lines that are not a milestone ("Dispatched…") are not sent there.
     assert [r["milestone"] for r in replies] == ["picked_up", "done"]
-    assert replies[0]["text"] == "On it — working in runtime."
+    assert replies[0]["text"] == "On it - working in runtime."
     assert replies[1]["text"] == (
         "CSV export is in, off by default.\n\n"
         "Pull request open: https://github.com/acme/runtime/pull/7"

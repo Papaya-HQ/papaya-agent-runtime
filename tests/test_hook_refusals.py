@@ -3,7 +3,7 @@
 Fourteen times (issue #83, plus #116 on a teammate's machine) a worker finished,
 ran exactly the `git push origin HEAD:ppy/task-<n>-<id>` its rules prescribe, and
 `.claude/hooks/verify-before-push.sh` refused it. The runtime recorded
-``kind: profile_gap``, ``reason: "git is not in the safe family"`` — false twice
+``kind: profile_gap``, ``reason: "git is not in the safe family"`` - false twice
 over: `Bash(git:*)` is in `config.CLAUDE_PROFILE`, and the profile never saw the
 call. It pointed maintainers at widening the profile, which would have changed
 nothing at all.
@@ -36,7 +36,7 @@ PUSH = "git push origin HEAD:ppy/task-112-53ebeb920815"
 
 #: Verbatim from task 112's recorded `tool_result` (papaya-backend-monorepo).
 HOOK_STDERR = (
-    "Error: PreToolUse:Bash hook error: make verify failed — fix issues before pushing.\n"
+    "Error: PreToolUse:Bash hook error: make verify failed - fix issues before pushing.\n"
     "\n"
     "Last 40 lines of /tmp log /var/folders/yh/T/papaya-verify.XXXXXX.log.DhauJCy3RE:\n"
     "\n"
@@ -48,7 +48,7 @@ HOOK_STDERR = (
 
 #: Verbatim from task 129's, on an older Claude Code: the same hook, no prefix.
 HOOK_STDERR_UNPREFIXED = (
-    "Error: make verify failed — fix issues before pushing.\n"
+    "Error: make verify failed - fix issues before pushing.\n"
     "\n"
     "Last 40 lines of /tmp log /var/folders/yh/T/papaya-verify.XXXXXX.log.Bukppvz1Fw:\n"
     "make: *** [frontend-browser-smoke] Error 1"
@@ -176,7 +176,7 @@ def test_a_hook_block_is_a_hook_refusal_and_never_a_profile_gap(worktree) -> Non
 def test_an_older_harness_that_omits_the_hook_prefix_is_read_the_same_way(worktree) -> None:
     """Tasks 58 and 129 carry the hook's stderr with no `PreToolUse:` prefix.
 
-    The prefix is corroboration, never the test — the absence of the harness's own
+    The prefix is corroboration, never the test - the absence of the harness's own
     refusal line is. Keying on the prefix would have missed a third of the real ones.
     """
     events = [
@@ -278,7 +278,7 @@ def test_a_hook_that_allows_the_push_is_recorded_as_nothing_at_all(worktree) -> 
 def test_a_repository_with_no_readable_hook_says_the_diagnosis_is_inferred(tmp_path) -> None:
     """H1's fallback: no hook could be read, so the word `inferred` is on the record.
 
-    The call still got past the harness, so a hook is still the only thing left —
+    The call still got past the harness, so a hook is still the only thing left -
     but which hook is a deduction, and it says so rather than naming one.
     """
     events = [_tool_use(PUSH, "toolu_7"), _hook_block("toolu_7"), _result(("toolu_7", PUSH))]

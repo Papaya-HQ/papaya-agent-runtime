@@ -38,7 +38,7 @@ def connection_harness() -> str:
     """The harness the person chose when they connected this machine to Papaya.
 
     Empty when nothing is connected, when the connection predates the field, or
-    when the client config cannot be read at all — reading it must never be the
+    when the client config cannot be read at all - reading it must never be the
     thing that stops setup.
     """
     from papaya_agent_runtime import papaya
@@ -66,7 +66,7 @@ def _worker_default(usable: list[str], manager_provider: str) -> str:
     """The harness a fresh runtime launches *workers* with, absent an explicit answer.
 
     Shane's rule, 2026-09-16: the runtime does not mix agents by default. Before
-    this, the worker was ``usable[-1]`` — so any machine with both harnesses signed
+    this, the worker was ``usable[-1]`` - so any machine with both harnesses signed
     in got a Claude manager driving Codex workers, chosen by list position rather
     than by anyone. The connection's harness is the person's own choice and wins;
     with no connection the workers match whoever is driving them.
@@ -170,7 +170,7 @@ def run_setup(non_interactive: bool = False, overrides: dict | None = None) -> M
 
 
 def config_models(overrides: dict) -> MMConfig:
-    """`ppy config models` — rerun discovery and change either profile.
+    """`ppy config models` - rerun discovery and change either profile.
 
     With no config yet this builds one, so the connection's harness is the default
     for both roles exactly as in setup. With a config already on disk, a provider
@@ -216,7 +216,7 @@ def config_models(overrides: dict) -> MMConfig:
 
 
 def config_authority(overrides: dict) -> MMConfig:
-    """`ppy config authority` — adjust standing authority, e.g. merge policy."""
+    """`ppy config authority` - adjust standing authority, e.g. merge policy."""
     cfg = load_config()
     auth = cfg.authority
     for key in (

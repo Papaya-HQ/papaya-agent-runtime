@@ -2,8 +2,8 @@
 
 Backend tasks bring up their own database with a per-task project name
 (``COMPOSE_PROJECT_NAME=task_<n>``) so two workers never fight over one port. On
-2026-09-03 fifteen of those stacks — every one belonging to a task that had
-already been delivered — were still running with their volumes, and Docker hit
+2026-09-03 fifteen of those stacks - every one belonging to a task that had
+already been delivered - were still running with their volumes, and Docker hit
 its 33-network ceiling: new stacks stopped starting, so a backend dispatch could
 no longer run its own tests. Nothing in the harness had ever torn one down.
 
@@ -18,11 +18,11 @@ volumes, and this machine runs shared stacks (``chat-with-agents``) and the
 user's own (``radar_phase6_7``) beside the per-task ones. A worker's progress note
 is prose, so a name learned from one is accepted only when it is that task's own
 per-task name; any other stack a note happens to mention is dropped with an event
-saying so. A name the manager types with ``ppy task env set`` is taken as given —
+saying so. A name the manager types with ``ppy task env set`` is taken as given -
 that is a decision, not a mention.
 
 Teardown is best-effort by construction. Docker may not be installed, may not be
-running, and the stack may already be gone — none of which is a reason to fail a
+running, and the stack may already be gone - none of which is a reason to fail a
 delivery or leave a lease held. Every failure here is reported and swallowed.
 """
 
@@ -88,7 +88,7 @@ def services_unavailable(environ: Mapping[str, str] | None = None) -> bool:
     A cloud runner is a VM nobody can start Docker on, so a repository that runs
     its services with compose works there anyway: its checks that need those
     services are left to CI instead of holding the ticket (PAP-334). On a
-    person's own machine the answer is always False — starting Docker is theirs
+    person's own machine the answer is always False - starting Docker is theirs
     to do, and readiness asks them to.
     """
     if not on_cloud_runner(environ):
@@ -154,7 +154,7 @@ def note_project(task_id: int, note: str, *, conn: sqlite3.Connection | None = N
     """Record a compose project a progress note mentions, if it is this task's own.
 
     A progress note is prose a worker wrote, and what it arms here is
-    ``docker compose down -v`` — which destroys volumes. This machine runs shared
+    ``docker compose down -v`` - which destroys volumes. This machine runs shared
     stacks (``chat-with-agents``) and the user's own (``radar_phase6_7``) beside
     the per-task ones, so a worker that merely *mentions* one must never arm its
     teardown. A name learned this way is therefore accepted only when it is the
@@ -180,7 +180,7 @@ def note_project(task_id: int, note: str, *, conn: sqlite3.Connection | None = N
                     "summary": (
                         f"a progress note named compose project {project!r}, which is not "
                         f"task {task_id}'s own stack (task_{task_id} or <prefix>_task_{task_id}) "
-                        "— not recorded, so nothing here will tear it down. If that really is "
+                        "- not recorded, so nothing here will tear it down. If that really is "
                         f"the stack to remove, say so deliberately with `ppy task env set "
                         f"{task_id} compose_project={project}`."
                     ),
@@ -242,7 +242,7 @@ def teardown_for_task(
 ) -> dict | None:
     """Take down the stack this task owns, if it owns one. Never raises.
 
-    Returns ``None`` when no compose project was ever recorded — the common case,
+    Returns ``None`` when no compose project was ever recorded - the common case,
     and not something to report.
     """
     try:
@@ -285,7 +285,7 @@ def describe(result: dict | None) -> str:
         return f"compose stack {project}: removed " + "; ".join(result["removed"])
     if result.get("ok"):
         return f"compose stack {project}: nothing left to remove"
-    return f"compose stack {project}: not torn down — {result.get('detail')}"
+    return f"compose stack {project}: not torn down - {result.get('detail')}"
 
 
 # --------------------------------------------------------------------------- #
@@ -352,7 +352,7 @@ def describe_prunable(stacks: list[dict]) -> str:
         return "compose stacks: none left over from finished tasks"
     names = ", ".join(f"{s['project']} (task {s['task_id']} {s['task_status']})" for s in stacks)
     return (
-        f"compose stacks: {len(stacks)} still up for finished tasks — {names}; "
+        f"compose stacks: {len(stacks)} still up for finished tasks - {names}; "
         "`ppy task close` or `ppy worktree prune` takes them down, or "
         "`docker compose -p <name> down -v --remove-orphans` by hand"
     )

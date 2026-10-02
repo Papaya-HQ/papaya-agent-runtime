@@ -2,8 +2,8 @@
 
 Every delivery on 2026-09-04 opened its pull request with the body "Automated
 delivery of task N (sha)." The fix then was to compose the body from what the run
-already held — the brief's first section, the worker's closing report, the reviewer's
-approval note — quoted verbatim, "nothing invented".
+already held - the brief's first section, the worker's closing report, the reviewer's
+approval note - quoted verbatim, "nothing invented".
 
 That produced bodies nobody outside the run could read (Shane, 2026-09-21, on
 papaya-frontend-monorepo PR #811: "cryptic slop"). Every source was written for the
@@ -13,7 +13,7 @@ repository layout, and a reviewer's note is shorthand for the ledger. None of th
 says what changed for a user or how a person should check it, and a quote cannot say
 what its author never wrote.
 
-So the body is *written*, once, by the reviewer — the one party that has just read
+So the body is *written*, once, by the reviewer - the one party that has just read
 the whole diff and knows what it does. ``ppy review approve --pr-description <file>``
 records it against the commit it approves, :func:`validate_description` refuses one
 that is missing any of :data:`DESCRIPTION_SECTIONS` (or points a reader at files that
@@ -159,7 +159,7 @@ def validate_description(text: str) -> list[str]:
         if marker in text:
             problems.append(
                 f"it cites `{marker}`, which only exists on the machine that did the work; "
-                "a reader of the pull request cannot open it — describe what it showed, or "
+                "a reader of the pull request cannot open it - describe what it showed, or "
                 "attach the file"
             )
     return problems
@@ -253,7 +253,7 @@ def _worker_label(task: sqlite3.Row) -> str:
 def _driver(conn: sqlite3.Connection | None) -> str:
     """Who drove this, named the way the workspace addresses them.
 
-    The runtime has no identity of its own — it is whichever Papaya agent this
+    The runtime has no identity of its own - it is whichever Papaya agent this
     machine is connected as. When that connection exists, the credit belongs to
     that agent by handle, because a reviewer who wants to reply needs someone to
     reply *to*. Unconnected, it is the runtime itself.
@@ -270,7 +270,7 @@ def _footer(task: sqlite3.Row, head: str, conn: sqlite3.Connection | None = None
     """Who did this, in one sentence: the connected agent drove it, a worker built it.
 
     The credit belongs to the session that briefed the work, reviewed the exact
-    commit, and delivered it — not to a generic harness line. Shane, 2026-09-04: the
+    commit, and delivered it - not to a generic harness line. Shane, 2026-09-04: the
     footer should name the runtime driving the work, and it now names the Papaya
     agent doing the driving whenever this machine is connected as one.
     """
@@ -299,7 +299,7 @@ def compose(task_id: int, *, head_sha: str = "", conn: sqlite3.Connection | None
     """The pull request body for a delivered task: its description, stack and credit.
 
     Raises :class:`MissingDescription` when no description was recorded for this
-    head — delivery calls this before it pushes, so nothing leaves the machine with
+    head - delivery calls this before it pushes, so nothing leaves the machine with
     a body nobody wrote.
     """
     from papaya_agent_runtime.state import init_db, store
@@ -315,8 +315,8 @@ def compose(task_id: int, *, head_sha: str = "", conn: sqlite3.Connection | None
         raise MissingDescription(
             f"no pull request description was written for task {task_id} at "
             f"{head[:8] or 'its head'}. Approve it with `ppy review approve {task_id} "
-            f"--pr-description <file>` — a description for people, with the sections "
-            f"{sections} — or pass `ppy deliver {task_id} --body-file <file>` with a body "
+            f"--pr-description <file>` - a description for people, with the sections "
+            f"{sections} - or pass `ppy deliver {task_id} --body-file <file>` with a body "
             "you wrote yourself"
         )
     body = (

@@ -2,13 +2,13 @@
 
 `manager/launch.py` told every manager turn to link tasks to a work item with
 `ppy papaya link`, which has never been a command (runtime issue #114). Each turn
-discovered that by being refused, worked around it, and reported it — twice on
+discovered that by being refused, worked around it, and reported it - twice on
 2026-09-19 alone, and it would have kept happening on every machine forever. One
 sentence was wrong; the lasting fix is that a sentence like it cannot merge.
 
-So this module reads the text the runtime *hands to* a turn or a worker — the turn
+So this module reads the text the runtime *hands to* a turn or a worker - the turn
 prompts, the worker command rules, the manager launch prompt, the worker environment
-block, the runtime contract and the README — pulls every `ppy` invocation out of it,
+block, the runtime contract and the README - pulls every `ppy` invocation out of it,
 and hands each one to the real `cli.build_parser()`. A command whose subcommand does
 not exist, or which names a flag that subcommand does not have, fails with the file
 and the line it is written on.
@@ -60,7 +60,7 @@ LAUNCHER_ONLY = {
     ("env", "sync"): "handled by bin/ppy through envsync.py; cli.py has no `env` subcommand",
 }
 
-#: Invocations that are written down *because they do not exist* — a sentence naming a
+#: Invocations that are written down *because they do not exist* - a sentence naming a
 #: command a reader must not reach for. Keyed on (repo-relative path, the command text
 #: as this module normalises it); the value says why, so an entry cannot be added to
 #: silence a real defect without saying so out loud.
@@ -238,7 +238,7 @@ def _dummy(token: str) -> str:
 def _choose(token: str) -> str:
     """One alternative stands for a documented choice: `a|b|c`, `--a|--b`, `--a/--deny`.
 
-    A `/` only separates alternatives between flags — `--brief docs/brief.md` is a path.
+    A `/` only separates alternatives between flags - `--brief docs/brief.md` is a path.
     """
     if _PLACEHOLDER_RE.match(token):
         return token
@@ -267,12 +267,12 @@ def to_argv(span: str) -> tuple[str, ...] | None:
     The whole grammar, and nothing beyond it:
 
     * the command must start `ppy`, `bin/ppy` or `./bin/ppy`, optionally after a `$`,
-      and the next word must look like a subcommand or a flag — `ppy  ◂ Ready, …` is a
+      and the next word must look like a subcommand or a flag - `ppy  ◂ Ready, …` is a
       transcript of what the runtime *said*, not something anyone is told to run;
     * a `#` comment and trailing prose punctuation are dropped, as a shell would;
-    * `[...]` marks an optional part — the brackets go and the contents stay, because
+    * `[...]` marks an optional part - the brackets go and the contents stay, because
       a documented optional flag is still a flag that has to exist;
-    * `a|b|c`, `--a|--b` and `--a/--b` are choices — the first alternative stands in;
+    * `a|b|c`, `--a|--b` and `--a/--b` are choices - the first alternative stands in;
     * a placeholder (`<task>`, `<worker task id>`, `{branch}`, `...`, a bare `METAVAR`)
       becomes `1`, which satisfies `type=int` and plain strings alike; `PLACEHOLDER_DUMMIES`
       overrides that by name, and `<claude|codex>` is read as the literal choice it spells.
@@ -379,7 +379,7 @@ def _repairs(parser, argv: tuple[str, ...], message: str) -> list[tuple[str, ...
     * a required argument the sentence left to the reader (`ppy track --show` does not
       spell the task id out) gets a dummy appended;
     * a flag named on its own, as a reference to the flag (`ppy dispatch --brief`), gets
-      its value inserted after it — the point of the sentence is that the flag exists;
+      its value inserted after it - the point of the sentence is that the flag exists;
     * a placeholder standing where a `choices=` argument goes (`ppy task set-status <id>
       <status>`) becomes a real choice.
 
@@ -635,7 +635,7 @@ def test_a_negative_example_is_exempt_only_by_an_explicit_entry(monkeypatch) -> 
     """A sentence saying "there is no `ppy foo`" is still a sentence naming `ppy foo`.
 
     It is a finding until someone writes down, in `NON_EXAMPLES`, which file it is in
-    and why it is there — an exemption nobody can take by accident.
+    and why it is there - an exemption nobody can take by accident.
     """
     argv = to_argv("ppy papaya link <task>")
     assert argv == ("papaya", "link", "1")

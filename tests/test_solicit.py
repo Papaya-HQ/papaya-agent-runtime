@@ -1,6 +1,6 @@
 """Soliciting repositories, and reading one properly once it is registered.
 
-Two invariants worth a test. Discovery must only ever *offer* — it reads the forge,
+Two invariants worth a test. Discovery must only ever *offer* - it reads the forge,
 never the filesystem, and it never proposes something that cannot take a pull
 request. Onboarding must extract what a brief actually needs (the verification
 command and the commands CI really runs) and say plainly what it could not find,
@@ -326,7 +326,7 @@ def test_onboarding_without_a_readme_says_what_it_is_is_unknown(registered) -> N
 #
 # Work that names a repository must not stop because nobody registered it yet: an
 # assignment arriving while nobody is at the machine has no one to ask. The
-# boundary is the person's OWN accounts — they assigned the work, and registering
+# boundary is the person's OWN accounts - they assigned the work, and registering
 # is a read-only clone plus a row, while pushing stays gated by the review gate.
 
 
@@ -420,7 +420,7 @@ def test_a_registered_repo_nobody_read_gets_onboarded(forge, ppy_home, monkeypat
 def test_owners_reads_the_login_from_the_object_not_a_bare_jq_string(forge) -> None:
     """`gh api user --jq .login` prints an unquoted string, which is not JSON.
 
-    Parsing it raised, so discovery could never see the person's OWN account —
+    Parsing it raised, so discovery could never see the person's OWN account -
     only organisations, and only when one was named explicitly.
     """
     forge.answers["viewer"] = "ignored"

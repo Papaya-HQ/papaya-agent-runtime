@@ -1,15 +1,15 @@
 """Plain references: the manager describes things, it does not cite labels.
 
 The user's rule (2026-08-30): when the manager speaks to them, every reference must
-be described as what it is — "the plan step that adds per-item summaries and links
-(the second backend PR)" — never as a bare internal label the reader would have to
+be described as what it is - "the plan step that adds per-item summaries and links
+(the second backend PR)" - never as a bare internal label the reader would have to
 look up: "1B", "§5", "rev3", "informs 1B/1D", "migration order 1C, 1B, 1D". A label
 may follow once, in parentheses, for people who want to grep; the sentence has to
 stand on its own.
 
 This module is the cheap mechanical half of that rule. It scans a reply for the
-label shapes that plans and specs produce — section sigils, revision tags, and
-plan-step codes — after removing everything that legitimately carries them (code
+label shapes that plans and specs produce - section sigils, revision tags, and
+plan-step codes - after removing everything that legitimately carries them (code
 spans, fenced blocks, URLs, and parentheticals). The Stop hook uses it to bounce a
 reply back to the manager once, with the offending labels named, before the reply
 reaches the user. It is a heuristic: it catches the common shapes, and a false
@@ -71,7 +71,7 @@ def block_reason(tokens: Iterable[str]) -> str | None:
     return (
         f"Your reply refers to things by internal label: {listed}. The user has asked "
         "that every reference be described as what it is, so a reader who has not seen "
-        "the plan can follow — e.g. 'the plan step that adds per-item summaries and links "
+        "the plan can follow - e.g. 'the plan step that adds per-item summaries and links "
         "(the second backend PR)', 'the plan's continuity section', 'the latest plan "
         "revision'. A label may follow once, in parentheses. Rewrite those references in "
         "plain terms and reply again."
@@ -83,7 +83,7 @@ def last_assistant_text(payload: dict) -> str:
 
     Prefers the harness's own ``last_assistant_message`` field; otherwise reads the
     final assistant entry from the JSONL transcript at ``transcript_path``. Returns
-    "" when neither is usable — a hook must never break the harness.
+    "" when neither is usable - a hook must never break the harness.
     """
     direct = payload.get("last_assistant_message")
     if isinstance(direct, str) and direct.strip():

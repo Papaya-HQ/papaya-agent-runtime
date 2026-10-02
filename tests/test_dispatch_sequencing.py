@@ -3,8 +3,8 @@
 The overlap check (issue #61) only printed a suggestion, and the unattended
 ``ppy serve`` manager has nobody to read one: this repository had three tasks
 editing ``serve.py`` at once (task 243's reflection). In Middle Manager a child was
-also stacked on a parent whose branch had no commits yet, so it started from — and
-recorded — the default branch as its base. Both are now refused before any task
+also stacked on a parent whose branch had no commits yet, so it started from - and
+recorded - the default branch as its base. Both are now refused before any task
 state exists, unless waved through with ``--accept-preflight overlap|empty-parent
 --reason ...``. The brief preflight (allowlist, prior attempt) is wired into
 ``ppy dispatch --brief`` and ``ppy brief lint`` here too.

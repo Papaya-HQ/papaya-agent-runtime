@@ -24,7 +24,7 @@ So the facts live on the repository (``ppy repo set <name> --compose-stack ...
 - the worker process receives those resolved values, registered database URLs and
   writable tool caches rather than merely prose describing them;
 - a repository whose pre-push hook runs the full suite tells the worker to stop at
-  the code-level gates and file its done note with the head SHA — the harness's
+  the code-level gates and file its done note with the head SHA - the harness's
   push-on-behalf path (:func:`papaya_agent_runtime.turn_end.rescue_unpushed`) then
   publishes the lease branch, exactly as it does for any done-but-unpushed turn.
 """
@@ -707,7 +707,7 @@ def render(
     """
     lines = [f"## {HEADING}", ""]
     lines.append(
-        f"- **Evidence directory: `{evidence_path}/`** — inside your worktree and excluded "
+        f"- **Evidence directory: `{evidence_path}/`** - inside your worktree and excluded "
         "from git. Receipts are `.txt` files. Create it with your own commands and write "
         "every receipt there (gate "
         "output, screenshots, dumps), then name the paths in your final progress report; "
@@ -871,7 +871,7 @@ def push_is_gated(repo_row, worktree: str | None = None) -> bool:
 
     When it is true the worker is told not to push and the runtime pushes the lease
     branch itself after its own gate. Telling the worker to push anyway is telling it
-    to be refused — the command rules and the environment block used to say opposite
+    to be refused - the command rules and the environment block used to say opposite
     things, and the worker followed the rules.
 
     **This is the only answer to that question.** Dispatch (what the worker is told),

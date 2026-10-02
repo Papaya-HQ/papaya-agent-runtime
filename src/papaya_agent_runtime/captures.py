@@ -6,7 +6,7 @@ and the diffstat, so the paths the worker named stayed buried in prose and a rev
 could approve on the strength of a sentence like "screenshots are in
 docs/evidence/task-104/".
 
-This module reads those paths back out of the reports and turns them into a listing —
+This module reads those paths back out of the reports and turns them into a listing -
 every named file or directory with its size, every missing one marked "(not found)"
 rather than failing the command, and every image printed once more on a line of its
 own so the reviewer can open it without retyping a path.
@@ -103,10 +103,10 @@ def render(paths: Iterable[str], root: str | Path | None = None) -> str:
         target = _resolve(token, base)
         if target.is_dir():
             entries = sorted(target.iterdir(), key=lambda p: p.name)
-            lines.append(f"  {token} — directory, {len(entries)} item(s)")
+            lines.append(f"  {token} - directory, {len(entries)} item(s)")
             for entry in entries[:MAX_DIR_ENTRIES]:
                 if entry.is_dir():
-                    lines.append(f"      {entry.name}/ — directory")
+                    lines.append(f"      {entry.name}/ - directory")
                     continue
                 lines.append(f"      {entry.name}  {_size(entry)}")
                 if entry.suffix.lower() in IMAGE_SUFFIXES:
@@ -114,13 +114,13 @@ def render(paths: Iterable[str], root: str | Path | None = None) -> str:
             if len(entries) > MAX_DIR_ENTRIES:
                 lines.append(f"      … and {len(entries) - MAX_DIR_ENTRIES} more")
         elif target.is_file():
-            lines.append(f"  {token} — {_size(target)}")
+            lines.append(f"  {token} - {_size(target)}")
             if target.suffix.lower() in IMAGE_SUFFIXES:
                 images.append(str(target))
         else:
             # A path that has gone (or was never written) is worth saying out loud;
             # it is never worth failing the review over.
-            lines.append(f"  {token} — (not found)")
+            lines.append(f"  {token} - (not found)")
 
     if images:
         lines.append("")

@@ -266,7 +266,7 @@ def path_reach(program: str, worktree: str | None, roots: Iterable[str] = ()) ->
     ``..`` is normalised first and symlinks are then resolved strictly, so a path that
     leaves the worktree through a link is outside, and one that cannot be resolved at
     all is outside too: nothing is granted on a path nobody could check. ``roots`` are
-    the other places a worktree's own tools may live — the repository's base clone,
+    the other places a worktree's own tools may live - the repository's base clone,
     which the runtime links a worktree's virtualenv to (`worktree.provision.link_venv`),
     so `.venv/bin/python` resolving there is the worktree's own interpreter.
     """
@@ -416,7 +416,7 @@ def _hook_verdict(tool: str, command: str, worktree: str | None) -> Verdict:
         )
     else:
         reason = (
-            f"the harness never refused it — no `permission_denied` line names this call — "
+            f"the harness never refused it - no `permission_denied` line names this call - "
             f"so something the repository runs between permission and execution did. This "
             f"repository registers no readable {tool} `PreToolUse` hook, so the diagnosis is "
             "inferred from the absence of the harness's own refusal"
@@ -467,8 +467,8 @@ def classify(
     ``refusal`` is the provider's evidence about WHO refused the call
     (`providers.base.REFUSAL_FIELDS`). It is judged first and settles the question
     outright: a call the harness never refused got past the profile, the shape rules
-    and the policy, so only the repository's own hook is left. Without it — an older
-    record, a provider that reports no such thing — the command alone is judged,
+    and the policy, so only the repository's own hook is left. Without it - an older
+    record, a provider that reports no such thing - the command alone is judged,
     exactly as before.
 
     Then the shape is judged before the program: `cd x && grep y` names `cd`, which
@@ -817,7 +817,7 @@ def _request_capabilities(task_id: int, new: list[dict], profile: set[str] | Non
 
     The worker does not have to ask twice: the refusal itself is the need, decided by
     this install's policy and, when policy cannot, put in front of the manager
-    (`capability_requests`) — a program, a program named by path, or a tool that is
+    (`capability_requests`) - a program, a program named by path, or a tool that is
     not the shell, on any stack. Not a pattern the profile already has: a grant of
     it would change nothing, so that denial stays the runtime's own to report.
 
@@ -926,7 +926,7 @@ def shape_steer_message(
     The rules alone were what this steer used to say, and workers kept writing the
     same shapes back (issue #121: 30 occurrences, 16 of them `cd <worktree> && …`).
     A worker that has just been refused needs ONE command it can run, with its own
-    directory in it — not three rows about `cd` in general — so `rewrite_for` builds
+    directory in it - not three rows about `cd` in general - so `rewrite_for` builds
     it from the refused text and the worktree, and the rules come after.
     """
     from papaya_agent_runtime.providers.command_rules import command_rules, rewrites_for
@@ -939,7 +939,7 @@ def shape_steer_message(
     ]
     if rewrites:
         said.append(
-            "Run this instead — your shell already starts in your worktree, so there is "
+            "Run this instead - your shell already starts in your worktree, so there is "
             "nothing to `cd` into to reach your own files:\n\n"
             + "\n".join(r.line() for r in rewrites)
         )
@@ -983,7 +983,7 @@ def hook_steer_message(payload: dict) -> str:
 
     A push is the case that matters: the worker finished, ran exactly the command
     its rules prescribe, and the repository stopped it. Retrying is pointless and
-    weakening the hook is forbidden, so the worker is told the one true thing —
+    weakening the hook is forbidden, so the worker is told the one true thing -
     commit, report, and let the runtime push after its own gate.
     """
     from papaya_agent_runtime.providers.command_rules import (
@@ -1005,7 +1005,7 @@ def hook_steer_message(payload: dict) -> str:
         lines.append(RUNTIME_PUSHES_RULE)
     else:
         lines.append(
-            "Do not retry it and do not work around the hook — never with `--no-verify`, "
+            "Do not retry it and do not work around the hook - never with `--no-verify`, "
             "never by editing or disabling it. Either do what the hook asks, or record it "
             "below and carry on."
         )
@@ -1132,7 +1132,7 @@ def shape_counts(days: int | None = None) -> dict[str, dict[str, int]]:
     """`command_shape` denials by repository and SHAPE: ``{repo: {shape: n}}``.
 
     The shape is the rewrite row the command matches, so the tally lines up one for
-    one with what the steer tells a worker to run instead — a shape that keeps its
+    one with what the steer tells a worker to run instead - a shape that keeps its
     count after the rewrite text landed is a rewrite that is not landing.
     """
 

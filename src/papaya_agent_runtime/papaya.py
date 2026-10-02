@@ -1,7 +1,7 @@
 """The Papaya connection: who this runtime is, and what it can write back.
 
 This runtime has no fixed persona. It *is* whichever Papaya agent this machine is
-connected as — the name, handle, workspace, persona, rules and memories all come
+connected as - the name, handle, workspace, persona, rules and memories all come
 from Papaya, not from a document in this repository. `papaya-agent connect` is what
 establishes that: it signs the machine in, pins it to one agent, and installs the
 Claude Code plugin that carries the `papaya` MCP server, the `papaya-connect` skill
@@ -15,14 +15,14 @@ The split this module keeps:
 - **Everything else lives in the harness.** Reading work, posting comments,
   proposing memories and searching the workspace are MCP tool calls the agent makes
   directly; shelling out to re-implement them here would be slower and lossier.
-  That includes which *tracker* a workspace uses — Papaya work items, Linear, Notion
+  That includes which *tracker* a workspace uses - Papaya work items, Linear, Notion
   or anything else. This module knows about the connection, never about the work;
   `papaya_agent_runtime.tracker` records a task's tracked record without caring where
   it lives.
 
 The connection is a *preference*, never a prerequisite. A runtime with no Papaya
 reachable still registers repositories, dispatches workers, reviews diffs and opens
-pull requests — it just cannot see the workspace. Every function here says which of
+pull requests - it just cannot see the workspace. Every function here says which of
 those two worlds it is in rather than raising.
 """
 
@@ -70,7 +70,7 @@ _LINK = re.compile(r"https?://\S+")
 HOME_ENV = "PPY_PAPAYA_HOME"
 #: The Papaya client's own override. The desktop app sets this for the process it
 #: launches, which is why a connection made there is invisible to a shell that did
-#: not inherit it — hence the discovery below.
+#: not inherit it - hence the discovery below.
 CLIENT_HOME_ENV = "PAPAYA_AGENT_HOME"
 #: How long a connect flow may sit waiting for the person to click Approve.
 CONNECT_TIMEOUT = 300
@@ -83,7 +83,7 @@ def _desktop_home() -> Path | None:
 
     The app runs the client as a child process with `PAPAYA_AGENT_HOME` pointed
     here, so the connection is real but invisible to any shell that did not inherit
-    that variable — which is every shell the user opens themselves. Looking here is
+    that variable - which is every shell the user opens themselves. Looking here is
     what makes "connect from the desktop app" and "connect from the CLI" the same
     thing to this runtime.
     """
@@ -126,7 +126,7 @@ def candidate_homes() -> list[Path]:
 def client_home() -> Path:
     """The home this machine's connection actually lives in.
 
-    The one carrying a pinned agent, or the first candidate when none does — so an
+    The one carrying a pinned agent, or the first candidate when none does - so an
     unconnected machine still reports a sensible path to look at.
     """
     found = _best()
@@ -282,7 +282,7 @@ def _identity_in(config: dict) -> tuple[Identity, str] | None:
     `papaya-agent connect` writes the pinned agent under `connect.agent_id` and the
     full entry under `agents[<id>]`. A config carrying agents but no `connect` block
     is an older client, so the single agent entry is used when there is exactly one
-    — guessing between several would act in the workspace as the wrong agent.
+    - guessing between several would act in the workspace as the wrong agent.
     """
     agents = config.get("agents")
     if not isinstance(agents, dict) or not agents:
@@ -335,7 +335,7 @@ def _connection_mark() -> tuple[str, str] | None:
     """What only a completed connect rewrites: the pin's stamp and the token's.
 
     `papaya-agent connect` writes both when it records a connection, and nothing
-    else does — signing in rewrites the config too, so the file changing proves
+    else does - signing in rewrites the config too, so the file changing proves
     nothing. ``None`` when nothing is pinned.
     """
     found = _pinned()
@@ -385,10 +385,10 @@ def status() -> dict:
 
     `state` is the only field a caller should branch on:
 
-    - ``connected`` — pinned to an agent; the workspace is available.
-    - ``signed_in`` — authenticated but no agent pinned; connect finishes it.
-    - ``installed`` — the client is present but this machine is not signed in.
-    - ``absent`` — no client of the person's own; `ppy papaya connect` installs one
+    - ``connected`` - pinned to an agent; the workspace is available.
+    - ``signed_in`` - authenticated but no agent pinned; connect finishes it.
+    - ``installed`` - the client is present but this machine is not signed in.
+    - ``absent`` - no client of the person's own; `ppy papaya connect` installs one
       (:func:`installer` says how) and connects it.
     """
     path = installed()
@@ -562,11 +562,11 @@ def keep_client_current(*, root: str | Path | None = None, run: Any = None) -> d
     Never raises. ``state`` is what happened, ``line`` the one thing to say (None
     when there is nothing worth saying):
 
-    - ``absent`` — no client of their own; connect installs the locked one.
-    - ``unknown`` — the client or the lock would not say its version; left alone.
-    - ``current`` / ``newer`` — nothing to do; a newer client is theirs to keep.
-    - ``updated`` — it was older and was reinstalled at the locked version.
-    - ``failed`` — it was older and the reinstall failed; ``command`` is what to run.
+    - ``absent`` - no client of their own; connect installs the locked one.
+    - ``unknown`` - the client or the lock would not say its version; left alone.
+    - ``current`` / ``newer`` - nothing to do; a newer client is theirs to keep.
+    - ``updated`` - it was older and was reinstalled at the locked version.
+    - ``failed`` - it was older and the reinstall failed; ``command`` is what to run.
 
     An older client silently falls back to the numbered prompts and the HTTP log
     lines at connect (2026-09-24: 0.17.0 on the PATH under a runtime locking 0.18.1),
@@ -878,8 +878,8 @@ def _on_pty(
     The client draws its arrow-key workspace and agent pickers only when both its
     stdin and stdout are terminals; with stdout piped it falls back to numbered
     prompts. The pty is that terminal, and it still passes every byte through here,
-    so what the client said is kept. The person's terminal is raw for the duration —
-    each key goes straight to the client, whose pty echoes it — and is restored on
+    so what the client said is kept. The person's terminal is raw for the duration -
+    each key goes straight to the client, whose pty echoes it - and is restored on
     every way out. ``stdin_fd`` is the terminal to read keys from (a test's pty).
     """
     import codecs
@@ -1025,15 +1025,15 @@ def connect(
     offered several, and ``workspace`` is the name the client connected in, when it
     said. ``reason`` on a failure is what the caller branches on:
 
-    - ``choose`` — the account has several workspaces or agents; ``kind``, ``flag`` and
+    - ``choose`` - the account has several workspaces or agents; ``kind``, ``flag`` and
       ``choices`` say which, so the person picks in conversation and it is re-run with
       that flag;
-    - ``timeout`` — nobody approved in time; ``link`` is the sign-in link when one was
+    - ``timeout`` - nobody approved in time; ``link`` is the sign-in link when one was
       printed;
-    - ``no_installer`` — neither Node (`npx`) nor `uv` is on this machine;
-    - ``no_engineer`` — ``create_engineer`` was asked and the Papaya server could not
+    - ``no_installer`` - neither Node (`npx`) nor `uv` is on this machine;
+    - ``no_engineer`` - ``create_engineer`` was asked and the Papaya server could not
       create one; ``detail`` is the client's line, which says where to create it instead;
-    - ``unavailable``, ``failed``, ``declined`` — as the words say, with ``detail``.
+    - ``unavailable``, ``failed``, ``declined`` - as the words say, with ``detail``.
 
     ``create_engineer`` connects as the person's own engineering agent, creating it when
     they have none. Every result carries ``create_engineer``: whether the flag reached
@@ -1176,7 +1176,7 @@ def _install_line(result: dict) -> str:
 
 
 def _first_link(lines: list[str]) -> str | None:
-    """The sign-in link the client printed for the person — never an API call it logged."""
+    """The sign-in link the client printed for the person - never an API call it logged."""
     for line in lines:
         if "HTTP Request:" in line:
             continue
@@ -1191,7 +1191,7 @@ def context(*, refresh: bool = False) -> dict | None:
 
     Returned verbatim from `papaya-agent context --json`. The harness re-injects
     this on its own through the plugin's hooks, so this exists for the cases the
-    hooks do not cover — a doctor run, a Codex session, a preflight that wants to
+    hooks do not cover - a doctor run, a Codex session, a preflight that wants to
     say who it is before the first hook fires. Returns None when not connected or
     when the client cannot answer.
     """

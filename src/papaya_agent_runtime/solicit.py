@@ -3,8 +3,8 @@
 A runtime that waits to be told which repositories exist is a runtime that sits
 idle. Two halves here, and they are deliberately different in character:
 
-**Discovery is an offer, never a scan.** Candidates come from the forge — the
-organizations the person actually belongs to, through `gh` — not from walking the
+**Discovery is an offer, never a scan.** Candidates come from the forge - the
+organizations the person actually belongs to, through `gh` - not from walking the
 filesystem. A repository on disk that nobody mentioned is not a signal; a repository
 their team pushed to yesterday is. Discovery only ever *proposes*: the registration
 itself stays an explicit act, because registering a repository is what makes it
@@ -12,7 +12,7 @@ something workers may change.
 
 **Onboarding is the expensive part, done once.** A first dispatch into a repository
 nobody has read is a worker guessing at the test command, the lint gate and the
-branch conventions — and guessing in a worktree, slowly, on the clock. So the moment
+branch conventions - and guessing in a worktree, slowly, on the clock. So the moment
 a repository is registered, read it: how it builds, how it tests, what CI will
 actually run, which contracts it carries for agents, whether it has a design system
 worth matching. That goes into the repository's durable notes, where the next brief
@@ -41,13 +41,13 @@ GH = "gh"
 LIST_TIMEOUT = 45
 #: How many repositories to consider per owner before ranking.
 DEFAULT_LIMIT = 50
-#: How many workflow commands to keep per repository — enough to see the gate,
+#: How many workflow commands to keep per repository - enough to see the gate,
 #: not so many that the notes become a copy of the YAML.
 MAX_CI_COMMANDS = 12
 
 
 class SolicitError(RuntimeError):
-    """Discovery could not run — the forge CLI is missing or not signed in."""
+    """Discovery could not run - the forge CLI is missing or not signed in."""
 
 
 # ── Discovery ───────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ class Candidate:
             bits.append(self.language)
         if self.pushed_at:
             bits.append(f"last pushed {self.pushed_at[:10]}")
-        head = " — ".join([bits[0], ", ".join(bits[1:])]) if len(bits) > 1 else bits[0]
+        head = " - ".join([bits[0], ", ".join(bits[1:])]) if len(bits) > 1 else bits[0]
         return f"{head}: {self.description}" if self.description else head
 
 
@@ -143,7 +143,7 @@ def candidates(
 
     Archived repositories never appear: they cannot take a pull request, so offering
     one is an offer to waste a dispatch. Forks are out by default for the same
-    reason — work on a fork usually belongs upstream.
+    reason - work on a fork usually belongs upstream.
     """
     targets = [owner] if owner else owners()
     fields = "name,owner,url,description,pushedAt,primaryLanguage,isArchived,isFork"
@@ -196,7 +196,7 @@ def _without_registered(found: list[Candidate]) -> list[Candidate]:
 
 
 def _rank(found: list[Candidate]) -> list[Candidate]:
-    """Most recently pushed first — the best available proxy for "live"."""
+    """Most recently pushed first - the best available proxy for "live"."""
     return sorted(found, key=lambda c: (c.pushed_at, c.slug), reverse=True)
 
 
@@ -441,8 +441,8 @@ _DULL_DIRECTORIES = {
 #: a ticket, not the README itself.
 MAX_PURPOSE_CHARS = 600
 
-#: Line openings that are README structure — headings, quotes, tables, rules,
-#: comments, badges, images and lists — rather than the prose that says what it is.
+#: Line openings that are README structure - headings, quotes, tables, rules,
+#: comments, badges, images and lists - rather than the prose that says what it is.
 _NOT_PROSE = ("#", ">", "|", "---", "===", "<!--", "[!", "![", "- ", "* ", "+ ", "<")
 
 
@@ -450,7 +450,7 @@ def _readme_paragraph(root: Path) -> str:
     """The first real paragraph of the README, as one line.
 
     "Real" means the first block of prose that is not the title, a badge row, a
-    table of contents entry or a fenced block — the sentence a person wrote to
+    table of contents entry or a fenced block - the sentence a person wrote to
     answer "what is this". Everything structural is skipped rather than cleaned
     up, because a paragraph that needs cleaning up is not the one worth keeping.
     """
@@ -1818,7 +1818,7 @@ def render_notes(report: Onboarding) -> str:
     """The durable repository notes an onboarding produces.
 
     Written for the next brief and the next worker, so it leads with the commands
-    they will need and states plainly what could not be determined — an unknown that
+    they will need and states plainly what could not be determined - an unknown that
     is named gets asked about, an unknown that is silently omitted gets guessed at.
     """
     lines = [f"# {report.name}", ""]
@@ -1881,7 +1881,7 @@ def render_notes(report: Onboarding) -> str:
             lines.append("What the repository says, in its own words:")
             lines.append("")
             lines.extend(
-                f"- {found.role}: `{found.command}` — {found.source}: “{found.quote}”"
+                f"- {found.role}: `{found.command}` - {found.source}: “{found.quote}”"
                 for found in report.gate.declarations
             )
             lines.append("")
@@ -1902,7 +1902,7 @@ def render_notes(report: Onboarding) -> str:
     lines.append("")
     if report.contracts:
         for path in report.contracts:
-            lines.append(f"- `{path}` — read before briefing work here.")
+            lines.append(f"- `{path}` - read before briefing work here.")
     else:
         lines.append("- None stated in the repository.")
     lines.append("")
@@ -1958,7 +1958,7 @@ def write_notes(report: Onboarding) -> Path:
         updated = f"{block}\n{existing}" if existing.strip() else block
     if report.purpose:
         # The seeded template's "What it is" is a placeholder nobody wrote. Filling
-        # it — and only while it is still the untouched placeholder — keeps one
+        # it - and only while it is still the untouched placeholder - keeps one
         # answer in the file; a person's own paragraph there is never replaced.
         updated = updated.replace(PURPOSE_PLACEHOLDER, report.purpose, 1)
     path.write_text(updated, encoding="utf-8")
@@ -2044,7 +2044,7 @@ def ensure(spec: str, *, allow_outside: bool = False) -> Ensured:
     """Make a repository ready to work in, registering it if it is not yet.
 
     Work that names a repository should not stop because nobody has registered it
-    yet — an assignment arriving while nobody is at the machine has no one to ask.
+    yet - an assignment arriving while nobody is at the machine has no one to ask.
     So a repository the *work itself* names, inside an account the person belongs
     to, is registered on demand: they assigned the work, and registering is a
     read-only clone plus a row. The destructive step is pushing, and that is gated
@@ -2087,7 +2087,7 @@ def _ensure(spec: str, *, allow_outside: bool) -> Ensured:
     if match is None and not allow_outside:
         raise NotYours(
             f"{spec!r} is not registered, and it is not in your account or any "
-            "organisation you belong to — so registering it is not mine to assume. "
+            "organisation you belong to - so registering it is not mine to assume. "
             "Give me its URL if you want it taken on."
         )
     url = match.url if match is not None else spec

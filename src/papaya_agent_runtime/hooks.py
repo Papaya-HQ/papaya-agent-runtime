@@ -74,18 +74,18 @@ def handle_hook(event: str, payload: dict[str, Any]) -> dict:
 #: The role, for a session nobody launched through `ppy start`.
 #:
 #: `ppy start` injects the full runtime role into the harness. A session the Papaya
-#: listener started — `claude -p "<work item>"` in this directory — never goes
+#: listener started - `claude -p "<work item>"` in this directory - never goes
 #: through it, and gets only `CLAUDE.md`, which is guidance a model with a job in
 #: hand can reasonably deprioritise. On 2026-09-15 three such sessions did exactly
 #: that: they did the work directly in other repositories and `ppy` was never
 #: involved, so nothing was briefed, reviewed at an exact commit, or delivered
-#: through the gate. This block is short on purpose — the contract is the long
+#: through the gate. This block is short on purpose - the contract is the long
 #: form, and this is the part that has to arrive whether or not it gets read.
 RUNTIME_ROLE = """YOU ARE THE PAPAYA AGENT RUNTIME (working directory: this repo).
 Work here goes through `./bin/ppy`, not through editing repositories yourself:
 register and onboard a repo, write a brief, `ppy dispatch` a worker into an
 isolated worktree, review the exact commit, then `ppy deliver` the pull request.
-If you were handed a work item, that is still how it gets built — the ledger,
+If you were handed a work item, that is still how it gets built - the ledger,
 the review gate and the evidence all depend on it. Read `docs/runtime-contract.md`
 for anything you are unsure of, and `ppy repo list` for the only repositories you
 may work on. Doing the work by hand in another checkout skips every gate this
@@ -107,8 +107,8 @@ def readiness_context() -> str | None:
     """Say, at the top of every session, when this runtime cannot actually work.
 
     The preflight in the contract only runs if the session reads the contract and
-    chooses to. A session started NON-INTERACTIVELY — the Papaya listener running
-    `claude -p "<work item>"` in this directory — arrives with a job to do and does
+    chooses to. A session started NON-INTERACTIVELY - the Papaya listener running
+    `claude -p "<work item>"` in this directory - arrives with a job to do and does
     it, and an unconfigured runtime stays unconfigured while work appears to happen
     somewhere else entirely. That is exactly what happened on 2026-09-15: three jobs
     ran in this working directory, none of them touched `ppy`, and nobody found out
@@ -123,7 +123,7 @@ def readiness_context() -> str | None:
     verdict = readiness.check()
     if verdict.state == readiness.READY:
         return None
-    lines = [f"RUNTIME READINESS: {verdict.state} — {readiness.headline(verdict)}"]
+    lines = [f"RUNTIME READINESS: {verdict.state} - {readiness.headline(verdict)}"]
     for problem in verdict.problems:
         if problem.code == owed.PROBLEM_CODE:
             continue  # the owed-work block says these, with the heartbeat, in one place
@@ -131,10 +131,10 @@ def readiness_context() -> str | None:
             continue  # said by the invitation, once, not as a gap
         who = "yours to fix now" if problem.owner == readiness.RUNTIME else "needs the user"
         mark = "BLOCKS WORK" if problem.blocking else "gap"
-        lines.append(f"- [{mark}, {who}] {problem.summary} — {problem.fix}")
+        lines.append(f"- [{mark}, {who}] {problem.summary} - {problem.fix}")
     if verdict.state == readiness.BLOCKED:
         lines.append(
-            "Nothing here is a gate — you can still answer, read and help as you are. But "
+            "Nothing here is a gate - you can still answer, read and help as you are. But "
             "`ppy dispatch` has nowhere to run until this is closed, so if the work in "
             "front of you needs a worker, close it first. Fix your own items as you go. "
             "For anything needing the user, say so plainly in your reply; if you are "
@@ -175,13 +175,13 @@ def invitation_context(payload: dict[str, Any] | None = None) -> str | None:
         return (
             "RUNNING WITHOUT PAPAYA: this machine has no Papaya connection. Everything local "
             "works as usual; tickets, comments and DMs do not flow. The person was already "
-            "told once at launch, with the offer to set it up — do not repeat it. If they "
+            "told once at launch, with the offer to set it up - do not repeat it. If they "
             f"ask for it: {_CONNECT_STEPS}"
         )
     return (
         "RUNNING WITHOUT PAPAYA: this machine has no Papaya connection. Everything local "
         "works as usual; tickets, comments and DMs do not flow. In your first reply, say "
-        "this line once, verbatim, and offer to set it up for them — never again this "
+        "this line once, verbatim, and offer to set it up for them - never again this "
         f"session, and never block local work on it:\n{line}\n"
         f"If they say yes: {_CONNECT_STEPS}"
     )
@@ -255,7 +255,7 @@ def session_start_context(conn, payload: dict[str, Any] | None = None) -> str | 
     """What a (re)starting manager needs to know before its first reply.
 
     Fires on a fresh session *and* after a compaction, so it carries the durable
-    pickup context: open todos, live work, team health — plus any due assessment,
+    pickup context: open todos, live work, team health - plus any due assessment,
     and, first, whether this runtime can work at all.
     """
     from papaya_agent_runtime import assessments, handoff
@@ -322,13 +322,13 @@ def owed_context(conn) -> str | None:
     lines: list[str] = []
     mine = [item for item in items if not item.serve_owns]
     if mine:
-        lines.append(f"WORKERS WAITING ON YOU ({len(mine)}) — take each up before new work:")
+        lines.append(f"WORKERS WAITING ON YOU ({len(mine)}) - take each up before new work:")
         lines.extend(f"- {item.line()}" for item in mine)
     # The ledger lane: a recorded next step is a queue item, not a diary entry.
     due = lanes.ledger_due(conn)
     if due:
         lines.append(
-            f"NEXT STEPS THAT SAT ({len(due)}) — do each, defer it with a reason "
+            f"NEXT STEPS THAT SAT ({len(due)}) - do each, defer it with a reason "
             "(`ppy todo block <id> --on user:<why>|task:<id>|review`), or drop it:"
         )
         lines.extend(f"- {item.said()}" for item in due)
@@ -357,7 +357,7 @@ def outreach_context(conn) -> str | None:
     if not found:
         return None
     lines = [
-        f"WAITING ON A PERSON ({len(found)}) — each is chased through Papaya (their DM "
+        f"WAITING ON A PERSON ({len(found)}) - each is chased through Papaya (their DM "
         "with this agent, the work item) and the desktop until answered; if an answer "
         "arrived, act on it and close the ask (`ppy todo done <id>`, `ppy capability "
         "approve|deny <id>`):"
@@ -434,7 +434,7 @@ def stop_block_reason(conn, payload: dict[str, Any] | None = None) -> str | None
     These are the places a prompt-level habit becomes a hard rule. With tasks in
     flight or waiting on the manager, an empty todo ledger means "what's next" would
     be lost to the next compaction. And a reply full of "1B", "§5", "rev3" offloads
-    the reader's context onto the user — the harness hands the reply back once, with
+    the reader's context onto the user - the harness hands the reply back once, with
     the labels named, so it goes out described plainly. Both are skipped for
     framework-development sessions (``PPY_DEV``); the ledger gate also when nothing is
     open. All reasons found are returned together so one bounce covers everything.

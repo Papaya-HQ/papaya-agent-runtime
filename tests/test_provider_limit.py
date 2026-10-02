@@ -3,7 +3,7 @@
 2026-09-19: the Claude account hit its session limit at 17:59 UTC. The lane's review
 turns on tasks 150 and 157 ended at once with `You've hit your session limit · resets
 12:30pm (America/Los_Angeles)`, twice each; the lane counted both as misses, wrote a
-person-wait todo, and never looked at either task again — not when the limit reset at
+person-wait todo, and never looked at either task again - not when the limit reset at
 19:30, not when task 150 said `worker_done` at 19:42. A held ticket would have been
 handed back. The limit is a temporary condition with a known end; a give-up is a
 verdict that news must be able to overturn.

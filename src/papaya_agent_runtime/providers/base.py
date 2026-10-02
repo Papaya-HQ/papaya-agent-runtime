@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 #: command alone.
 #:
 #: - ``harness_line``: the harness itself announced the refusal. False means the
-#:   call got past the permission layer and something after it — a repository's own
-#:   tool hook — stopped it.
+#:   call got past the permission layer and something after it - a repository's own
+#:   tool hook - stopped it.
 #: - ``decision_reason_type`` / ``decision_reason`` / ``message``: the harness's own
 #:   words, when it announced one.
 #: - ``tool_result``: the error the tool call came back with, which for a hook block

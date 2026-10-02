@@ -1,7 +1,7 @@
 ---
 name: brief-a-worker
 description: >-
-  The checklist a task brief must satisfy before `ppy dispatch` — the things a
+  The checklist a task brief must satisfy before `ppy dispatch` - the things a
   worker cannot recover once it has started: the Goals, Intent, In scope and Out of
   scope sections that make the brief outcome-led and bounded, the exact starting
   commit, the design reference for UI work, one authoritative verification suite,
@@ -25,7 +25,7 @@ paid for once already.
 Every brief opens with these four sections, under those headings, before any
 mechanism. `ppy brief lint` and `ppy dispatch --brief` refuse an empty or missing one
 under `--strict` and warn otherwise. They exist because a brief can specify steps
-and tests without saying what success is, why it matters, or where to stop — and a
+and tests without saying what success is, why it matters, or where to stop - and a
 worker then optimises the mechanism, adds an adjacent capability, or hardens
 something speculative while the product outcome sits unfinished (issue #77).
 
@@ -47,7 +47,7 @@ something speculative while the product outcome sits unfinished (issue #77).
   worker that knows the difference flags a dead route instead of inventing a second
   source.
 - **In scope.** The concrete capabilities, files or components, changes and
-  verification this task covers — what the worker is authorised to do. End it with a
+  verification this task covers - what the worker is authorised to do. End it with a
   **`Pre-authorised adjacent changes:`** line naming the small packaging or config
   edits the scope implies (a pyproject entry, a lockfile, a generated file, a skill
   link) or `none`; `ppy brief lint` asks for it. Without it those edits land under
@@ -60,7 +60,7 @@ something speculative while the product outcome sits unfinished (issue #77).
 - **Prior attempt** (re-dispatches only). When a closed, failed or cancelled task in
   the same repository carried the same title, the brief owes a `## Prior attempt`
   section: what it did, why it ended, what this attempt does differently. Look it up
-  before you write the brief — `prior_attempts.describe(conn, repo, title)` names the
+  before you write the brief - `prior_attempts.describe(conn, repo, title)` names the
   task, how it ended and the recorded reason; the brief lint
   (`brief_lint.preflight`) flags a re-dispatch without the section, so the worker
   never learns mid-task from a repo note that the last try was rejected.
@@ -83,7 +83,7 @@ brief and the packet the worker receives after a steer.
   with `ppy dispatch --base <previous lease branch>` so the stack parent is recorded and
   `ppy deliver` targets it. The brief still spells it out: `git fetch origin <branch>`
   then `git reset --hard origin/<branch>` and the SHA the worker must see. Never
-  "merge the base in" — a fresh worktree loses nothing and a merge fails when main
+  "merge the base in" - a fresh worktree loses nothing and a merge fails when main
   has moved. Start from `origin/main` only for a bottom layer or an independent change.
   Name the base branch the PR opens against (Claude briefs: the runtime's command
   rules already pin the push to the lease branch; name only the base).
@@ -98,9 +98,9 @@ brief and the packet the worker receives after a steer.
   neither. Four workers proceeded past a gate that never said whether to wait (tasks
   245, 247, 248, 252). A plan that serves a mechanism no Goal asks for, or that
   quietly reaches into an exclusion, is steered before implementation, not reviewed
-  after it — which only happens when the gate is `blocking`.
+  after it - which only happens when the gate is `blocking`.
 - **External facts are cited or marked unknown.** Every external contract the brief
-  depends on — a package release and its API, a route, an envelope field — is stated
+  depends on - a package release and its API, a route, an envelope field - is stated
   with its source (file and line in a local clone, or the release tag) or explicitly
   marked `unknown`. Four tasks lost time to unstated external facts (237, 241, 242,
   243).
@@ -113,11 +113,11 @@ brief and the packet the worker receives after a steer.
 ## 2. UI work: name the design reference
 
 - **Point the worker at the ux-craft skill by absolute path.** Workers are not
-  skill-aware — naming a skill is invisible to them, the file read is the mechanism.
+  skill-aware - naming a skill is invisible to them, the file read is the mechanism.
   Every brief that touches UX, design, or interactions carries the instruction to read
   and apply it before writing any UI: `<repo>/.agents/skills/ux-craft/SKILL.md` when the
   target repo carries its own copy, otherwise the manager's harness copy
-  (`~/.claude/skills/ux-craft/SKILL.md`) — resolved to a real, existing absolute path
+  (`~/.claude/skills/ux-craft/SKILL.md`) - resolved to a real, existing absolute path
   before it goes in the brief. Two iOS chat briefs went out without it and one had to be
   steered mid-flight (2026-08-31).
 - **Ask "which mockup are we designing from?" before dispatching.** Pin the file
@@ -136,7 +136,7 @@ brief and the packet the worker receives after a steer.
   with the mockup's, under the repo's generated-evidence directory.
 - **Capture paths are an acceptance item, not a reporting nicety.** "The final report
   MUST name the capture directory; a delivery without it is incomplete" belongs in the
-  acceptance/gates block, never in the report block — workers treat gates as binding and
+  acceptance/gates block, never in the report block - workers treat gates as binding and
   reporting as prose. Two workers in one day claimed captures without publishing paths:
   a resume round-trip each (2026-09-01, tasks 49 and 52).
 
@@ -147,7 +147,7 @@ brief and the packet the worker receives after a steer.
   freshness, and performance gates; list focused commands only as faster subsets.
   Two of three CI failures on one PR were pins outside the "focused" list.
 - **Collection-only run** (`pytest --collect-only -q`, zero errors) whenever a PR adds
-  or renames test modules — parallel test trees without packages refuse duplicate
+  or renames test modules - parallel test trees without packages refuse duplicate
   basenames, and targeted runs never see it.
 - **Fresh-chain proof for migrations**: the database *reset* target, not the
   ensure target, and the expected single head.
@@ -159,8 +159,8 @@ brief and the packet the worker receives after a steer.
   the dump into the evidence directory with its own commands.
 - **Never name `/private/tmp` as the evidence directory.** The worker's shell cannot reach
   it (21 tasks between 2026-09-01 and 09-07 lost a cycle to that). The runtime's
-  environment block pins `<worktree>/.ppy-evidence/` — inside the worktree, excluded from
-  version control, listed by `ppy review show` — and `ppy repo set --evidence-dir` changes
+  environment block pins `<worktree>/.ppy-evidence/` - inside the worktree, excluded from
+  version control, listed by `ppy review show` - and `ppy repo set --evidence-dir` changes
   it per repo. The brief names the artefacts; the block names the directory.
 - **Environment facts come from `ppy repo set`, not from the brief.** The private database
   stack (`compose_project=task_<n>`, its port, the `make`/`.env` override recipe), the
@@ -178,26 +178,26 @@ brief and the packet the worker receives after a steer.
 Three named sections, the same names every time, so a worker can find the rule instead
 of re-reading the brief for it.
 
-- **Evidence contract.** Which artefacts count as proof and how each is named or sized —
+- **Evidence contract.** Which artefacts count as proof and how each is named or sized -
   one line per artefact. The directory is the environment block's `.ppy-evidence/` inside
   the worktree (the worker creates it); do not name another. "Capture screenshots" with no destination produced two receipt-less
   deliveries in one window (2026-09-01).
 - **Standing gate policy.** Which single gate is authoritative; what a flaky gate means
-  (re-run once, then report the flake with both outputs — never loosen it, never skip
+  (re-run once, then report the flake with both outputs - never loosen it, never skip
   it, never call it unrelated without checking the base branch's own runs); and when a
-  failing gate stops being the worker's problem — after two identical failures with a
+  failing gate stops being the worker's problem - after two identical failures with a
   fix in between it is the user's budget-versus-infrastructure decision, so the worker
   files it under "Flagged, not done" instead of trying a third fix. Three workers stalled
   on a gate nobody owned and two gate cycles were lost for want of this block
   (window ending 2026-09-01). The block also says: **run the gate in the foreground and
-  wait for it; never background it, and never end the session with it still running** —
+  wait for it; never background it, and never end the session with it still running** -
   a backgrounded command dies with the session. A long gate is the worker's to finish;
   the review re-checks it and does not run it first. PAP-213 lost a worker session and
   then two review turns to a suite left running past the end of a turn (2026-09-16).
 - **Scope-change protocol.** What the worker does when the brief turns out to be wrong
   or an out-of-scope dependency turns up: stop at the checkpoint, and under "Flagged,
   not done" state the conflict, its effect on the Goals and on the timeline, and the
-  smallest correct alternative — then wait. Never widen scope silently, never implement
+  smallest correct alternative - then wait. Never widen scope silently, never implement
   something Out of scope excludes, never invent a substitute requirement. The manager
   decides under its existing authority rules (routine: decide; scope expansion or a
   product call: the user). A worker resolving a wrong brief on its own cost one
@@ -215,7 +215,7 @@ of re-reading the brief for it.
   never removes the path that mints a fresh one; and one probe of the real tool's
   output shape behind every capacity or state read, never only a fake. Twenty-nine of 89 reviews requested changes in the window ending
   2026-09-11 and 14 workers said the probes belonged in the brief: each late round cost
-  a stop, a resume and a full gate. A second review round means a row was missing —
+  a stop, a resume and a full gate. A second review round means a row was missing -
   name it and add it to `.ppy/briefs/_templates/defect-brief.md` the same day.
 - **Continuations are deltas.** A steer or continuation names what changed since the
   last packet and nothing else; a full packet is re-issued only when the scope is
@@ -223,15 +223,15 @@ of re-reading the brief for it.
   Seven reflections (tasks 175, 176, 184, 196) lost time reconciling serial
   superseding packets.
 
-Then **one closeout checklist at the end of the brief** — every acceptance item, gate and
-receipt in a single list — instead of the same constraints repeated inside each section.
+Then **one closeout checklist at the end of the brief** - every acceptance item, gate and
+receipt in a single list - instead of the same constraints repeated inside each section.
 Three separate workers asked for exactly this (2026-08-31); duplicated constraints drift
 against each other and the worker has to guess which copy is current.
 
 ## 5. Semantics the worker must be right about
 
 - **Concurrency / back-off / retry: a state-transition truth table.** Rows are
-  states, columns are events, cells are the next state and side effect — especially
+  states, columns are events, cells are the next state and side effect - especially
   "own streak" versus "any peer's success". Prose here produced a back-off that
   reset on anyone's success.
 - **Contract or freeze documents: an expected-discrepancy matrix.** Plan claim →
@@ -254,15 +254,15 @@ against each other and the worker has to guess which copy is current.
   requirement. A round-trip fix moved a CI number by 3 ms.
 - **Escalation is built in**: after two identical gate failures with a code fix in
   between, the budget-versus-infrastructure decision goes to the user with the
-  evidence — not a third code round.
+  evidence - not a third code round.
 
 ## 6a. Only name commands the worker can run
 
 A Claude worker runs under `claude.allowed_tools` (`ppy config claude --show`), and a
 command it refuses becomes a denial and a "Flagged, not done" entry. The brief lint's
 allowlist check (`brief_lint.preflight` with `brief_lint.claude_allowlist("claude")`)
-reads a Claude brief's literal commands — fenced blocks, and inline code that starts
-with a shell command — and names each one the allowlist would deny, with the
+reads a Claude brief's literal commands - fenced blocks, and inline code that starts
+with a shell command - and names each one the allowlist would deny, with the
 substitute where one is known: `chmod` → `git update-index --chmod=+x <file>` then
 `git checkout-index -f -- <file>`; `unzip` → `python3 -m zipfile -e <archive> <dir>`;
 `rm` → `git rm` / `git clean -f`. Rewrite the command, or do that step yourself before

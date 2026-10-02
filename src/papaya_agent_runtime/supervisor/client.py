@@ -95,7 +95,7 @@ class Liveness:
         if self.verdict == "alive":
             return f"task {task_id}: worker alive (pid {self.pid})"
         if self.verdict == "finished":
-            return f"task {task_id}: worker already finished — status {self.task_status}"
+            return f"task {task_id}: worker already finished - status {self.task_status}"
         return (
             f"INCIDENT: task {task_id}: no live worker process seen after the resume (task "
             f"status {self.task_status}, runner {self.runner_status or 'none'}); run "

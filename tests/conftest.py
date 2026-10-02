@@ -150,7 +150,7 @@ def _fixture_repos_are_their_own_forge(request, monkeypatch):
     ``ppy repo add`` refuses a path with no forge remote, because a repo with
     nowhere to open a pull request is a delivery that strands. Temp git repos on
     disk have no origin at all, so every test that registers one would have to
-    invent a GitHub URL — and then delivery would try to push to github.com. So
+    invent a GitHub URL - and then delivery would try to push to github.com. So
     the fixtures register the source path as their own forge: no second remote is
     created, and push/PR resolution stays local and offline.
 
@@ -174,7 +174,7 @@ def _hermetic_dispatch_defaults_to_fake(request, monkeypatch):
     """A hermetic dispatch that names no provider means the fake one.
 
     In production an unnamed provider resolves to the configured worker ceiling
-    (``config.default_worker_provider``) and is never ``fake`` — defaulting to
+    (``config.default_worker_provider``) and is never ``fake`` - defaulting to
     ``fake`` is what pushed a stub branch to a live remote on 2026-09-04 (issue
     #49). The hermetic suite has no config and wants the deterministic local
     worker, so the default is substituted here, in the tests, rather than left as
@@ -207,7 +207,7 @@ def _isolated_capability_record(tmp_path, monkeypatch):
     """Keep the capability gate off the developer's machine-local probe record.
 
     ``.ppy/provider-capabilities.json`` overrides the tracked matrix per provider,
-    and ``PPY_HOME`` falls back to the cwd — so on a developer machine that has run
+    and ``PPY_HOME`` falls back to the cwd - so on a developer machine that has run
     `make probe`, any test not requesting ``ppy_home`` would read that real record
     and assert against whatever this laptop happens to prove. Point the override
     at an empty temp home so the hermetic suite sees only the tracked matrix.
@@ -222,8 +222,8 @@ def _isolated_capability_record(tmp_path, monkeypatch):
 def _no_real_papaya_connection(tmp_path_factory, monkeypatch):
     """Keep the hermetic suite off this machine's real Papaya connection.
 
-    The runtime discovers a connection wherever one was made — a terminal's
-    `~/.papaya-agent`, or the desktop app's own directory — which means that
+    The runtime discovers a connection wherever one was made - a terminal's
+    `~/.papaya-agent`, or the desktop app's own directory - which means that
     without this, every test reads whichever agent the developer happens to be
     connected as. Three pull-request-body tests started asserting against a real
     handle the moment discovery landed. Point it at an empty directory so a test
@@ -337,7 +337,7 @@ def _no_real_self_reports(monkeypatch):
     """Keep the hermetic suite from opening issues on the runtime's real repository.
 
     `ppy serve` opens a GitHub issue for every deficiency it records, through `gh`,
-    on the origin of this checkout — which, in a developer's clone, is the runtime's
+    on the origin of this checkout - which, in a developer's clone, is the runtime's
     real repository. A test that trips a signal must not file it there. So `gh`
     answers every call with a failure and the origin reads as not GitHub; a test of
     self-reporting hands its `Reporter` a fake `gh` and an origin of its own.
@@ -372,8 +372,8 @@ def _no_supervisor_outlives_its_test(monkeypatch):
     """Stop every supervisor a test created before the test's environment is undone.
 
     A supervisor's threads find their database through ``PPY_HOME`` each time they
-    touch it. A test that returned while its worker was still running — routine on a
-    two-core CI runner — left those threads to finish against the *next* test's
+    touch it. A test that returned while its worker was still running - routine on a
+    two-core CI runner - left those threads to finish against the *next* test's
     instance, where task ids restart at 1: an old supervisor resumed, deferred or
     released the new test's work, and the new test timed out waiting for a state
     that had already been taken from it (task 259). Requesting ``monkeypatch`` here
@@ -442,7 +442,7 @@ def source_repo(tmp_path):
 #: the instant its predicate is true, so a generous deadline costs nothing on a
 #: green run and only makes a genuine failure slower to report. On a two-core CI
 #: runner the same suite takes roughly twice as long as it does locally, which is
-#: how three unrelated supervisor tests failed on the first CI run — different ones
+#: how three unrelated supervisor tests failed on the first CI run - different ones
 #: on each Python version, none of them actually broken. One knob scales every
 #: deadline rather than fifteen hand-tuned numbers drifting apart.
 TIMEOUT_SCALE = float(os.environ.get("PPY_TEST_TIMEOUT_SCALE", "1") or "1")
@@ -465,7 +465,7 @@ def wait_until(predicate, timeout: float, *, what: str = "condition", interval: 
     """Poll ``predicate`` until it is truthy and return its value, or fail explaining why.
 
     A deadline that expires on a worker lifecycle test used to say only "timed out
-    waiting" — nothing about whether the worker spawned, what it last said, or what
+    waiting" - nothing about whether the worker spawned, what it last said, or what
     the supervisor's threads were doing. Now it writes all of that to
     :data:`EVIDENCE_DIR` and puts it in the failure, so the next flake explains itself.
     """
@@ -483,7 +483,7 @@ def wait_until(predicate, timeout: float, *, what: str = "condition", interval: 
 def timed_out(what: str) -> AssertionError:
     """The failure for an expired wait: the state dump, written and in the message.
 
-    For a poll that cannot use :func:`wait_until` — an async one must await its sleep,
+    For a poll that cannot use :func:`wait_until` - an async one must await its sleep,
     or it stalls the event loop it is waiting on.
     """
     report = state_dump(what)

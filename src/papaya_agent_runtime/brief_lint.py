@@ -12,7 +12,7 @@ A *defect* brief (one with a Hypotheses/Cause section, or one that speaks of a
 defect, a FAIL, or a symptom) gets every check:
 
 1. a Symptom section, before any Hypothesis/Cause/Mechanism/Diagnosis section;
-2. a probe on every hypothesis — a sub-bullet or trailing clause that starts with
+2. a probe on every hypothesis - a sub-bullet or trailing clause that starts with
    ``Probe:``, ``Measure:``, ``Reproduce:`` or ``Check:``;
 3. an Expected discrepancies table with at least one row per hypothesis;
 4. self-consistency: a scope rule saying never/no/must not and a later
@@ -26,17 +26,17 @@ Intent, In scope, Out of scope. A brief can specify steps and tests without
 saying what success is, why it matters, or where to stop; a worker then
 optimises a mechanism or hardens something adjacent while the product outcome
 sits unfinished. Check 6 asks only that each section exists and says something
-— structure, not semantic quality. The same four sections are what
+- structure, not semantic quality. The same four sections are what
 :func:`standing_scope` carries into every resume and steer packet, so a
 continuation is self-contained and cannot silently drop a boundary.
 
 Three more contract checks apply to every brief (#94, item 5). ``## In scope``
 names its pre-authorised adjacent changes, so a pyproject entry or a lockfile
 does not land under "Outside scope, required to build". A plan-note section
-says whether the worker waits after posting — four workers proceeded past a
+says whether the worker waits after posting - four workers proceeded past a
 gate that never said (tasks 245, 247, 248, 252). A release or version-bump
 brief that lists files carries the ``git show --stat`` command the list came
-from — three release briefs repeated the same hand-transcribed list (tasks 235,
+from - three release briefs repeated the same hand-transcribed list (tasks 235,
 239, 246).
 
 Two checks need more than the text (#94, item 4), so they sit beside
@@ -62,7 +62,7 @@ _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 #: "Probe:" (or the other three) at the start of a line or of a trailing clause.
 _PROBE = re.compile(
-    r"(?:^|[—–;(]\s*|\.\s+|\s-\s+)[*_]{0,2}(?:probe|measure|reproduce|check)[*_]{0,2}\s*:",
+    r"(?:^|[\u2014–;(]\s*|\.\s+|\s-\s+)[*_]{0,2}(?:probe|measure|reproduce|check)[*_]{0,2}\s*:",
     re.IGNORECASE,
 )
 _NEGATION = re.compile(r"\b(?:never|no|must not)\b", re.IGNORECASE)
@@ -170,8 +170,8 @@ ALLOWLIST_SUBSTITUTES: dict[str, str] = {
     "mv": "`git mv <from> <to>`",
     "curl": "ask the manager to fetch it, or `python3 -c` with urllib",
     "wget": "ask the manager to fetch it, or `python3 -c` with urllib",
-    "export": "nothing — say in the report which variable the command needed",
-    "sudo": "nothing — the worker has no privilege escalation; flag it",
+    "export": "nothing - say in the report which variable the command needed",
+    "sudo": "nothing - the worker has no privilege escalation; flag it",
 }
 
 #: The outcome sections every brief carries, with what each one is for. The
@@ -338,7 +338,7 @@ def _check_symptom_first(lines: list[_Line]) -> list[Finding]:
         return [
             Finding(
                 at,
-                "no Symptom section — open a defect brief with `## Symptom`: the observed "
+                "no Symptom section - open a defect brief with `## Symptom`: the observed "
                 "behaviour and the persisted evidence to read, before any cause",
             )
         ]
@@ -346,7 +346,7 @@ def _check_symptom_first(lines: list[_Line]) -> list[Finding]:
         return [
             Finding(
                 cause.number,
-                f"`{_own_heading(cause)}` comes before `Symptom` (line {symptom.number}) — "
+                f"`{_own_heading(cause)}` comes before `Symptom` (line {symptom.number}) - "
                 "state what was observed before what might explain it",
             )
         ]
@@ -357,7 +357,7 @@ def _check_probes(hypotheses: list[tuple[_Line, list[_Line]]]) -> list[Finding]:
     return [
         Finding(
             head.number,
-            "hypothesis has no probe — add a sub-bullet or trailing clause starting "
+            "hypothesis has no probe - add a sub-bullet or trailing clause starting "
             '"Probe:", "Measure:", "Reproduce:" or "Check:" naming the query, log filter, '
             "or test that would confirm or refute it",
         )
@@ -376,7 +376,7 @@ def _check_discrepancies(
         return [
             Finding(
                 cause.number if cause is not None else 1,
-                "no Expected discrepancies table — add `## Expected discrepancies` with one "
+                "no Expected discrepancies table - add `## Expected discrepancies` with one "
                 f"row per hypothesis ({wanted} here): the claim, and what to do if the probe "
                 "comes back negative",
             )
@@ -385,7 +385,7 @@ def _check_discrepancies(
         return [
             Finding(
                 heading.number,
-                f"Expected discrepancies has {rows} row(s) for {wanted} hypothesis(es) — "
+                f"Expected discrepancies has {rows} row(s) for {wanted} hypothesis(es) - "
                 "every hypothesis needs a row saying what to do when it is wrong",
             )
         ]
@@ -430,7 +430,7 @@ def _check_evidence_paths(lines: list[_Line]) -> list[Finding]:
             findings.append(
                 Finding(
                     line.number,
-                    f"evidence points at {path} — a temp directory does not survive the "
+                    f"evidence points at {path} - a temp directory does not survive the "
                     "session; put evidence inside the worktree and name that path",
                 )
             )
@@ -515,7 +515,7 @@ def standing_scope(text: str) -> str | None:
     A continuation replaces the worker's instructions for the turn; without the
     brief's boundaries repeated, a replacement packet silently erases them. The
     four sections are quoted verbatim, framed as unchanged unless the message
-    itself says otherwise — a deliberate scope change is then something the
+    itself says otherwise - a deliberate scope change is then something the
     message states, never something it drops. ``None`` when the brief has none
     of the sections, so a brief from before this rule is passed through as-is.
     """
@@ -539,7 +539,7 @@ def literal_commands(text: str) -> list[tuple[int, str]]:
     Fenced blocks are read line by line; a ``$`` prompt is stripped. Inline code
     counts only when its first word is a shell command, so identifiers and file
     names never register. Compound lines are split on ``&&``, ``||``, ``;`` and
-    ``|`` and each piece is a command — the allowlist matches one at a time.
+    ``|`` and each piece is a command - the allowlist matches one at a time.
     """
     found: list[tuple[int, str]] = []
     in_fence = False
@@ -597,7 +597,7 @@ def allowlist_findings(text: str, allowed: list[str]) -> list[Finding]:
     """Commands the brief names that a Claude worker's allowlist will deny.
 
     A command the allowlist refuses becomes a denial and a "Flagged, not done"
-    entry — friction the brief could have avoided (``unzip`` and ``chmod`` in
+    entry - friction the brief could have avoided (``unzip`` and ``chmod`` in
     Middle Manager's issue #79). Each finding names the allowed substitute when
     one is known.
     """
@@ -620,7 +620,7 @@ def allowlist_findings(text: str, allowed: list[str]) -> list[Finding]:
         findings.append(
             Finding(
                 number,
-                f"claude allowlist: `{command}` — `{head}` is not covered by the worker's "
+                f"claude allowlist: `{command}` - `{head}` is not covered by the worker's "
                 f"allowed tools ({', '.join(f'`{p}`' for p in prefixes) or 'none'}), so the "
                 f'worker gets a denial and a "Flagged, not done" entry{advice}',
             )
@@ -661,7 +661,7 @@ def prior_attempt_findings(text: str, prior: str | None) -> list[Finding]:
     return [
         Finding(
             1,
-            f"no Prior attempt section — this objective was tried before ({prior}). Add "
+            f"no Prior attempt section - this objective was tried before ({prior}). Add "
             "`## Prior attempt`: what it did, why it ended, and what this attempt does "
             "differently, so the worker is not told mid-task by a repo note",
         )
@@ -680,7 +680,7 @@ def _check_pre_authorised(lines: list[_Line]) -> list[Finding]:
     return [
         Finding(
             in_scope.number if in_scope is not None else 1,
-            "no pre-authorised adjacent changes line — under `## In scope`, add "
+            "no pre-authorised adjacent changes line - under `## In scope`, add "
             "`Pre-authorised adjacent changes:` naming the small packaging or config edits "
             "this scope implies (a pyproject entry, a lockfile, a generated file) or `none`, "
             'so they do not land under "Outside scope, required to build"',
@@ -701,7 +701,7 @@ def _check_plan_note_blocking(lines: list[_Line]) -> list[Finding]:
         findings.append(
             Finding(
                 line.number,
-                "plan note does not say whether to block — add `blocking: stop after posting "
+                "plan note does not say whether to block - add `blocking: stop after posting "
                 "and wait for the manager's reply` or `non-blocking: post it, then proceed`; "
                 "a worker with no channel to wait on proceeds",
             )
@@ -729,7 +729,7 @@ def _check_release_file_list(lines: list[_Line]) -> list[Finding]:
     return [
         Finding(
             listed[0].number,
-            "release brief lists files with no `git show --stat` — paste the file list from "
+            "release brief lists files with no `git show --stat` - paste the file list from "
             "`git show --stat <previous release commit>` (the release commit, not the merge) "
             "with that command, never transcribed by hand",
         )
@@ -745,7 +745,7 @@ def _check_outcome_sections(lines: list[_Line]) -> list[Finding]:
             findings.append(
                 Finding(
                     1,
-                    f"no {name} section — add `## {name}`: {purpose}. A worker with no "
+                    f"no {name} section - add `## {name}`: {purpose}. A worker with no "
                     f"{name.lower()} optimises the mechanism instead of the outcome",
                 )
             )
@@ -755,7 +755,7 @@ def _check_outcome_sections(lines: list[_Line]) -> list[Finding]:
             findings.append(
                 Finding(
                     heading.number,
-                    f"`## {name}` is empty — say {purpose}",
+                    f"`## {name}` is empty - say {purpose}",
                 )
             )
     return findings

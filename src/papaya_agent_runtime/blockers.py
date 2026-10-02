@@ -2,7 +2,7 @@
 
 Readiness answers "can this runtime take work?". Some of its answers are the
 runtime's own to close (a missing config, task 267's drifted defaults); the rest
-need a person at this machine — `gh` signed out, Docker stopped, the disk full. The
+need a person at this machine - `gh` signed out, Docker stopped, the disk full. The
 second kind is a *blocker*, and a blocker nobody hears about is the failure this
 module exists for: delivery used to fail on the first pull request with a gh error
 nobody saw.
@@ -14,13 +14,13 @@ decides when a person is told:
 - when a blocker **appears**;
 - again only when its **steps change** (a new device code, a different fix) or it
   has stood for :data:`REPEAT_AFTER`;
-- and **once** when it clears — only if it was ever reported, since "fixed" is not
+- and **once** when it clears - only if it was ever reported, since "fixed" is not
   news to somebody who never heard it was broken.
 
 It reaches them three ways, all private to them: the agent's DM with the person who
 connected this machine (`serve`), the supervised protocol's `runtime.blockers` on
 `hello` and every `status` (the desktop app's "Setup needed on this Mac" card), and
-— when a job is refused because of one — a single neutral comment on the ticket,
+- when a job is refused because of one - a single neutral comment on the ticket,
 :data:`TICKET_COMMENT`, that never names the blocker.
 
 Nothing private leaves in any of them. A blocker's public form is its code, a title,
@@ -466,7 +466,7 @@ def set_push_refused(
     fp = hashlib.sha256(f"{PUSH_REFUSED}:{task_id}:{branch}".encode()).hexdigest()[:16]
     title = f"task {task_id}'s finished branch `{branch}` could not be pushed to {repo}"
     steps = [
-        f"Read why: `ppy task show {task_id}` — the refusal is recorded in the "
+        f"Read why: `ppy task show {task_id}` - the refusal is recorded in the "
         "remote's or the hook's own words",
         f"Fix what it asks for in the worktree, then `ppy task push {task_id}`",
         "Never `--no-verify` and never force: the hook is the repository's, not the "

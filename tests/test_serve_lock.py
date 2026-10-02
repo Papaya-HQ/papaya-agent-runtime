@@ -5,7 +5,7 @@ desktop's, connected as @shanes_eng_assistant, over one state database: the seco
 adopted the first's supervisor, both listened, and for seven hours the machine worked
 every ticket twice and handed tickets over to itself. These pin the rule that ended
 it: a serve holds ``run/serve.lock`` for its whole life, and the newest start retires
-whichever serve holds it — asked first, then SIGTERM, then SIGKILL — or does not run.
+whichever serve holds it - asked first, then SIGTERM, then SIGKILL - or does not run.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def _env() -> dict[str, str]:
 # A serve reduced to its lock: take it the way `serve` does, say so, hold it. `mode`
 # is how it ends: `hold` (until SIGTERM, which it handles as serve does), `deaf`
 # (ignores SIGTERM), `grandchild` (starts a long-lived child that could inherit the
-# lock, prints its pid, then is SIGKILLed), or an exit path — `exit`, `raise`,
+# lock, prints its pid, then is SIGKILLed), or an exit path - `exit`, `raise`,
 # `default-term`, `sigkill`.
 _HOLDER = r"""
 import os, signal, sys, time
@@ -525,7 +525,7 @@ def test_a_long_lived_child_of_the_holder_does_not_keep_the_lock(ppy_home, tmp_p
 
 
 def _write_lock_file(home: str, pid: int, started: str, taken_at: float) -> None:
-    """What a holder writes into ``serve.lock`` — or what a crashed or reused one left there."""
+    """What a holder writes into ``serve.lock`` - or what a crashed or reused one left there."""
     Path(takeover.serve_lock_path(home)).write_text(f"{pid}\n{started}\n{taken_at:.6f}\n")
 
 

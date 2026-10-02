@@ -3,7 +3,7 @@
 ## The tag is the version
 
 This runtime is always run from a checkout. There is no wheel, no `pip install`,
-nothing that could stamp a version into the package as it was built — so a literal
+nothing that could stamp a version into the package as it was built - so a literal
 version in a file would have to be bumped by hand, and would name the same build on
 every machine whenever nobody did. That is exactly what happened: `__version__` and
 `pyproject.toml` both said `0.0.0` for the whole of the project's life, and Papaya
@@ -35,7 +35,7 @@ All of these are valid [PEP 440](https://peps.python.org/pep-0440/) versions, so
 anything reading one can parse it. Only an exact tag on a clean tree gets to be a
 bare `X.Y.Z`: `0.1.3+dirty` would claim to *be* release 0.1.3, which is the one thing
 a modified checkout is not, so the commit and the dirt go in the local segment
-instead. "Modified" is git's own meaning — a tracked file differs from HEAD — so a
+instead. "Modified" is git's own meaning - a tracked file differs from HEAD - so a
 scratch directory beside the source does not change which build you are running.
 
 Reading the version starts a `git describe`, and starting anything can fail. It never
@@ -52,7 +52,7 @@ to `main`. It finds the newest `v<major>.<minor>.<patch>` tag, bumps the patch b
 creates that annotated tag on the pushed commit, and publishes a GitHub release with
 auto-generated notes. A repository that has never been released starts at `v0.1.0`.
 
-Nobody has to remember to bump anything, and nothing has to be merged to release —
+Nobody has to remember to bump anything, and nothing has to be merged to release -
 which matters here, because the `main` ruleset requires a pull request and a green
 `ci-ok` with no bypass actors, so no workflow could commit a version bump even if we
 wanted one. A tag, a workflow may push.
@@ -61,7 +61,7 @@ It is idempotent. The computation lives in the package, not in the workflow's sh
 
     python3 -m papaya_agent_runtime.version --next
 
-prints the tag to create, or an empty line when HEAD already carries a release tag —
+prints the tag to create, or an empty line when HEAD already carries a release tag -
 so a re-run, or a commit somebody tagged by hand, tags nothing and exits green. The
 sort is in Python for a reason: `git tag` orders lexically, which puts `v0.1.10`
 before `v0.1.9`, and a release process that got that wrong would go backwards. That

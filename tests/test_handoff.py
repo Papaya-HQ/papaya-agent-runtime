@@ -139,8 +139,8 @@ def test_snapshot_goes_to_file_and_prompt_names_it(ppy_home, no_supervisor, monk
     )
     assert f"- Waiting (todo ledger): #{c} confirm the endpoint (waiting on user)" in snapshot
     assert f'Run {ids["run_id"]} "ship the widget"' in snapshot
-    assert '"widget docs" (demo) — blocked · question: "v1 or v2 endpoint?"' in snapshot
-    assert '"build widget" (demo) — in_progress · phase implement ("wiring it up")' in snapshot
+    assert '"widget docs" (demo) - blocked · question: "v1 or v2 endpoint?"' in snapshot
+    assert '"build widget" (demo) - in_progress · phase implement ("wiring it up")' in snapshot
     assert "## Known risks at handoff" in snapshot
     assert "No next step is recorded" not in snapshot
 

@@ -33,7 +33,7 @@ from papaya_agent_runtime.worktree import Lease, LeaseError, LeaseManager
 def _advisory_failed(conn, kind: str, exc: Exception) -> None:
     """Record that an advisory could not be computed, instead of hiding it.
 
-    A dispatch advisory is a suggestion, so it must never fail a dispatch — but a
+    A dispatch advisory is a suggestion, so it must never fail a dispatch - but a
     silent `except` also means a crash inside one looks exactly like "nothing to
     report". That is how a migration matcher that raised on every call shipped
     unnoticed: every advisory returned None and every dispatch looked clean. The
@@ -48,8 +48,8 @@ def _advisory_failed(conn, kind: str, exc: Exception) -> None:
                 "error": f"{type(exc).__name__}: {exc}",
                 "summary": (
                     f"the {kind} advisory could not be computed for this dispatch "
-                    f"({type(exc).__name__}: {exc}). The dispatch went ahead — an advisory "
-                    "is a suggestion — but nothing was checked, so treat a clean dispatch "
+                    f"({type(exc).__name__}: {exc}). The dispatch went ahead - an advisory "
+                    "is a suggestion - but nothing was checked, so treat a clean dispatch "
                     "as unknown rather than clear until this is fixed."
                 ),
             },
@@ -70,8 +70,8 @@ class _Execution:
     overwrote the first, and a finalizer for an old session released whatever
     slot the task held *now*. Every path that gives a slot back names the
     execution it is giving back, so an old finalizer can never release a newer
-    execution's slot, and an execution knows its task from admission — before
-    any branch sync, status write, or runner creation — so a duplicate resume
+    execution's slot, and an execution knows its task from admission - before
+    any branch sync, status write, or runner creation - so a duplicate resume
     is refused with no side effects at all.
     """
 
@@ -256,14 +256,14 @@ def _start_from_branch(
     """Move a fresh worktree onto ``branch`` and return the resulting HEAD.
 
     The branch is looked for in three places, in order: on ``remote`` (the repo's
-    forge — for a repo registered from a local path, ``origin`` is that local clone
+    forge - for a repo registered from a local path, ``origin`` is that local clone
     and the branch a stack is built on lives on the forge instead); as a local ref
     of the base clone, which every lease worktree shares; and in ``local_source``,
     the lease worktree of the task being stacked on, fetched as a peer.
 
     The last two are what let a layer start from a parent that has not pushed
     yet. On 2026-09-05 (issue #57) ``--stack-on`` was refused two minutes after
-    the parent was dispatched, because only the forge was ever asked — while the
+    the parent was dispatched, because only the forge was ever asked - while the
     parent's lease branch sat in the base clone the whole time. Which tip the
     child starts from is recorded as its ``base_sha`` either way; the push comes
     later, with the parent's own delivery.
@@ -331,7 +331,7 @@ class Supervisor:
         # reappears after its stored answer is escalated instead of looping.
         self._auto_answered: dict[int, set[str]] = {}
         # Every thread this supervisor started, so ``close`` can wait for all of
-        # them — ``_threads`` keeps only the latest per task.
+        # them - ``_threads`` keeps only the latest per task.
         self._started: list[threading.Thread] = []
         self._closed = False
 
@@ -542,7 +542,7 @@ class Supervisor:
             allowed, source = effective_allowed_tools()
             if not allowed:
                 raise SupervisorError(
-                    f"claude worker would have no tools at all ({source} is empty) — it could "
+                    f"claude worker would have no tools at all ({source} is empty) - it could "
                     "not run a command, commit, or report progress. Restore the profile with "
                     "`ppy config claude --reset`, or add a pattern with "
                     "`ppy config claude --allow 'Bash(git:*)'`."
@@ -574,8 +574,8 @@ class Supervisor:
                 trust=trust,
             )
         except BaseException:
-            # Whatever failed — the lease, the branch, provisioning, the adapter's
-            # argv, the thread — this execution is over and its slot goes back.
+            # Whatever failed - the lease, the branch, provisioning, the adapter's
+            # argv, the thread - this execution is over and its slot goes back.
             self._release(execution)
             raise
 
@@ -824,8 +824,8 @@ class Supervisor:
 
         standalone.skip_if_local(conn, task_id, standalone.DISPATCHED)
 
-        # Give the worktree whatever head start this repo has configured — a reused
-        # virtualenv from the base clone, a provision command — before the worker
+        # Give the worktree whatever head start this repo has configured - a reused
+        # virtualenv from the base clone, a provision command - before the worker
         # starts. Opt-in per repo; a repo with nothing configured does nothing here,
         # and a hook that fails costs the head start, never the dispatch.
         from papaya_agent_runtime.worktree.provision import provision_worktree
@@ -839,7 +839,7 @@ class Supervisor:
         )
 
         # Point the worker at this repo's shared memory (learnings + progress log) so
-        # it uses and updates it — which is also how the manager follows progress
+        # it uses and updates it - which is also how the manager follows progress
         # without interrupting. Seeding is idempotent; files already exist from add.
         from papaya_agent_runtime import memory
 
@@ -1005,7 +1005,7 @@ class Supervisor:
         scheduler. Persisted starting/running rows from an earlier supervisor
         are counted conservatively until reconciliation marks them otherwise.
         A resume names its task at admission, so a second resume of the same
-        task — pending or live — is refused here, before any side effect.
+        task - pending or live - is refused here, before any side effect.
 
         The two lanes are counted apart. ``limit`` bounds ``lane``: a ticket
         execution counts ticket executions and every persisted row this process
@@ -1089,8 +1089,8 @@ class Supervisor:
     ) -> dict:
         """Resume a task's provider session (blocked-worker resume / checkpoint steer).
 
-        ``continuation`` names what this resume delivers — the queued steer
-        events, or the stored answer — and is written into the ``resumed`` event
+        ``continuation`` names what this resume delivers - the queued steer
+        events, or the stored answer - and is written into the ``resumed`` event
         before the runner thread starts. That event is the durable proof of
         consumption (issue #71): a steer or answer counts as delivered when, and
         only when, a launch carrying it was recorded. ``by`` says who asked
@@ -1183,7 +1183,7 @@ class Supervisor:
         # A cascade may have rewritten this task's branch while it was stopped.
         # Resuming a worker into a worktree that is behind its own remote ends in
         # a force-push over the cascade, so the worktree is moved onto the remote
-        # first — or the resume is refused when both sides hold commits.
+        # first - or the resume is refused when both sides hold commits.
         from papaya_agent_runtime import stacks
 
         try:
@@ -1192,7 +1192,7 @@ class Supervisor:
             raise SupervisorError(str(exc)) from exc
         # Any runner still attached to the old session is retired here: it is no
         # longer the task's worker, and its (usually nonzero) exit must not land on
-        # the task after this resume. Then say the truth about the task *now* —
+        # the task after this resume. Then say the truth about the task *now* -
         # it is being worked again, not `failed` from the session we just replaced.
         superseded = store.supersede_runners(conn, task_id, reason="resume")
         store.set_task_status(conn, task_id, "in_progress")
@@ -1218,7 +1218,7 @@ class Supervisor:
         # A pull request fix resumes the session that delivered it, which holds the
         # diff, the brief and the review. When that session cannot be resumed, or its
         # worktree had to be rebuilt, a fresh reconciler session starts on the same
-        # task — same branch, same worktree — from a brief scoped to the pull request.
+        # task - same branch, same worktree - from a brief scoped to the pull request.
         reconciler = execution.lane == LANE_RECONCILE and (
             rebuilt is not None or not self._session_resumable(task, session_id)
         )
@@ -1322,8 +1322,8 @@ class Supervisor:
 
         Returns what was done, or None when the worktree was there all along. The
         rebuilt checkout starts from the task's branch on the forge, or in the
-        base clone, or — when the branch was never pushed and the pristine
-        release deleted it — from the task's recorded base commit. Task 158
+        base clone, or - when the branch was never pushed and the pristine
+        release deleted it - from the task's recorded base commit. Task 158
         (2026-09-06) had no commits and lost its slot to a prune; `ppy resume`
         then crashed twice and the session had to be thrown away.
         """
@@ -1372,8 +1372,8 @@ class Supervisor:
         started_from = None
         if reconcile.is_reconciliation(conn, task_id):
             # A delivered task's work is its pull request. The forge's head is the
-            # truth — a local branch can be stale after a rebase pushed from elsewhere
-            # — and the base commit is never an answer (PAP-222, 2026-09-17).
+            # truth - a local branch can be stale after a rebase pushed from elsewhere
+            # - and the base commit is never an answer (PAP-222, 2026-09-17).
             remote = _repos.upstream_remote(repo_row)
             for refspec, label in reconcile.pr_head_sources(conn, task):
                 fetched = git("fetch", "--quiet", remote, refspec).returncode == 0
@@ -1441,15 +1441,15 @@ class Supervisor:
     ) -> dict:
         """Steer a task.
 
-        ``by`` is who steered — a person at a session (`store.BY_PERSON`) or `ppy
-        serve` (`store.BY_MANAGER`) — and rides on every event the steer writes, so
+        ``by`` is who steered - a person at a session (`store.BY_PERSON`) or `ppy
+        serve` (`store.BY_MANAGER`) - and rides on every event the steer writes, so
         the rounds can tell a person's direction from their own and leave it alone.
 
         Interrupt steering is offered only when the provider/version proves it
         (capability-gated). Otherwise steering is checkpoint-at-completion: the
         message is queued and delivered by resuming the session once the current
-        turn ends. Queued messages are additive — every one since the last
-        delivery goes into that resume, in the order sent — unless ``delivery``
+        turn ends. Queued messages are additive - every one since the last
+        delivery goes into that resume, in the order sent - unless ``delivery``
         is ``"replace"``, which makes this message supersede everything queued
         before it. On 2026-09-07 three additive messages were queued and only the
         last survived (issue #75); the response now says what is queued.
@@ -1470,8 +1470,8 @@ class Supervisor:
         can_interrupt = getattr(adapter, "supports_interrupt_steer", lambda: False)()
 
         # A steer only reaches a worker that is actually mid-turn. A finished,
-        # delivered, blocked, or failed task — or one whose runner process has
-        # already exited — has no turn to interrupt and no checkpoint coming, so
+        # delivered, blocked, or failed task - or one whose runner process has
+        # already exited - has no turn to interrupt and no checkpoint coming, so
         # the only way the message can land is by resuming the session with it.
         # (Queueing it "for the checkpoint" of a turn that already ended is how a
         # steer silently vanished on 2026-08-31.)
@@ -1546,7 +1546,7 @@ class Supervisor:
 
         The interrupted process exits nonzero and its adapter reports ``failed``.
         Before the signal goes out the runner is marked superseded, so that exit is
-        recorded against the retired session instead of stamping the task — a steer
+        recorded against the retired session instead of stamping the task - a steer
         is a redirection, not a failure (2026-09-02, task 78). The resume carrying
         the steer text is fired as soon as the old process is gone.
         """
@@ -1584,7 +1584,7 @@ class Supervisor:
             "status": "in_progress",
             "superseded_runners": superseded,
             "note": (
-                "interrupt delivered; the session is being resumed with the steer — "
+                "interrupt delivered; the session is being resumed with the steer - "
                 "the task stays in_progress"
             ),
         }
@@ -1714,7 +1714,7 @@ class Supervisor:
 
         ``steer_task`` promises delivery at the checkpoint; this is that
         checkpoint. Every queued message since the last delivery goes into one
-        resume, in order — unless a message was queued to replace, in which case
+        resume, in order - unless a message was queued to replace, in which case
         it supersedes what came before it (issue #75). Consumption is the
         launch: a refused resume leaves every message queued and records why
         (issue #71).
@@ -1787,7 +1787,7 @@ class Supervisor:
         health tick (which is how a pending continuation survives a supervisor
         restart). Each pending continuation is attempted at most once per call;
         one that is refused again simply waits for the next call. Nothing here
-        bypasses admission or the ceiling — that is the point.
+        bypasses admission or the ceiling - that is the point.
         """
         conn = init_db()
         attempted: list[dict] = []
@@ -2199,7 +2199,7 @@ class Supervisor:
 
         Admission is refused from here on, so a continuation that would have started
         another worker is deferred instead. Returns the threads still alive at the
-        deadline — empty when the supervisor is truly done.
+        deadline - empty when the supervisor is truly done.
 
         A supervisor's threads find the database through ``PPY_HOME`` each time they
         touch it. One left running after its owner moved on (a test ending, most
@@ -2225,7 +2225,7 @@ def _self_contained(conn, task, message: str | None) -> tuple[str | None, bool]:
 
     A bare resume (no message) sends nothing new, so nothing is appended: the
     session already holds the brief. A brief archived without the four sections
-    — from before they were required — is passed through unchanged.
+    - from before they were required - is passed through unchanged.
     """
     if not message:
         return message, False

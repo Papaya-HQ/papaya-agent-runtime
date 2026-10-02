@@ -3,7 +3,7 @@
 On 2026-09-06 four tasks (165-168) were dispatched in parallel against one Radar
 composition module. Delivery cost three hand-resolved merge conflicts, conflict
 markers shipped inside one merge commit, and three extra full CI runs. The
-manager's own rule — related changes in one repository are a stack — was not
+manager's own rule - related changes in one repository are a stack - was not
 applied at dispatch, because nothing at dispatch knew what the new brief touched
 or what the in-flight siblings were touching (issue #61).
 
@@ -89,7 +89,7 @@ def _looks_like_path(token: str) -> bool:
 def touched_paths(brief: str, repo_root: str | None = None) -> list[str]:
     """The repo-relative paths a brief says it touches, in the order first named.
 
-    ``Touches:`` lines are taken at their word — the manager wrote them for this.
+    ``Touches:`` lines are taken at their word - the manager wrote them for this.
     Backtick spans are kept only when they name something that exists under
     ``repo_root``, because a brief quotes commands, flags, and identifiers in
     backticks far more often than files.
@@ -242,8 +242,8 @@ def dispatch_refusal(
 ) -> str | None:
     """Why this dispatch is refused for siblings editing the same files, or None.
 
-    The task being built on — named by ``--stack-on``, or by ``--base`` naming its
-    lease branch — and everything under it in its stack are not counted: their
+    The task being built on - named by ``--stack-on``, or by ``--base`` naming its
+    lease branch - and everything under it in its stack are not counted: their
     edits are about to be part of the new worker's starting commit.
     """
     exclude = _stack_chain(conn, stack_on)

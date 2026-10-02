@@ -32,7 +32,7 @@ class CodexAdapter(ProviderAdapter):
 
         Where receipts go, which suite is the local gate, and which database stack
         is this task's are facts about the repository, so a Codex worker reads the
-        block a Claude worker does — from the same function.
+        block a Claude worker does - from the same function.
         """
         block = command_rules(self.name, spec.branch, environment=spec.environment)
         body = super().worker_prompt(spec)

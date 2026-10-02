@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# lavish-review — drive the rich lavish-axi review surface WITHOUT freezing your turn.
+# lavish-review - drive the rich lavish-axi review surface WITHOUT freezing your turn.
 #
 # `lavish-axi poll <file>` long-polls: it blocks until the user annotates the
-# surface or it times out. Never run it in the foreground — it freezes the whole
+# surface or it times out. Never run it in the foreground - it freezes the whole
 # conversation. This wrapper backgrounds the poll to a sidecar file so you can hand
 # control back immediately and read notes on a later turn.
 #

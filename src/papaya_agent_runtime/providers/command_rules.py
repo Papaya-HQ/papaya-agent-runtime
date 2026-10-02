@@ -1,8 +1,8 @@
 """Provider-specific command rules, prepended to a fresh worker's prompt.
 
 A Claude worker runs under an explicit tool allowlist, and the allowlist matches
-*one plain command per call*. Compound shell — pipes, ``&&``, ``;``, an inline
-env assignment, a redirection — does not match any pattern and is denied; ``cd``
+*one plain command per call*. Compound shell - pipes, ``&&``, ``;``, an inline
+env assignment, a redirection - does not match any pattern and is denied; ``cd``
 has to be its own call; and there is no ``gh``, so the worker cannot open a pull
 request even if it wanted to.
 
@@ -35,7 +35,7 @@ heading:
 
 ## Flagged, not done
 
-- `<the exact command that was denied>` — what it was for, and what it means for
+- `<the exact command that was denied>` - what it was for, and what it means for
   the task.
 """
 
@@ -45,7 +45,7 @@ heading:
 RUNTIME_PUSHES_RULE = (
     "**Do not push in this repository; the runtime pushes for you.** Commit your work "
     "and report done. The runtime runs its own gate at your exact head and, when that "
-    "is green, pushes your lease branch itself — outside the harness, so the "
+    "is green, pushes your lease branch itself - outside the harness, so the "
     "repository's hook is neither triggered nor weakened. Never use `--no-verify`, "
     "never force, and never edit, skip or disable a hook to get a push through."
 )
@@ -57,8 +57,8 @@ RUNTIME_PUSHES_RULE = (
 #: has ever been refused.
 NOTE_FILE_RULE = (
     "**Write long notes to a file and pass the file.** A note, a reason or a commit "
-    "message with more than one line — or holding backticks, `$`, `#`, braces or "
-    "quotes — is refused as a command however plain the program is, because the "
+    "message with more than one line - or holding backticks, `$`, `#`, braces or "
+    "quotes - is refused as a command however plain the program is, because the "
     "harness will not analyse the argument. Do not reshape the text and do not use "
     "`$(cat …)`, which is command substitution and refused too. Write the text with "
     "the file-writing tool, then pass the path: `ppy progress <task id> --phase "
@@ -71,7 +71,7 @@ NOTE_FILE_RULE = (
 #: runtime's own record. A steer about a shape denial carries the rows that apply, so
 #: the worker is given the command to run rather than the rule it broke again.
 REWRITES: tuple[tuple[str, str], ...] = (
-    ("cd <your worktree> && <command>", "`<command>` — your shell already starts there"),
+    ("cd <your worktree> && <command>", "`<command>` - your shell already starts there"),
     ("cd <worktree>/<subdir> && git <args>", "`git -C <subdir> <args>`"),
     (
         "cd <worktree>/<subdir> && <command>",
@@ -87,7 +87,7 @@ REWRITES: tuple[tuple[str, str], ...] = (
     ("<command> 2>&1 | tee <file> | tail -<n>", "`ppy gate run`, then the Read tool on its output"),
     ("cat >> <file> <<'EOF' … EOF", "the file-writing or file-editing tool"),
     ("FOO=1 <command>", "`ppy need <task id> --capability <program> --why-file <path>`"),
-    ("for x in a b c; do <command>; done", "one call per value — run it three times"),
+    ("for x in a b c; do <command>; done", "one call per value - run it three times"),
     ("<command a>; <command b>", "two calls, one command each"),
     ('git commit -m "$(cat <file>)"', "`git commit -F <file>`"),
     ('ppy progress <id> --note "<long text>"', "`ppy progress <id> --note-file <path>`"),
@@ -97,7 +97,7 @@ REWRITES: tuple[tuple[str, str], ...] = (
     ),
     (
         "export PATH=<dir>:$PATH",
-        "`ppy need <task id> --capability <program> --why-file <path>` — PATH comes from "
+        "`ppy need <task id> --capability <program> --why-file <path>` - PATH comes from "
         "the runtime's environment block, not your shell",
     ),
     (
@@ -126,8 +126,8 @@ EVIDENCE_RULE = (
 )
 
 #: The one sanctioned way to keep a long command's saved output as a receipt. A worker
-#: cannot see a big tool result in full — the harness saves it under the session's own
-#: `tool-results` directory and shows a preview — and `cp` from there is refused,
+#: cannot see a big tool result in full - the harness saves it under the session's own
+#: `tool-results` directory and shows a preview - and `cp` from there is refused,
 #: correctly, because `cp` takes any path at all (issue #127, ten refusals, every one a
 #: worker copying its own output). `ppy evidence add` copies that one file and nothing
 #: else; `evidence.add` is the rule it is confined by.
@@ -161,7 +161,7 @@ class Rewrite:
 
     #: The refused command, verbatim.
     command: str
-    #: Which :data:`REWRITES` shape it is — what :func:`tool_learning.shape_counts`
+    #: Which :data:`REWRITES` shape it is - what :func:`tool_learning.shape_counts`
     #: buckets on, so the tally and the advice always name the same thing.
     shape: str
     #: The exact replacement, or a sentence saying no replacement exists.
@@ -170,7 +170,7 @@ class Rewrite:
     runnable: bool = True
 
     def line(self) -> str:
-        arrow = "->" if self.runnable else "— "
+        arrow = "->" if self.runnable else "- "
         return f"- `{self.command}`\n  {arrow} {self.instead}"
 
 
@@ -226,7 +226,7 @@ def _rewrite_saved_output(
         command,
         REWRITES[13][0],
         f"`{EVIDENCE_COMMAND} {source} --task {task_id} --as {_receipt_name(command, source)}` "
-        "— that file is your own session's saved output, and this is the one command that "
+        "- that file is your own session's saved output, and this is the one command that "
         "may copy it into your evidence directory",
     )
 
@@ -238,7 +238,7 @@ def rewrite_for(
 
     Not a list of generic rows. A worker that has just been refused
     `cd /path/to/wt/backend && git status` needs `git -C backend status`, with the
-    real directory in it — three rows about `cd` in general are what it had before,
+    real directory in it - three rows about `cd` in general are what it had before,
     and it kept writing the same command back (issue #121, 30 occurrences).
 
     ``worktree`` is what makes the `cd` answer exact: the same text is a different
@@ -335,7 +335,7 @@ def _rewrite_cd(command: str, worktree: str | None) -> Rewrite | None:
     target, rest = parts
     place, relative = _where(target, worktree)
     if place == "worktree":
-        return Rewrite(command, REWRITES[0][0], f"`{rest}`, on its own — your shell starts there")
+        return Rewrite(command, REWRITES[0][0], f"`{rest}`, on its own - your shell starts there")
     if place == "inside" and relative:
         program = (rest.split() or [""])[0]
         template = DIRECTORY_FLAGS.get(program)
@@ -354,11 +354,11 @@ def _rewrite_cd(command: str, worktree: str | None) -> Rewrite | None:
         return Rewrite(
             command,
             REWRITES[2][0],
-            f"`{target}` is outside your worktree and nothing can reach it — not this "
+            f"`{target}` is outside your worktree and nothing can reach it - not this "
             "command and not a rewrite of it. Record it under 'Flagged, not done'.",
             runnable=False,
         )
-    return Rewrite(command, REWRITES[0][0], f"`{rest}`, on its own — your shell starts there")
+    return Rewrite(command, REWRITES[0][0], f"`{rest}`, on its own - your shell starts there")
 
 
 def _bare_cd(command: str, worktree: str | None) -> Rewrite | None:
@@ -392,14 +392,14 @@ def _rewrite_inline_env(command: str, worktree: str | None) -> Rewrite | None:
         return Rewrite(
             command,
             shape,
-            f"`{rest}` — those cache variables are already set in your environment by "
+            f"`{rest}` - those cache variables are already set in your environment by "
             "the runtime, so setting them again does nothing",
         )
     return Rewrite(
         command,
         shape,
         f"nothing sets an environment variable for one call here. If `{rest}` cannot run "
-        f"without `{', '.join(names)}`, say so in your report — and if what it needs is a "
+        f"without `{', '.join(names)}`, say so in your report - and if what it needs is a "
         f"PROGRAM, `ppy need <task id> --capability <program> --why-file <path>`",
         runnable=False,
     )
@@ -469,7 +469,7 @@ def _rewrite_tee(command: str, worktree: str | None) -> Rewrite | None:
     return Rewrite(
         command,
         REWRITES[6][0],
-        f"`ppy gate run --task <task id>` when `{left}` is your gate — it records the "
+        f"`ppy gate run --task <task id>` when `{left}` is your gate - it records the "
         "output for you; otherwise run it and read what it printed",
     )
 
@@ -520,7 +520,7 @@ def _rewrite_loop(command: str, worktree: str | None) -> Rewrite | None:
     return Rewrite(
         command,
         REWRITES[9][0],
-        f"`{without}`, once per value — {len(values)} separate calls",
+        f"`{without}`, once per value - {len(values)} separate calls",
     )
 
 
@@ -542,7 +542,7 @@ _CLAUDE_RULES = (
 ## Command rules for this environment
 
 Your shell runs under an allowlist that matches **one plain command per call**.
-These are not style preferences — anything else is denied before it runs.
+These are not style preferences - anything else is denied before it runs.
 
 - **Your shell already starts in your worktree.** There is nothing to `cd` into
   to reach your own files: run the command on its own. For a subdirectory, use the
@@ -560,7 +560,7 @@ These are not style preferences — anything else is denied before it runs.
 - {note_file_rule}
 - {evidence_rule}
 - {gate_tiers_rule}
-- Run the scoped gate **in the foreground** —
+- Run the scoped gate **in the foreground** -
   never as a background task. A backgrounded command is killed when your turn
   ends, so a gate you left running in the background never finished and its
   result is worthless. A tool call is capped at ten minutes and anything longer is moved to
@@ -624,13 +624,13 @@ def command_rules(
     ``runtime_pushes`` is for a repository whose own hook gates pushes: the worker
     is told not to push at all, because the runtime pushes the lease branch itself
     after its gate. Telling a worker there to run the push is telling it to be
-    refused (issues #83, #116) — fourteen times on the record.
+    refused (issues #83, #116) - fourteen times on the record.
 
     ``environment`` is the per-repository environment block dispatch rendered
     (:mod:`papaya_agent_runtime.environment`): the evidence directory, the local gate,
     the private database stack, the push-hook policy. It is appended after the
     command rules for a Claude worker and is the whole block for a Codex worker,
-    whose sandbox has a real shell and needs no command rules — the environment
+    whose sandbox has a real shell and needs no command rules - the environment
     facts are the repository's, not the provider's.
     """
     block = (environment or "").strip()

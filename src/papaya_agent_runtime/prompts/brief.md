@@ -103,8 +103,8 @@ when it needs the worker again.
 
 End the turn once a worker is dispatched. Do not do the work yourself.
 
-If there is nothing to build — the work is already delivered or merged, waiting only on
-a merge, a person's answer or QA, or another ticket carries it — do not dispatch, and do
+If there is nothing to build - the work is already delivered or merged, waiting only on
+a merge, a person's answer or QA, or another ticket carries it - do not dispatch, and do
 not post a comment unless something changed since the last one on the item. End the
 turn with a message whose first line is `NOTHING TO BUILD: <why, in one line>`. The
 runtime ends the hold there and leaves the item's status as it is; ending without that
@@ -116,5 +116,5 @@ Where a durable fact goes depends on this agent, which the facts at the end of t
 
 ## When the runtime got in the way
 
-If the runtime itself got in the way of this turn, say so in one line of its own: `RUNTIME: <what got in the way>`. ONLY for something that stopped or degraded the job this turn was sent to do — a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true — and never for the repository, the work itself, or anything that went fine. One that belongs: `RUNTIME: the instructions named a command that does not exist, so task 412 was never linked to its work item`. One that does not: `RUNTIME: the Papaya tools were loaded on demand this turn, so the work item could be read` — that is the runtime working, reported as though it were an obstacle. A turn with nothing in its way writes no `RUNTIME:` line at all. Name ids, never people, and quote no code or ticket text.
+If the runtime itself got in the way of this turn, say so in one line of its own: `RUNTIME: <what got in the way>`. ONLY for something that stopped or degraded the job this turn was sent to do - a tool you were refused, a fact you could not obtain, or a contract such as these instructions or a `ppy` command's output that was not true - and never for the repository, the work itself, or anything that went fine. One that belongs: `RUNTIME: the instructions named a command that does not exist, so task 412 was never linked to its work item`. One that does not: `RUNTIME: the Papaya tools were loaded on demand this turn, so the work item could be read` - that is the runtime working, reported as though it were an obstacle. A turn with nothing in its way writes no `RUNTIME:` line at all. Name ids, never people, and quote no code or ticket text.
 Put it at the very end of your last message.

@@ -50,7 +50,7 @@ def test_no_registered_repositories_is_a_gap_not_a_block(ppy_home, monkeypatch) 
     `papaya_events.ensure_repository` registers the runtime-owned clone from the
     work item's repository URL the moment the work is picked up. Treating an empty
     list as blocking made a machine that was about to be handed exactly that
-    refuse the work — on the first morning of every connection.
+    refuse the work - on the first morning of every connection.
     """
     monkeypatch.setattr(readiness, "_harness_problems", lambda problems: None)
     monkeypatch.setattr(readiness, "_papaya_problems", lambda problems: None)
@@ -210,7 +210,7 @@ def test_no_signed_in_harness_at_all_says_that_once_not_twice(ppy_home, monkeypa
 #
 # Every JavaScript worker on 2026-09-16 reported `node --test` denied: the stored
 # profile had been copied from a Python-only manager. The profile is code now, so
-# the only way to lack a gate tool is to have dropped it — and restoring it is the
+# the only way to lack a gate tool is to have dropped it - and restoring it is the
 # runtime's own job, unless a person locked the key.
 
 
@@ -237,7 +237,7 @@ def _javascript_repo_with_profile(monkeypatch, dropped: list[str], locked=()) ->
     notes.parent.mkdir(parents=True, exist_ok=True)
     notes.write_text(
         f"{solicit.NOTES_MARKER}\n# web\n\n## How it builds and verifies\n\n"
-        "- test: `node --test`\n\n## Conventions and contracts\n\n- `cp.md` — read first.\n"
+        "- test: `node --test`\n\n## Conventions and contracts\n\n- `cp.md` - read first.\n"
         f"{solicit.NOTES_END}\n",
         encoding="utf-8",
     )
@@ -410,8 +410,8 @@ def test_a_blocked_runtime_with_nothing_for_them_says_so() -> None:
 def test_a_blocked_runtime_announces_itself_at_session_start(ppy_home, monkeypatch) -> None:
     """The contract's preflight only runs if the session reads the contract.
 
-    A session started non-interactively — the Papaya listener running
-    `claude -p "<work item>"` in this directory — arrives with a job and does it.
+    A session started non-interactively - the Papaya listener running
+    `claude -p "<work item>"` in this directory - arrives with a job and does it.
     On 2026-09-15 three such jobs ran here, none touched `ppy`, and nobody found
     out the runtime had never been set up. A hook is in front of the model
     whatever it was launched to do.
@@ -513,8 +513,8 @@ def test_every_session_is_told_it_is_the_runtime(ppy_home, monkeypatch) -> None:
     """`ppy start` injects the role; a listener-launched session never goes through it.
 
     On 2026-09-15 three sessions started by the Papaya listener did the work
-    directly in other checkouts — nothing briefed, nothing reviewed at an exact
-    commit, nothing delivered through the gate — because all they had was
+    directly in other checkouts - nothing briefed, nothing reviewed at an exact
+    commit, nothing delivered through the gate - because all they had was
     CLAUDE.md, which a model holding a work item can reasonably deprioritise.
     """
     from papaya_agent_runtime import hooks

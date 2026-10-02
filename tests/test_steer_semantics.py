@@ -1,4 +1,4 @@
-"""Steering reaches the worker, or says plainly why it cannot — never vanishes."""
+"""Steering reaches the worker, or says plainly why it cannot - never vanishes."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def test_steering_a_delivered_task_resumes_it_instead_of_queueing(server, source
     task_id = client.dispatch_task(repo=added.name, title="ship it")["task_id"]
     _wait_status(client, task_id, {"worker_done"})
 
-    # Delivered tasks used to fall through to the "queued for checkpoint" branch —
+    # Delivered tasks used to fall through to the "queued for checkpoint" branch -
     # a checkpoint that never comes once the turn has ended.
     conn = init_db()
     store.set_task_status(conn, task_id, "delivered")

@@ -1,8 +1,8 @@
 """An instruction a person sent to this machine: which way to run it, and how to answer.
 
-A person in Papaya can now send their own machine an instruction — "what are you
+A person in Papaya can now send their own machine an instruction - "what are you
 working on?", "approve capability 12", "quick spike on this, show me the PR",
-"investigate JIRA-4411 in the backend" — as a `machine.instruction` event with no
+"investigate JIRA-4411 in the backend" - as a `machine.instruction` event with no
 work item behind it (backend task 349). `ppy serve` takes it like a ticket
 (`serve.TicketRunner`), and this module holds the parts that are decisions, not
 plumbing:
@@ -127,7 +127,7 @@ class Classification:
     #: Work items the instruction references that could not be read, said in the
     #: question rather than guessed around.
     unread: tuple[str, ...] = ()
-    #: What the referenced work items say, for the choice turn: ``ref: title — text``.
+    #: What the referenced work items say, for the choice turn: ``ref: title - text``.
     items: tuple[str, ...] = ()
 
     @property
@@ -319,7 +319,7 @@ def read_references(
             ReadItem(
                 ref,
                 repo=papaya_events.work_item_repository(record),
-                summary=f"{summary} — {words}" if words else summary,
+                summary=f"{summary} - {words}" if words else summary,
             )
         )
     return found
@@ -488,7 +488,7 @@ def classify(
 
 def first_note(instruction: papaya_events.Instruction, found: Classification) -> str:
     """The ticket's first progress note: which path, and why."""
-    return f"{instruction.short_id}: {found.path} path — {found.reason}."
+    return f"{instruction.short_id}: {found.path} path - {found.reason}."
 
 
 #: The progress line an answer turn still running after :data:`LOOKING_AFTER` posts, once.
@@ -498,7 +498,7 @@ LOOKING_AFTER = 20.0
 
 def on_it(repo: str) -> str:
     """The work path's acknowledgement, in the conversation, as soon as it is placed."""
-    return f"On it — working in {repo}."
+    return f"On it - working in {repo}."
 
 
 def setup_reason(problem: Any) -> str:
@@ -536,7 +536,7 @@ ANSWER_ALLOWED: dict[str, frozenset[str] | None] = {
 }
 #: An asked question's commands: the answer path's reads, and nothing that acts. Not a
 #: capability, a delivery or a merge, not `ppy answer` (it steers a waiting worker:
-#: replying to a needs-you row is work), and only the read subcommands of the rest —
+#: replying to a needs-you row is work), and only the read subcommands of the rest -
 #: `memory init`, `outreach run` (it posts) and every `todo` write are refused. The words
 #: of a question ("should I merge #12?") never become the act.
 ASK_ALLOWED: dict[str, frozenset[str] | None] = {
@@ -643,7 +643,7 @@ def compose_brief(instruction: papaya_events.Instruction, repo: str) -> str:
     """The brief a work path's worker is dispatched with, from the instruction alone.
 
     Its four instruction sections are the instruction, its references, who asked, and
-    the agent's standing instructions — the last quoted as data the worker follows
+    the agent's standing instructions - the last quoted as data the worker follows
     where it applies, never as commands.
     """
     title = " ".join((instruction.title or instruction.text).split())[:120] or "Instruction"
@@ -770,9 +770,9 @@ def outcome_of(transcript: str) -> Outcome | None:
     head = lines[start].strip().lstrip("*_`> ").removeprefix(OUTCOME_PREFIX).strip()
     status = "done"
     first, _, rest = head.partition(" ")
-    if first.strip(".,:;—-").lower() in ("done", "failed"):
-        status = first.strip(".,:;—-").lower()
-        head = rest.strip().lstrip("—-:").strip()
+    if first.strip(".,:;\u2014-").lower() in ("done", "failed"):
+        status = first.strip(".,:;\u2014-").lower()
+        head = rest.strip().lstrip("\u2014-:").strip()
     body = [head] if head else []
     also = ""
     for line in lines[start + 1 :]:
@@ -1050,8 +1050,8 @@ _ENDED = ("declined", "handed_back", "released", "reported", "done", "stalled")
 _HOLDING = ("picked_up", "briefing", "dispatched", "blocked", "reviewing", "delivering")
 
 #: The detail on a `released` phase that says this process shut down under the hold (the
-#: listener cancelled it). A `released` without it is a lost lease — Papaya took the
-#: request back, or a person released it in the app — and is never taken back up.
+#: listener cancelled it). A `released` without it is a lost lease - Papaya took the
+#: request back, or a person released it in the app - and is never taken back up.
 SHUTDOWN = "shutdown"
 
 
@@ -1215,8 +1215,8 @@ def answer(
 ) -> Answered:
     """Reply at the origin, record it, then report the result. In that order, always.
 
-    The reply goes where ``instruction.reply`` says — the block the event carried,
-    stored on the ticket at intake — and nowhere a turn or a worker names. A reply
+    The reply goes where ``instruction.reply`` says - the block the event carried,
+    stored on the ticket at intake - and nowhere a turn or a worker names. A reply
     that fails is tried once more; if it still fails the report says ``failed``, with
     the error and the outcome text in the summary so nothing is lost.
     """

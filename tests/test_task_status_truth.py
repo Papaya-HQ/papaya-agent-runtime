@@ -3,7 +3,7 @@
 Three runtime lies this pins shut:
 
 1. ``ppy steer`` on a live Claude worker interrupted the turn, the interrupted
-   process exited non-zero, and the harness stamped the task ``failed`` — with no
+   process exited non-zero, and the harness stamped the task ``failed`` - with no
    auto-resume (2026-09-02, task 78).
 2. A superseded session's late exit overwrote ``in_progress`` with ``failed``
    while the resumed runner was alive and working (codex, 2026-09-01).

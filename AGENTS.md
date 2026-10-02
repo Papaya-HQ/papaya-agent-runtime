@@ -1,7 +1,7 @@
-# Papaya Agent Runtime — development contract
+# Papaya Agent Runtime - development contract
 
 > **Wrong file for a runtime session.** The default way Papaya Agent Runtime is used is
-> the *runtime manager* — the user opens their harness and delegates work. If this
+> the *runtime manager* - the user opens their harness and delegates work. If this
 > session is that (the user wants work done on their repos), or you were launched
 > by `ppy start` (env `PPY_MANAGER_SESSION=1`), STOP and follow
 > [`docs/runtime-contract.md`](docs/runtime-contract.md): run its preflight, operate
@@ -20,7 +20,7 @@ requests at the start of a development session. There is no checked-in task log.
 
 > The *runtime voice* the end user hears lives in
 > [`docs/runtime-contract.md`](docs/runtime-contract.md) and is injected at
-> `ppy start`. Keep it there, not here. The runtime has no persona of its own — it
+> `ppy start`. Keep it there, not here. The runtime has no persona of its own - it
 > takes the identity, rules and memories of whichever Papaya agent the machine is
 > connected as (`src/papaya_agent_runtime/papaya.py`), so never hard-code a name,
 > handle or character into this codebase.
@@ -37,7 +37,7 @@ with the file and the line. Rename a command and the text that names it fails wi
 
 Two named exceptions, both tested: `LAUNCHER_ONLY` for a command `bin/ppy` answers
 itself (`ppy env sync`), and `NON_EXAMPLES` for a sentence that names a command
-*because it does not exist* — an entry there must give the file and the reason.
+*because it does not exist* - an entry there must give the file and the reason.
 
 ## Authority is enforced in code, not prompts
 
@@ -94,6 +94,9 @@ credentials.
 
 ## Operating discipline
 
+- Do not use em dashes in repository text, including skills, instructions, prompts,
+  documentation, comments, and generated model-facing output. Use ordinary punctuation
+  or ASCII hyphens instead. Input parsers may recognize them through Unicode escapes.
 - Run `make lint`, `make fmt`, and `make test` before marking work complete.
 - Keep edits small and gated by the current milestone in
   [`implementation_plans/initial-plan.md`](implementation_plans/initial-plan.md).
@@ -101,11 +104,11 @@ credentials.
   surfaces, feedback sidecars, or any other running record (the former
   `docs/tasks.md` was one; `.lavish/` is another). Two branches appending to one
   file conflict every time. The record of a change is its commit message and pull
-  request body — write the *why* there. Machine-local state stays under `.ppy/`
+  request body - write the *why* there. Machine-local state stays under `.ppy/`
   and `.lavish/`, both gitignored.
 - Use `uv` for all Python commands.
 - **Skills:** author every skill under `.agents/skills/<name>/SKILL.md` (Codex
   reads that natively) and add a relative symlink `.claude/skills/<name> ->
-  ../../.agents/skills/<name>` so Claude Code can see it — it only scans
+  ../../.agents/skills/<name>` so Claude Code can see it - it only scans
   `.claude/skills/`. `tests/test_skills_layout.py` fails if a skill is missing
   its symlink.

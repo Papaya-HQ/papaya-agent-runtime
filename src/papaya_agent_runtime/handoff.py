@@ -1,19 +1,19 @@
 """Session handoff: a pickup prompt that resumes the manager from durable state.
 
 The manager's working context is the one thing Papaya Agent Runtime cannot make durable by
-itself — compaction, a closed terminal, or a fresh session drop whatever only lived
+itself - compaction, a closed terminal, or a fresh session drop whatever only lived
 in the conversation. The rule is simple: **record state first, then hand off.** The
 todo ledger (``ppy todo``) carries the manager's intent; ``.ppy/state.db`` carries the
 team's lifecycle; memory carries the learnings. ``ppy handoff`` reads all three, checks
 on the team (supervisor reachable? every in-flight worker alive and talking?), writes
-the resulting **snapshot** — open work, ledger, known risks — to
+the resulting **snapshot** - open work, ledger, known risks - to
 ``.ppy/memory/handoff.md`` (a generated projection, like the board), and prints a short
 **pickup prompt** the user pastes into the next session. The prompt does not carry the
 snapshot; it points at the file, so the thing the user pastes stays a few lines long
 no matter how much is in flight. The same collection feeds the SessionStart hook, so a
 session that restarts after compaction gets the pickup context injected automatically.
 
-Judgment — what to record before handing off, and how to speak to the user — lives in
+Judgment - what to record before handing off, and how to speak to the user - lives in
 the ``handoff`` skill. This module owns only the mechanics and is deliberately
 independent of the supervisor daemon: a handoff must work even when nothing else is
 running (that is one of the things it warns about).
@@ -37,11 +37,11 @@ DONE = ("delivered",)
 _STATUS_HINT = {
     "requested": "queued, not started",
     "in_progress": "worker running",
-    "worker_done": "finished — review the diff, then deliver",
-    "worker_stopped": "turn ended mid-gate — `ppy resume` it; the reason is on the task",
+    "worker_done": "finished - review the diff, then deliver",
+    "worker_stopped": "turn ended mid-gate - `ppy resume` it; the reason is on the task",
     "blocked": "waiting on an answer",
-    "needs_recovery": "runner dropped — `ppy reconcile`, then `ppy resume`",
-    "failed": "failed — inspect events; rework or re-dispatch",
+    "needs_recovery": "runner dropped - `ppy reconcile`, then `ppy resume`",
+    "failed": "failed - inspect events; rework or re-dispatch",
     "delivered": "delivered",
 }
 
@@ -95,7 +95,7 @@ def _task_entry(
         if review is None:
             entry["review"] = "not reviewed"
         elif review["verdict"] == "approved":
-            entry["review"] = f"approved at {review['head_sha'][:8]} — deliver if head unchanged"
+            entry["review"] = f"approved at {review['head_sha'][:8]} - deliver if head unchanged"
         else:
             entry["review"] = f"{review['verdict']} at {review['head_sha'][:8]}"
     return entry
@@ -163,7 +163,7 @@ def collect(conn: sqlite3.Connection | None = None, *, recent_runs: int = 10) ->
 
 
 # --------------------------------------------------------------------------- #
-# Warnings — what could go wrong for the team while the manager is away
+# Warnings - what could go wrong for the team while the manager is away
 # --------------------------------------------------------------------------- #
 
 
@@ -192,7 +192,7 @@ def warnings_for(data: dict[str, Any]) -> list[str]:
     for e in by_verdict["quiet"]:
         out.append(
             f'Task {e["task_id"]} "{e["title"]}" has been silent for '
-            f"{health.humanize(e['silent_seconds'])} — it may be stuck. On resume, check "
+            f"{health.humanize(e['silent_seconds'])} - it may be stuck. On resume, check "
             "`ppy task <id>` and steer/resume it, or `ppy reconcile` if it's wedged."
         )
     if by_verdict["alive"] and sup["reachable"]:
@@ -200,14 +200,14 @@ def warnings_for(data: dict[str, Any]) -> list[str]:
         out.append(
             f"{len(by_verdict['alive'])} worker(s) still running (task {ids}). They keep "
             "going in the background; finished work and questions queue in state until "
-            "you're back — a worker that asks a question will sit idle until it's "
+            "you're back - a worker that asks a question will sit idle until it's "
             "answered. If this terminal or the machine goes down, they stop with it: "
             "on resume run `ppy reconcile` and `ppy health` before trusting any status."
         )
     for e in in_flight:
         if e["status"] == "in_progress" and not e.get("progress"):
             out.append(
-                f'Task {e["id"]} "{e["title"]}" has not posted a plan — you have not seen '
+                f'Task {e["id"]} "{e["title"]}" has not posted a plan - you have not seen '
                 "its approach yet."
             )
     for run in data["open_runs"]:
@@ -218,10 +218,10 @@ def warnings_for(data: dict[str, Any]) -> list[str]:
             elif e["status"] == "worker_done" and e.get("review") == "not reviewed":
                 out.append(f'Task {e["id"]} "{e["title"]}" is finished and waiting on review.')
             elif e["status"] in ("needs_recovery", "failed"):
-                out.append(f'Task {e["id"]} "{e["title"]}" is {e["status"]} — {e["hint"]}.')
+                out.append(f'Task {e["id"]} "{e["title"]}" is {e["status"]} - {e["hint"]}.')
     if data["open_runs"] and not (data["next"] or data["waiting"]):
         out.append(
-            'No next step is recorded while runs are open — `ppy todo add "..."` what '
+            'No next step is recorded while runs are open - `ppy todo add "..."` what '
             "happens next (and `--blocked-on user|review|task:<id>` for anything waiting), "
             "or it's lost."
         )
@@ -235,7 +235,7 @@ def warnings_for(data: dict[str, Any]) -> list[str]:
 
 def _task_brief(e: dict[str, Any]) -> str:
     where = f" ({e['repo']})" if e.get("repo") else ""
-    s = f'task {e["id"]} "{e["title"]}"{where} — {e["status"]}'
+    s = f'task {e["id"]} "{e["title"]}"{where} - {e["status"]}'
     if e.get("progress"):
         s += f" · phase {e['progress']['phase']}"
         if e["progress"].get("note"):
@@ -270,7 +270,7 @@ def _snapshot_lines(data: dict[str, Any]) -> list[str]:
     if data["assessment"]:
         a = data["assessment"]
         lines.append(
-            f"- Assessment cycle {a['id']} is {a['status']} — handle via `ppy assessment`."
+            f"- Assessment cycle {a['id']} is {a['status']} - handle via `ppy assessment`."
         )
     return lines
 
@@ -281,7 +281,7 @@ def render_snapshot(data: dict[str, Any], warnings: list[str]) -> str:
         "# Handoff snapshot",
         "",
         f"Generated by `ppy handoff` at {data['generated_at']} from `.ppy/state.db` and the "
-        "todo ledger — do not hand-edit; rerun `ppy handoff` to refresh. Live state wins: "
+        "todo ledger - do not hand-edit; rerun `ppy handoff` to refresh. Live state wins: "
         "reconcile with `ppy status`, `ppy run <id>`, `ppy task <id>`, `ppy health` before acting.",
         "",
         "## Snapshot",
@@ -321,23 +321,23 @@ def render_pickup_prompt(
         "Pick up where we left off. You're Papaya Agent Runtime at runtime (follow "
         "docs/runtime-contract.md; run preflight silently). Do all of this BEFORE you say "
         "anything to me:",
-        "1. Reconnect to the team: `./bin/ppy supervisor status` — if it's down, start it "
-        "detached (`./bin/ppy supervisor start`, never a harness background task) — then "
+        "1. Reconnect to the team: `./bin/ppy supervisor status` - if it's down, start it "
+        "detached (`./bin/ppy supervisor start`, never a harness background task) - then "
         "`./bin/ppy reconcile` and "
         "`./bin/ppy health` to find dead or stuck workers.",
         f"2. Read the handoff snapshot at `{path}` (as of {data['generated_at']}: "
-        f"{summary}) — it holds the ledger, every open run and task, and the known risks "
+        f"{summary}) - it holds the ledger, every open run and task, and the known risks "
         "at handoff to verify on resume.",
         "3. Load your ledger and memory: `./bin/ppy todo list` and `./bin/ppy board`; then "
         "`.ppy/memory/preferences.md`, `relationships.md`, `improvements.md`, and "
         "`repos/<name>/notes.md` for any repo in the snapshot.",
         "4. Reconcile the snapshot against live state (`./bin/ppy run <id>` per open run, "
-        "`./bin/ppy task <id>` for each worker's latest progress) — workers keep working "
+        "`./bin/ppy task <id>` for each worker's latest progress) - workers keep working "
         "between sessions, so live state wins. Don't re-ask anything already on file.",
     ]
     if data["assessment"]:
         a = data["assessment"]
-        lines.append(f"Assessment cycle {a['id']} is {a['status']} — handle via `ppy assessment`.")
+        lines.append(f"Assessment cycle {a['id']} is {a['status']} - handle via `ppy assessment`.")
     lines.append("")
     lines.append(
         "Then greet me with one dry line: where things stand, anything that went wrong "
@@ -351,7 +351,7 @@ def render_session_context(data: dict[str, Any]) -> str | None:
     if not (data["open_runs"] or data["next"] or data["waiting"]):
         return None
     lines = [
-        "Papaya Agent Runtime pickup context (from `ppy` durable state; live state wins — "
+        "Papaya Agent Runtime pickup context (from `ppy` durable state; live state wins - "
         "reconcile with `ppy status`, `ppy run <id>`, `ppy health` before acting):",
         *_snapshot_lines(data),
     ]

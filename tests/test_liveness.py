@@ -3,8 +3,8 @@
 PAP-219: the client called a job stalled, and handed it back, while its worker had sent
 a tool heartbeat every 30 seconds for 32 minutes and was mid-`make verify`. None of that
 reached the client, whose stall clock hears only progress lines. These tests drive the
-client's own `ListenerLoop` and `Job` — its renew cadence fired by hand, its activity
-clock injected — so what is shown is the client's stall rule seeing the runtime's lines,
+client's own `ListenerLoop` and `Job` - its renew cadence fired by hand, its activity
+clock injected - so what is shown is the client's stall rule seeing the runtime's lines,
 not a copy of that rule.
 """
 

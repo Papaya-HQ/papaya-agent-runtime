@@ -2,7 +2,7 @@
 
 Delivery used to be the end of a worker's interest in its pull request. The rounds
 reacted to red CI and a formal changes-requested review, once per delivery, and to
-nothing else — and one afternoon produced every other case: a pull request auto-closed
+nothing else - and one afternoon produced every other case: a pull request auto-closed
 and conflicting after its base merged, one behind a base whose ruleset requires
 up-to-date branches, and no worker that knew any of it was still theirs.
 
@@ -49,7 +49,7 @@ NEEDS_A_PERSON = "needs_a_person"
 OUTCOME_FIXED = "fixed"
 OUTCOME_FAILED = "failed"
 OUTCOME_MERGED = "merged"
-#: Over, with the forge no longer saying where the pull request landed — a merge on
+#: Over, with the forge no longer saying where the pull request landed - a merge on
 #: the record drops the branch out of :func:`watch.pr_states` for good. Not a failure:
 #: nothing was attempted and lost, so it never counts toward :data:`ATTEMPTS`.
 OUTCOME_ENDED = "ended"
@@ -351,7 +351,7 @@ def open_lane(conn: sqlite3.Connection | None = None) -> list[LaneEntry]:
 def attempt_over(entry: LaneEntry) -> str | None:
     """Has this attempt stopped running? ``merged``, ``ended``, or ``None`` if not yet.
 
-    Over means nothing of it is still running — no live runner on the worker — and
+    Over means nothing of it is still running - no live runner on the worker - and
     either the merge is on the worker's row, or the worker delivered again since it
     started, or the ticket reached a phase after which nothing more happens on its own
     (reported, released, handed back, …).
@@ -400,15 +400,15 @@ def adopt_forge_merge(worker_task_id: int) -> str | None:
     """Write down a merge that happened on the forge outside ``ppy``. The SHA, or ``None``.
 
     The runtime only ever learned a merge from its own hand: ``ppy deliver`` or
-    ``ppy stack merge`` set ``merged_sha``, and everything downstream — the lane, the
-    stack's next action, the worktree sweep, the work item — keys off that column. A
+    ``ppy stack merge`` set ``merged_sha``, and everything downstream - the lane, the
+    stack's next action, the worktree sweep, the work item - keys off that column. A
     person pressing *Merge* on GitHub sets nothing, and the pull request leaves the
     forge query at the same moment, so the task is stranded: delivered, shipped, and
     permanently unfinished as far as this runtime can tell.
 
     So the fact is fetched from the forge and recorded. This is pure bookkeeping, the
     same as ``ppy deliver --merged``: the commit shipped, there is nothing to push and
-    no review gate left to satisfy. It never merges anything — a pull request that is
+    no review gate left to satisfy. It never merges anything - a pull request that is
     still open is left exactly alone, which is what keeps this apart from merge
     authority (``ppy config authority --allow-merge``) and out of reach of it.
 
@@ -456,8 +456,8 @@ def adopt_forge_merge(worker_task_id: int) -> str | None:
 def attempt_is_open(started_event_id: int, conn: sqlite3.Connection | None = None) -> bool:
     """Is this attempt still open? Asked again before closing one a round already judged.
 
-    Judging an attempt can itself close it — :func:`adopt_forge_merge` records the merge,
-    and recording a merge frees the lane — and a hand-run ``ppy deliver --merged`` can
+    Judging an attempt can itself close it - :func:`adopt_forge_merge` records the merge,
+    and recording a merge frees the lane - and a hand-run ``ppy deliver --merged`` can
     land in the same gap. Without this the attempt is finished twice, which is one
     ``reconcile_finished`` too many for every reader that counts them.
     """
@@ -474,8 +474,8 @@ def close_open_attempts(
     """Finish every lane attempt still open on one worker, and say how many closed.
 
     A merge recorded by hand (``ppy deliver --merged``) or observed by the watch ends
-    the attempt at that moment. Nothing else can close it afterwards — the merge takes
-    the branch out of the forge query — so the lane would hold its slot until a restart.
+    the attempt at that moment. Nothing else can close it afterwards - the merge takes
+    the branch out of the forge query - so the lane would hold its slot until a restart.
     """
     own = conn is None
     conn = conn or db.init_db()
@@ -580,7 +580,7 @@ def pr_head_sources(conn: sqlite3.Connection, task: Any) -> list[tuple[str, str]
     """Where a delivered task's pull request head is fetched from, best first.
 
     ``(refspec, label)`` pairs: the forge's ``refs/pull/<n>/head`` when the pull request
-    is known — that is the head the pull request shows, whoever pushed it — then the
+    is known - that is the head the pull request shows, whoever pushed it - then the
     task's branch. A worktree rebuilt for the reconcile lane starts from one of these
     and never from the task's base commit (PAP-222, 2026-09-17: the slot came back at
     the base, and the gate and the approval ran against it).

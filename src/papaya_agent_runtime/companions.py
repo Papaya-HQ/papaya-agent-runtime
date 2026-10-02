@@ -3,7 +3,7 @@
 Companions (treehouse, lavish-axi, gh-axi) are provisioned by ``ppy setup`` /
 ``ppy tools install`` into ``.ppy/tools/`` with a stable symlink in
 ``.ppy/tools/bin/``. Runtime code resolves a companion by preferring the
-provisioned copy and falling back to whatever is on ``PATH`` — so Papaya Agent Runtime
+provisioned copy and falling back to whatever is on ``PATH`` - so Papaya Agent Runtime
 works whether the user let us manage the tool or installed it themselves.
 """
 

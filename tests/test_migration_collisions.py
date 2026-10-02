@@ -73,7 +73,7 @@ def test_down_revision_is_read_from_every_shape_alembic_writes() -> None:
 #
 # `PurePosixPath.full_match` is Python 3.13+. This project supports 3.12, where
 # that call raised `AttributeError` inside the broad `except` around every
-# dispatch advisory — so on 3.12 the migration check silently reported nothing
+# dispatch advisory - so on 3.12 the migration check silently reported nothing
 # and every dispatch looked clean. These pin the replacement's semantics on both
 # versions, because the matcher is now the only thing standing between two
 # migrations off one head and a red migration-graph test after both merge.

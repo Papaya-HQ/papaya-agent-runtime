@@ -3,7 +3,7 @@
 On 2026-09-16 the previous build's supervisor survived the app quitting with a worker
 under it, and every restart of the new build refused to start until somebody sent
 it a signal by hand. These drive the real supervisor with the fake provider's
-`HOLD:` worker — a genuinely live session that an interrupt ends — so "recorded
+`HOLD:` worker - a genuinely live session that an interrupt ends - so "recorded
 stopped, session intact" is what the runner actually records, not a stub's word.
 """
 

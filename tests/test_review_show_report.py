@@ -258,7 +258,7 @@ def test_recycled_slot_paths_do_not_turn_one_migration_into_phantom_competitors(
     store.set_task_status(conn, current, "worker_done")
 
     # Three finished tasks whose records name the same slot, with branches that
-    # are retired (the base clone never had them) — the shape in the report.
+    # are retired (the base clone never had them) - the shape in the report.
     for title, status, merged in (
         ("old failed", "failed", False),
         ("old delivered", "delivered", True),

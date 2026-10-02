@@ -10,8 +10,8 @@ item 6).
 
 So a brief that adds a database migration, names new routes or endpoints,
 specifies a state machine, or lists more than five numbered items under In
-scope is routed to the top of the configured ladder — the ceiling's model and
-reasoning — unless ``--model`` or ``--reasoning`` says otherwise. Anything else
+scope is routed to the top of the configured ladder - the ceiling's model and
+reasoning - unless ``--model`` or ``--reasoning`` says otherwise. Anything else
 keeps the configured default. The dispatch response, its ``dispatched`` event
 and ``ppy dispatch`` all carry the rule that fired. Nothing here can exceed the
 ceiling: the top tier *is* the ceiling, and ``router.enforce_ceiling`` still
@@ -40,7 +40,7 @@ _SCOPE_HEADING = re.compile(r"^(?:in[ -]scope|scope)\b")
 
 _MIGRATION_PATH = re.compile(r"(?:^|[/\s`'\"(])(?:migrations|alembic/versions)/[\w.-]+")
 _DOWN_REVISION = re.compile(r"\bdown_revision\b")
-# "add a migration", "write an Alembic migration", "a new schema migration" —
+# "add a migration", "write an Alembic migration", "a new schema migration" -
 # never the advisory, the collision check or the word on its own.
 _MIGRATION_INSTRUCTION = re.compile(
     r"(?:\b(?:add|adds|adding|write|writes|writing|create|creates|creating)\s+an?\s+"
@@ -153,4 +153,4 @@ def route(
 
 
 def describe(route: Route) -> str:
-    return f"routing: {route.tier} ({route.model}/{route.reasoning}) — {route.rule}"
+    return f"routing: {route.tier} ({route.model}/{route.reasoning}) - {route.rule}"

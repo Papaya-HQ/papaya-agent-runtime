@@ -3,7 +3,7 @@
 Issue #121, 30 occurrences: workers keep running commands the rules refuse for
 their shape, and the steer answered by reprinting the same rules. 16 of the 28
 `command_shape` denials since 2026-09-18 are `cd <worktree> && …`, which the
-rules never actually addressed — they say "`cd` is its own call", and never said
+rules never actually addressed - they say "`cd` is its own call", and never said
 the shell already starts in the worktree, so "run it without the cd" was not
 derivable from the text.
 
@@ -43,7 +43,7 @@ def test_a_cd_into_the_worktree_itself_becomes_the_bare_command(wt) -> None:
     found = rewrite_for(f"cd {wt} && git status --short", str(wt))
 
     assert found is not None
-    assert found.instead == "`git status --short`, on its own — your shell starts there"
+    assert found.instead == "`git status --short`, on its own - your shell starts there"
     assert found.runnable is True
 
 
@@ -112,7 +112,7 @@ def test_an_inline_variable_with_no_alternative_says_there_is_none(wt) -> None:
     [
         (
             "make ios-test 2>&1 | tee /tmp/ios-test-output.txt | tail -80",
-            "`ppy gate run --task <task id>` when `make ios-test` is your gate — it "
+            "`ppy gate run --task <task id>` when `make ios-test` is your gate - it "
             "records the output for you; otherwise run it and read what it printed",
         ),
         ("cat notes.md | head -200", "the Read tool on `notes.md`"),
@@ -128,7 +128,7 @@ def test_an_inline_variable_with_no_alternative_says_there_is_none(wt) -> None:
         ),
         (
             "for i in 1 2 3; do uv run pytest -q tests/test_dm.py; done",
-            "`uv run pytest -q tests/test_dm.py`, once per value — 3 separate calls",
+            "`uv run pytest -q tests/test_dm.py`, once per value - 3 separate calls",
         ),
         (
             'git commit -m "$(cat .ppy-evidence/msg.txt)"',

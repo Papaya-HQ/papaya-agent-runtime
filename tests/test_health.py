@@ -75,7 +75,7 @@ def test_flag_quiet_workers_once_per_episode(ppy_home, monkeypatch) -> None:
     first = health.flag_quiet_workers(conn, quiet_after=threshold, already_flagged=flagged)
     assert [e["task_id"] for e in first] == [task_id]
     assert flagged == {task_id}
-    # Second tick: still quiet, but already flagged — no duplicate event.
+    # Second tick: still quiet, but already flagged - no duplicate event.
     assert health.flag_quiet_workers(conn, quiet_after=threshold, already_flagged=flagged) == []
     events = conn.execute("SELECT kind FROM events WHERE task_id = ?", (task_id,)).fetchall()
     assert [e["kind"] for e in events].count("worker_quiet") == 1
@@ -287,7 +287,7 @@ def test_the_first_health_tick_runs_however_long_the_machine_has_been_up(
     """`time.monotonic()` is time since boot, so a 0.0 sentinel is a live tick at boot.
 
     With `_last_health_tick = 0.0`, the guard `monotonic() - 0.0 < 60` is true for the
-    first minute of a machine's uptime — so a supervisor started on a freshly booted
+    first minute of a machine's uptime - so a supervisor started on a freshly booted
     box silently polled nothing, and prepared no assessments, until the box had been
     up a minute. It surfaced as a flaky CI test on a fresh runner (2026-09-15).
     """

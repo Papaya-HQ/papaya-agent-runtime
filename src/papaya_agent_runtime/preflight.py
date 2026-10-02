@@ -51,13 +51,13 @@ def read_brief(path: str | Path) -> str:
     brief_path = Path(path).expanduser()
     if not brief_path.is_file():
         raise PreflightError(
-            f"brief file not found: {brief_path} — nothing was dispatched. "
+            f"brief file not found: {brief_path} - nothing was dispatched. "
             "Write the brief to a durable location (for example .ppy/briefs/<repo>/) first."
         )
     text = brief_path.read_text(encoding="utf-8")
     if not text.strip():
         raise PreflightError(
-            f"brief file is empty: {brief_path} — refusing to dispatch a worker with no "
+            f"brief file is empty: {brief_path} - refusing to dispatch a worker with no "
             "instructions (this is how an empty-brief worker was sent out on 2026-08-30)."
         )
     return text
@@ -96,7 +96,7 @@ def min_free_gb() -> float:
 def check_disk(path: str | Path | None = None, *, floor_gb: float | None = None) -> float:
     """Return free gigabytes at ``path`` (the instance root by default) or refuse.
 
-    A worker needs room for a worktree checkout and a dependency install — several
+    A worker needs room for a worktree checkout and a dependency install - several
     gigabytes on a real repository. Dispatching below the floor produces a
     half-created checkout that also blocks the pool until someone removes it.
     """
@@ -108,7 +108,7 @@ def check_disk(path: str | Path | None = None, *, floor_gb: float | None = None)
     if free_gb < floor:
         raise PreflightError(
             f"only {free_gb:.1f} GB free on the volume holding {probe} (floor {floor:g} GB; "
-            f"set {MIN_FREE_GB_ENV} to change it) — free space before dispatching; a "
+            f"set {MIN_FREE_GB_ENV} to change it) - free space before dispatching; a "
             f"worktree checkout plus a dependency install needs several GB. {reclaim_hint()}"
         )
     return free_gb
@@ -117,8 +117,8 @@ def check_disk(path: str | Path | None = None, *, floor_gb: float | None = None)
 def reclaim_hint() -> str:
     """Point a refused dispatch at the space it already owns.
 
-    Most of the time the disk is full of the harness's own finished worktrees —
-    20 GB of delivered tasks on 2026-09-02 — so a refusal that only says "free
+    Most of the time the disk is full of the harness's own finished worktrees -
+    20 GB of delivered tasks on 2026-09-02 - so a refusal that only says "free
     space" sends the manager hunting when one command would do it.
     """
     from papaya_agent_runtime.worktree.reclaim import human_bytes, reclaimable_bytes
@@ -239,7 +239,7 @@ def check_remote(origin: str | None, forge_url: str | None) -> None:
     if _same_repository(origin, forge_url):
         return
     raise PreflightError(
-        f"the base clone's origin is {origin} but the registered forge is {forge_url} — "
+        f"the base clone's origin is {origin} but the registered forge is {forge_url} - "
         "the worker would start from one repository and deliver to another. Re-register "
         "the repo with `ppy repo add <path> --forge-url <forge URL>` so the two agree.",
         check="remote",
@@ -258,7 +258,7 @@ def fetch_remote(local_path: str, remote: str) -> None:
     if fetched.returncode != 0:
         raise PreflightError(
             f"`git fetch {remote}` failed in the base clone {local_path}: "
-            f"{fetched.stderr.strip()[:200]} — the starting commit cannot be checked "
+            f"{fetched.stderr.strip()[:200]} - the starting commit cannot be checked "
             "against a remote that did not answer.",
             check="base",
         )
@@ -274,7 +274,7 @@ def intended_base(
 ) -> str | None:
     """The commit the lease must sit on: the ``--base`` branch head or the default's.
 
-    Read from ``remote`` after the fetch — never from the base clone's own default
+    Read from ``remote`` after the fetch - never from the base clone's own default
     branch, which a stale local origin can leave behind the forge (task 229). A
     ``--base`` branch not on the remote may still be a stack parent that has not
     pushed: its local branch, or its lease worktree, is then the head.
@@ -290,7 +290,7 @@ def intended_base(
         raise PreflightError(
             f"the branch to start from, {base_branch!r}, is not on {remote} after "
             f"`git fetch {remote}` in the base clone, and no local branch or stack "
-            "parent's worktree has it — there is nothing for the worker to start from.",
+            "parent's worktree has it - there is nothing for the worker to start from.",
             check="base",
         )
     return head
@@ -317,7 +317,7 @@ def check_starting_commit(
     if not (on_remote or under_base):
         raise PreflightError(
             f"the brief's starting commit {sha} is not reachable from {remote} after "
-            f"`git fetch {remote}` in the base clone — the worker would be told to find a "
+            f"`git fetch {remote}` in the base clone - the worker would be told to find a "
             "commit it cannot see. Check the SHA against the forge before dispatching.",
             check="base",
         )
@@ -427,7 +427,7 @@ def lease_refusal(
     if expect_base and head != expect_base:
         return LeaseRefusal(
             f"the lease is at {head[:12] or 'no commit'} but the intended base is "
-            f"{expect_base[:12]} — run `ppy repo sync <repo>` so the base clone matches its "
+            f"{expect_base[:12]} - run `ppy repo sync <repo>` so the base clone matches its "
             "forge, then dispatch again.",
             expect_base,
             head,
@@ -435,7 +435,7 @@ def lease_refusal(
     if starting_sha and not (head and _is_ancestor(worktree, starting_sha, head)):
         return LeaseRefusal(
             f"the lease is at {head[:12] or 'no commit'}, which does not contain the brief's "
-            f"starting commit {starting_sha[:12]} — run `ppy repo sync <repo>`, then dispatch "
+            f"starting commit {starting_sha[:12]} - run `ppy repo sync <repo>`, then dispatch "
             "again.",
             starting_sha,
             head,
@@ -580,7 +580,7 @@ def empty_parent_refusal(parent, *, local_path: str, remote: str) -> str | None:
     where = ", ".join(dict.fromkeys(where for where, _cwd, _head in heads))
     return (
         f'the stack parent, task {parent["id"]} "{parent["title"]}" (branch {branch}), has no '
-        f"commits beyond its own base {base[:12]} ({where}) — the new worker would start "
+        f"commits beyond its own base {base[:12]} ({where}) - the new worker would start "
         "from that base, not from the parent's work. Wait for the parent's first push, then "
         "dispatch again; to start from its base anyway, --accept-preflight empty-parent "
         "--reason ..."

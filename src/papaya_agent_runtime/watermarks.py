@@ -1,7 +1,7 @@
 """Comment-sweep watermarks for external records the harness does not own.
 
 During the Radar QA loop the manager swept six tickets every ten minutes with a
-subagent that re-read every comment — about 65k tokens a sweep — and found a new
+subagent that re-read every comment - about 65k tokens a sweep - and found a new
 comment on well under one sweep in five (issue #62). ``ppy watch`` keeps per-PR
 state so a tick asks the forge only what changed; this is the same shape for a
 ticket, a thread, or any record with a timestamp: the newest one the manager has
@@ -34,7 +34,7 @@ def parse_timestamp(raw: str) -> datetime:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise WatermarkError(
-            f"not an ISO-8601 timestamp: {raw!r} — pass the newest comment's own "
+            f"not an ISO-8601 timestamp: {raw!r} - pass the newest comment's own "
             "timestamp, for example 2026-09-06T14:03:00Z"
         ) from exc
     if parsed.tzinfo is None:
@@ -53,8 +53,8 @@ def set_watermark(
     """Record ``raw`` as the newest processed timestamp on ``key``.
 
     Returns the stored timestamp and the previous one (None when the key was
-    unset). Moving a watermark backwards is allowed — it is how a manager asks
-    for a re-read — and the caller can say so, since the previous value comes back.
+    unset). Moving a watermark backwards is allowed - it is how a manager asks
+    for a re-read - and the caller can say so, since the previous value comes back.
     """
     key = key.strip()
     if not key:

@@ -5,9 +5,9 @@ base clone. Workers only ever touch their leased worktree.
 
 Two backends implement the same ``Lease`` contract:
 
-- ``git`` — the always-available reference backend using plain ``git worktree``
+- ``git`` - the always-available reference backend using plain ``git worktree``
   under ``.ppy/worktree-pools/``.
-- ``treehouse`` — the pinned companion (https://github.com/kunchenguid/treehouse),
+- ``treehouse`` - the pinned companion (https://github.com/kunchenguid/treehouse),
   which maintains a pool of pre-warmed, reusable worktrees. We use its
   non-interactive lease interface: ``treehouse get --lease --json`` durably
   reserves a pooled worktree and prints ``{path, lease_id, ...}``; ``treehouse
@@ -130,7 +130,7 @@ class LeaseManager:
 
         ``branch`` is for a task getting its worktree *back* (issue #58): the
         pull request, the remote, and every record already carry that name, so
-        the rebuilt checkout is put on it — the existing local branch when the
+        the rebuilt checkout is put on it - the existing local branch when the
         base clone still has one, a new branch at the clone's head otherwise.
         The caller moves it to the right commit afterwards.
         """

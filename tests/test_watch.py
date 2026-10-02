@@ -90,7 +90,7 @@ def test_tick_reports_owed_tasks_new_events_and_the_ledger(home) -> None:
     assert "new since last tick: error×1, worker_done×1" in line
     assert "open todos: 1" in line
 
-    # A second tick from the new cursor reports nothing new — but still reports.
+    # A second tick from the new cursor reports nothing new - but still reports.
     again = watch.tick(conn, since_event_id=snap["last_event_id"])
     assert again["new_events"] == {}
     assert "new since last tick: none" in watch.render(again)
@@ -475,7 +475,7 @@ def test_idle_means_every_reason_to_tick_is_absent() -> None:
     assert watch.is_idle({**IDLE, "prs": [{"ci": "pending"}]}) is False
     assert watch.is_idle({**IDLE, "prs": [{"ci": "fail"}]}) is False
     # Green work, work the forge can't be asked about, and a full ledger are all
-    # things the manager acts on in its own time — none of them is the team.
+    # things the manager acts on in its own time - none of them is the team.
     assert watch.is_idle({**IDLE, "prs": [{"ci": "pass"}]}) is True
     assert watch.is_idle({**IDLE, "prs": [{"ci": "unknown"}]}) is True
     assert watch.is_idle({**IDLE, "open_todos": 4}) is True
@@ -513,12 +513,12 @@ def test_the_watch_says_it_is_going_quiet_once_then_says_nothing(home) -> None:
 
     lines = out.getvalue().strip().splitlines()
     assert len(lines) == 4  # five ticks, one of them silent
-    assert lines[0].startswith("TEAM 09:00 UTC — no workers in flight")
-    assert lines[1] == "TEAM 09:01 UTC — idle; watch quiet until something changes"
+    assert lines[0].startswith("TEAM 09:00 UTC - no workers in flight")
+    assert lines[1] == "TEAM 09:01 UTC - idle; watch quiet until something changes"
     # The third idle tick (09:02) printed nothing at all; the dispatch brings the
     # normal line and the normal cadence straight back.
-    assert lines[2].startswith("TEAM 09:03 UTC — in flight 1:")
-    assert lines[3].startswith("TEAM 09:04 UTC — in flight 1:")
+    assert lines[2].startswith("TEAM 09:03 UTC - in flight 1:")
+    assert lines[3].startswith("TEAM 09:04 UTC - in flight 1:")
     assert naps == [300, 300, 300, 300, 300]  # the process never stopped ticking
 
 
@@ -556,8 +556,8 @@ def test_exit_when_idle_ends_the_process_for_scripts(home) -> None:
     )
     assert rc == 0
     lines = out.getvalue().strip().splitlines()
-    assert lines[0].startswith("TEAM 09:00 UTC — no workers in flight")
-    assert lines[1] == "TEAM 09:01 UTC — idle; watch exiting (--exit-when-idle)"
+    assert lines[0].startswith("TEAM 09:00 UTC - no workers in flight")
+    assert lines[1] == "TEAM 09:01 UTC - idle; watch exiting (--exit-when-idle)"
     assert naps == [300]  # it slept once, then stopped rather than going quiet
 
 

@@ -2,7 +2,7 @@
 
 Uses a fake `lavish-axi` on PATH to prove readiness is established before the poll
 is backgrounded, a vanished session is retried, and drain keeps poller errors apart
-from feedback — without a real tool and without ever blocking the caller.
+from feedback - without a real tool and without ever blocking the caller.
 """
 
 from __future__ import annotations

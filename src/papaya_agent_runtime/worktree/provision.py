@@ -21,8 +21,8 @@ A repository with neither configured behaves exactly as it did before: nothing
 runs, nothing is linked, and no event is recorded.
 
 Nothing here may fail a dispatch. A provision hook that exits non-zero has cost
-the worker the head start, not the task — the worker can still install what it
-needs — so the exit status is recorded and the dispatch continues.
+the worker the head start, not the task - the worker can still install what it
+needs - so the exit status is recorded and the dispatch continues.
 """
 
 from __future__ import annotations
@@ -123,8 +123,8 @@ def exclude_locally(worktree: str, relative: str) -> bool:
 def link_venv(base_clone: str, worktree: str, relative: str) -> dict:
     """Point the worktree at the virtualenv the base clone already has.
 
-    A symlink is the whole point — the win is not copying gigabytes of installed
-    packages per task — but a filesystem that refuses one gets a copy rather than
+    A symlink is the whole point - the win is not copying gigabytes of installed
+    packages per task - but a filesystem that refuses one gets a copy rather than
     nothing. The venv's own absolute paths keep resolving to the base clone,
     which is what makes this work at all.
     """

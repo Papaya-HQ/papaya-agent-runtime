@@ -2,7 +2,7 @@
 
 Everything this runtime does for a person arrives as a Papaya event, and until now
 every arrival was somebody else's process: `papaya-agent listen` held the lease,
-started a harness, and let go the moment that harness exited — while the work it
+started a harness, and let go the moment that harness exited - while the work it
 had started was still being built. A ticket that takes an hour cannot be held by
 something that lives for a minute.
 
@@ -26,14 +26,14 @@ supervisor is a blocking socket server that already knows how to run on a thread
 (:meth:`SupervisorServer.start_background`), and the client's loop is asyncio. So
 the supervisor takes a thread, the listener takes the main thread's event loop,
 and neither waits on the other. The supervisor binds *first*, synchronously, so
-that the one refusal this command can make — another `serve` or `supervisor serve`
-already owns this ``PPY_HOME`` — happens before anything has been said to Papaya.
+that the one refusal this command can make - another `serve` or `supervisor serve`
+already owns this ``PPY_HOME`` - happens before anything has been said to Papaya.
 
 Before either of them runs, `serve` sets the checkout up if nobody ever has
 (:func:`self_setup`) and then tells the connection's owner, once, what is still
 missing (:func:`report_readiness`). Both are here rather than in a command
 somebody is expected to type, because the experience this runtime is for is
-"clone it, point the app at it, connect" — and a machine that has only ever been
+"clone it, point the app at it, connect" - and a machine that has only ever been
 connected has no first turn in which to run `ppy setup` by hand.
 
 What the runner does
@@ -64,7 +64,7 @@ is `dispatched`, `reviewing` or `blocked`, a new comment by anyone but this agen
 starts the answer turn with the comment as its fact (read at most a minute late,
 queued behind a turn already running, and recorded so it is answered once, even
 across a restart). How it knows a turn did its job is
-mechanical too — a worker row in the ticket's run, or an answer, steer or
+mechanical too - a worker row in the ticket's run, or an answer, steer or
 delivery event since the turn began. A turn that did not is retried once with the
 tail of its transcript; a second miss hands the ticket back.
 
@@ -81,7 +81,7 @@ at its head is steered to run `ppy gate run`.
 The work item's *status* is state, so the runner sets it: ``in_progress`` on
 pickup, ``review`` when the pull request is open, ``blocked`` while a question
 waits on a person, ``todo`` on hand-back. The *phase* is state too, so the runner
-says each phase change on the item as one plain line, as the agent — that is what
+says each phase change on the item as one plain line, as the agent - that is what
 the ticket card shows as the agent's status. Worker progress stays in the app.
 Anything that needs judgment is still a turn's to say.
 
@@ -91,9 +91,9 @@ must have left the turn's report as a new agent comment. A miss reruns the turn
 once with a one-line addendum; a second miss is a progress line (acceptance
 criteria) or the runner's own fallback line with the pull request (the report).
 
-Every turn is launched with the Papaya agent's tools — the MCP config
+Every turn is launched with the Papaya agent's tools - the MCP config
 `papaya-agent mcp runner-config` writes, `--strict-mcp-config` and the client's
-plugin — and its transcript is kept at `.ppy/runs/<run id>/turns/<turn>-<n>.log`.
+plugin - and its transcript is kept at `.ppy/runs/<run id>/turns/<turn>-<n>.log`.
 
 A ticket this runtime cannot take at all (a repository it names that cannot be
 registered, or an event carrying no work item) is declined through the client's
@@ -216,7 +216,7 @@ COMMENT_POLL_SECONDS = 60.0
 #: waiting on this machine, so what they add is heard within 15 seconds.
 FOLLOW_UP_POLL_SECONDS = 15.0
 #: Said at the origin once for each batch of follow-ups handed to a turn.
-FOLLOW_UP_LINE = "Got it — passing that on."
+FOLLOW_UP_LINE = "Got it - passing that on."
 #: How an answer turn for an instruction's follow-up says something back to the person:
 #: the last line starting with it is posted at the origin as a progress reply.
 FOLLOW_UP_REPLY_PREFIX = "REPLY:"
@@ -466,7 +466,7 @@ def parse_args(argv: list[str]) -> ServeOptions:
     try:
         known, extra = _parser().parse_known_args(list(argv))
     except _ParseFailed as exc:
-        # The parse failed, so `known.supervised` does not exist — and whether the
+        # The parse failed, so `known.supervised` does not exist - and whether the
         # complaint goes to stderr or down the protocol depends on that one flag.
         # Reading the raw token is the only answer available at this point.
         return ServeOptions(supervised="--supervised" in argv, invalid_arguments=str(exc))
@@ -545,7 +545,7 @@ def session_id_for(connection_id: str) -> str:
 
     The same id every time, so the acquire-or-extend reserve extends the leases
     this manager already holds after a restart. A machine with no connection at
-    all still gets an id — the build that follows is about to fail with something
+    all still gets an id - the build that follows is about to fail with something
     far more useful than "no session id".
     """
     from papaya_agent_client.listener import mint_session_id
@@ -578,8 +578,8 @@ def protocol_writer(stream: Any, *, on_stalled: Any = None) -> Any:
 
     The client's `hello` describes the *client*: its protocol version, its own
     version, the home and the working directory. A host that exec'd a runtime
-    needs two more facts — which runtime answered, and what this machine needs
-    from its owner — and they are added here as ``runtime``: the descriptor plus
+    needs two more facts - which runtime answered, and what this machine needs
+    from its owner - and they are added here as ``runtime``: the descriptor plus
     ``blockers`` (``[{code, title, steps, since}]``, redacted; see
     :mod:`~papaya_agent_runtime.blockers`), on `hello` and on every `status`, so
     the desktop app can show "Setup needed on this Mac" with copyable commands.
@@ -588,7 +588,7 @@ def protocol_writer(stream: Any, *, on_stalled: Any = None) -> Any:
     0.15.1 has the destination but not the road: `Supervisor.runtime` is a field
     the client deliberately never sets ("a runtime the client handed the process
     to fills it"), but `build_supervised_listener` constructs the `Supervisor`
-    itself, takes no `runtime=` argument, and calls `hello()` before it returns —
+    itself, takes no `runtime=` argument, and calls `hello()` before it returns -
     so there is no moment at which a host can reach the field. Injecting on the
     message is the seam that exists. When the builder forwards `runtime=`, delete
     this and pass it.
@@ -687,7 +687,7 @@ class Trigger:
     #: The phase it moves the ticket to: `blocked` or `reviewing`, or `delivering`.
     phase: str
     event_id: int
-    #: The worker's question, or what stopped it — verbatim, for the turn to read.
+    #: The worker's question, or what stopped it - verbatim, for the turn to read.
     detail: str = ""
     #: True when the worker did not finish: the review turn is then a steer.
     failure: bool = False
@@ -800,7 +800,7 @@ def is_own_comment(comment: dict[str, Any], agent_id: str | None) -> bool:
     """Did this agent write ``comment``? Only then is it not worth waking for.
 
     Another agent's comment is somebody else talking. An agent comment whose
-    author cannot be told apart — no id on it, or no id for this agent — is
+    author cannot be told apart - no id on it, or no id for this agent - is
     taken as this agent's own: every comment the runner and its turns post is
     an agent comment, and waking on those would answer ourselves.
     """
@@ -1117,7 +1117,7 @@ def plan_reply(result: object) -> str:
     """The manager's reply to a plan note, from an answer turn's transcript tail.
 
     The contract is `prompts/answer.md`: the last `PLAN-REPLY:` line. Empty when the
-    turn did not say one, which is a missed turn — the runner never writes a reply of
+    turn did not say one, which is a missed turn - the runner never writes a reply of
     its own, because a guess is exactly what a plan gate exists to prevent.
     """
     text = result.tail() if hasattr(result, "tail") else str(result or "")
@@ -1266,7 +1266,7 @@ def checkin_decision(result: object) -> tuple[str, str] | None:
 
 def _continue_note(rest: str) -> str:
     """The note after `continue` (`, note <text>`), or ``""`` when there is none."""
-    text = rest.strip().lstrip(",:;-—").strip()
+    text = rest.strip().lstrip(",:;-\u2014").strip()
     if not text.lower().startswith(prompts.CHECKIN_NOTE):
         return ""
     return text[len(prompts.CHECKIN_NOTE) :].strip().lstrip(":").strip()
@@ -1316,7 +1316,7 @@ def _report_progress(job: Any, phase: str, detail: str) -> None:
     for this: a supervised host gets a `job.progress` message, a terminal
     listener gets a log line, and the runner does not have to know which it is
     talking to. It is wrapped only because a hold must outlive a reporting
-    failure — the lease is the thing that matters, and a host that has gone away
+    failure - the lease is the thing that matters, and a host that has gone away
     is not a reason to give a work item back.
     """
     try:
@@ -1330,8 +1330,8 @@ class TicketRunner:
 
     Everything the runner itself does is mechanical: record, launch a turn, read
     the ledger, set a status. Everything that needs judgment is a manager turn.
-    All of the blocking work — reading the envelope, cloning a repository,
-    SQLite, a turn that runs for twenty minutes — runs on a thread, because the
+    All of the blocking work - reading the envelope, cloning a repository,
+    SQLite, a turn that runs for twenty minutes - runs on a thread, because the
     client renews this ticket's lease on the event loop this coroutine runs on,
     and a manager that stops renewing while it works loses the very lease it holds.
 
@@ -1466,7 +1466,7 @@ class TicketRunner:
         """Take the next offer of ``work_item_id`` up on ``task_id``, the rounds' reclaim.
 
         ``reported_until`` is the newest event id when the offer was made. The hold
-        starts on a thread some time later — seconds, on a loaded machine — and a
+        starts on a thread some time later - seconds, on a loaded machine - and a
         worker's progress in between is news: marking history at the hold's start
         instead silently dropped it.
         """
@@ -1598,7 +1598,7 @@ class TicketRunner:
         """Bring the work item's living status line up to date. Returns whether it wrote.
 
         One comment, edited in place, and only when the line changed: phase, what the
-        worker is doing, the pull request and its CI, what waits on a person — the facts
+        worker is doing, the pull request and its CI, what waits on a person - the facts
         `ppy status --team` prints, so a hosted agent reading the ticket reads the record.
 
         Never in standalone mode: with no Papaya connection, or for a local task with no
@@ -1865,7 +1865,7 @@ class TicketRunner:
         except asyncio.CancelledError:
             # The listener cancels a hold only when this process shuts down: marked so,
             # the rounds of the next start take it back up (`instructions.live`). A lost
-            # lease stops the hold instead (`_Stopped`) and is never taken back — nor is
+            # lease stops the hold instead (`_Stopped`) and is never taken back - nor is
             # one whose lease was lost, or released by a person, before the shutdown's
             # cancel reached it: the stop was set first, so the release is plain.
             stopped_first = ticket.job.stop.is_set()
@@ -1904,9 +1904,9 @@ class TicketRunner:
         The turn follows the brief turn's own layers (`prompts.REPO_CHOICE_LAYERS`) over
         the instruction, its references and what the referenced items say, and ends on
         a `REPOSITORY:` line. Its candidates are registered repositories only, so what it
-        names is dispatched into as it stands. Anything but a candidate — "cannot tell",
+        names is dispatched into as it stands. Anything but a candidate - "cannot tell",
         a turn past its deadline, one the provider's usage limit ended or would end, one
-        that could not launch — becomes the one question, naming the candidates and any
+        that could not launch - becomes the one question, naming the candidates and any
         unregistered URL. It runs once: a usage limit is not waited out while a person
         waits for an answer. Never raises except for the hold itself ending.
         """
@@ -2810,8 +2810,8 @@ class TicketRunner:
         """Review the pushed head when all the local one adds is build artifacts.
 
         The auto-commit could put `__pycache__/` and `uv.lock` on top of a branch the
-        worker had pushed clean (2026-09-23), and the review turn — which may not
-        write in the worktree — sent the worker back to undo a commit it never made.
+        worker had pushed clean (2026-09-23), and the review turn - which may not
+        write in the worktree - sent the worker back to undo a commit it never made.
         The runtime drops that commit itself and says so in one line.
         """
         worker = ticket.worker
@@ -2913,8 +2913,8 @@ class TicketRunner:
         the plan itself: one answer turn reads it against the brief and ends with a
         `PLAN-REPLY:` line, and that line reaches the worker verbatim under
         :data:`PLAN_REPLY_TO_WORKER`. A turn that says no reply is a miss like any other
-        — waited out when a usage limit ended it, retried, and handing the ticket back
-        after `TURN_ATTEMPTS` — and the worker is never resumed with a guess.
+        - waited out when a usage limit ended it, retried, and handing the ticket back
+        after `TURN_ATTEMPTS` - and the worker is never resumed with a guess.
         """
         misses: list[str] = []
         tail = ""
@@ -3159,7 +3159,7 @@ class TicketRunner:
         On the first real run the review turn had no tools, posted nothing, and the
         runner said "Result posted on the work item" anyway. So: a new comment by
         the agent since the turn began, or one rerun told only to post it, or
-        ``False`` — and then the runner posts the fallback itself.
+        ``False`` - and then the runner posts the fallback itself.
         """
         posted = await asyncio.to_thread(self._agent_commented_since, ticket, before)
         if posted is not False:
@@ -3184,7 +3184,7 @@ class TicketRunner:
         already holds, so a person's reply to a question the manager asked would
         otherwise go unheard until review. The runner reads the comments itself,
         at most once a minute and right after every turn, and a comment that
-        arrived while a turn ran is answered after it — all of them in one turn.
+        arrived while a turn ran is answered after it - all of them in one turn.
         What to do about a comment is the turn's judgment, not the runner's.
         """
         await self._listen(ticket)
@@ -3322,7 +3322,7 @@ class TicketRunner:
         """A turn is about to read the item: what is on it now counts as handled.
 
         Every turn's prompt reads the work item and its comments, so a comment
-        that is there when one starts has been heard — a person's reply that a
+        that is there when one starts has been heard - a person's reply that a
         brief turn acted on is not answered again once the worker is dispatched.
         Taken before the launch, so a comment made while the turn runs is newer.
 
@@ -3375,7 +3375,7 @@ class TicketRunner:
         """Hold in `blocked` while a turn's question waits on a person's reply.
 
         A turn that needs a person says so by recording a todo blocked on `user`
-        against the ticket task — an existing, local primitive, so the runner can
+        against the ticket task - an existing, local primitive, so the runner can
         read it without interpreting the transcript. The client drops a new event
         for a subject this session already holds, so the reply cannot arrive as a
         `work_item.comment`; the runner watches the work item itself instead, and
@@ -3470,8 +3470,8 @@ class TicketRunner:
         """A turn that ended `WAITING:` is waited out, not missed. Returns the tail, or ``None``.
 
         The reason is a progress line; the phase does not change. The wait is on
-        the runner's clock — `WAIT_FIRST_SECONDS`, doubling for each wait in a row
-        up to `WAIT_MAX_SECONDS` — touching the activity stamp as it goes, and is
+        the runner's clock - `WAIT_FIRST_SECONDS`, doubling for each wait in a row
+        up to `WAIT_MAX_SECONDS` - touching the activity stamp as it goes, and is
         cut short by a stop or by a comment from somebody else, which the caller's
         loop then hears before the turn runs again.
         """
@@ -3500,7 +3500,7 @@ class TicketRunner:
 
         A turn the provider's usage limit ended did not fail at its job: it never ran.
         It is waited out and run again here, so no caller (brief, answer, review,
-        check-in) ever sees it — no miss, no hand-back, no deficiency, no comment on the
+        check-in) ever sees it - no miss, no hand-back, no deficiency, no comment on the
         ticket, only progress lines. And no turn is launched into a pause another turn
         or a worker already hit (`limits.pause`: per provider, on this machine).
 
@@ -3920,7 +3920,7 @@ class TicketRunner:
     async def _enter(self, ticket: Ticket, phase: str, detail: str, *, say: str = "") -> None:
         """Record a phase on the task and say it as progress, which is activity.
 
-        With ``say``, the phase change is also one comment on the work item — the
+        With ``say``, the phase change is also one comment on the work item - the
         line the ticket card shows as this agent's status.
         """
         await asyncio.to_thread(self._record_phase, ticket.held.task_id, phase, detail)
@@ -4056,7 +4056,7 @@ class TicketRunner:
     async def _stopped(self, ticket: Ticket) -> dict[str, Any]:
         """The client ended the hold. Record why; a stall is a hand-back of ours.
 
-        Unless the ticket's worker's work goes on — its session is live, it said done,
+        Unless the ticket's worker's work goes on - its session is live, it said done,
         or it stopped with its branch ahead of base: then only the hold stalled. The
         worker is left as it is under the supervisor, nothing is said on the item, and
         the phase `stalled` is what the rounds' reclaim reads to offer the ticket again
@@ -4142,8 +4142,8 @@ class TicketRunner:
             event = papaya_events.hydrate_work_item(event, environ=job.env, **self._opener_kwargs())
         except papaya_events.PapayaEventError as exc:
             # Best effort, and deliberately not a decline of its own. The envelope
-            # is thinner than the full record — no description, no repository
-            # metadata — and the brief turn reads the item through MCP anyway;
+            # is thinner than the full record - no description, no repository
+            # metadata - and the brief turn reads the item through MCP anyway;
             # declining here would give work away over one network error.
             log.warning("[serve] Could not read the full work item for %s: %s", job.subject, exc)
 
@@ -4162,8 +4162,8 @@ class TicketRunner:
                 ensured = papaya_events.ensure_repository(event)
             except papaya_events.PapayaEventError as exc:
                 return self._decline(event, str(exc))
-        # A blocker scoped to this repository — its forge signed out, a toolchain it
-        # needs missing — refuses it here, while work elsewhere goes on.
+        # A blocker scoped to this repository - its forge signed out, a toolchain it
+        # needs missing - refuses it here, while work elsewhere goes on.
         if ensured is not None and readiness.setup_blocker(verdict, ensured.name) is not None:
             return self._decline(event, blockers.DECLINE_REASON, setup=verdict)
 
@@ -4176,8 +4176,8 @@ class TicketRunner:
     def _take_instruction(self, job: Any, event: papaya_events.PapayaEvent) -> Held | Declined:
         """Record an instruction's ticket, keyed on its subject, or decline it honestly.
 
-        Declined — the job's decline file and exit 75, which the client turns into a
-        release with ``declined: true`` so Papaya's fall-back tells the person — when
+        Declined - the job's decline file and exit 75, which the client turns into a
+        release with ``declined: true`` so Papaya's fall-back tells the person - when
         the runtime cannot run a turn at all, when work meets a setup blocker, or when
         the work path names a repository this machine cannot register. A setup blocker
         declines only work: a question is still answered, since answering needs no
@@ -4342,7 +4342,7 @@ class TicketRunner:
         """Decline an instruction; one that is already this machine's ticket, for good.
 
         With no ticket, only the decline (as before: Papaya's fall-back tells the
-        person). With one — a request the rounds offered back after a restart — the
+        person). With one - a request the rounds offered back after a restart - the
         ticket is recorded `declined`, the person is answered with ``said`` and the
         result reported `failed`, once, on the ledger: never offered again, never said
         again after another restart. What its run waited on is closed with it.
@@ -4419,7 +4419,7 @@ class TicketRunner:
         A first delivery has no task and leaves none: declining is the opposite of
         taking work on, so it must not be the thing that creates a row. A *re*
         delivery of a ticket this manager took earlier is the case worth
-        recording — the hold ended and the next attempt was refused, and a task
+        recording - the hold ended and the next attempt was refused, and a task
         still reading `picked_up` would be describing a lease nobody holds.
 
         Either way the decline is remembered for the sweep, with the ticket's
@@ -4469,8 +4469,8 @@ class TicketRunner:
         reported_until: int | None = None
         if existing is None and event.work_item_id:
             # An offer carries a new event key every time, so a ticket this runtime
-            # was already working — re-offered by the rounds' reclaim, or by the
-            # sweep after its hold ended — is found by its work item instead.
+            # was already working - re-offered by the rounds' reclaim, or by the
+            # sweep after its hold ended - is found by its work item instead.
             wanted = self._reclaiming.pop(str(event.work_item_id), None)
             if wanted is not None:
                 wanted_task, reported_until = wanted
@@ -4778,8 +4778,8 @@ def sent_back_before(task_id: int) -> bool:
 def resumable_phase(conn, task_id: int) -> str | None:
     """The working phase a redelivered ticket should pick up from, if any.
 
-    A ticket mid-work resumes. So does one whose hold ended as `released` — a lost
-    lease or this process shutting down — from the working phase before it, since
+    A ticket mid-work resumes. So does one whose hold ended as `released` - a lost
+    lease or this process shutting down - from the working phase before it, since
     nobody gave that work away. So does one whose hold `stalled` while its worker's
     work went on (:func:`stalled_resume_phase`): the client gave the lease back, not
     the work, so it resumes from the phase the worker's state implies. A ticket that
@@ -5302,7 +5302,7 @@ def acted_since(worker_id: int, mark: int) -> bool:
 
 
 def delivered_since(worker_id: int, mark: int, by_status: bool = True) -> bool:
-    """Is this worker's work delivered — by an event since ``mark``, or by its status?
+    """Is this worker's work delivered - by an event since ``mark``, or by its status?
 
     ``by_status=False`` asks for the event alone: a worker sent back over its
     open pull request still reads `delivered` until it delivers again.
@@ -5555,8 +5555,8 @@ def work_item_fingerprint(item: object) -> str | None:
 def turn_environment(job_env: dict[str, str], *, root: str, run_id: int) -> dict[str, str]:
     """The environment a manager turn gets: the client's job, bounded to the runtime.
 
-    Everything the client gives a job — the context, event, decline and activity
-    files, the plugin directory, the workspace and API variables — so the turn
+    Everything the client gives a job - the context, event, decline and activity
+    files, the plugin directory, the workspace and API variables - so the turn
     speaks as the Papaya agent and its tool use keeps the ticket's activity
     stamp fresh. Then two overrides: the write boundary is the runtime directory
     and nothing else, so a turn can register and dispatch but never edit a
@@ -5779,7 +5779,7 @@ async def _build(options: ServeOptions, runner: Any, *, stdout, extra: dict[str,
         "harness": options.harness,
         # What this connection announces itself as to Papaya, on every start.
         # Without it the label follows `--harness`, so a runtime exec'd as
-        # `--harness codex` would register as a Codex CLI listener — which is
+        # `--harness codex` would register as a Codex CLI listener - which is
         # exactly what it is not, and the one fact the app needs to tell a
         # machine running the manager from a machine running a bare harness.
         # `--harness` still names the bundled harness (the `key` and `label` a
@@ -5838,8 +5838,8 @@ def self_setup(*, stderr) -> None:
     """Configure this checkout, if nobody ever has, before anything listens.
 
     The intended experience is: clone the runtime, point the desktop app at it,
-    connect. Nothing else. Until now that left a checkout in `no_config` — no
-    driver profile, no worker ceiling, no database, no memory tree — until a
+    connect. Nothing else. Until now that left a checkout in `no_config` - no
+    driver profile, no worker ceiling, no database, no memory tree - until a
     person happened to open a session here and run `ppy setup` by hand. The
     readiness module has always said config is the runtime's own job "on its
     first turn"; under `ppy serve` there is no first turn unless `serve` takes
@@ -5847,14 +5847,14 @@ def self_setup(*, stderr) -> None:
 
     Non-interactive and with no overrides on purpose. Every default then comes
     from where it should: the provider from the harness the person chose when
-    they connected this machine (both roles the same — the runtime does not mix
+    they connected this machine (both roles the same - the runtime does not mix
     agents behind anybody's back), and the rest from the setup wizard, which is
     the same code path `ppy setup` runs. A checkout that already has a config is
     left exactly as it is; this is first-run setup, never a reset.
 
     Nothing here can stop `serve` from starting. The one expected failure is a
     machine with no signed-in harness, which is a person's to fix and which
-    readiness is about to say out loud — so it is said once on stderr and the
+    readiness is about to say out loud - so it is said once on stderr and the
     listener goes up anyway, ready to take the work it can and to be *there*
     when somebody signs in.
     """
@@ -5870,7 +5870,7 @@ def self_setup(*, stderr) -> None:
         print(f"ppy serve: could not set this runtime up: {exc}", file=stderr)
         return
     print(
-        f"ppy serve: set this runtime up in {ppy_home()} — manager {cfg.manager.provider}, "
+        f"ppy serve: set this runtime up in {ppy_home()} - manager {cfg.manager.provider}, "
         f"workers {cfg.worker.provider} (up to {cfg.worker.max_concurrent} at once, "
         f"plus {cfg.worker.reconcile_slots} for pull-request fixes), "
         "state database and memory created",
@@ -5884,8 +5884,8 @@ def keep_state_right(*, stderr) -> None:
     Three remedies, beside the config's: runner rows with no process behind them are
     closed (the supervisor start already did this when this process owns it; here it
     also covers a start that adopted one), every base clone is put back on its
-    forge — ``origin`` the forge, not a local checkout, and the default branch the
-    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`) — and every
+    forge - ``origin`` the forge, not a local checkout, and the default branch the
+    forge's HEAD unless it was pinned (`repos.keep_base_clones_right`) - and every
     repository's gates are read again from what it says and what its pull-request
     workflows run, keeping every answer a person set and dropping the old heuristics'
     guesses (`solicit.keep_gate_policies_right`). A remedy that cannot finish says why
@@ -5927,7 +5927,7 @@ def keep_config_right(*, stderr) -> None:
 
     Loading migrates an older file in place; `config_changes.apply` restores dropped
     gate tools and learns denied safe-family tools. Every change since the last start
-    — including ones a load made between starts — gets one line here, then is marked
+    - including ones a load made between starts - gets one line here, then is marked
     said. Nothing here can stop `serve` from starting.
     """
     from papaya_agent_runtime import config_changes
@@ -6028,7 +6028,7 @@ async def _post_dm(built: Any, text: str) -> bool:
 
 
 async def report_readiness(verdict, built, watch: blockers.Watch | None = None) -> None:
-    """DM the owner what still needs them — once per distinct situation.
+    """DM the owner what still needs them - once per distinct situation.
 
     Once, because the alternative is a message every restart saying the same
     thing, which is how a person learns to ignore the one that is new. The
@@ -6038,7 +6038,7 @@ async def report_readiness(verdict, built, watch: blockers.Watch | None = None) 
     The blockers the watch has due ride in the same message, with their steps,
     so a start never sends two. Marked as reported only when the post actually
     landed: a workspace that was unreachable at start-up is not a person who has
-    been told. And nothing here can stop the listener going up — the state this
+    been told. And nothing here can stop the listener going up - the state this
     reads on is the same state a failed self-setup may have been unable to create.
     """
     watch = watch or blockers.Watch(say=functools.partial(_post_dm, built))
@@ -6082,7 +6082,7 @@ def _announce_readiness(verdict, built, *, stderr) -> None:
 
     Once: the runner repeats the same sentence to every job it declines, and a
     host that heard it at start does not need it again on a timer. Non-fatal,
-    because `serve` still runs — a manager that refused to start because no
+    because `serve` still runs - a manager that refused to start because no
     repository was registered would be unreachable at exactly the moment somebody
     wanted to register one. The blockers, with their steps, are printed whatever
     the verdict: a signed-out forge stops delivery without blocking the rest.
@@ -6244,7 +6244,7 @@ def announce_deficiencies(*, stderr) -> None:
     line = (
         f"{waiting} self-reported deficienc{'y is' if waiting == 1 else 'ies are'} waiting "
         + ("to open as issues" if enabled else "in the ledger (self_report.enabled = false)")
-        + " — `ppy deficiency list`"
+        + " - `ppy deficiency list`"
     )
     log.info("[serve] %s", line)
     print(f"ppy serve: {line}", file=stderr)
@@ -6314,7 +6314,7 @@ async def _run(
         # the status is the client's own for this failure, so `serve` exits the
         # way `papaya-agent listen` would have.
         # One line: the client and the app show the last thing said, not a transcript.
-        print(f"ppy serve: {exc.message}" + (f" — {exc.advice}" if exc.advice else ""), file=stderr)
+        print(f"ppy serve: {exc.message}" + (f" - {exc.advice}" if exc.advice else ""), file=stderr)
         return exc.status
     if host is not None:
         # From here the provider's doorbell wakes this listener's pull; a ring
@@ -6330,7 +6330,7 @@ async def _run(
         )
     _announce_readiness(verdict, built, stderr=stderr)
     # Readiness re-runs every round, so a blocker a person closes clears on its own
-    # — nothing to restart — and its owner hears that once.
+    # - nothing to restart - and its owner hears that once.
     watch = blockers.Watch(
         say=functools.partial(_post_dm, built),
         publish=functools.partial(publish_status, built),
@@ -6365,7 +6365,7 @@ async def _run(
 
     # The sweep shares this event loop with the listener: every offer goes into
     # the loop the listener is running, so it is a task beside `loop.run()` rather
-    # than a thread of its own. It starts with a sweep straight away — a start is
+    # than a thread of its own. It starts with a sweep straight away - a start is
     # exactly when an assignment missed while the machine was off is waiting.
     #
     # The rounds share it too, and one lock with the sweep: a round re-offering a
@@ -6704,7 +6704,7 @@ def _say(line: str, *, stderr) -> None:
 
 def serve_identity(*, supervised: bool = False) -> dict[str, str]:
     """Who this serve says it is in ``serve.json``: the Papaya connection, when there is one,
-    and what started it — the desktop app (``--supervised``) or a terminal — which is
+    and what started it - the desktop app (``--supervised``) or a terminal - which is
     how `ppy update` knows which restart to name."""
     from papaya_agent_runtime import update
 
@@ -6784,7 +6784,7 @@ def take_supervisor(*, stderr, seams: dict[str, Any] | None = None) -> tuple[Any
     """Own this home's supervisor, adopt a live one of this build, or retire one of another.
 
     Returns ``(server, None)`` when this process owns the supervisor, ``(None, None)``
-    when it adopted a running one, and ``(None, status)`` when `serve` cannot start —
+    when it adopted a running one, and ``(None, status)`` when `serve` cannot start -
     having said why in one line and recorded it for the blockers ledger. `seams` are
     :func:`takeover.retire`'s keyword seams (clock, sleep, kill, shutdown) for tests.
     """
@@ -6848,7 +6848,7 @@ class SupervisorKeeper:
     that the adopted supervisor still answers. Before 2026-09-18 nothing did: when an
     adopted supervisor exited, `serve` kept listening and running rounds with no
     supervisor behind them, so every dispatch, resume and steer a turn ran failed. Now
-    a round that finds it gone — no answer on the socket and the owner lock free — runs
+    a round that finds it gone - no answer on the socket and the owner lock free - runs
     the same decision a start runs (:func:`take_supervisor`), owns what that gives it,
     starts its lifeline, and wires it as a start would (``wire``, set by the running
     listener). `serve`'s exit then shuts down whichever supervisor it ended up owning.

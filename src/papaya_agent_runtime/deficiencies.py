@@ -27,7 +27,7 @@ The channel is only worth reading if its open issues are true, so four rules bou
 what it may say. **Nothing stale opens**: a row whose newest evidence predates the
 running build, or is older than :data:`STALE_AFTER_SECONDS`, stopped happening
 before this version existed and waits in the ledger as :data:`STALE` until it
-happens again — which is what stops a backlog of old rows opening issues for weeks
+happens again - which is what stops a backlog of old rows opening issues for weeks
 after the fix. **One cause is one issue**: a turn's `RUNTIME:` line is fingerprinted
 by what it names, not how it words it (:func:`reduce_turn_report`), and rows that
 turn out to be one cause are folded together with the rest of their fingerprints
@@ -41,8 +41,8 @@ that scope's occurrences and no others (:func:`reported_entries`), and an issue
 opened on a miscount corrects itself and closes.
 
 Nothing private leaves the machine. An issue body is built only from the evidence
-fields named in :data:`EVIDENCE_FIELDS` — ticket keys and repository names, never
-titles, descriptions, comments or people — and every string in it goes through
+fields named in :data:`EVIDENCE_FIELDS` - ticket keys and repository names, never
+titles, descriptions, comments or people - and every string in it goes through
 :func:`redact`, which drops diff hunks, turns home-directory paths into ``~``,
 removes tokens and email addresses, and blanks any string the caller names as
 private (a ticket's title, a display name).
@@ -512,8 +512,8 @@ def redact(text: object, scrub: Iterable[str] = ()) -> str:
 
     Diff hunks are dropped; paths under a home directory start at ``~`` (the user
     name in the path is often a person's); tokens, secret assignments, opaque keys
-    and email addresses become ``[redacted]``; and each string in ``scrub`` — a
-    ticket's title, its description, a display name — is blanked wherever it
+    and email addresses become ``[redacted]``; and each string in ``scrub`` - a
+    ticket's title, its description, a display name - is blanked wherever it
     appears, longest first.
     """
     out = _drop_diffs(str(text or ""))
@@ -535,11 +535,11 @@ def redact(text: object, scrub: Iterable[str] = ()) -> str:
 def scope_key(scope: object, scrub: Iterable[str] = ()) -> str:
     """``scope`` with nothing private in it, and still one scope per ticket.
 
-    A scope is not prose. It is an identity — ``ticket:<key>``, ``repo:<name>`` — and
+    A scope is not prose. It is an identity - ``ticket:<key>``, ``repo:<name>`` - and
     two occurrences count towards one threshold only when theirs is the same string.
     So it cannot simply go through :func:`redact` and be stored: a work item id is a
     36-character UUID, which redaction reads as an opaque key, and every ticket
-    reached the ledger as the one scope ``ticket:[redacted]``. That is issue #84 —
+    reached the ledger as the one scope ``ticket:[redacted]``. That is issue #84 -
     five tickets whose check-in steered each of them once, reported as one ticket
     steered five times, because the five scopes were one string.
 
@@ -624,7 +624,7 @@ def reported_entries(spec: Kind, entries: Iterable[Mapping[str, Any]]) -> list[d
     """The occurrences an issue about these is entitled to show.
 
     For a kind that opens on one scope reaching a threshold, that is the scope which
-    reached it — the first one to, when more than one has — and nothing else: an issue
+    reached it - the first one to, when more than one has - and nothing else: an issue
     that says one ticket was steered twice must not list another ticket's occurrence as
     evidence for it.
     """
@@ -684,7 +684,7 @@ _STOPWORDS = _DETERMINERS | frozenset(
 #: How many stemmed content words stand for a line that names no tool.
 CONTENT_WORDS = 8
 #: A pull request the line names: `PR #58`, `PR 58`, `pull request 710`. A number is only
-#: a report when `#` or the word for one stands in front of it — "issue 3 of 5 checks" and
+#: a report when `#` or the word for one stands in front of it - "issue 3 of 5 checks" and
 #: "ran 12 issues 4 times" name no report.
 _NAMED_PR = re.compile(r"(?i)\b(?:prs?|pull\s+requests?)\s*#?\s*(\d{1,6})\b")
 #: `#58`, anywhere. Guarded by :data:`_ENUMERATED`, which is what a bare number after a
@@ -694,7 +694,7 @@ _ENUMERATED = re.compile(r"[\w\-]*\d+\s*$")
 #: Where an exception came from: `claude.live_denial`, `serve.take`, `state/db.py`, `ppy gate`.
 _WHERE_IDENT = re.compile(r"\bppy\s+[a-z][a-z-]*|\b[a-z][a-z0-9]*(?:[._][a-z0-9_]+)+\b")
 #: An exception's own message: what it brackets, or what follows the class to the end of
-#: the sentence. Whole, never a token of it — "'NoneType' object has no attribute 'get'"
+#: the sentence. Whole, never a token of it - "'NoneType' object has no attribute 'get'"
 #: and "'NoneType' object has no attribute 'phase'" are two causes.
 _BRACKETED = re.compile(r"^\s*[:\-]?\s*\((.+?)\)")
 _SENTENCE_END = re.compile(r"[.;](?:\s|$)")
@@ -736,7 +736,7 @@ def _named_number(text: str) -> str:
     """The pull request or issue number the line names, or ``""``.
 
     ``PR #58``, ``PR 58`` and ``pull request 710`` name one; so does a bare ``#94``,
-    unless it is an enumeration rather than a report — a ``#3`` right after a ticket id
+    unless it is an enumeration rather than a report - a ``#3`` right after a ticket id
     or another number ("PAP-219 #3", "task 25 #2") is counted by something, not named.
     """
     named = _NAMED_PR.search(text)
@@ -763,7 +763,7 @@ def _exception_message(after: str) -> str:
 
     Whole, and never a token of it. "'NoneType' object has no attribute 'get'" and
     "'NoneType' object has no attribute 'phase' when parking" are two deficiencies, and
-    a key built from the first quoted word would make them one — a bare class linking
+    a key built from the first quoted word would make them one - a bare class linking
     two unrelated rows, which is the thing this fingerprint exists to prevent.
     """
     said = after[:MESSAGE_CHARS]
@@ -789,7 +789,7 @@ def reduce_turn_report(detail: str) -> str:
        specific thing a turn can say, and a pull request it mentions in passing must not
        take it over.
     2. ``pr|<number>|<repo>``: a pull request the line names, with the repository when it
-       names one — two repositories' PR #58 are two things. A turn that says which change
+       names one - two repositories' PR #58 are two things. A turn that says which change
        its trouble is about, and nowhere it came from, has said what the trouble is.
     3. ``<exceptionclass>|<message>|<repo>``: an exception class with nowhere named, keyed
        on its whole message.
@@ -1358,7 +1358,7 @@ def _evidence_lines(entries: list[dict[str, Any]]) -> list[str]:
             if entry.get(key) not in (None, "")
         ]
         head = f"- {entry.get('at', '?')}"
-        lines.append(head + (" — " + ", ".join(parts) if parts else ""))
+        lines.append(head + (" - " + ", ".join(parts) if parts else ""))
         if entry.get("error"):
             lines += ["", "  ```", *[f"  {line}" for line in str(entry["error"]).splitlines()]]
             lines += ["  ```"]
@@ -1385,8 +1385,8 @@ def _stale(deficiency: Deficiency, born: datetime, now: datetime) -> bool:
 
     Either alone is not enough, and that is deliberate on both sides. A row still being
     recorded under this version is this version's problem however old the first
-    occurrence is. A row recorded minutes before an upgrade is still news — the upgrade
-    it crossed says nothing about whether the new version fixed it — so an upgrade never
+    occurrence is. A row recorded minutes before an upgrade is still news - the upgrade
+    it crossed says nothing about whether the new version fixed it - so an upgrade never
     buries recent evidence. What it buries is the backlog: rows nobody has seen for two
     days, last seen under a version this machine has since replaced.
     """
@@ -1533,8 +1533,8 @@ def miscounted_body(deficiency: Deficiency) -> str:
     scopes = len(scope_groups(deficiency.evidence))
     return _body_text(
         f"closing: this never happened {spec.threshold} times in one place.\n\n"
-        f"`{deficiency.kind}` is worth an issue only when one scope — one ticket, one "
-        f"repository — holds {spec.threshold} occurrences, which is what this issue's "
+        f"`{deficiency.kind}` is worth an issue only when one scope - one ticket, one "
+        f"repository - holds {spec.threshold} occurrences, which is what this issue's "
         f"title claims. It was opened by a build that counted across scopes: the scope "
         "each occurrence carried was redacted before it was stored, and a work item id "
         "redacts to the same string for every ticket, so occurrences on different "
@@ -1548,8 +1548,8 @@ def miscounted_body(deficiency: Deficiency) -> str:
 def issue_body(deficiency: Deficiency) -> str:
     """The first report of a deficiency: what, evidence, what instead, a remedy.
 
-    The evidence is the occurrences this issue is entitled to show — for a kind that
-    opens on one scope, that scope's and no others (:func:`reported_entries`) — and
+    The evidence is the occurrences this issue is entitled to show - for a kind that
+    opens on one scope, that scope's and no others (:func:`reported_entries`) - and
     the footer counts what is shown, not what the ledger holds.
     """
     spec = KINDS.get(deficiency.kind) or KINDS[UNHANDLED_EXCEPTION]
@@ -1612,7 +1612,7 @@ def released_version(described: str) -> str:
 
     `papaya_agent_runtime.__version__` is `git describe`, so it carries the commits since
     the tag and a dirty flag, and a ledger keyed on that would call every commit and
-    every uncommitted edit a new version — burying every waiting deficiency at each
+    every uncommitted edit a new version - burying every waiting deficiency at each
     restart, and reading as "a newer version has run" when nothing was released. A
     version with no release in it at all is ``unknown``: one version for ever, which
     buries nothing and closes nothing.
@@ -1647,7 +1647,7 @@ def build_started(conn: Any, build: str, born: datetime) -> datetime:
     flush of a new build belongs to it, so the build's life starts when the process
     that reports it did. The first reporter on a build wins, so a deficiency recorded
     on this build by an earlier process that never flushed is held back until its next
-    occurrence — which errs the way the rest of this module does, towards saying less.
+    occurrence - which errs the way the rest of this module does, towards saying less.
     """
     conn.execute(
         "INSERT OR IGNORE INTO runtime_builds (build_id, first_seen) VALUES (?, ?)",
@@ -1870,7 +1870,7 @@ class Reporter:
         back through :func:`limit_of`; one that classifies as a limit keeps its evidence
         under :data:`LIMIT_EVIDENCE` and stops counting (:func:`counted`).
 
-        A transcript that is gone or unreadable leaves its occurrence counted — there is
+        A transcript that is gone or unreadable leaves its occurrence counted - there is
         no evidence to re-judge it on, and quietly dropping it would be the same kind of
         untruth in the other direction.
 
@@ -1976,8 +1976,8 @@ class Reporter:
 
         A build before :func:`scope_key` stored a redacted scope, so every ticket was
         the one scope ``ticket:[redacted]`` and two tickets steered once each reached a
-        threshold of two (issue #84). Such a row is recounted here — its blanked scopes
-        each count as their own (:func:`scope_groups`) — and when one scope no longer
+        threshold of two (issue #84). Such a row is recounted here - its blanked scopes
+        each count as their own (:func:`scope_groups`) - and when one scope no longer
         holds enough, its issue gets one comment saying so and closes, and the row goes
         back to `watching` with no issue of its own. No evidence is edited: the recount
         reads the rows as they are.
@@ -2035,7 +2035,7 @@ class Reporter:
         A forge that refuses must cost no more than a forge that agrees, so every
         *attempt* counts against the same ``max_per_day`` as opening, and a row that was
         tried within :data:`CLOSE_RETRY_AFTER_SECONDS` is left alone. Closing is two
-        things to GitHub — a comment and a close — and the first can succeed while the
+        things to GitHub - a comment and a close - and the first can succeed while the
         second fails; so before commenting again a retry asks whether the comment is
         already there and, if it is (or cannot be read), only closes.
         """
@@ -2205,8 +2205,8 @@ class Reporter:
         stays as it is and is tried again at the next start.
 
         A kept row keeps the fingerprint its issue was opened under, whatever today's
-        rule would give it, and every other fingerprint in the group — including the one
-        today's rule computes — becomes an alias to it. So the same line said again
+        rule would give it, and every other fingerprint in the group - including the one
+        today's rule computes - becomes an alias to it. So the same line said again
         comments that issue instead of opening a second one, even while a duplicate's
         own issue is still waiting to be closed.
         """
@@ -2424,7 +2424,7 @@ def record_denials(
     `tool_learning.classify`, so the two never disagree about which is which:
 
     - ``profile_gap``: a `worker-denial` when neither learning nor the request loop
-      carries it — ``profile`` (the tools the worker was dispatched with, when known)
+      carries it - ``profile`` (the tools the worker was dispatched with, when known)
       already allowed the pattern, or the capability request could not be recorded
       (``request_error``), and the evidence says which. A denial with a
       `capability_request` for its pattern on its task is the manager's, not an issue.
@@ -2610,7 +2610,7 @@ def denial_routes(conn: Any, deficiency: Deficiency) -> list[tuple[str | None, s
     is judged again with today's classifier, on the worktree it was refused in. A route
     is a kind the worker is steered about (`command_shape`, `policy_refusal`,
     `outside_worktree`), :data:`REQUEST_ROUTE` or :data:`LEARNED_ROUTE`; ``None`` is a
-    denial nothing explains — the profile held the pattern and the harness still
+    denial nothing explains - the profile held the pattern and the harness still
     refused it. An empty list means nothing could be read, which never closes an issue.
     """
     pattern = next(

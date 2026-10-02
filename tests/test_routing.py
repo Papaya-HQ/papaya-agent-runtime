@@ -89,7 +89,7 @@ def test_route_picks_the_ceiling_for_a_contract_and_the_default_otherwise(ppy_ho
     assert (top.model, top.reasoning, top.tier) == ("opus", "high", "top-tier")
     assert top.rule == f"contract-heavy brief: {MIGRATION}"
     assert routing.describe(top) == (
-        f"routing: top-tier (opus/high) — contract-heavy brief: {MIGRATION}"
+        f"routing: top-tier (opus/high) - contract-heavy brief: {MIGRATION}"
     )
 
     for brief in (FOLLOW_UP, ADVISORY_ONLY):
@@ -146,7 +146,7 @@ def test_dispatch_routes_and_records_the_rule(ppy_home, source_repo, monkeypatch
     heavy = supervisor.dispatch_task(
         repo=added.name, title="events", instructions=ROUTES_BRIEF, provider="claude"
     )
-    line = "routing: top-tier (opus/high) — contract-heavy brief: names new routes or endpoints"
+    line = "routing: top-tier (opus/high) - contract-heavy brief: names new routes or endpoints"
     assert heavy["routing"]["tier"] == "top-tier"
     assert heavy["routing"]["line"] == line
     wait_until(lambda: len(captured) == 1, 5.0, what="heavy worker", interval=0.01)
@@ -157,7 +157,7 @@ def test_dispatch_routes_and_records_the_rule(ppy_home, source_repo, monkeypatch
         repo=added.name, title="rename", instructions=ADVISORY_ONLY, provider="claude"
     )
     assert light["routing"]["tier"] == "default"
-    assert light["routing"]["line"].startswith("routing: default (sonnet/medium) — ")
+    assert light["routing"]["line"].startswith("routing: default (sonnet/medium) - ")
     wait_until(lambda: len(captured) == 2, 5.0, what="light worker", interval=0.01)
     assert (captured[1].model, captured[1].reasoning) == ("sonnet", "medium")
     assert _dispatched_payload(light["task_id"])["routing"]["tier"] == "default"
@@ -202,7 +202,7 @@ def test_ppy_dispatch_prints_the_routing_line(tmp_path, monkeypatch, capsys) -> 
     monkeypatch.setenv("PPY_HOME", str(tmp_path / ".ppy"))
     (tmp_path / ".ppy").mkdir()
     monkeypatch.setattr(shutil, "disk_usage", lambda _p: Usage(100e9, 20e9, 80e9))
-    line = "routing: top-tier (opus/high) — contract-heavy brief: specifies a state machine"
+    line = "routing: top-tier (opus/high) - contract-heavy brief: specifies a state machine"
 
     class FakeClient:
         def __init__(self, *a, **k):

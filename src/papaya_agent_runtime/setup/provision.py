@@ -4,10 +4,10 @@
 ``tools.lock`` into ``.ppy/tools/<tool>/<version>/`` and expose a stable symlink in
 ``.ppy/tools/bin/``. Artifacts are verified before activation:
 
-- **treehouse** — a Go release archive fetched from GitHub; its sha256 is checked
+- **treehouse** - a Go release archive fetched from GitHub; its sha256 is checked
   against the per-platform digest in ``tools.lock`` (sourced from the release's
   ``checksums.txt``).
-- **lavish-axi**, **gh-axi** — npm packages installed at an exact pinned version
+- **lavish-axi**, **gh-axi** - npm packages installed at an exact pinned version
   into an isolated prefix; npm verifies registry integrity on install.
 
 Provisioning is best-effort and non-fatal: a companion that fails to install

@@ -13,15 +13,15 @@ produces nothing, and writes a zero-byte log nobody reads. Nothing is broken eno
 to raise, so nothing tells the person who owns the connection that their agent
 cannot work.
 
-So this module answers one question with three possible answers — `ready`,
-`degraded` (can work, something is missing), `blocked` (cannot work) — and for
+So this module answers one question with three possible answers - `ready`,
+`degraded` (can work, something is missing), `blocked` (cannot work) - and for
 anything short of ready, names each problem, what closes it, and **who has to close
 it**: the runtime itself, or a person. That last distinction is the point. A missing
 config is the runtime's own job and it should just do it; an unauthenticated harness
 is not, and saying so is the difference between a useful message and a complaint.
 
 Most checks read local state only. The machine checks (`_machine_problems`) ask
-the machine itself — `gh auth status`, `docker info`, the free disk — through one
+the machine itself - `gh auth status`, `docker info`, the free disk - through one
 seam, :data:`machine`, so the hermetic suite never asks the real one. The
 fingerprint exists so the same problem is reported once rather than on every wake.
 
@@ -172,7 +172,7 @@ def _unusable_provider_problem(report: dict, usable: list[str]) -> Problem | Non
             f"configured to use a harness this machine cannot launch: {roles}; "
             f"usable here: {', '.join(usable)}"
         ),
-        fix="; ".join(fixes) + " — or `ppy config models` to choose a harness that works here",
+        fix="; ".join(fixes) + " - or `ppy config models` to choose a harness that works here",
         owner=USER,
         title="The coding harness this runtime is set to use cannot start on this machine",
         steps=(*steps, AFTER),
@@ -240,7 +240,7 @@ def _harness_problems(problems: list[Problem]) -> None:
             Problem(
                 code="companions_missing",
                 summary=f"companion tools not provisioned: {', '.join(sorted(missing))}",
-                fix="`ppy tools install` — the documented fallbacks work meanwhile",
+                fix="`ppy tools install` - the documented fallbacks work meanwhile",
                 blocking=False,
             )
         )
@@ -258,7 +258,7 @@ def _config_problems(problems: list[Problem]) -> None:
                     "this runtime has never been set up: no driver profile and no worker ceiling"
                 ),
                 fix=(
-                    "`ppy setup --profile-only --non-interactive` — `ppy serve` does this "
+                    "`ppy setup --profile-only --non-interactive` - `ppy serve` does this "
                     "itself before it starts listening"
                 ),
             )
@@ -305,7 +305,7 @@ def _repo_problems(problems: list[Problem]) -> None:
         # brings its own repository: `papaya_events.ensure_repository` registers the
         # runtime-owned clone from the work item's repository URL the moment the
         # work is picked up. So an empty list means "nothing registered *ahead of
-        # time*", which is the normal state of a machine somebody just connected —
+        # time*", which is the normal state of a machine somebody just connected -
         # and blocking on it made a runtime that could take work refuse to.
         problems.append(
             Problem(
@@ -484,7 +484,7 @@ def _gate_tool_problems(problems: list[Problem]) -> None:
     pattern the code's profile carries is named: with the profile applied from the
     code, that can only be a pattern somebody dropped. Restoring it is the runtime's
     own job (`config_changes.apply`, at `ppy serve` start and on every ensure), so
-    this is said as the runtime's item — unless a lock refuses it, which is a
+    this is said as the runtime's item - unless a lock refuses it, which is a
     person's.
     """
     from papaya_agent_runtime import config_changes
@@ -663,7 +663,7 @@ MEMORY_UNAVAILABLE_SHARED_AGENT = "memory_unavailable_shared_agent"
 
 
 def _papaya_problems(problems: list[Problem]) -> None:
-    """No connection is a mode, not a gap — that is a standing rule, not a default.
+    """No connection is a mode, not a gap - that is a standing rule, not a default.
 
     Everything local works without Papaya, so a runtime running standalone is as
     ready as a connected one. The entry is informational: it has no steps (it is
@@ -701,8 +701,8 @@ def _papaya_problems(problems: list[Problem]) -> None:
                     "not flow in or out"
                 ),
                 fix=(
-                    "`ppy papaya connect` sets it up — it installs the client if needed "
-                    "(npx papaya-agent, or uv without Node) and the person clicks Approve — "
+                    "`ppy papaya connect` sets it up - it installs the client if needed "
+                    "(npx papaya-agent, or uv without Node) and the person clicks Approve - "
                     "or connect from the Papaya desktop app"
                 ),
                 owner=USER,
@@ -718,7 +718,7 @@ def _client_problems(problems: list[Problem]) -> None:
     The host execs this checkout and passes its own client version across, so the
     two can disagree: the app updates its pinned client, the checkout does not, and
     the runtime quietly runs an older loop than the machine around it expects. This
-    is a warning and only ever a warning — the client refuses to delegate on a
+    is a warning and only ever a warning - the client refuses to delegate on a
     protocol mismatch, not on a version, so being a release behind is drift worth
     naming and never a reason to stop taking work.
     """
@@ -766,7 +766,7 @@ def environment_imports(env: Path) -> bool:
     """Would the runtime's dependency import from ``env``? Read from disk, not by running it.
 
     Its interpreter must resolve (a swapped or deleted build leaves a dangling link)
-    and the Papaya client must be in its site-packages — the package a refused or
+    and the Papaya client must be in its site-packages - the package a refused or
     interrupted sync left missing on 2026-09-16.
     """
     if not (env / "bin" / "python").exists():
@@ -782,7 +782,7 @@ def environment_current(env: Path) -> bool:
 
     A sync by `ppy` stamps the environment with a hash of both (`envsync`); a pull
     that changes either leaves the stamp behind, and the environment then lacks what
-    the new code imports — `ppy setup` crashed at its first prompt that way on
+    the new code imports - `ppy setup` crashed at its first prompt that way on
     2026-09-24. An environment with no stamp was built by something else (a bare
     `uv sync`, CI) and is not called stale here: nothing says what it was built from.
     """
@@ -1071,8 +1071,8 @@ def _origin_problems(problems: list[Problem], registered: list[dict]) -> None:
 
     `ppy serve`'s start and `ppy repo sync` rewrite such an `origin` whenever the
     forge answers, so one still standing means the forge could not be reached. Work
-    there would branch from whatever the checkout had fetched — on 2026-09-16, a
-    person's feature branch — so the repository is refused until it is fixed.
+    there would branch from whatever the checkout had fetched - on 2026-09-16, a
+    person's feature branch - so the repository is refused until it is fixed.
     """
     from papaya_agent_runtime import repos
 
@@ -1239,7 +1239,7 @@ def setup_blocker(
 
     At pickup (``delivery=False``): any blocking problem a person must remedy, or
     one scoped to ``repo``. At delivery: only what makes a pull request impossible
-    for ``repo``. ``None`` means nothing a person has to do stands in the way —
+    for ``repo``. ``None`` means nothing a person has to do stands in the way -
     which is not the same as ready, since the runtime's own gaps are not blockers.
     """
     for problem in verdict.problems:
@@ -1342,8 +1342,8 @@ def report(readiness: Readiness, *, agent: str = "", where: str = "") -> str:
     """What the owner of this connection should be told, in their DM.
 
     Written for a person who may not be at the machine: it says what cannot happen,
-    what closes it, and — the part that decides whether this message is useful or
-    just a complaint — which items the runtime is about to handle by itself.
+    what closes it, and - the part that decides whether this message is useful or
+    just a complaint - which items the runtime is about to handle by itself.
     """
     who = agent or "This agent"
     if readiness.state == READY:
@@ -1353,7 +1353,7 @@ def report(readiness: Readiness, *, agent: str = "", where: str = "") -> str:
     if readiness.state == BLOCKED:
         lines.append(
             f"{who} is connected but **cannot take work yet**"
-            f"{f' — its runtime is at {where}' if where else ''}."
+            f"{f' - its runtime is at {where}' if where else ''}."
         )
     else:
         lines.append(
@@ -1368,7 +1368,7 @@ def report(readiness: Readiness, *, agent: str = "", where: str = "") -> str:
         lines.append("**Needs you:**")
         for problem in yours:
             mark = "" if problem.blocking else " (not blocking)"
-            lines.append(f"- {problem.summary}{mark} — {problem.fix}")
+            lines.append(f"- {problem.summary}{mark} - {problem.fix}")
         lines.append("")
     if mine:
         lines.append("**I'll handle these myself on my next turn:**")
@@ -1378,7 +1378,7 @@ def report(readiness: Readiness, *, agent: str = "", where: str = "") -> str:
 
     if readiness.state == BLOCKED and not yours:
         lines.append(
-            "Nothing here needs you — open a session on that machine and I'll sort it out."
+            "Nothing here needs you - open a session on that machine and I'll sort it out."
         )
     return "\n".join(lines).rstrip()
 

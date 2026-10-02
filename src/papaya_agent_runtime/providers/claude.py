@@ -51,7 +51,7 @@ def _transcript_path(worktree: str, session_id: str) -> Path:
 # one of them. Read off the live state database on 2026-09-20, every recorded
 # denial since 2026-09-18 (107) fell into exactly these two:
 #
-# 1. The HARNESS refused — profile, safety check, command shape, working
+# 1. The HARNESS refused - profile, safety check, command shape, working
 #    directory. A `{"type":"system","subtype":"permission_denied"}` line names the
 #    `tool_use_id` and carries the harness's own words in `message`, often with a
 #    `decision_reason_type` (`other`, `subcommandResults`, `safetyCheck`,
@@ -65,7 +65,7 @@ def _transcript_path(worktree: str, session_id: str) -> Path:
 #    `git push origin HEAD:ppy/task-<n>-<id>`, refused by
 #    `.claude/hooks/verify-before-push.sh` in the two monorepos (issues #83, #116).
 #
-# The `PreToolUse:Bash hook error:` prefix some of those carry is NOT the test —
+# The `PreToolUse:Bash hook error:` prefix some of those carry is NOT the test -
 # two of the six (tasks 58 and 129, older Claude Code) carry the hook's stderr
 # with no prefix at all. The absence of the harness's own line is the test.
 
@@ -87,7 +87,7 @@ _HARNESS_WORDS = (
 
 
 def _tool_result_error(tool_use_id: str, events: list[ProviderEvent]) -> str:
-    """The error text the call came back with, or "" — for a hook, its own stderr."""
+    """The error text the call came back with, or "" - for a hook, its own stderr."""
     for ev in events:
         if ev.raw.get("type") != "user":
             continue
@@ -142,7 +142,7 @@ def refusal_evidence(tool_use_id: str, events: list[ProviderEvent]) -> dict:
                 "tool_result": "",
             }
     result = _tool_result_error(tool_use_id, events)
-    # No line AND no error result is not evidence of a hook — it is no evidence at
+    # No line AND no error result is not evidence of a hook - it is no evidence at
     # all, which is the ordinary case for a denial read back from a `result` event
     # with none of the turn's stream beside it. Claiming a hook there would put a
     # false diagnosis on every one of them, which is the defect this whole change
@@ -174,7 +174,7 @@ def registered_hooks(worktree: str | None, tool: str) -> list[dict[str, str]]:
 
     Each is ``{"settings": <repo-relative settings file>, "command": <as written>,
     "script": <repo-relative script, when the command names one>}``. An empty list
-    means the repository registers none, or that none could be read — which is why
+    means the repository registers none, or that none could be read - which is why
     a diagnosis resting on this alone is recorded as inferred.
     """
     found: list[dict[str, str]] = []
@@ -299,7 +299,7 @@ def _fresh_session_prompt(worker_prompt: str, spec: TaskSpec, steer: str) -> str
         f"{worker_prompt}\n\n---\n\n"
         "## You are continuing an interrupted session\n\n"
         "Your previous session could not be resumed, so this is a new one on the same "
-        "task, in the same worktree, on the same branch. Your work on disk is intact — "
+        "task, in the same worktree, on the same branch. Your work on disk is intact - "
         "read it before assuming anything is missing. What you reported so far:\n\n"
         f"{log}\n\n"
         f"What you were asked to do next:\n\n{steer}\n"
@@ -309,8 +309,8 @@ def _fresh_session_prompt(worker_prompt: str, spec: TaskSpec, steer: str) -> str
 def effective_allowed_tools() -> tuple[list[str], str]:
     """The tool patterns a Claude worker will be launched with, and where they came from.
 
-    ``PPY_CLAUDE_ALLOWED_TOOLS`` (a comma-separated list) wins when it is set — the
-    escape hatch for a one-off session — otherwise the code's profile with the
+    ``PPY_CLAUDE_ALLOWED_TOOLS`` (a comma-separated list) wins when it is set - the
+    escape hatch for a one-off session - otherwise the code's profile with the
     config's ``claude.extra_tools`` added and ``claude.dropped_tools`` removed. Read
     on every call, so a tool the runtime learned applies to the very next dispatch.
     Without a config file yet, the profile applies as it is: a worker with no shell
@@ -342,7 +342,7 @@ class ClaudeAdapter(ProviderAdapter):
         """The command rules come first, then the memory preamble and the brief.
 
         Briefs used to repeat these rules by hand. They are the environment's
-        rules, not the task's, so the runtime states them — once, identically,
+        rules, not the task's, so the runtime states them - once, identically,
         every time.
         """
         rules = command_rules(

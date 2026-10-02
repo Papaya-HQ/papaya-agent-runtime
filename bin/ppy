@@ -24,8 +24,8 @@ fi
 # Every other command goes through `uv run`, and a checkout with no environment
 # builds one first: on a machine with no uv cache that is a download of
 # sixty-odd packages. The Papaya client's connect-time probe asks this one
-# question and gives the answer ten seconds, so a fresh clone — exactly the
-# machine somebody has just pointed the desktop app at — would time out on it.
+# question and gives the answer ten seconds, so a fresh clone - exactly the
+# machine somebody has just pointed the desktop app at - would time out on it.
 #
 # So when the project environment does not exist yet, this one command is
 # answered by the runtime's own module under a bare interpreter: no uv, no
@@ -73,11 +73,11 @@ helper() {
 # The environment is rebuilt when the lockfile changes, never under a running `serve`.
 #
 # `uv run` re-syncs whenever it decides the environment is stale, and a sync
-# deletes the interpreter and packages a live `serve` is importing from — which
+# deletes the interpreter and packages a live `serve` is importing from - which
 # is how a `ppy status` in a terminal killed the app's manager on 2026-09-16. So
 # every command runs with `--no-sync`, and the syncing is `envsync`'s: `ppy serve`
 # as it starts (when the environment is out of date or broken), an explicit
-# `ppy env sync`, and — ahead of every other command — a comparison of the
+# `ppy env sync`, and - ahead of every other command - a comparison of the
 # environment's stamp with uv.lock and pyproject.toml, which rebuilds it when a
 # pull changed them (2026-09-24: `ppy setup` crashed on a dependency the pull had
 # just added). `envsync` never rebuilds while the supervisor lock is held; it
@@ -88,7 +88,7 @@ sync_env() {
     helper papaya_agent_runtime.envsync --project "$ROOT" ${PYTHON:+--python "$PYTHON"} "$@"
 }
 
-# Commands that must work when the environment is refused or broken — above all
+# Commands that must work when the environment is refused or broken - above all
 # `ppy supervisor stop`, which is how a person clears a supervisor in the way.
 # They never sync: from the environment when it imports, else from the source
 # tree under uv's interpreter for the pinned series.

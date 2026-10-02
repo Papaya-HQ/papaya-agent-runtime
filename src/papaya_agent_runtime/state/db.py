@@ -270,7 +270,7 @@ CREATE TABLE IF NOT EXISTS outreach (
 CREATE INDEX IF NOT EXISTS idx_outreach_open ON outreach(resolved_at, first_seen_at);
 
 -- The newest comment (or event) timestamp the manager has processed on an
--- external record — a ticket URL or id — so a sweep asks only for what is newer
+-- external record - a ticket URL or id - so a sweep asks only for what is newer
 -- and an empty sweep costs one list call, not a re-read. Same shape `ppy watch`
 -- keeps per pull request, for records the harness does not own.
 CREATE TABLE IF NOT EXISTS watermarks (

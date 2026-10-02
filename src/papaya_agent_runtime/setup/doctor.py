@@ -1,4 +1,4 @@
-"""`ppy doctor` — diagnostics of the environment and config.
+"""`ppy doctor` - diagnostics of the environment and config.
 
 Read-only but for one repair: the person's own `papaya-agent`, when it is older than
 the version this runtime locks (`papaya.keep_client_current`).
@@ -83,7 +83,7 @@ def _repo_forges() -> list[dict]:
 
     A repo registered from a local path before forge URLs existed has none: the
     worker pushes, and ``ppy deliver`` has no forge to open the pull request
-    against — which is exactly the hand-push that cost a delivery on 2026-09-04.
+    against - which is exactly the hand-push that cost a delivery on 2026-09-04.
     """
     try:
         from papaya_agent_runtime.repos import list_repos
@@ -100,7 +100,7 @@ def venv_interpreter(venv: Path | None = None, pin: Path | None = None) -> dict:
     """The project environment's interpreter against the series `.python-version` pins.
 
     `bin/ppy` asks uv for the pinned series, but an environment built before that,
-    or by an invoker that could not honour it, can still hold another one — and
+    or by an invoker that could not honour it, can still hold another one - and
     `uv run --no-sync` then runs on it rather than rebuilding under a live `serve`.
     So the mismatch is reported here, as a warning, instead of being fixed silently.
     """
@@ -114,7 +114,7 @@ def venv_interpreter(venv: Path | None = None, pin: Path | None = None) -> dict:
     status: dict = {"path": str(venv), "version": None, "expected": expected, "warning": None}
     cfg = venv / "pyvenv.cfg"
     if not cfg.is_file():
-        status["warning"] = "no project environment — the next `ppy` command builds it"
+        status["warning"] = "no project environment - the next `ppy` command builds it"
         return status
     for line in cfg.read_text(encoding="utf-8").splitlines():
         key, _, value = line.partition("=")
@@ -134,7 +134,7 @@ def _venv_line(venv: dict) -> str:
     version = venv.get("version") or "?"
     pinned = f" (.python-version {venv['expected']})" if venv.get("expected") else ""
     if venv.get("warning"):
-        return f"venv:      {version}{pinned} WARNING — {venv['warning']}"
+        return f"venv:      {version}{pinned} WARNING - {venv['warning']}"
     return f"venv:      {version}{pinned} [ok]"
 
 
@@ -185,10 +185,10 @@ def render_text(data: dict) -> str:
     lines.append(f"ppy home:   {data['ppy_home']}")
     verdict = data.get("readiness")
     if verdict:
-        lines.append(f"readiness: {verdict['state']} — see `ppy readiness` for what and whose")
+        lines.append(f"readiness: {verdict['state']} - see `ppy readiness` for what and whose")
         for problem in verdict.get("problems", []):
             if problem["code"] in _TOOL_PROBLEMS:
-                lines.append(f"  WARNING — {problem['summary']}; {problem['fix']}")
+                lines.append(f"  WARNING - {problem['summary']}; {problem['fix']}")
     for change in data.get("config_changes") or []:
         lines.append(f"  {change['at']} {config_changes.line(change)}")
     found = data.get("blockers") or []
@@ -209,30 +209,30 @@ def render_text(data: dict) -> str:
     if reported:
         lines.append(
             f"self-report: {reported['open_issues']} open self-reported issue(s), "
-            f"{reported['waiting']} waiting to open — `ppy deficiency list`"
+            f"{reported['waiting']} waiting to open - `ppy deficiency list`"
         )
     cfg = data["config"]
     if cfg["present"]:
         state = "valid" if cfg.get("valid") else f"INVALID ({cfg.get('error')})"
         extra = ""
         if cfg.get("valid"):
-            extra = f" — manager {cfg['manager']}, worker ceiling {cfg['worker_ceiling']}"
+            extra = f" - manager {cfg['manager']}, worker ceiling {cfg['worker_ceiling']}"
         lines.append(f"config:    {cfg['path']} [{state}]{extra}")
     else:
-        lines.append(f"config:    {cfg['path']} [missing — run `ppy setup`]")
+        lines.append(f"config:    {cfg['path']} [missing - run `ppy setup`]")
     lines.append("")
     lines.append("Harnesses:")
     for h in data["environment"]["harnesses"]:
         mark = "ready" if h["available"] else "unavailable"
         v = h.get("version") or "?"
-        detail = f" — {h['detail']}" if h.get("detail") else ""
+        detail = f" - {h['detail']}" if h.get("detail") else ""
         lines.append(f"  {h['name']:<8} [{mark}] {v}{detail}")
     lines.append("")
     lines.append("Requirements:")
     for r in data["environment"]["requirements"]:
         mark = "ok" if r["available"] else "MISSING"
         v = r.get("version") or ""
-        detail = f" — {r['detail']}" if not r["available"] and r.get("detail") else ""
+        detail = f" - {r['detail']}" if not r["available"] and r.get("detail") else ""
         lines.append(f"  {r['name']:<8} [{mark}] {v}{detail}")
     lines.append("")
     lines.append("Companion tools:")
@@ -248,11 +248,11 @@ def render_text(data: dict) -> str:
             origin = "local probe" if d.get("source") == LOCAL else "tracked record"
             if d["drift"]:
                 lines.append(
-                    f"  {d['provider']:<8} DRIFT — {origin} says {d['recorded']}, "
+                    f"  {d['provider']:<8} DRIFT - {origin} says {d['recorded']}, "
                     f"installed {installed}; re-probe before trusting steering"
                 )
             else:
-                lines.append(f"  {d['provider']:<8} ok — {origin}, probed at {d['recorded']}")
+                lines.append(f"  {d['provider']:<8} ok - {origin}, probed at {d['recorded']}")
     repos = data.get("repos", [])
     if repos:
         lines.append("")
@@ -262,7 +262,7 @@ def render_text(data: dict) -> str:
                 lines.append(f"  {r['name']:<24} forge {r['forge_url']}")
             else:
                 lines.append(
-                    f"  {r['name']:<24} NO FORGE — deliver cannot open pull requests; "
+                    f"  {r['name']:<24} NO FORGE - deliver cannot open pull requests; "
                     "re-register it with `ppy repo add <path> --forge-url <url>`"
                 )
     db = data["state_db"]
@@ -280,7 +280,7 @@ def _papaya_line(connection: dict) -> str:
     """The connection, in the terms a person reads it: who, or what is missing.
 
     The runtime has no identity of its own, so "which agent am I" is the first
-    thing a diagnostic should answer — and every answer short of connected has to
+    thing a diagnostic should answer - and every answer short of connected has to
     say what would fix it, because none of them stop the runtime working.
     """
     state = connection.get("state")
@@ -289,10 +289,10 @@ def _papaya_line(connection: dict) -> str:
         role = who.get("role_label") or ""
         return f"connected as {connection.get('addressed')}" + (f" ({role})" if role else "")
     if state == "signed_in":
-        return "signed in, no agent pinned — `ppy papaya connect` finishes it"
+        return "signed in, no agent pinned - `ppy papaya connect` finishes it"
     if state == "installed":
-        return "client installed, not signed in — `ppy papaya connect` signs in"
-    return "not connected — the runtime works locally; `ppy papaya connect` adds the workspace"
+        return "client installed, not signed in - `ppy papaya connect` signs in"
+    return "not connected - the runtime works locally; `ppy papaya connect` adds the workspace"
 
 
 def run_doctor(as_json: bool = False) -> str:

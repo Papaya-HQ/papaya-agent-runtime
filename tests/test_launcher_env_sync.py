@@ -7,7 +7,7 @@ guard that fixed that refused every restart while the previous build's superviso
 held the lock, and left the environment without the Papaya client. These drive the
 real launcher with a fake `uv` on `PATH` that records its argv, builds a stand-in
 environment when asked to sync, and runs Python when asked to run, so what the
-launcher asks uv to do — and in which order — is the thing under test.
+launcher asks uv to do - and in which order - is the thing under test.
 """
 
 from __future__ import annotations

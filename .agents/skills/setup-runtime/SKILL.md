@@ -28,8 +28,8 @@ sign-ins need the person's terminal); the steps below are the session's own path
    and `gh`; the interpreter the runtime runs on is the series `.python-version`
    pins (3.13), which uv fetches when it is missing. It is idempotent and safe to
    rerun after a partial failure. Linux and macOS run natively; Windows only inside
-   WSL2 (the runtime needs `fcntl`). For a machine with no desktop app — a server,
-   SSH, WSL2 — the whole procedure, including keeping `ppy serve` running, is the
+   WSL2 (the runtime needs `fcntl`). For a machine with no desktop app - a server,
+   SSH, WSL2 - the whole procedure, including keeping `ppy serve` running, is the
    `docs/operating.md` section "Run it on a machine without the app"; follow and link it, don't restate it.
 2. Run `ppy doctor` (or `ppy doctor --json`). Read the harness, requirement, and
    companion-tool sections.
@@ -43,7 +43,7 @@ sign-ins need the person's terminal); the steps below are the session's own path
 
    Both roles default to the **same** harness, and it is never picked by list
    position: the one this machine is connected to Papaya with (`ppy papaya status`),
-   or — with no connection yet — whichever one drives. A Claude connection means
+   or - with no connection yet - whichever one drives. A Claude connection means
    Claude workers; a Codex connection means Codex workers. Mixing is still allowed,
    but only when someone asks for it: an explicit answer at the prompt,
    `ppy config models --worker-provider ...`, or `ppy dispatch --provider ...` for
@@ -53,8 +53,8 @@ sign-ins need the person's terminal); the steps below are the session's own path
    machine is pinned to an agent. Connected, that is the session's identity. Not
    connected is a mode, not a blocker: run standalone, with everything local working
    the same, and say once the one line the runtime prints ("Running without Papaya.
-   It's better with it: … `ppy papaya connect` sets it up … https://trypapaya.ai") —
-   unless `PPY_QUIET_INVITE=1` or `papaya.invite = false` silenced it — offering to do
+   It's better with it: … `ppy papaya connect` sets it up … https://trypapaya.ai") -
+   unless `PPY_QUIET_INVITE=1` or `papaya.invite = false` silenced it - offering to do
    it for them. Never wait on it. If they say yes, run `ppy papaya connect --create-engineer` yourself (their own engineering agent, created when they have none; `--agent` instead only when they name another)
    with a timeout of at least ten minutes: it installs the client when there is none
    (`npx papaya-agent`, or `uv` on a machine without Node), opens a sign-in link, pins
@@ -68,8 +68,8 @@ sign-ins need the person's terminal); the steps below are the session's own path
    and `/mcp`.
 6. Register work with `ppy repo add <url-or-path>`. If the user does not name one,
    run `ppy repo discover` and offer what it finds rather than asking an open
-   question. Then `ppy repo onboard <name>` each newly registered repo — see the
-   `onboard-a-repo` skill — and confirm with `ppy repo list` and `ppy status`.
+   question. Then `ppy repo onboard <name>` each newly registered repo - see the
+   `onboard-a-repo` skill - and confirm with `ppy repo list` and `ppy status`.
 
 ## Repair
 

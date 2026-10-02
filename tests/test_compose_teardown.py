@@ -1,6 +1,6 @@
 """A task's per-task compose stack goes down when the task is over.
 
-On 2026-09-03 fifteen abandoned stacks — every one belonging to a delivered task —
+On 2026-09-03 fifteen abandoned stacks - every one belonging to a delivered task -
 were still up with their volumes, and Docker hit its 33-network ceiling: new
 stacks stopped starting, so backend workers could no longer bring up the database
 their own tests needed. Nothing in the harness had ever torn one down.

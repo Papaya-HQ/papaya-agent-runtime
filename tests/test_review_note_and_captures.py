@@ -91,9 +91,9 @@ def test_render_lists_sizes_marks_the_missing_and_hands_back_image_paths(tmp_pat
     (shots / "after.png").write_bytes(b"x" * 2048)
     (shots / "log.txt").write_text("output\n")
     out = captures.render(["docs/evidence", "docs/evidence/gone.png"], root=tmp_path)
-    assert "docs/evidence — directory, 2 item(s)" in out
+    assert "docs/evidence - directory, 2 item(s)" in out
     assert "after.png  2.0 KB" in out
-    assert "docs/evidence/gone.png — (not found)" in out
+    assert "docs/evidence/gone.png - (not found)" in out
     assert str(shots / "after.png") in out.splitlines()  # a bare, openable line
     assert str(shots / "log.txt") not in out.splitlines()
 
@@ -176,7 +176,7 @@ def test_review_show_lists_the_receipts_and_the_standing_approval_note(
     out = capsys.readouterr().out
     assert "captures and receipts named in the worker's reports:" in out
     assert "panel.png  512 B" in out
-    assert "docs/evidence/missing.png — (not found)" in out
+    assert "docs/evidence/missing.png - (not found)" in out
     assert str(shots / "panel.png") in out.splitlines()
     assert "note on the standing approval: opened the panel capture" in out
     # The receipts land between the worker's report and the diff, where a reviewer
@@ -188,4 +188,4 @@ def test_review_show_survives_a_capture_path_that_is_gone(task, monkeypatch, cap
     _stub_bundle(monkeypatch)
     progress.record(task.id, phase="done", note="shots at /nowhere/at/all/captures", conn=task.conn)
     assert cli.main(["review", "show", str(task.id)]) == 0
-    assert "/nowhere/at/all/captures — (not found)" in capsys.readouterr().out
+    assert "/nowhere/at/all/captures - (not found)" in capsys.readouterr().out

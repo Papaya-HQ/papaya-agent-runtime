@@ -3,7 +3,7 @@
 The rounds run inside the real `serve.run`, beside the client's own loop, exactly
 as `tests/test_serve.py` drives it. What is faked is the outside world and time:
 the harness (:class:`FakeTurns`), Papaya (:class:`FakePapaya`, :class:`FakeEvents`),
-the forge, the worktree pruner, and two clocks — the rounds' timer, fired by hand,
+the forge, the worktree pruner, and two clocks - the rounds' timer, fired by hand,
 and the wall clock a round reads silence and age on, moved by hand.
 """
 
@@ -1698,9 +1698,9 @@ def test_one_round_over_a_ticket_in_every_phase_completes_on_real_threads(
 ) -> None:
     """PAP-219's first start: a round died on a connection opened in another thread.
 
-    The state is the shape Shane's `.ppy/state.db` had — a stalled ticket whose worker
+    The state is the shape Shane's `.ppy/state.db` had - a stalled ticket whose worker
     is done, a handed-over one, a dispatched one with a live worker, a delivered one
-    with an open pull request — plus every other phase and worker status. The round
+    with an open pull request - plus every other phase and worker status. The round
     runs with the real `asyncio.to_thread` and SQLite's own `check_same_thread`.
     """
     from papaya_agent_runtime.state import db

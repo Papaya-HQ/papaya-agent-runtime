@@ -28,7 +28,7 @@ def connected_as(tmp_path, monkeypatch):
     """Fake this machine's Papaya connection, harness and all.
 
     `PPY_PAPAYA_HOME` is the whole world for connection discovery, so a test can
-    say precisely which harness the person chose at connect time — the thing the
+    say precisely which harness the person chose at connect time - the thing the
     provider defaults are supposed to follow.
     """
 
@@ -103,7 +103,7 @@ def test_setup_non_interactive_writes_config(ppy_home, monkeypatch) -> None:
 # ── One harness unless somebody asked otherwise ─────────────────────────────
 #
 # The worker used to be `usable[-1]` and the manager `usable[0]`, so any machine
-# with both harnesses signed in got a Claude manager driving Codex workers —
+# with both harnesses signed in got a Claude manager driving Codex workers -
 # chosen by list position rather than by anyone. Shane's rule, 2026-09-16: the
 # runtime does not mix agents by default. The person already chose a harness when
 # they connected this machine; that choice is the default for everyone it launches.
@@ -149,7 +149,7 @@ def test_one_usable_harness_still_drives_and_works(ppy_home, monkeypatch, connec
 def test_an_explicit_worker_provider_still_wins_over_the_connection(
     ppy_home, both_harnesses, connected_as
 ) -> None:
-    """Mixing stays possible — on purpose, never by list position."""
+    """Mixing stays possible - on purpose, never by list position."""
     connected_as("claude")
     cfg = wizard.run_setup(non_interactive=True, overrides={"worker_provider": "codex"})
     assert (cfg.manager.provider, cfg.worker.provider) == ("claude", "codex")

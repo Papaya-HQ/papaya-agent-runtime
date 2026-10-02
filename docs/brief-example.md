@@ -3,7 +3,7 @@
 This is a complete brief in the shape `ppy brief lint` accepts, kept short. The
 four outcome sections come first because they are what the worker plans
 against, what steering is checked against, and what every continuation packet
-carries (see below). The blocks after them are the ones every brief carries —
+carries (see below). The blocks after them are the ones every brief carries -
 see the `brief-a-worker` skill for why each exists.
 
 ## Goals
@@ -20,7 +20,7 @@ see the `brief-a-worker` skill for why each exists.
 Support agents answer "where is my order" by opening the order page; today they
 open the courier tool as well. The outcome is the answer on the page. Reading it
 from the existing `delivery_events` table is the suggested route, not the
-requirement — if the table cannot give the state, say so under "Flagged, not
+requirement - if the table cannot give the state, say so under "Flagged, not
 done" rather than inventing a second source.
 
 ## In scope
@@ -32,7 +32,7 @@ done" rather than inventing a second source.
 
 ## Out of scope
 
-- No courier-tool integration, polling, or webhook — the table is the source.
+- No courier-tool integration, polling, or webhook - the table is the source.
 - No redesign of the order page and no new components; one line in the existing
   summary card.
 - No changes to `delivery_events` or its migrations; if the state cannot be
@@ -61,12 +61,12 @@ done" rather than inventing a second source.
 `make test` is the gate. A flaky failure is re-run once, then reported with both
 outputs; never loosened, never skipped, never called unrelated without checking
 main's own runs. After two identical failures with a fix between them, stop and
-file it under "Flagged, not done" — the third attempt is the user's call.
+file it under "Flagged, not done" - the third attempt is the user's call.
 
 ## Scope-change protocol
 
-If the brief turns out to be wrong — the table lacks a state, the copy file lacks
-a string — stop at the checkpoint, and under "Flagged, not done" state the
+If the brief turns out to be wrong - the table lacks a state, the copy file lacks
+a string - stop at the checkpoint, and under "Flagged, not done" state the
 conflict, its effect on the Goals and on the timeline, and the smallest correct
 alternative. Never widen scope silently; never implement something the Out of
 scope section excludes; never invent a substitute requirement.
@@ -114,7 +114,7 @@ Also handle orders whose latest event is a return; render it as 'Returned'
 Support agents answer "where is my order" by opening the order page; today they
 open the courier tool as well. The outcome is the answer on the page. Reading it
 from the existing `delivery_events` table is the suggested route, not the
-requirement — if the table cannot give the state, say so under "Flagged, not
+requirement - if the table cannot give the state, say so under "Flagged, not
 done" rather than inventing a second source.
 
 ## In scope
@@ -124,7 +124,7 @@ done" rather than inventing a second source.
 - Pre-authorised adjacent changes: the fixture index `tests/fixtures/orders/index.json`.
 
 ## Out of scope
-- No courier-tool integration, polling, or webhook — the table is the source.
+- No courier-tool integration, polling, or webhook - the table is the source.
 - No redesign of the order page and no new components; one line in the existing
   summary card.
 - No changes to `delivery_events` or its migrations; if the state cannot be
@@ -132,7 +132,7 @@ done" rather than inventing a second source.
 - No backfill of historical orders; no speculative caching.
 ```
 
-Had that steer been meant to change a boundary — say, allowing a schema change —
+Had that steer been meant to change a boundary - say, allowing a schema change -
 the message would have to say so explicitly ("Out of scope is amended: a
 migration adding `returned_at` is now in scope"), because the standing block
 still says the opposite and the worker is told the message wins only where it

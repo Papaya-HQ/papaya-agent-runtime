@@ -193,7 +193,7 @@ THREE = [
 ONE = [RepoRef("runtime", "https://github.com/acme/runtime")]
 FRONT = instructions.ReadItem("PAP-1", repo="https://github.com/acme/papaya-frontend-monorepo")
 BACK = instructions.ReadItem("PAP-2", repo="papaya-backend-monorepo")
-WORDS = instructions.ReadItem("PAP-3", summary="PAP-3: Activity feed (todo) — web and iOS")
+WORDS = instructions.ReadItem("PAP-3", summary="PAP-3: Activity feed (todo) - web and iOS")
 UNREAD = instructions.ReadItem("PAP-4")
 
 PRECEDENCE = [
@@ -334,7 +334,7 @@ def test_read_references_drops_other_trackers_and_keeps_refusals_as_unread() -> 
     refused, feed = read_items
     assert refused.repo is None and refused.summary == ""
     assert feed.repo == "https://github.com/acme/papaya-frontend-monorepo"
-    assert feed.summary == "PAP-115: Activity feed (done) — Web and iOS"
+    assert feed.summary == "PAP-115: Activity feed (done) - Web and iOS"
 
 
 def test_the_choice_turn_follows_the_brief_turns_own_layers_word_for_word() -> None:
@@ -585,7 +585,7 @@ def test_the_turns_outcome_block_is_read_with_its_status_and_also_sent_line() ->
         "Two tasks running: task 41 (snapshot route), task 42.\nWaiting on you: capability 12.",
         "#eng-status",
     )
-    assert instructions.outcome_of("OUTCOME: failed — no such task 99").status == "failed"
+    assert instructions.outcome_of("OUTCOME: failed - no such task 99").status == "failed"
     assert instructions.outcome_of("no block at all") is None
 
 

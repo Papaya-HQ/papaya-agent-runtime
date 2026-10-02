@@ -72,7 +72,7 @@ def review_base(conn, task) -> ReviewBase:
     the branch is rebased: on PAP-222 (2026-09-17) `ppy review show 21` diffed from
     it after a rebase onto a newer main and listed 51 files instead of the worker's
     3. So the review asks the forge for the target branch (the stacked parent, else
-    the repository's default) and diffs from where HEAD meets it — a rebase moves
+    the repository's default) and diffs from where HEAD meets it - a rebase moves
     both ends together and never changes what is reviewed. When the forge cannot be
     asked, the last fetched copy is used and said; with neither, the dispatch base.
     """
@@ -167,7 +167,7 @@ def record_review(
 ) -> dict:
     """Record a verdict against the exact commit it examined.
 
-    ``note`` is the reviewer's own words about *this* approval — what they checked,
+    ``note`` is the reviewer's own words about *this* approval - what they checked,
     which captures they opened, what they accepted a caveat on. It rides the review
     row, so it is bound to the same SHA as the verdict and cannot be mistaken for a
     note about some later commit; ``ppy review status``/``show`` print it back. The

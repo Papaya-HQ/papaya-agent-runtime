@@ -120,7 +120,7 @@ class Limit:
         if self.until.date() != self.at.date():
             when = self.until.strftime("%b %d %H:%M UTC")
         how = "" if self.exact else " (no reset time could be read; trying again then)"
-        return f"{who} usage limit: turns wait until {when}{how} — {self.text}"
+        return f"{who} usage limit: turns wait until {when}{how} - {self.text}"
 
 
 def backoff(times: int = 1) -> float:

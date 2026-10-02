@@ -1,7 +1,7 @@
 """Task lifecycle bookkeeping: close, repair a status, release a stuck lease.
 
 These are the three things the manager was doing with ad-hoc Python one-liners
-against `.ppy/state.db` on 2026-09-01/02 — abandoning a task the user cancelled,
+against `.ppy/state.db` on 2026-09-01/02 - abandoning a task the user cancelled,
 correcting a status the runtime had wrong, and handing back a slot whose lease
 outlived its worker. A one-liner writes a status with no event behind it, so the
 next reader has no idea why the state changed; every operation here records the
@@ -173,11 +173,11 @@ def close_task(task_id: int, reason: str) -> dict:
     """End a task for a reason that is not delivery, and give its slot back.
 
     Superseded, duplicated, overtaken by the user's own change, dropped on a scope
-    call — all of these used to leave a task sitting in `worker_done` forever,
+    call - all of these used to leave a task sitting in `worker_done` forever,
     holding a worktree and nagging the heartbeat.
     """
     if not reason or not reason.strip():
-        raise LifecycleError("a close needs a reason — it is the only record of why")
+        raise LifecycleError("a close needs a reason - it is the only record of why")
     conn = init_db()
     task = _task(conn, task_id)
     previous = task["status"]
@@ -216,7 +216,7 @@ def close_task(task_id: int, reason: str) -> dict:
 def set_task_status(task_id: int, status: str, note: str | None = None) -> dict:
     """Repair a task's status by hand, leaving a record of who changed what and why."""
     if status not in TASK_STATUSES:
-        raise LifecycleError(f"unknown status {status!r} — allowed: {', '.join(TASK_STATUSES)}")
+        raise LifecycleError(f"unknown status {status!r} - allowed: {', '.join(TASK_STATUSES)}")
     conn = init_db()
     task = _task(conn, task_id)
     previous = task["status"]

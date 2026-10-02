@@ -347,7 +347,7 @@ def assessment_prompt(cycle: dict[str, Any]) -> str:
         f"Periodic performance assessment {cycle['id']} is due ({cycle['trigger']}). "
         "Do it now without asking whether to begin. Inspect this deterministic evidence: "
         f"{evidence}. Weigh the workers' reflections in it (their self-assessments and their "
-        "assessments of you — brief clarity, scope, steering, review) as first-class input, "
+        "assessments of you - brief clarity, scope, steering, review) as first-class input, "
         "quoting them where they change a conclusion. Identify what improved, what "
         "underperformed, and the most likely root causes. Propose only 1-3 measurable "
         "experiments. You may autonomously adjust "
@@ -498,7 +498,7 @@ def _append_memory(cycle: dict[str, Any], response: dict[str, str]) -> None:
     path = memory.improvements_path()
     lines = [
         "",
-        f"## Assessment {cycle['id']} — {cycle['window_end'][:10]}",
+        f"## Assessment {cycle['id']} - {cycle['window_end'][:10]}",
         f"- Outcome: {response['decision']}",
         f"- Summary: {cycle.get('summary') or '(none)'}",
     ]

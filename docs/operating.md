@@ -9,7 +9,7 @@ follows.
 ## Identity comes from Papaya
 
 The runtime has **no persona of its own**. Connecting pins this machine to one of
-your workspace's agents — either from the Papaya desktop app or with
+your workspace's agents - either from the Papaya desktop app or with
 `papaya-agent connect` in a terminal; the runtime finds either one. (A machine with no
 app or no browser connects with a device code: see
 [Run it on a machine without the app](#run-it-on-a-machine-without-the-app).) From then on
@@ -17,7 +17,7 @@ the session *is* that agent:
 persona, objective, rules and memories are loaded from Papaya and treated as
 standing instructions. `ppy papaya status` says who you're connected as.
 
-`ppy papaya connect` runs the connect flow — your only step is clicking Approve in the
+`ppy papaya connect` runs the connect flow - your only step is clicking Approve in the
 browser.
 
 ### Without Papaya
@@ -26,8 +26,8 @@ Open Claude or Codex in this directory on a machine with no Papaya connection an
 runtime is still a manager, the way Middle Manager is: register and onboard repos,
 brief, dispatch, steer, answer, review, deliver, gate runs, budgets, hygiene, PR
 following, self-reported issues, config ownership, learned tools, `board`, `health`,
-`handoff` all work exactly as they do connected. It says so once — at session start, on
-`ppy start`, `ppy status` and `ppy doctor`, and when `ppy serve` starts — in one line:
+`handoff` all work exactly as they do connected. It says so once - at session start, on
+`ppy start`, `ppy status` and `ppy doctor`, and when `ppy serve` starts - in one line:
 
     Running without Papaya. It's better with it: tickets, comments and the team's record flow in and out by themselves. `ppy papaya connect` sets it up: it installs the client if needed and you click Approve in your browser. https://trypapaya.ai
 
@@ -59,16 +59,16 @@ the brief, answer, review and check-in prompts send durable facts to
 
 ## Repositories: it comes to you with options
 
-- **`ppy repo discover`** reads the forge — your account and every organization you
-  belong to — and offers what isn't registered yet, most recently pushed first.
+- **`ppy repo discover`** reads the forge - your account and every organization you
+  belong to - and offers what isn't registered yet, most recently pushed first.
   Archived repositories never appear; forks are skipped unless you ask. It only ever
   offers: registering is an explicit act, because that's what makes a repository
   something a worker may change.
 - **Naming a repo it doesn't have is never a dead end.** It finds it, offers it, and
   registers it on your word.
-- **`ppy repo onboard`** reads a registered repository properly — how it builds, how
+- **`ppy repo onboard`** reads a registered repository properly - how it builds, how
   it tests, the commands its CI workflows *actually* run, which contracts it carries
-  for agents, whether UI work has a design reference to match — and writes that into
+  for agents, whether UI work has a design reference to match - and writes that into
   the repository's durable notes, where the next brief and the next worker both read
   it. It names what it couldn't determine, so the unknown gets asked about instead of
   guessed at. It also records the repository's **gate policy**, and **the repository
@@ -141,14 +141,14 @@ none is steered to run `ppy gate run`.
 
 One stop is not that. A worker whose newest progress note is `plan` has written no
 verification and often no code, so telling it a "verification gate" did not finish is
-simply false — and where a brief made the plan gate blocking, that steer pushed it past
+simply false - and where a brief made the plan gate blocking, that steer pushed it past
 the gate a person had asked for (PAP-278). Such a worker is instead answered about its
 plan: an answer turn reads the plan note against the brief, with the brief's own
 plan-note gate wording as a fact, and ends with one `PLAN-REPLY:` line. That line reaches
 the worker verbatim, prefixed `Manager reply to your plan note:`, and is what resumes it.
 Every stopped worker at its plan is answered, blocking or not; a worker still *running*
 after a non-blocking plan note is left to work. A turn that says no reply is a missed
-turn, retried and then handed back — the runtime never writes the reply itself.
+turn, retried and then handed back - the runtime never writes the reply itself.
 
 Heavy gates run one at a time per repository. A full suite (`--full`), or any gate whose
 learned duration in its repository (p90, or a budget override) is past
@@ -241,14 +241,14 @@ link the tasks that belong to one (`ppy track`) so the pull request body names t
 work it was for and where to find it.
 
 **Papaya work items are the default, not the assumption.** A workspace that tracks
-work in Linear, Notion or Jira has said so, and that wins — the agent reads it from
+work in Linear, Notion or Jira has said so, and that wins - the agent reads it from
 the workspace's own durable context and from whatever providers are connected, so a
 new machine honours it on its first turn with nothing to configure. The runtime never
 talks to a tracker itself; it records which record a task belongs to and renders it.
 
 ## What works today
 
-- **Your harness is the front door.** No launch step, no setup homework — it
+- **Your harness is the front door.** No launch step, no setup homework - it
   bootstraps itself.
 - **Real Claude & Codex workers, on a leash.** Smallest-eligible-worker routing with
   a hard, code-enforced cost ceiling.
@@ -261,7 +261,7 @@ talks to a tracker itself; it records which record a task belongs to and renders
   exact-HEAD review gate, and PR delivery via `gh`/`gh-axi`.
 - **It doesn't lose things.** SQLite source of truth, append-only event logs, and
   restart / replay / reconcile recovery.
-- **It repairs itself.** Drift, a stalled runner, a missing companion — fixed in
+- **It repairs itself.** Drift, a stalled runner, a missing companion - fixed in
   passing. It will not rewire its own guardrails or loosen a ceiling to save time;
   those are enforced in code, not prompts.
 - **It reviews its own performance.** Evidence is collected while it works, and it
@@ -269,14 +269,14 @@ talks to a tracker itself; it records which record a task belongs to and renders
   stay proposals until you approve them.
 - **It remembers, at two levels.** Durable notes under `.ppy/memory/`: an *instance*
   tier spanning all your repos (your preferences, how the repos relate, the work
-  board, aligned experiments) and a *per-repo* tier (`repos/<name>/` — build and test
+  board, aligned experiments) and a *per-repo* tier (`repos/<name>/` - build and test
   incantations, conventions, gotchas, and a progress log). The per-repo files double
   as a back channel: workers post their plan up front, so a wrong turn is caught
   while it's still cheap.
 - **Cross-repo aware.** Multi-repo work is one run of dependency-linked tasks, with a
   computable rollout order (`ppy plan`).
 - **Pinned, verified companions.** treehouse (worktrees), lavish-axi (rich review),
-  gh-axi (delivery) — downloaded, checksum-verified, pinned at setup.
+  gh-axi (delivery) - downloaded, checksum-verified, pinned at setup.
 
 ## Run it on a machine without the app
 
@@ -506,7 +506,7 @@ is in it: the token arrives at boot, and every sign-in is made on the running VM
 
 ## The control plane, if you want to look
 
-You don't type these — the runtime does — but nothing is hidden:
+You don't type these - the runtime does - but nothing is hidden:
 
 ```bash
 ppy capabilities --json                 # what this runtime is, for the client that found it
@@ -539,17 +539,17 @@ ppy assessment status                   # performance-review cadence
 
 `ppy capabilities --json` is the one the Papaya client reads rather than types. When
 you connect a machine, the client finds this checkout and has to know what it can
-delegate here; this prints one JSON object — `runtime`, `version`, `client_version`
+delegate here; this prints one JSON object - `runtime`, `version`, `client_version`
 (the `papaya-agent-client` release embedded in this checkout), `protocol` (the
 supervised-protocol version that client speaks) and `modes` (the launch modes this
-runtime can serve — today `supervised` and `terminal`, both of them `ppy serve`) —
+runtime can serve - today `supervised` and `terminal`, both of them `ppy serve`) -
 from local state only, so it answers instantly, offline, and on a machine that has
-never been set up — including one where `uv sync` has never run. `bin/ppy` answers
+never been set up - including one where `uv sync` has never run. `bin/ppy` answers
 this one command from the standard library when the project environment does not
 exist yet, so the client's ten-second probe never waits on a first-time install of
 sixty-odd packages. It never fails: a checkout where the client cannot be imported
 reports `client_version: null` and still exits 0. `ppy doctor` and `ppy readiness`
-show the same embedded client version, and readiness warns — without blocking — when
+show the same embedded client version, and readiness warns - without blocking - when
 the client that launched this runtime is newer than the one in the checkout.
 
 **What the machine needs from its owner reaches its owner.** Some things only a person
@@ -562,12 +562,12 @@ finds each of these as a *blocker* with a
 title and the literal commands that close it, in order. `ppy serve` keeps them in
 `.ppy/blockers.json`, re-checks every round (nothing to restart once a person has done
 their part), and tells the owner when one appears, again only when its steps change or a
-day has passed, and once when it clears — in the agent's DM with the person who
+day has passed, and once when it clears - in the agent's DM with the person who
 connected the machine, as `runtime.blockers: [{code, title, steps, since}]` on the
 supervised `hello` and every `status`, and at start on stderr. A ticket refused because
 of one (a pickup on a signed-out forge, a delivery that could not open its pull request)
-is handed back with one neutral comment — "This machine needs setup before it can take
-this; its owner has been told what to do" — that names nothing. Every string on those
+is handed back with one neutral comment - "This machine needs setup before it can take
+this; its owner has been told what to do" - that names nothing. Every string on those
 surfaces is redacted of tokens, home paths, email addresses and diff hunks, and the
 machine is named only by its short hostname. With `forge.github_oauth_client_id` set in
 `config.toml` (Papaya's GitHub OAuth app; not a secret), the runtime signs `gh` in
@@ -579,8 +579,8 @@ when there are any) and `ppy doctor` print them locally.
 every command with `uv run --no-sync`, so typing `ppy status` in a terminal cannot let uv
 rebuild `.venv` out from under the manager the desktop app started. The syncing is the
 launcher's own: `ppy serve` as it starts (only when the environment was built from
-another lockfile or does not import), an explicit `ppy env sync`, and — before any other
-command — a comparison of the stamp the last sync left in the environment with
+another lockfile or does not import), an explicit `ppy env sync`, and - before any other
+command - a comparison of the stamp the last sync left in the environment with
 `uv.lock`, `pyproject.toml` and `.python-version`. After a pull that changed them, the
 next command says "Updating the runtime's environment…", syncs, and then runs; unchanged,
 it costs that one stamp read. A sync that fails stops the command with one line naming
@@ -634,9 +634,9 @@ last fetch saw, and fetch nothing themselves.
 ## Running as the Papaya manager
 
 `ppy serve` is the always-on manager. It runs until told to stop, and in one process
-it runs this runtime's own supervisor — the same one `ppy supervisor serve` runs, so
-`ppy dispatch`, `ppy review` and `ppy deliver` from any shell on the machine reach it
-— and the Papaya client's event loop **in-process**, through the client's library
+it runs this runtime's own supervisor (the same one `ppy supervisor serve` runs, so
+`ppy dispatch`, `ppy review` and `ppy deliver` from any shell on the machine reach it)
+and the Papaya client's event loop **in-process**, through the client's library
 entry points. There is no copy of the client's cursor, reservation, renewal or
 hand-back code in this repository: the loop is imported and only the way a job is
 executed is this runtime's own.
@@ -646,8 +646,8 @@ checkout, reads `ppy capabilities --json`, and execs `ppy serve` with the flags 
 would have passed its own listener: `--supervised`, `--harness`, `--approval-timeout`
 and `--working-directory`. Any other `listen` flag is ignored with one warning line on
 stderr, so a newer client cannot fail to launch an older runtime. Under `--supervised`
-stdout carries the JSON Lines protocol and nothing else — every log line goes to
-stderr — and the opening `hello` carries a `runtime` field naming this runtime and its
+stdout carries the JSON Lines protocol and nothing else - every log line goes to
+stderr - and the opening `hello` carries a `runtime` field naming this runtime and its
 version, so a host never has to infer what answered. The connection registers with
 Papaya as `papaya-agent-runtime` whatever `--harness` says, so the app can tell a
 machine running the manager from one running a bare harness.
@@ -674,14 +674,14 @@ blockers ledger; the next start that succeeds reports it to the owner once.
 down, and waits up to `supervisor.stop_timeout` (default 30s) for every worker to be
 recorded `worker_stopped` with its session kept for a resume, then exits. Workers, gates
 and manager turns keep process groups of their own (so an interrupt reaches the tools
-they started and never `serve`), and a small watcher process — the lifeline — kills
+they started and never `serve`), and a small watcher process - the lifeline - kills
 whatever is still running if `serve` itself dies without running another line (an app
 crash, `kill -9`), so no orphan is left holding a worktree.
 
 **A runner row is truth or it is closed.** Worker slots are counted from the runner rows
-that say `starting` or `running`. A row whose process is gone — its pid is not alive, or
-it never had one and has not been heard from for `supervisor.dead_after` (default 600s)
-— is closed at every supervisor start (fresh, adopted or retired), at every `serve`
+that say `starting` or `running`. A row whose process is gone (its pid is not alive, or
+it never had one and has not been heard from for `supervisor.dead_after`, default 600s)
+is closed at every supervisor start (fresh, adopted or retired), at every `serve`
 start, and on every manager round whatever its ticket's state: the row becomes
 `exited`, its slot comes back, and a task still in flight is recorded `worker_stopped`
 with the cause and its session kept for a resume. One line per row.
@@ -698,9 +698,9 @@ unpins it). Each `serve` start makes both repairs, one line per repository repai
 clone whose `origin` is still a local path because the forge could not be reached is
 refused work and reported as the `repo_origin_is_local` blocker, with its steps.
 
-A start on a checkout that has never been set up sets it up first — the same
+A start on a checkout that has never been set up sets it up first - the same
 non-interactive path `ppy setup` runs, with the providers taken from the
-connection's harness — and says so in one line on stderr. It then checks whether it
+connection's harness - and says so in one line on stderr. It then checks whether it
 can actually work and, if anything is blocked or missing, sends the owner one
 direct message saying what needs them; the message is keyed on *which* problems
 there are, so restarting doesn't repeat it. A blocked runtime still starts and
@@ -749,10 +749,10 @@ activity stamp) and a write boundary of this directory alone, so it can register
 dispatch but never edit a repository by hand. Its prompt is reviewed text under
 `src/papaya_agent_runtime/prompts/` and points at the skills it follows:
 
-- **brief** reads the work item, **chooses the repository** — the item names it; the
+- **brief** reads the work item, **chooses the repository** - the item names it; the
   agent already knows (memories, and each repository's "What it is" notes, which
   `ppy repo onboard` now fills); the code says (`ppy repo locate "hover card"`);
-  `ppy repo discover` and register; ask on the item and wait; then record the mapping —
+  `ppy repo discover` and register; ask on the item and wait; then record the mapping -
   writes acceptance criteria onto the record if it has none, and dispatches a brief
   written to `brief-a-worker` with `ppy dispatch --brief --strict`;
 - **answer** unblocks a worker's question with `ppy answer` or `ppy steer`, or takes it
@@ -760,8 +760,8 @@ dispatch but never edit a repository by hand. Its prompt is reviewed text under
 - **review** follows `review-a-worker`, runs the gate at head, then approves and
   delivers or steers with every finding, and posts the result on the work item.
 
-The runner knows a turn did its job from the ledger alone — a worker in the ticket's
-run, or an answer, steer or delivery event since the turn began — and retries a turn
+The runner knows a turn did its job from the ledger alone - a worker in the ticket's
+run, or an answer, steer or delivery event since the turn began - and retries a turn
 that did not once, with the tail of its transcript, before handing the ticket back.
 **Waiting is not a miss.** A turn runs its gates in the foreground; one whose gate
 cannot finish inside the turn ends with a message whose first line is
@@ -801,8 +801,8 @@ kept at `.ppy/runs/<run id>/turns/<turn>-<n>.log` (for example `brief-1.log`,
 `review-2.log`), and the path appears in the ticket's progress as soon as the turn
 starts. On the work item itself the runner posts only what a person reading the
 thread needs, one line each, as the agent: picked up, dispatched (worker and
-repository), blocked (the question) and unblocked, and — the first time a review
-sends the worker back, never again — `Sent the worker back with findings; still
+repository), blocked (the question) and unblocked, and - the first time a review
+sends the worker back, never again - `Sent the worker back with findings; still
 working.` The report is the review turn's own comment, and the runner posts nothing
 after it. The web app's ticket card shows the latest line as the agent's status.
 Worker progress and the review loop's bookkeeping (reviewing, stopped short, sent
@@ -814,13 +814,13 @@ one-line reminder. If the report is still missing, the runner posts
 `Pull request open: <link>; see the pull request for details.` itself, as the last
 line.
 
-A ticket this machine cannot take at all — a repository the item names that cannot be
-registered, or a runtime that is not ready to work — is declined before any of that, so
+A ticket this machine cannot take at all - a repository the item names that cannot be
+registered, or a runtime that is not ready to work - is declined before any of that, so
 a peer may take it. An item that names no repository is *not* declined: choosing one
 is the brief turn's job, and nothing ever falls back to this checkout.
 
 The manager also **looks for work** instead of only waiting for it. An event can be
-missed — the machine was off, every slot was busy, an older client aged it out — so on
+missed - the machine was off, every slot was busy, an older client aged it out - so on
 start, and then every five minutes, `serve` asks Papaya which work items are assigned
 to this agent and still open (`todo`, `in_progress`, `blocked`, `changes_requested`).
 It offers each one that has no live task here to the client's loop
@@ -849,8 +849,8 @@ status change by the holder within `sweep.idle_claim_minutes` (15 by default, in
 `config.toml`). With none of those the item is **idle**: the memory is skipped and the
 sweep asks for it on every sweep. If Papaya still refuses (after its on-call fallback
 takes an item, it refuses the owner's machines for a guard window), the sweep keeps one
-blocker for the owner — "Papaya keeps 3 idle items from this Mac: PAP-219, PAP-221,
-PAP-222; use Run on this Mac, or wait for the guard to lift" — changed when that set
+blocker for the owner - "Papaya keeps 3 idle items from this Mac: PAP-219, PAP-221,
+PAP-222; use Run on this Mac, or wait for the guard to lift" - changed when that set
 changes and cleared when it empties. An item refused for the same reason on three
 sweeps running with no evidence of work is also recorded as a
 `repeated-without-progress` deficiency: one row per refusal reason, each ticket in its
@@ -860,8 +860,8 @@ evidence once a day, and an issue only from the second ticket or day. It shows u
 **Unless Papaya is doing its job.** Papaya routes an item to one person's machines and
 keeps the rest, and refusing the others is correct, not a defect: a refusal whose reason
 is `not_routed_here`, `handled_in_papaya` or `held_elsewhere` on work this runtime has
-no claim on is never a deficiency. It stays visible — the blocker names it, the sweep
-keeps asking, `ppy workers` shows it as kept elsewhere — and nothing is opened about it.
+no claim on is never a deficiency. It stays visible - the blocker names it, the sweep
+keeps asking, `ppy workers` shows it as kept elsewhere - and nothing is opened about it.
 The same refusal *on work this machine holds* is a deficiency, because the work was sent
 here and this machine cannot have it: a ticket task here that was not given away, a
 lease or a Run on this Mac hold naming one of this runtime's connections. So is a
@@ -1010,7 +1010,7 @@ the signals, recorded where they already happen:
 - **A turn reports it.** A turn (brief, answer, review, check-in) that was stopped or
   degraded by the runtime ends with a line `RUNTIME: <what got in the way>`. Every turn
   prompt invites that line when a tool was refused, a fact could not be found, or a
-  contract was wrong — and only then: a turn with nothing in its way writes no such
+  contract was wrong - and only then: a turn with nothing in its way writes no such
   line, and the prompt gives it both an example that belongs and one that does not,
   because a turn once reported the Papaya tools loading on demand, which is the runtime
   working (issue #120). Two turns seldom word one
@@ -1018,12 +1018,12 @@ the signals, recorded where they already happen:
   not by its sentence, in this order:
 
   1. an exception class *together with* the function, module or command it names
-     (`AttributeError` in `claude.live_denial`) — the most specific thing a turn can
+     (`AttributeError` in `claude.live_denial`) - the most specific thing a turn can
      say, which a pull request mentioned in passing does not take over;
   2. a pull request it names (`PR #58`, `pull request 710`, `#94`), with the repository
      when it names one, since two repositories' PR #58 are two things. A number nothing
      marks as a report ("issue 3 of 5 checks failed", "PAP-219 #3") is not one;
-  3. an exception class with nowhere named, keyed on its whole message — never a word of
+  3. an exception class with nowhere named, keyed on its whole message - never a word of
      it, or "'NoneType' object has no attribute 'get'" and "…no attribute 'phase'" would
      be one deficiency;
   4. the first tool or API it names, with the noun phrase after its first refusal verb
@@ -1035,7 +1035,7 @@ the signals, recorded where they already happen:
   ways turns worded "the Claude worker crashes and the fix is PR #58" in September are
   one issue rather than six. The rule under-merges on purpose: two reports are one only
   when they name the same thing. At start, `serve` folds older turn reports that are one
-  cause today — the issue opened first is kept, each later one gets the comment
+  cause today - the issue opened first is kept, each later one gets the comment
   "duplicate of #N" and is closed, and every other fingerprint in the group becomes an
   alias to the kept row, so a change to this rule never opens a second issue for a cause
   that already has one.
@@ -1047,7 +1047,7 @@ the signals, recorded where they already happen:
 - **A live worker stalls.** The client stalls a held ticket while its worker's session is
   still live: the liveness lines above did not reach it in time.
 - **A turn misses its job.** A ticket is handed back because a turn ended twice without
-  doing its job (a usage-limit ending never counts — and the occurrences recorded before
+  doing its job (a usage-limit ending never counts - and the occurrences recorded before
   that was true are re-read once from their transcripts and stop counting, so an issue
   already open on them corrects itself with one comment and closes when nothing genuine
   is left), or a worker's gate was backgrounded past the tool cap with no
@@ -1088,7 +1088,7 @@ If its issue was closed, that comment reopens it instead of opening a duplicate.
 
 **Nothing stale opens.** A deficiency is held back (`stale`, no issue) when both of
 these are true: it has not happened for 48 hours, and it last happened before this
-released version first ran on this machine. Either alone leaves it pending — something
+released version first ran on this machine. Either alone leaves it pending - something
 still happening under this version is this version's problem, and an upgrade never
 buries evidence from the hours before it. The next occurrence makes it `pending` again
 and it opens then. This is what stops a backlog opening issues for weeks about something
@@ -1102,7 +1102,7 @@ seven days, across at least one released version this machine had not run when i
 last seen, is closed with one comment saying so; if it happens again, the recurrence
 reopens it with its new evidence. A kind that another kind has replaced
 (`idle-work-refused` → `repeated-without-progress`) opens nothing, and its open issue
-gets one comment pointing at the successor's issue and is closed — before any recurrence
+gets one comment pointing at the successor's issue and is closed - before any recurrence
 comment, so a retired kind's issue ends with one comment rather than two. Closing is two
 things to GitHub, so a close the forge refuses is retried later rather than on every
 flush, and a retry that finds its comment already there only closes.
@@ -1275,7 +1275,7 @@ it is still listed as `MI-n`.
 
 All working state is under `.ppy/` (gitignored):
 
-- `config.toml` — only what differs from the code's defaults: driver profile, worker
+- `config.toml` - only what differs from the code's defaults: driver profile, worker
   defaults and ceiling, active-worker limit, cost posture, authority, self-assessment
   cadence, and the *changes* to the Claude worker tool profile. Setup writes nothing
   but `config_version` and the values a person chose, so a new release's defaults
@@ -1306,7 +1306,7 @@ All working state is under `.ppy/` (gitignored):
   --why "..."`) only when only they can decide. So is a denied tool that is not the
   shell (`WebFetch`, `WebSearch`, an `mcp__…` tool), asked for and granted by its own
   name, and a program run by path (`.venv/bin/python`), decided as its basename and
-  granted as that literal path to its task alone — by policy only when the path
+  granted as that literal path to its task alone - by policy only when the path
   resolves inside the worktree. The worker is told the outcome and a
   grant reaches it on its next launch. A command refused for its shape (including a
   shell builtin such as `export PATH=…` or `source .venv/bin/activate`), by policy, or
@@ -1315,15 +1315,15 @@ All working state is under `.ppy/` (gitignored):
   `ppy config history` lists them, and `ppy serve` start and `ppy doctor` print one
   line each. `ppy config claude --lock extra_tools` (or `dropped_tools`) stops the
   runtime changing a key; a change a lock refuses is a readiness warning naming it.
-- `state.db` — SQLite source of truth (repos, runs, tasks, decisions, sessions,
+- `state.db` - SQLite source of truth (repos, runs, tasks, decisions, sessions,
   events, usage, reviews, self-assessment cycles).
-- `repos/` — read-only base clones. The only repositories work happens in.
-- `runs/` — per-run plans, task packets, results, append-only event logs.
-- `memory/` — durable notes in two tiers, per-instance and per-repo.
-- `papaya-sessions.json` — one listener session id per Papaya connection, so a
+- `repos/` - read-only base clones. The only repositories work happens in.
+- `runs/` - per-run plans, task packets, results, append-only event logs.
+- `memory/` - durable notes in two tiers, per-instance and per-repo.
+- `papaya-sessions.json` - one listener session id per Papaya connection, so a
   restarted `ppy serve` extends its own leases rather than racing them.
-- `tools/`, `worktree-pools/`, `run/` — companions, task worktrees, supervisor sockets.
-- `probes/` — raw provider-probe evidence.
+- `tools/`, `worktree-pools/`, `run/` - companions, task worktrees, supervisor sockets.
+- `probes/` - raw provider-probe evidence.
 
 The Papaya connection itself is owned by the client, not by this runtime:
 `~/.papaya-agent/` for a terminal connection, or the desktop app's own
@@ -1332,8 +1332,8 @@ application-support directory. `ppy papaya status` says which one it found, and
 
 ## Model routing
 
-You pick a driver profile, a deterministic worker default, and a hard worker ceiling
-— provider, top model, top reasoning. Omitted task choices use the worker default;
+You pick a driver profile, a deterministic worker default, and a hard worker ceiling:
+provider, top model, top reasoning. Omitted task choices use the worker default;
 they never inherit the signed-in account's CLI defaults. Explicit lower-cost profiles
 are allowed below the ceiling; the runtime never automatically selects a more
 expensive one.
@@ -1376,6 +1376,6 @@ already-reviewed pull request. It comes to you for:
 - new credentials or access;
 - destructive, irreversible, or production actions;
 - changes to model / reasoning / spend ceilings; and
-- **merging** — off unless you grant a standing policy.
+- **merging** - off unless you grant a standing policy.
 
 These are enforced in `ppy`, not in a prompt.

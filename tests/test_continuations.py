@@ -1,8 +1,8 @@
 """A continuation that admission refuses stays pending and is delivered later, once (issue #71).
 
-A worker ending releases its slot before its automatic continuation — a queued
+A worker ending releases its slot before its automatic continuation - a queued
 checkpoint steer, a stored-decision answer, the resume after a steer's
-interrupt — and a competing dispatch can take that slot. The continuation used
+interrupt - and a competing dispatch can take that slot. The continuation used
 to be marked delivered before the resume was admitted, and then vanish.
 """
 

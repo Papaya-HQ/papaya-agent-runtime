@@ -3,7 +3,7 @@
 The runtime is only ever run from a checkout: there is no wheel, no `pip install`,
 nothing that could stamp a version into the package as it was built. So the version
 had to come from somewhere, and for a long time it came from a literal `0.0.0` in
-two files — which is why Papaya Desktop's machine card said "Managed by Papaya Agent
+two files - which is why Papaya Desktop's machine card said "Managed by Papaya Agent
 Runtime 0.0.0" for every machine, on every build, forever.
 
 **The tag is the version.** `main` requires a pull request and a green `ci-ok` with
@@ -17,14 +17,14 @@ halves of that arrangement:
   build somebody is actually running;
 - :func:`next_tag` computes what the next tag should be, and the workflow *calls*
   it (`python3 -m papaya_agent_runtime.version --next`) rather than reimplementing
-  the sort in shell — `git tag` sorts lexically, which makes `v0.1.9` look newer
+  the sort in shell - `git tag` sorts lexically, which makes `v0.1.9` look newer
   than `v0.1.10`, and a release process that gets that wrong goes backwards.
 
 Two constraints bound everything here, both inherited from `capabilities.py`, which
 is read at connect time by a client that gives the answer ten seconds:
 
-**It cannot fail.** No call in this module raises. Every failure — no git binary, a
-directory that is not a checkout, a repository with no commits, a git that hangs —
+**It cannot fail.** No call in this module raises. Every failure - no git binary, a
+directory that is not a checkout, a repository with no commits, a git that hangs -
 becomes a version string. "I could not tell you" is a worse answer than a version
 that is visibly a fallback.
 
@@ -34,8 +34,8 @@ is the generous one; when it is exceeded the answer still names the commit, via 
 cases where there is genuinely nothing to name: no git, not a checkout, or both
 commands failing.
 
-It is also importable by a bare, possibly old, system interpreter — `bin/ppy`
-answers `capabilities` that way on a checkout nobody has synced yet — so nothing
+It is also importable by a bare, possibly old, system interpreter - `bin/ppy`
+answers `capabilities` that way on a checkout nobody has synced yet - so nothing
 here imports the client, the state database, or anything outside the standard
 library.
 """
@@ -57,8 +57,8 @@ FALLBACK_VERSION = "0.0.0"
 TAG_PREFIX = "v"
 
 #: The glob handed to git, and the strict form applied to what comes back. The
-#: glob is the looser of the two on purpose — git's `--match` is fnmatch, so it
-#: cannot express "exactly three numbers" — and the regex is what actually decides.
+#: glob is the looser of the two on purpose - git's `--match` is fnmatch, so it
+#: cannot express "exactly three numbers" - and the regex is what actually decides.
 TAG_GLOB = "v[0-9]*.[0-9]*.[0-9]*"
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -68,8 +68,8 @@ TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 FIRST_RELEASE = (0, 1, 0)
 
 #: `--dirty` walks the working tree, so a large or cold checkout can take a while;
-#: `rev-parse` reads one ref and cannot. Neither is a latency budget — the answer
-#: is milliseconds in practice — they are the point at which a hung git stops
+#: `rev-parse` reads one ref and cannot. Neither is a latency budget - the answer
+#: is milliseconds in practice - they are the point at which a hung git stops
 #: being worth waiting for, well under the client's ten-second connect probe.
 DESCRIBE_TIMEOUT_SECONDS = 2.0
 REV_PARSE_TIMEOUT_SECONDS = 1.0
@@ -92,12 +92,12 @@ DESCRIBE_ARGS: tuple[str, ...] = (
     "--abbrev=7",
 )
 
-#: `v0.1.3-2-gabc1234[-dirty]` — the long form, which `--long` guarantees even when
+#: `v0.1.3-2-gabc1234[-dirty]` - the long form, which `--long` guarantees even when
 #: HEAD *is* the tag (distance 0).
 _DESCRIBED = re.compile(
     r"^v(?P<release>\d+\.\d+\.\d+)-(?P<distance>\d+)-g(?P<sha>[0-9a-f]+)(?P<dirty>-dirty)?$"
 )
-#: `abc1234[-dirty]` — what `--always` falls back to when no tag matches.
+#: `abc1234[-dirty]` - what `--always` falls back to when no tag matches.
 _BARE = re.compile(r"^(?P<sha>[0-9a-f]{4,40})(?P<dirty>-dirty)?$")
 
 #: Variables that would send git somewhere other than the directory it was asked
@@ -115,8 +115,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
     """The only place this module starts a process, and so the only test seam.
 
-    Every way git can disappoint — absent, hung, pointed elsewhere by a hook's
-    environment — is reachable by replacing this one function.
+    Every way git can disappoint - absent, hung, pointed elsewhere by a hook's
+    environment - is reachable by replacing this one function.
     """
     env = {key: value for key, value in os.environ.items() if key not in _REDIRECTS}
     return subprocess.run(
@@ -156,13 +156,13 @@ def _pep440(release: str | None, distance: int, sha: str, dirty: bool) -> str:
     PEP 440 has no room in the public part of a version for "and some edits":
     `0.1.3+dirty` would claim to *be* release 0.1.3, which is the one thing a
     modified checkout is not. So the commit and the dirt both live in the local
-    segment, and a dirty tagged head is `0.1.3+g<sha7>.dirty` — a version that
+    segment, and a dirty tagged head is `0.1.3+g<sha7>.dirty` - a version that
     sorts as 0.1.3 and says, to anyone reading it, that it is not quite 0.1.3.
 
     Only the exact tag, on a clean tree, gets to be a bare `X.Y.Z`.
 
     "Dirty" is git's own meaning: a *tracked* file differs from HEAD. Untracked
-    files do not count, which is what anybody would want — a worker's scratch
+    files do not count, which is what anybody would want - a worker's scratch
     directory beside the source does not change which build is running.
     """
     local: list[str] = []
@@ -198,7 +198,7 @@ def derive(root: str | None = None) -> str:
     Two invocations, in order of how much they know and how much they cost:
 
     1. ``git describe --tags --match <glob> --long --dirty --always --abbrev=7``
-       answers everything at once — nearest release tag, distance from it, the
+       answers everything at once - nearest release tag, distance from it, the
        abbreviated commit, and whether the tree is dirty.
     2. ``git rev-parse --short=7 HEAD`` is asked only when the first did not
        answer usably: it hung, it failed, or it named a tag the glob allows but
@@ -232,7 +232,7 @@ def version(root: str | None = None) -> str:
 
     `__version__` is read on every `ppy` invocation and on every supervised
     `hello`, and the answer cannot change inside a process in any way worth a
-    second subprocess — except one. A fallback is *not* cached: it can mean "git
+    second subprocess - except one. A fallback is *not* cached: it can mean "git
     was busy for two seconds", and a runtime that answered `0.0.0` for the rest
     of its life because of one loaded moment would be exactly the bug this
     module was written to remove.
@@ -273,7 +273,7 @@ def parse_tag(name: str) -> tuple[int, int, int] | None:
 
 
 def releases(names: list[str] | tuple[str, ...]) -> list[tuple[int, int, int]]:
-    """Every release tag among ``names``, sorted oldest first — numerically.
+    """Every release tag among ``names``, sorted oldest first - numerically.
 
     The sort is the reason this is Python and not a shell pipeline: `git tag`
     orders lexically, so it puts `v0.1.10` *before* `v0.1.9` and the eleventh
@@ -331,8 +331,8 @@ def tags_at_head(root: str | None = None) -> list[str] | None:
     """The release tags on HEAD, or ``None`` if git failed.
 
     This is the idempotence check. A commit that already carries a release tag
-    has already been released — by an earlier run of the workflow, by a re-run of
-    this one, or by a person cutting a minor by hand — and tagging it again would
+    has already been released - by an earlier run of the workflow, by a re-run of
+    this one, or by a person cutting a minor by hand - and tagging it again would
     either fail or invent a second name for one build.
     """
     root = ROOT if root is None else root

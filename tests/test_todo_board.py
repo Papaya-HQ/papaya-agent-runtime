@@ -73,7 +73,7 @@ def test_board_is_a_projection_rewritten_on_every_change(ppy_home) -> None:
 
     todo_id = board.add("review and deliver", run_id=run_id, conn=conn)
     text = memory.board_path().read_text()
-    assert f'task {task_id} "build" (demo) [claude] — in_progress · no plan posted yet' in text
+    assert f'task {task_id} "build" (demo) [claude] - in_progress · no plan posted yet' in text
     assert f"[#{todo_id}] review and deliver (run {run_id})" in text
     assert "## Next" in text
 
@@ -101,7 +101,7 @@ def test_cli_todo_board_and_status(ppy_home, capsys) -> None:
     assert main(["todo", "list"]) == 0
     out = capsys.readouterr().out
     assert "[ ] [#1] review task 1 (run 1)" in out
-    assert "[ ] [#2] confirm endpoint — waiting on user" in out
+    assert "[ ] [#2] confirm endpoint - waiting on user" in out
 
     assert main(["todo", "done", "1"]) == 0
     assert main(["todo", "list", "--all", "--json"]) == 0

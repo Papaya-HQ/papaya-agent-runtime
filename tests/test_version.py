@@ -2,7 +2,7 @@
 
 Two things are being held here, and they are the same thing from opposite ends.
 `.github/workflows/release.yml` tags every merge to `main` with the next patch, and
-the runtime reads that tag back out of the checkout to say what build it is — so the
+the runtime reads that tag back out of the checkout to say what build it is - so the
 tests that matter are the ones where the two could disagree: a tag sorted as a string
 instead of a number, a tag on a commit two behind HEAD, a working tree with edits in
 it, a checkout with no tags at all, and a git that is missing, hung, or pointed
@@ -64,7 +64,7 @@ class Repo:
         self.git("tag", "-a", name, "-m", name)
 
     def soil(self) -> None:
-        """Leave an uncommitted edit to a tracked file — git's own "dirty"."""
+        """Leave an uncommitted edit to a tracked file - git's own "dirty"."""
         (self.path / "README.md").write_text("# edited, not committed\n")
 
     def litter(self) -> None:
@@ -106,7 +106,7 @@ def test_a_dirty_tagged_tree_puts_the_dirt_in_the_local_segment(repo) -> None:
     """Not `0.1.3+dirty`, and emphatically not `0.1.3`.
 
     PEP 440 has nowhere in the *public* part of a version to say "and some edits",
-    so `0.1.3+dirty` would claim to be release 0.1.3 — the one thing a modified
+    so `0.1.3+dirty` would claim to be release 0.1.3 - the one thing a modified
     checkout is not. The commit and the dirt share the local segment instead, so
     the string still sorts as 0.1.3 while telling anyone reading it that this is
     not the release.
@@ -139,7 +139,7 @@ def test_an_untracked_file_beside_the_source_is_not_a_different_build(repo) -> N
 
 
 def test_a_checkout_with_no_release_tag_still_names_its_commit(repo) -> None:
-    """`0.0.0+g<sha7>` — which is exactly what this repository was until today."""
+    """`0.0.0+g<sha7>` - which is exactly what this repository was until today."""
     assert repo.derive() == f"0.0.0+g{repo.head()}"
 
     repo.soil()
@@ -203,7 +203,7 @@ def test_a_describe_that_hangs_still_names_the_commit(repo, monkeypatch) -> None
     """The reason there are two invocations rather than one.
 
     `git describe --dirty` walks the working tree, so a large or cold checkout can
-    exceed its deadline where `git rev-parse HEAD` — one ref, no tree — cannot. A
+    exceed its deadline where `git rev-parse HEAD` - one ref, no tree - cannot. A
     flat `0.0.0` is reserved for having nothing to say; a slow git still knows
     which commit this is.
     """
@@ -425,8 +425,8 @@ def _refusing_git(argv, timeout):
 def release_checkout(tmp_path) -> Repo:
     """A repository holding this package, the way the workflow's checkout does.
 
-    The command answers about *its own* checkout — the one the module was imported
-    from — because that is the only question the runtime and the release job both
+    The command answers about *its own* checkout - the one the module was imported
+    from - because that is the only question the runtime and the release job both
     ask. So exercising it means putting the module in a repository and tagging
     that, which has a second virtue: it only works if `version.py` imports nothing
     from its siblings, which is what the bare-interpreter path depends on.
@@ -489,7 +489,7 @@ def test_the_workflows_two_steps_agree_on_one_release(release_checkout) -> None:
     """What the release job actually does, end to end, minus the network.
 
     `--next` names the tag, the tag is created, and the runtime then reports
-    exactly that release — the check the workflow runs before it publishes,
+    exactly that release - the check the workflow runs before it publishes,
     because `ppy capabilities --json` feeds the desktop machine card verbatim and
     a derivation that drifted from the tag would be visible to users first.
     """
@@ -616,7 +616,7 @@ def test_pyproject_no_longer_states_a_version_of_its_own() -> None:
 
     `[tool.uv] package = false` makes this a virtual project, so `dynamic` needs
     no build backend: uv records no version for the root in `uv.lock` and
-    `uv sync --frozen` — what CI runs — resolves exactly as it did before.
+    `uv sync --frozen` - what CI runs - resolves exactly as it did before.
     """
     pyproject = (ROOT / "pyproject.toml").read_text()
 

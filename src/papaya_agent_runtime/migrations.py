@@ -10,7 +10,7 @@ The harness can see it earlier, at two moments and from two angles:
 
 - **At dispatch**, before the second worker has written a line: another task in
   this repository is in flight and its worktree already adds a migration. That is
-  a *suggestion* — start from its branch with ``--stack-on`` — not a refusal,
+  a *suggestion* - start from its branch with ``--stack-on`` - not a refusal,
   because two migrations off one head are fine as long as somebody sequences them.
 - **At `ppy review show`**, when both diffs exist and the question is sharper: do
   these two added migrations name the *same* ``down_revision``? That is no longer
@@ -43,7 +43,7 @@ from pathlib import Path
 
 #: A task in one of these may still put a migration on the graph: a worker is
 #: writing it, or it is written and waiting for review or delivery. ``failed``
-#: and ``needs_recovery`` are deliberately absent — that work is not about to
+#: and ``needs_recovery`` are deliberately absent - that work is not about to
 #: merge, so it must not push a new dispatch onto its branch (issue #56). Note
 #: this is a narrower question than "may the worktree be reclaimed": a failed
 #: task keeps its worktree for ``ppy resume`` (issue #58) while contributing
@@ -139,7 +139,7 @@ def _glob_regex(glob: str) -> re.Pattern[str] | None:
     """A glob compiled to a whole-path pattern, or None when it is malformed.
 
     Hand-rolled rather than `PurePosixPath.full_match`, which only exists on
-    Python 3.13 — this project supports 3.12, and on 3.12 that call raised
+    Python 3.13 - this project supports 3.12, and on 3.12 that call raised
     `AttributeError` from inside a broad `except`, so every migration-collision
     advisory silently reported nothing instead of failing loudly. One
     implementation means the version CI runs is the version that ships.
@@ -190,8 +190,8 @@ def glob_for_repo_id(conn, repo_id) -> str:
 def parse_down_revision(source: str) -> str | None:
     """The ``down_revision`` an Alembic revision file declares, as one string.
 
-    Alembic writes either a single revision id or — for a migration that merges
-    two heads — a tuple of them; ``None`` marks the first revision in a branch and
+    Alembic writes either a single revision id or - for a migration that merges
+    two heads - a tuple of them; ``None`` marks the first revision in a branch and
     is returned as the string ``"None"``, because two tasks each adding a *first*
     migration collide exactly as two off a shared parent do. ``None`` from here
     means "no ``down_revision`` could be read at all", which is not a collision.
@@ -267,7 +267,7 @@ def task_commits(conn, task) -> tuple[str, str] | str:
     """Where this task's own commits can be read: ``(git_dir, ref)``, or the reason not.
 
     Two places are trusted, in order. The lease worktree, while an active lease
-    of this task owns the path and the checkout is on the task's branch — that
+    of this task owns the path and the checkout is on the task's branch - that
     is the one moment a path proves ownership. Failing that, the task's branch
     as a ref of the base clone, which every lease worktree shares refs with and
     which outlives the slot. A recorded path that fails the first test is never
@@ -296,7 +296,7 @@ def added_migrations(conn, task, *, glob: str | None = None) -> list[AddedMigrat
     Added files only (``--diff-filter=A``): editing an existing revision is not
     what puts a second head on the graph. A task with no base, or whose commits
     cannot be located (see :func:`task_commits`), contributes nothing rather than
-    raising — this is an advisory, and it never gets to be the reason a dispatch
+    raising - this is an advisory, and it never gets to be the reason a dispatch
     failed. Callers that must say so use :func:`inventory` instead.
     """
     found, _unverifiable = inventory(conn, task, glob=glob)
@@ -512,7 +512,7 @@ def review_flag(conn, task) -> str | None:
                 f"down_revision {mine.down_revision!r}."
             )
         lines.append(
-            "  Sequence them before delivering — rebase one onto the other, or give the "
+            "  Sequence them before delivering - rebase one onto the other, or give the "
             "later one the earlier revision as its parent."
         )
     if unverifiable:
