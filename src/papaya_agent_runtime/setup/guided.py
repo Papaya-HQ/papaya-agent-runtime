@@ -51,6 +51,7 @@ from papaya_agent_runtime.team import Paint, colour_wanted
 #: The steps' names, as the step lines show them.
 MACHINE = "Machine"
 CLAUDE_CODE = "Claude Code"
+CODEX = "Codex"
 GITHUB = "GitHub"
 PAPAYA = "Papaya"
 REPOSITORIES = "Repositories"
@@ -67,6 +68,15 @@ RULE_WIDTH = 60
 #: The last lines of a finished setup: ``Done.`` in bold, then the command on its own.
 DONE = "Done. Start it with:"
 START = "./bin/ppy serve"
+#: Set by `ppy serve --cloud` for everything it starts, the sign-in terminal included.
+CLOUD_RUNNER_ENV = "PPY_CLOUD_RUNNER"
+#: Which harness Papaya created a cloud runner for (`claude-code` or `codex`).
+HARNESS_ENV = "PAPAYA_AGENT_HARNESS"
+#: A cloud runner is serving already: setup ran in its terminal, beside `serve`.
+DONE_CLOUD = (
+    "Done. This runner is already serving and takes work as soon as it is ready; "
+    "there is nothing to start. You can close this tab."
+)
 #: How a re-run with repositories already registered describes them.
 REPOS_LINE = "{n} {noun} (./bin/ppy setup --repos to change)"
 #: Said when the picker leaves a registered repository unticked.
@@ -93,6 +103,7 @@ WINDOWS_STEPS = (
 )
 UV_INSTALL = "curl -LsSf https://astral.sh/uv/install.sh | sh"
 CLAUDE_INSTALL = "npm install -g @anthropic-ai/claude-code"
+CODEX_INSTALL = "npm install -g @openai/codex"
 GITHUB_HOST = "github.com"
 
 
@@ -435,7 +446,7 @@ class Setup:
     def run(self) -> int:
         try:
             self.machine()
-            self.claude()
+            self.harness()
             self.github()
             self.papaya()
             self.repositories()
@@ -451,6 +462,9 @@ class Setup:
         available = self.update_available()
         if available:
             self.say(paint(available, "yellow"))
+        if self.env.get(CLOUD_RUNNER_ENV):
+            self.say(f"{paint('Done.', 'bold')}{DONE_CLOUD.removeprefix('Done.')}")
+            return 0
         self.say(f"{paint('Done.', 'bold')}{DONE.removeprefix('Done.')}")
         self.say(f"  {paint(START, 'bold', 'cyan')}")
         return 0
@@ -492,7 +506,34 @@ class Setup:
             where = "Linux (WSL2)"
         self.step(OK, MACHINE, f"{where}, git, uv and the runtime's environment")
 
-    # 2 ── Claude Code
+    # 2 ── the harness: Claude Code, or Codex on a cloud runner made for it
+
+    def harness(self) -> None:
+        """Sign in the harness this machine drives.
+
+        Claude Code, except on a cloud runner Papaya created for Codex
+        (`PAPAYA_AGENT_HARNESS=codex`), where Codex is the one the runner runs.
+        """
+        if self.env.get(HARNESS_ENV) == "codex":
+            self.codex()
+        else:
+            self.claude()
+
+    def _codex_signed_in(self) -> bool:
+        return self.shell.capture(["codex", "login", "status"])[0] == 0
+
+    def codex(self) -> None:
+        if self.shell.which("codex") is None:
+            raise Stop(f"Codex is not installed. Install it: {CODEX_INSTALL}")
+        if not self._codex_signed_in():
+            if not self.options.interactive:
+                raise Stop("Codex is not signed in: run codex login --device-auth")
+            self.step(DOING, CODEX, "Not signed in; starting its sign-in…")
+            with self.child_output("codex login --device-auth"):
+                self.shell.attach(["codex", "login", "--device-auth"])
+            if not self._codex_signed_in():
+                raise Stop("Codex is still not signed in: run codex login --device-auth")
+        self.step(OK, CODEX, "Signed in")
 
     def _claude_signed_in(self) -> bool:
         return self.shell.capture(["claude", "auth", "status", "--text"])[0] == 0
@@ -560,6 +601,16 @@ class Setup:
 
         self.keep_client_current()
         before = papaya.identity()
+        if self.env.get(CLOUD_RUNNER_ENV):
+            # A cloud runner IS its connection: Papaya created it for one agent and
+            # handed it that agent's token. Switching here would only break it.
+            if before is None:
+                raise Stop(
+                    "This cloud runner has lost its Papaya connection. "
+                    "Delete it in Papaya and create another."
+                )
+            self.step(OK, PAPAYA, connected_line(before))
+            return
         if before is not None:
             self.step(OK, PAPAYA, connected_line(before))
             if not (self.options.interactive and not self.options.pick_repos):

@@ -2038,6 +2038,13 @@ def test_what_counts_as_new_and_as_somebody_else() -> None:
     assert not serve.is_own_comment(reply, "agent-1")
 
 
+def _state_dir() -> Path:
+    """Where this test's runtime state really is (`PPY_HOME`), resolved."""
+    from papaya_agent_runtime.paths import ppy_home
+
+    return ppy_home().resolve()
+
+
 def test_manager_turns_get_the_jobs_environment_and_only_the_runtime_directory(
     ppy_home, client_home, ready, registered_repo
 ) -> None:
@@ -2073,8 +2080,12 @@ def test_manager_turns_get_the_jobs_environment_and_only_the_runtime_directory(
         assert launch.env[key] == job_env[key], key
     if "PAPAYA_PLUGIN_DIR" in job_env:
         assert launch.env["PAPAYA_PLUGIN_DIR"] == job_env["PAPAYA_PLUGIN_DIR"]
-    # The write boundary is the runtime directory and nothing else.
-    assert json.loads(launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [runtime_dir]
+    # The write boundary is the runtime directory and nothing else: the checkout
+    # and its state, which this fixture keeps outside it (`PPY_HOME`).
+    assert json.loads(launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [
+        runtime_dir,
+        str(_state_dir()),
+    ]
     assert launch.env["PAPAYA_WORKING_DIRECTORY"] == runtime_dir
     assert launch.env[papaya_events.TICKET_RUN_ENV] == str(ticket_task()["run_id"])
     # Launched through `ppy start`'s own builder, headless.
@@ -2168,7 +2179,10 @@ def test_a_turn_is_launched_with_the_agents_mcp_server_and_plugin(
     )
     assert launch.env["PAPAYA_AGENT_BIN"] == str(agent_bin)
     # And the boundary is still the runtime directory, with the job's files beside it.
-    assert json.loads(launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [runtime_dir]
+    assert json.loads(launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"]) == [
+        runtime_dir,
+        str(_state_dir()),
+    ]
     for key in ("PAPAYA_CONTEXT_FILE", "PAPAYA_DECLINE_FILE"):
         assert launch.env[key] == job_env[key], key
 

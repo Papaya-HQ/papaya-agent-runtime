@@ -1781,7 +1781,10 @@ def test_an_answer_turn_that_names_the_request_id_is_not_posted_as_it_wrote_it(
     # Matrix row 3: the instruction's own manager turn still writes only in the runtime.
     runtime_dir = str(Path(repo_root()).resolve())
     roots = json.loads(turns.calls[0].launch.env["PAPAYA_ALLOWED_WORKING_DIRECTORIES"])
-    assert roots == [runtime_dir]
+    # The checkout, and the runtime's state, which this fixture keeps outside it.
+    from papaya_agent_runtime.paths import ppy_home
+
+    assert roots == [runtime_dir, str(ppy_home().resolve())]
     # Task 372: another request's label marks its sentence as about another request,
     # and that sentence is dropped whole; this request's own id reads "your request".
     assert _no_request_ids(routes)[0] == (

@@ -18,6 +18,10 @@ if [ -n "$expected" ] && [ "$version" != "$expected" ]; then
   exit 1
 fi
 run /opt/papaya-agent-runtime/.venv/bin/python -c "import papaya_agent_client.cloud_host"
+# The runtime's state is the checkout's own .ppy, a link to the data disk.
+[ "$(run readlink /opt/papaya-agent-runtime/.ppy)" = "/data/ppy" ] || {
+  echo "::error::/opt/papaya-agent-runtime/.ppy is not a link to /data/ppy"; exit 1; }
+run pnpm --version >/dev/null
 
 set +e
 output="$(docker run --rm -v papaya-runner-smoke:/data "$image" 2>&1)"
