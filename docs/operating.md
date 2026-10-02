@@ -492,6 +492,15 @@ What is different, all of it in `src/papaya_agent_runtime/cloud.py` and the clie
   (`/data/papaya-agent`), and `HOME` itself (`/data/home`), where Claude Code, Codex
   and `gh` keep the sign-ins, all survive the VM sleeping.
 
+- **No Docker, so services are CI's.** A cloud runner cannot run Docker. A repository
+  that runs its services with compose (its database and the like) is worked anyway:
+  the worker runs every check that needs no service (lint, type checks, the tests that
+  touch nothing), skips the rest, and writes `not run here: needs Docker services; left
+  to CI` in its evidence and done report. No private stack is allocated, and a full
+  suite the supervisor would run before delivery is left to CI. On your own machine
+  nothing changes: "Docker is not running" still holds that repository's tickets
+  until you start it.
+
 The image is public because the provider cannot pull a private one, so nothing secret
 is in it: the token arrives at boot, and every sign-in is made on the running VM.
 

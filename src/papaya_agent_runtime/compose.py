@@ -29,10 +29,13 @@ delivery or leave a lease held. Every failure here is reported and swallowed.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
+from collections.abc import Mapping
+from pathlib import Path
 
 from papaya_agent_runtime.state import init_db, store
 
@@ -61,6 +64,42 @@ class ComposeError(Exception):
 def docker_bin() -> str | None:
     """The docker executable, or ``None`` when this machine has none."""
     return shutil.which("docker")
+
+
+#: The files that say a repository runs its services with compose.
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+#: Set by `ppy serve --cloud` for everything it starts (`cloud.CLOUD_RUNNER_ENV`).
+_CLOUD_RUNNER_ENV = "PPY_CLOUD_RUNNER"
+
+
+def has_compose_file(path: str | Path | None) -> bool:
+    """Does the checkout at ``path`` run services with compose?"""
+    return bool(path) and any((Path(path) / name).is_file() for name in COMPOSE_FILES)
+
+
+def on_cloud_runner(environ: Mapping[str, str] | None = None) -> bool:
+    """Is this `ppy serve --cloud` (or something it started)?"""
+    return bool((environ if environ is not None else os.environ).get(_CLOUD_RUNNER_ENV))
+
+
+def services_unavailable(environ: Mapping[str, str] | None = None) -> bool:
+    """Is this a cloud runner with no Docker, where compose services cannot run?
+
+    A cloud runner is a VM nobody can start Docker on, so a repository that runs
+    its services with compose works there anyway: its checks that need those
+    services are left to CI instead of holding the ticket (PAP-334). On a
+    person's own machine the answer is always False — starting Docker is theirs
+    to do, and readiness asks them to.
+    """
+    if not on_cloud_runner(environ):
+        return False
+    docker = docker_bin()
+    if docker is None:
+        return True
+    try:
+        return _run([docker, "info"]).returncode != 0
+    except (OSError, subprocess.SubprocessError):
+        return True
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess:

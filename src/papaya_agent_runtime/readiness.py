@@ -585,7 +585,7 @@ def _gate_isolation_problems(problems: list[Problem]) -> None:
     environment had nothing private in it. A compose repository is isolated per task
     only with a port base and database URL templates that carry ``{task_id}``.
     """
-    from papaya_agent_runtime import environment, repos
+    from papaya_agent_runtime import compose, environment, repos
 
     try:
         registered = repos.list_repos()
@@ -595,7 +595,7 @@ def _gate_isolation_problems(problems: list[Problem]) -> None:
     for row in registered:
         path = str(row.get("local_path") or "")
         has_compose_file = bool(path) and any(
-            machine.is_file(f"{path}/{name}") for name in _COMPOSE_FILES
+            machine.is_file(f"{path}/{name}") for name in compose.COMPOSE_FILES
         )
         found = environment.isolation_gaps(
             environment.for_repo(row), has_compose_file=has_compose_file
@@ -881,7 +881,6 @@ DELIVERY_CODES = frozenset({FORGE_UNAUTHENTICATED, GH_MISSING, REPO_UNREACHABLE}
 #: fails part-way, which is worse than not starting.
 DISK_FLOOR_BYTES = 5 * 1024**3
 
-_COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
 _NODE_PROGRAMS = frozenset({"node", "pnpm", "npm", "npx", "yarn"})
 
 
@@ -1114,7 +1113,7 @@ def _origin_problems(problems: list[Problem], registered: list[dict]) -> None:
 
 def _toolchain_problems(problems: list[Problem], registered: list[dict]) -> None:
     """Node, uv and Docker, for the repositories that need them."""
-    from papaya_agent_runtime import memory
+    from papaya_agent_runtime import compose, memory
 
     needs: dict[str, list[str]] = {"node": [], "uv": [], "docker": []}
     for row in registered:
@@ -1128,7 +1127,7 @@ def _toolchain_problems(problems: list[Problem], registered: list[dict]) -> None
             needs["node"].append(name)
         if "uv" in programs or (path and machine.is_file(f"{path}/uv.lock")):
             needs["uv"].append(name)
-        if path and any(machine.is_file(f"{path}/{f}") for f in _COMPOSE_FILES):
+        if path and any(machine.is_file(f"{path}/{f}") for f in compose.COMPOSE_FILES):
             needs["docker"].append(name)
 
     for tool, code, title in (
@@ -1153,6 +1152,26 @@ def _toolchain_problems(problems: list[Problem], registered: list[dict]) -> None
         return
     installed = machine.which("docker") is not None
     if installed and machine.run(["docker", "info"])[0] == 0:
+        return
+    if compose.on_cloud_runner():
+        # A cloud runner: nobody can start Docker here, so this is a fact, not a
+        # step for a person. With no steps it holds no ticket: those repositories
+        # are worked anyway, their service-backed checks left to CI.
+        problems.append(
+            Problem(
+                code=DOCKER_NOT_RUNNING,
+                summary=(
+                    f"No Docker on this cloud runner; {', '.join(sorted(needs['docker']))} "
+                    "run their services with compose, so those checks are left to CI"
+                ),
+                fix="none needed: CI runs the service-backed checks",
+                owner=RUNTIME,
+                blocking=False,
+                title="No Docker on this cloud runner: service-backed checks are left to CI",
+                steps=(),
+                repos=tuple(sorted(needs["docker"])),
+            )
+        )
         return
     start = "open -a Docker" if machine.platform == "darwin" else "sudo systemctl start docker"
     problems.append(
