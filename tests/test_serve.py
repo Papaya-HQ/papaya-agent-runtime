@@ -2838,7 +2838,7 @@ def test_the_review_turn_reads_the_full_suite_run_once_at_the_head_and_is_told_n
     (worker,) = workers_in(int(ticket_task()["run_id"]))
     assert asked == [worker]
     review = " ".join(turns.calls[1].prompt.split())
-    fact = review.partition(f"- {serve.FULL_SUITE_FACT}: ")[2].partition(" - ")[0]
+    fact = turns.calls[1].prompt.partition(f"- {serve.FULL_SUITE_FACT}: ")[2].partition("\n")[0]
     assert full.result.line() in fact
     assert "already run once at this head; do not run it again" in fact
     assert "Do not run `ppy gate run --full` again at a head that has one" in review
