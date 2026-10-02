@@ -1211,6 +1211,67 @@ def uncommitted_steer_message(files: list[str], branch: str | None) -> str:
     )
 
 
+#: How a ticket's hold ended: nobody is working that ticket any more.
+ENDED_PHASES = (
+    PHASE_RELEASED,
+    PHASE_HANDED_BACK,
+    PHASE_STALLED,
+    PHASE_DECLINED,
+    PHASE_HANDED_OVER,
+    PHASE_DONE,
+    PHASE_NEEDS_A_PERSON,
+)
+WORKER_ADOPTED_EVENT = "worker.adopted"
+
+
+def adopt_worker(worker_task_id: int, run_id: int) -> bool:
+    """Make a worker this ticket's, when a ticket's turn steers it and its own ticket is over.
+
+    Work already on an open pull request is changed by steering the worker that owns
+    it, not by a second dispatch. Left in its first ticket's run, a worker steered
+    for a second ticket finished with nobody watching it: the first ticket was over,
+    and the second had no worker of its own, so it reported "nothing to build" and
+    the worker waited on a manager that never came (first end-to-end cloud test,
+    2026-10-02). Moving the worker into this ticket's run makes it the worker this
+    ticket watches, reviews and delivers, like one it dispatched.
+
+    Never taken from a ticket still being worked, never from work a person dispatched
+    by hand (a run with no ticket), and never into a run that already has a worker.
+    Returns whether the worker moved.
+    """
+    conn = db.init_db()
+    try:
+        worker = store.get_task(conn, worker_task_id)
+        if worker is None or worker["phase"] is not None or worker["run_id"] is None:
+            return False
+        source = int(worker["run_id"])
+        if source == run_id:
+            return False
+        ticket = conn.execute(
+            "SELECT id, phase FROM tasks WHERE run_id = ? AND phase IS NOT NULL "
+            "ORDER BY id LIMIT 1",
+            (source,),
+        ).fetchone()
+        if ticket is None or ticket["phase"] not in ENDED_PHASES:
+            return False
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE run_id = ? AND phase IS NULL LIMIT 1", (run_id,)
+        ).fetchone():
+            return False
+        store.update_task_fields(conn, worker_task_id, run_id=run_id)
+        store.append_event(
+            conn,
+            kind=WORKER_ADOPTED_EVENT,
+            payload={"worker_task_id": worker_task_id, "from_run": source, "to_run": run_id},
+            run_id=run_id,
+            task_id=worker_task_id,
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def steer_worker(task_id: int, message: str) -> dict[str, Any]:
     """`ppy steer`, from inside `serve`: through the supervisor this process runs."""
     from papaya_agent_runtime.supervisor.client import SupervisorClient

@@ -79,6 +79,12 @@ item which command is the quick gate and which is the full suite, set the item t
 `blocked`, and end the turn; the runtime's readiness report asks the owner the same
 question.
 
+If the change belongs on a pull request a worker already opened (the ticket asks to
+change that pull request, or an earlier ticket's work is still open), do not dispatch a
+second worker and do not open a second pull request. Steer the worker that owns it,
+`ppy steer <worker task id> --message "<what to change and why>"`: steered from this turn, it
+becomes this ticket's worker, and you review and deliver it like one you dispatched.
+
 If dispatch is refused because worker capacity is full, keep the brief where it is and
 end the turn. The runtime keeps holding the ticket and calls this turn back when a slot
 frees; dispatch the brief you already wrote then.
