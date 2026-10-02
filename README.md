@@ -91,6 +91,10 @@ it needs from you.
   it is better with Papaya, and `./bin/ppy papaya connect` sets that up.
 - **A server, or WSL2.** Same steps, with a device code for the sign-in. See
   [Run it on a machine without the app](docs/operating.md#run-it-on-a-machine-without-the-app).
+- **In the cloud, hosted by Papaya.** Papaya can run your engineer on a VM it
+  provisions from this repository's image, woken when there is work. You sign it in
+  once, in its terminal, with the same `./bin/ppy setup`. See
+  [Run it in the cloud](docs/operating.md#run-it-in-the-cloud).
 
 ## What it does
 

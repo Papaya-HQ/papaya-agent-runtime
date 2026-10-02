@@ -40,6 +40,8 @@ jobs:
     name: tag and release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
     steps:
       # Full history and every tag: the next version is computed from the tags,
       # and a shallow clone would have none of them and re-release v0.1.0.
@@ -97,3 +99,54 @@ jobs:
           gh release create "${{ steps.next.outputs.tag }}"
           --title "${{ steps.next.outputs.tag }}"
           --generate-notes
+
+  # The cloud runner image for this release (PAP-334): `ppy serve --cloud` from a
+  # checkout of this tag, which a cloud provider boots for a Papaya cloud agent.
+  # Published as ghcr.io/papaya-hq/papaya-agent-runtime:<version>, and nothing
+  # else: no `latest`, so a new runtime reaches a runner only when Papaya's
+  # CLOUD_RUNNER_IMAGE names it. In this job and not one triggered by the tag,
+  # because a tag pushed with GITHUB_TOKEN starts no other workflow.
+  image:
+    name: cloud runner image
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/papaya-hq/papaya-agent-runtime
+    steps:
+      # The tag's own commit, with every tag, so the runtime in the image reads
+      # its version from git exactly as on a person's machine.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/cloud-runner/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: papaya-agent-runtime:candidate
+          # One plain single-platform manifest, for the provider's puller.
+          provenance: false
+          sbom: false
+      - name: Smoke test
+        run: |
+          tag="${{ needs.release.outputs.tag }}"
+          docker/cloud-runner/smoke.sh papaya-agent-runtime:candidate "${tag#v}"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.release.outputs.tag }}"
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker tag papaya-agent-runtime:candidate "${IMAGE}:${tag#v}"
+          docker push "${IMAGE}:${tag#v}"
+          echo "Published ${IMAGE}:${tag#v}" >> "${GITHUB_STEP_SUMMARY}"

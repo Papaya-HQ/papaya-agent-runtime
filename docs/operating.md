@@ -458,6 +458,42 @@ would fight a takeover. Run `ppy serve` in `tmux`, or from a launch agent with
 
 The details are in [Asking the machine from Papaya](#asking-the-machine-from-papaya).
 
+## Run it in the cloud
+
+Papaya can host your engineer instead of your machine (PAP-334). It provisions a VM on
+a cloud provider (Maritime first) from this repository's image,
+`ghcr.io/papaya-hq/papaya-agent-runtime:<version>`, built by the release workflow from
+`docker/cloud-runner/Dockerfile` for every release tag. The VM runs this checkout at
+`/opt/papaya-agent-runtime` with `ppy serve --cloud`: the same runtime a laptop runs,
+connected as the same kind of Papaya connection. It sleeps when there is nothing to
+do, and Papaya's doorbell wakes it when there is.
+
+What is different, all of it in `src/papaya_agent_runtime/cloud.py` and the client's
+`papaya_agent_client.cloud_host`:
+
+- **It is connected from its environment.** Papaya hands the VM the connection token
+  as a secret variable, `PAPAYA_AGENT_TOKEN`. `serve --cloud` takes it out of the
+  environment before it starts anything, so no worker or harness inherits it, and
+  stores it in the client home like any connection, with this checkout as its folder.
+- **One port for the provider.** `GET /health`; `POST /chat`, the doorbell, which only
+  wakes the listener's pull; and `/terminal`, the sign-in terminal. While a ticket is
+  held or the terminal is open, it rings its own doorbell every two minutes so the
+  provider does not sleep it mid-job.
+- **You sign it in yourself, in its terminal.** Open the runner's terminal from Papaya.
+  It runs `./bin/ppy setup`, the same steps as on a laptop: Claude Code
+  (`claude auth login`, with your subscription or key), GitHub (`gh auth login` and
+  `gh auth setup-git`), and the repositories it may work on. For Codex, run
+  `codex login --device-auth` in the shell it leaves you in. The link Papaya gives you
+  is good for one use, by you, for two minutes; what you type goes to the VM, never
+  through Papaya. Until setup is done, the runner says what is missing the way any
+  machine does, as a blocker in your DM.
+- **What lasts lives on `/data`.** `PPY_HOME` (`/data/ppy`), the client home
+  (`/data/papaya-agent`), and `HOME` itself (`/data/home`), where Claude Code, Codex
+  and `gh` keep the sign-ins, all survive the VM sleeping.
+
+The image is public because the provider cannot pull a private one, so nothing secret
+is in it: the token arrives at boot, and every sign-in is made on the running VM.
+
 ## The control plane, if you want to look
 
 You don't type these — the runtime does — but nothing is hidden:
