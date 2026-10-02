@@ -484,7 +484,8 @@ def render_task_env(conn: sqlite3.Connection, repo_row, task_id: int) -> dict[st
     """
     env = for_repo(repo_row)
     project = port = None
-    if env.compose_stack:
+    # No stack at all where compose services cannot run (a cloud runner, no Docker).
+    if env.compose_stack and not services_missing(repo_row):
         project = store.get_task_env(conn, task_id, compose.COMPOSE_PROJECT_KEY)
         if not project:
             project = compose.record_project(
@@ -590,6 +591,41 @@ def ensure_excluded(worktree: str | Path, evidence_dir: str) -> bool:
         return False
 
 
+def services_missing(repo_row) -> bool:
+    """Does this repository run services with compose, on a cloud runner with no Docker?
+
+    Then its service-backed checks are CI's: the worker runs the rest, says what it
+    left, and the supervisor does not run a full suite that could only fail here.
+    """
+    env = for_repo(repo_row)
+    uses_compose = bool(env.compose_stack) or compose.has_compose_file(
+        _cell(repo_row, "local_path")
+    )
+    return uses_compose and compose.services_unavailable()
+
+
+def full_suite_is_supervisors(repo_row) -> bool:
+    """Does the runtime run this repository's full suite before delivery, here?
+
+    The repository's own answer (`supervisor_runs_full_suite`), unless its services
+    cannot run on this machine, when CI is the only place the suite can pass.
+    """
+    return for_repo(repo_row).supervisor_runs_full_suite and not services_missing(repo_row)
+
+
+NO_SERVICES_RULE = (
+    "- **No Docker on this runner.** This repository runs services (its database and "
+    "the like) with compose, and this cloud runner cannot run them. Run every check that "
+    "does not need them: lint, type checks, and the tests that touch no service; where the "
+    "repository has its own way to leave service-backed tests out (a test marker, a "
+    "separate target), use it. Do not install or start Docker. A failure that is only a "
+    "missing service (a refused connection to the database's port, a compose command "
+    "that cannot reach Docker) is not your change failing: leave it, and write in your "
+    "evidence and your done report which checks were not run here, as `not run here: "
+    "needs Docker services; left to CI`. CI runs them on your pull request."
+)
+
+
 def prepare(
     conn: sqlite3.Connection,
     repo_row,
@@ -609,7 +645,8 @@ def prepare(
     """
     env = for_repo(repo_row)
     project = port = None
-    if env.compose_stack:
+    missing = services_missing(repo_row)
+    if env.compose_stack and not missing:
         project = compose.record_project(
             task_id, compose_project_for(task_id), source="dispatch", conn=conn
         )
@@ -631,6 +668,7 @@ def prepare(
         ends_at=ends_at,
         process_env=process_env,
         gate_timing=budgets.gate_timing_line(env.repo, conn=conn),
+        services_missing=missing,
     )
     return PreparedEnvironment(
         block=block,
@@ -657,11 +695,15 @@ def render(
     ends_at: str = "done",
     process_env: dict[str, str] | None = None,
     gate_timing: str | None = None,
+    services_missing: bool = False,
 ) -> str:
     """The block itself. Markdown, one bullet per fact, no prose to drift.
 
     ``gate_timing`` is how long this repository's gates have actually taken
     (:func:`budgets.gate_timing_line`), said only when there is history behind it.
+    ``services_missing`` is a cloud runner with no Docker for a repository that runs
+    services with compose (:func:`services_missing`): no private stack, and
+    :data:`NO_SERVICES_RULE` in its place.
     """
     lines = [f"## {HEADING}", ""]
     lines.append(
@@ -692,7 +734,7 @@ def render(
     full = env.sourced("full_suite_command") if env.full_suite_command else "not recorded"
     owner = (
         "CI runs it on your pull request"
-        if not env.supervisor_runs_full_suite
+        if not env.supervisor_runs_full_suite or services_missing
         else "the supervisor runs it once, at the head that will be delivered"
     )
     lines.append(
@@ -726,6 +768,8 @@ def render(
     if env.local_gate:
         assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in resolved.items())
         lines.append(f"- **Exact scoped gate:** `{assignments} {env.local_gate}`")
+    if services_missing:
+        lines.append(NO_SERVICES_RULE)
     if compose_project:
         port_text = (
             f" and host port **{db_port}** (`{env.db_port_variable}`)"

@@ -1389,7 +1389,7 @@ def full_suite_once(
         )
     finally:
         conn.close()
-    if row is None or not environment.for_repo(row).supervisor_runs_full_suite:
+    if row is None or not environment.full_suite_is_supervisors(row):
         return None
     recorded = verdict(task_id, full=True)
     if recorded.state != NONE or not recorded.head_sha:
