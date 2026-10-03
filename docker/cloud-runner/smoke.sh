@@ -24,10 +24,15 @@ run /opt/papaya-agent-runtime/.venv/bin/python -c "import papaya_agent_client.cl
 run pnpm --version >/dev/null
 
 set +e
-output="$(docker run --rm -v papaya-runner-smoke:/data "$image" 2>&1)"
+# HOME=/root stands in for a provider's init replacing the image's HOME.
+output="$(docker run --rm -e HOME=/root -v papaya-runner-smoke:/data "$image" 2>&1)"
 status=$?
 set -e
+# Sign-ins are kept on the data disk whatever HOME the runner was started with.
+homes="$(docker run --rm -v papaya-runner-smoke:/data --entrypoint ls "$image" /data)"
 docker volume rm -f papaya-runner-smoke >/dev/null
+grep -qx home <<<"$homes" || {
+  echo "::error::HOME was not made on the data disk (/data holds: ${homes//$'\n'/ })"; exit 1; }
 echo "$output" | tail -5
 if [ "$status" -eq 0 ] || ! grep -q PAPAYA_AGENT_TOKEN <<<"$output"; then
   echo "::error::the runner started without PAPAYA_AGENT_TOKEN (exit ${status})"
