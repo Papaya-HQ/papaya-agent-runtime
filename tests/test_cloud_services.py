@@ -145,3 +145,76 @@ def test_a_repository_without_compose_is_never_missing_services(tmp_path, monkey
     monkeypatch.setattr(compose, "services_unavailable", lambda environ=None: True)
 
     assert environment.services_missing({"name": "web", "local_path": str(tmp_path)}) is False
+
+
+# ── the disk floor without Docker ──────────────────────────────────────────
+
+
+def test_the_disk_floor_is_lower_where_docker_cannot_run(monkeypatch) -> None:
+    from papaya_agent_runtime import preflight
+
+    monkeypatch.delenv(preflight.MIN_FREE_GB_ENV, raising=False)
+    monkeypatch.setattr(compose, "services_unavailable", lambda environ=None: True)
+    assert preflight.min_free_gb() == preflight.NO_DOCKER_MIN_FREE_GB
+
+    monkeypatch.setattr(compose, "services_unavailable", lambda environ=None: False)
+    assert preflight.min_free_gb() == preflight.DEFAULT_MIN_FREE_GB
+
+    # The owner's setting still wins on a cloud runner.
+    monkeypatch.setattr(compose, "services_unavailable", lambda environ=None: True)
+    monkeypatch.setenv(preflight.MIN_FREE_GB_ENV, "8")
+    assert preflight.min_free_gb() == 8.0
+
+
+def test_readiness_reports_a_low_disk_against_the_same_floor(monkeypatch) -> None:
+    from papaya_agent_runtime import preflight
+
+    monkeypatch.delenv(preflight.MIN_FREE_GB_ENV, raising=False)
+    # What a Maritime runner had: 3.8 GiB free on its work disk.
+    monkeypatch.setattr(readiness.machine, "free_bytes", lambda path: int(3.8 * 1024**3))
+
+    monkeypatch.setattr(compose, "services_unavailable", lambda environ=None: True)
+    cloud: list[readiness.Problem] = []
+    readiness._disk_problems(cloud)
+
+    monkeypatch.setattr(compose, "services_unavailable", lambda environ=None: False)
+    laptop: list[readiness.Problem] = []
+    readiness._disk_problems(laptop)
+
+    assert cloud == []
+    assert [problem.code for problem in laptop] == [readiness.DISK_LOW]
+    assert "below the 5 GiB a worker needs" in laptop[0].summary
+    assert "free up at least 5 GiB" in laptop[0].steps
+
+
+# ── naming the machine ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("unset", ["(none)", "localhost", ""])
+def test_an_unnamed_vm_is_not_called_by_its_placeholder(monkeypatch, unset) -> None:
+    from papaya_agent_runtime import blockers
+
+    monkeypatch.setattr(blockers.socket, "gethostname", lambda: unset)
+    monkeypatch.setenv("PPY_CLOUD_RUNNER", "1")
+    assert blockers.short_hostname() == "your cloud machine"
+    monkeypatch.delenv("PPY_CLOUD_RUNNER")
+    assert blockers.short_hostname() == "this machine"
+
+
+def test_a_named_machine_keeps_its_short_name(monkeypatch) -> None:
+    from papaya_agent_runtime import blockers
+
+    monkeypatch.setattr(blockers.socket, "gethostname", lambda: "studio.local")
+    assert blockers.short_hostname() == "studio"
+
+
+# ── a cleared blocker reaches Papaya's snapshot ────────────────────────────
+
+
+def test_a_blocker_change_drops_the_kept_readiness_check() -> None:
+    from papaya_agent_runtime import machine_status, serve
+
+    machine_status._verdict[:] = [0.0, ("home", 1), "signed-out verdict"]
+    serve.publish_status(object())  # a cloud runner: no supervised host to tell
+
+    assert machine_status._verdict == []

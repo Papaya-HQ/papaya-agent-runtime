@@ -136,12 +136,21 @@ def redact(text: str) -> str:
     return _EMAIL.sub("[email]", out)
 
 
+#: What an unset hostname reads as: Linux reports a VM nobody named (Maritime's) as
+#: "(none)", and a container's default is "localhost". Neither names a machine.
+_UNNAMED_HOSTS = frozenset({"", "(none)", "localhost"})
+
+
 def short_hostname() -> str:
     """This machine's name without its domain, which is all a report says about it."""
+    from papaya_agent_runtime import compose
+
+    unnamed = "your cloud machine" if compose.on_cloud_runner() else "this machine"
     try:
-        return socket.gethostname().split(".", 1)[0].strip() or "this machine"
+        name = socket.gethostname().split(".", 1)[0].strip()
     except OSError:
-        return "this machine"
+        return unnamed
+    return unnamed if name.lower() in _UNNAMED_HOSTS else name
 
 
 # ── the ledger ──────────────────────────────────────────────────────────────

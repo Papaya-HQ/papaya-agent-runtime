@@ -27,6 +27,9 @@ from papaya_agent_runtime.paths import ppy_home
 
 MIN_FREE_GB_ENV = "PPY_MIN_FREE_GB"
 DEFAULT_MIN_FREE_GB = 5.0
+#: The floor where Docker cannot run (a cloud runner): no images or volumes to make
+#: room for, only a worktree checkout and its dependency install.
+NO_DOCKER_MIN_FREE_GB = 2.0
 
 #: A brief's first Markdown heading, however many "#" marks it carries.
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s*(.+?)\s*$")
@@ -82,15 +85,26 @@ def title_from_brief(text: str) -> str | None:
     return None
 
 
+def default_min_free_gb() -> float:
+    """The floor with no override: lower where Docker cannot run, since no image lands there."""
+    from papaya_agent_runtime import compose
+
+    return NO_DOCKER_MIN_FREE_GB if compose.services_unavailable() else DEFAULT_MIN_FREE_GB
+
+
 def min_free_gb() -> float:
-    """The free-space floor a dispatch requires, in gigabytes (env-overridable)."""
+    """The free-space floor a dispatch requires, in gigabytes (env-overridable).
+
+    Readiness reports a low disk against the same floor, so what Papaya shows and
+    what a dispatch refuses never disagree.
+    """
     raw = os.environ.get(MIN_FREE_GB_ENV)
     if not raw:
-        return DEFAULT_MIN_FREE_GB
+        return default_min_free_gb()
     try:
         return max(0.0, float(raw))
     except ValueError:
-        return DEFAULT_MIN_FREE_GB
+        return default_min_free_gb()
 
 
 def check_disk(path: str | Path | None = None, *, floor_gb: float | None = None) -> float:
