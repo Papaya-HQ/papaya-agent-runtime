@@ -6132,6 +6132,9 @@ def publish_status(built: Any) -> None:
     appears or clears while the connection is healthy would otherwise wait for
     the next reconnect to be seen.
     """
+    # The snapshot Papaya reads reuses a readiness check for minutes; a blocker that
+    # just cleared (a sign-in in the cloud terminal) must not keep showing until then.
+    machine_status.forget_verdict()
     supervisor = getattr(built, "supervisor", None)
     if supervisor is None:
         return

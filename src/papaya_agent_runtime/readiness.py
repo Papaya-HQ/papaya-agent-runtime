@@ -877,9 +877,9 @@ DISK_LOW = "disk_low"
 #: The blockers that make a pull request impossible, so delivery is refused too.
 DELIVERY_CODES = frozenset({FORGE_UNAUTHENTICATED, GH_MISSING, REPO_UNREACHABLE})
 
-#: Below this much free space a worktree, a dependency install or a Docker image
-#: fails part-way, which is worse than not starting.
-DISK_FLOOR_BYTES = 5 * 1024**3
+#: Below the dispatch floor (`preflight.min_free_gb`: 5 GiB, or 2 GiB where Docker
+#: cannot run) a worktree, a dependency install or a Docker image fails part-way,
+#: which is worse than not starting.
 
 _NODE_PROGRAMS = frozenset({"node", "pnpm", "npm", "npx", "yarn"})
 
@@ -1193,22 +1193,24 @@ def _toolchain_problems(problems: list[Problem], registered: list[dict]) -> None
 
 def _disk_problems(problems: list[Problem]) -> None:
     from papaya_agent_runtime.paths import ppy_home
+    from papaya_agent_runtime.preflight import min_free_gb
 
     home = ppy_home()
     free = machine.free_bytes(str(home if home.exists() else Path.cwd()))
-    if free is None or free >= DISK_FLOOR_BYTES:
+    floor_gb = min_free_gb()
+    if free is None or free >= floor_gb * 1024**3:
         return
     problems.append(
         Problem(
             code=DISK_LOW,
             summary=(
                 f"{free / 1024**3:.1f} GiB free on this disk, below the "
-                f"{DISK_FLOOR_BYTES // 1024**3} GiB a worker needs"
+                f"{floor_gb:g} GiB a worker needs"
             ),
             fix="free some disk space",
             owner=USER,
             title="This machine is almost out of disk space",
-            steps=("ppy worktree prune", "df -h ~", "free up at least 5 GiB", AFTER),
+            steps=("ppy worktree prune", "df -h ~", f"free up at least {floor_gb:g} GiB", AFTER),
         )
     )
 
