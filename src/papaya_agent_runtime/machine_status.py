@@ -701,6 +701,11 @@ def _readiness_now() -> Any:
     return verdict
 
 
+def forget_verdict() -> None:
+    """Drop the kept readiness check, so the next snapshot checks the machine again."""
+    _verdict.clear()
+
+
 def snapshot_now(verdict: Any = None) -> dict[str, Any] | None:
     """The snapshot from this install's ledger, config and readiness; ``None`` with no ledger."""
     from papaya_agent_runtime.paths import db_path
