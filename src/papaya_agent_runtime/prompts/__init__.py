@@ -9,7 +9,9 @@ that sat in the ledger: do each, defer it with a reason, or drop it), and a sixt
 ``instruction.md`` (answer an instruction a person sent this machine from its own state,
 ending in an `OUTCOME:` block the runner posts where they asked), and a seventh,
 ``repo_choice.md`` (choose the repository an instruction's work runs in, or say it
-cannot tell, on one `REPOSITORY:` line). The answer and
+cannot tell, on one `REPOSITORY:` line), and an eighth, ``scratch.md`` (do an
+instruction's work that needs no repository in a scratch directory, ending in the same
+`OUTCOME:` block). The answer and
 review turns run with a held Papaya work item or without one (a worker dispatched from
 a session, or whose ticket ended: `lanes`); the facts say which.
 
@@ -38,12 +40,18 @@ INSTRUCTION = "instruction"
 #: One short turn choosing the repository for an instruction's work path, when neither
 #: the text, a referenced work item nor a single registered repository settles it.
 REPO_CHOICE = "repo_choice"
-TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION, REPO_CHOICE)
+#: An instruction's work that needs no repository, done by the turn itself in a scratch
+#: directory (only on a runner Papaya hosts: `instructions.SCRATCH`).
+SCRATCH = "scratch"
+TURNS = (BRIEF, ANSWER, REVIEW, CHECKIN, LEDGER, INSTRUCTION, REPO_CHOICE, SCRATCH)
 
 #: How the choice turn says what it chose: its last such line, then a candidate's name
 #: or `cannot tell`.
 REPOSITORY_PREFIX = "REPOSITORY:"
 REPOSITORY_CANNOT_TELL = "cannot tell"
+#: What the choice turn says when the work needs no repository at all; offered only
+#: where such work can run (`instructions.SCRATCH`).
+REPOSITORY_NONE = "none"
 
 #: How a repository is chosen when nothing names it: the brief turn's layers 2 and 3,
 #: which the choice turn follows too. One rule, not two resolvers: `brief.md` and

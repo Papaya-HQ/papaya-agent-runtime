@@ -1437,6 +1437,7 @@ class TicketRunner:
         read_work_item=None,
         looking_after=None,
         repo_choice_seconds: float = REPO_CHOICE_SECONDS,
+        scratch_work: bool | None = None,
     ) -> None:
         #: The wall clock a usage limit's reset is compared with (an aware datetime).
         self._wall = wall_clock or (lambda: datetime.now(UTC))
@@ -1447,6 +1448,14 @@ class TicketRunner:
         self._looking_after = looking_after
         #: How long the repository-choice turn may run before it counts as "cannot tell".
         self._repo_choice_seconds = float(repo_choice_seconds)
+        #: Whether work that needs no repository runs here, in a scratch directory
+        #: (`instructions.SCRATCH`): only on a runner Papaya hosts, which is a sandbox.
+        #: On a person's own machine it is asked about instead.
+        if scratch_work is None:
+            from papaya_agent_runtime.cloud import CLOUD_RUNNER_ENV
+
+            scratch_work = os.environ.get(CLOUD_RUNNER_ENV) == "1"
+        self._scratch_work = scratch_work
         #: Instructions whose decline was already said at their origin, this process.
         self._declines_said: set[str] = set()
         #: An instruction's work path: ``(repo, brief, run_id, title) -> None``, raising
@@ -1910,6 +1919,11 @@ class TicketRunner:
             await store.run_in_thread(instructions.record_classified, held.task_id, found)
             if found.path == instructions.ANSWER:
                 status, text = await self._instruction_answer(ticket)
+            elif found.path == instructions.WORK and found.scratch:
+                await self._say_once(
+                    ticket, SAID_ON_IT, instructions.on_it(None), milestone=machine_tasks.PICKED_UP
+                )
+                status, text = await self._instruction_scratch(ticket)
             elif found.path == instructions.WORK:
                 assert found.repo is not None
                 await self._say_once(
@@ -1975,6 +1989,10 @@ class TicketRunner:
         instruction = ticket.held.instruction
         assert found is not None and instruction is not None
         if not found.candidates:
+            if self._scratch_work and not found.unregistered:
+                # Nothing registered to choose from, on a sandbox: the work runs in a
+                # scratch directory, and its turn says if it needed a repository after all.
+                return instructions.in_scratch(found)
             return instructions.cannot_tell(found, "no registered repository to choose")
         if await asyncio.to_thread(limits.paused, self._provider(), self._wall()) is not None:
             return instructions.cannot_tell(found, "the provider's usage limit is in force")
@@ -1993,6 +2011,10 @@ class TicketRunner:
             ),
             "referenced work items that could not be read": ", ".join(found.unread),
         }
+        if self._scratch_work:
+            facts["work that needs no repository"] = (
+                "runs here, in a scratch directory: answer `REPOSITORY: none` for it"
+            )
         deadline = time.monotonic() + self._repo_choice_seconds
 
         def past_deadline() -> bool:
@@ -2014,6 +2036,8 @@ class TicketRunner:
             return instructions.cannot_tell(found, "the choice turn ran out of time")
         transcript = result.transcript if hasattr(result, "transcript") else str(result or "")
         repo = instructions.chosen_repository(transcript, found.candidates)
+        if repo is None and self._scratch_work and instructions.said_no_repository(transcript):
+            return instructions.in_scratch(found)
         if repo is None:
             return instructions.cannot_tell(found, "the choice turn could not tell")
         return instructions.chosen(found, repo)
@@ -2259,11 +2283,11 @@ class TicketRunner:
         return unheard
 
     async def _outcome_turns(
-        self, ticket: Ticket, facts: dict[str, object]
+        self, ticket: Ticket, facts: dict[str, object], turn: str = prompts.INSTRUCTION
     ) -> instructions.Outcome | None:
         """The instruction turn, run until it writes its `OUTCOME:` block (twice at most)."""
         for attempt in range(TURN_ATTEMPTS):
-            result = await self._turn(ticket, prompts.INSTRUCTION, facts)
+            result = await self._turn(ticket, turn, facts)
             transcript = result.transcript if hasattr(result, "transcript") else str(result or "")
             outcome = instructions.outcome_of(transcript)
             if outcome is not None:
@@ -2281,6 +2305,35 @@ class TicketRunner:
                     prompts.ADDENDUM_FACT: f"{earlier}\n\n{retry}" if earlier else retry,
                 }
         return None
+
+    async def _instruction_scratch(self, ticket: Ticket) -> tuple[str, str]:
+        """Work that needs no repository: one turn does it in the run's scratch directory.
+
+        No worker, no worktree, nothing to review or deliver: the turn runs the commands
+        and ends with the same `OUTCOME:` block as the answer path.
+        """
+        from papaya_agent_runtime.paths import runs_dir
+
+        scratch = runs_dir() / str(ticket.held.run_id) / "scratch"
+        await asyncio.to_thread(scratch.mkdir, parents=True, exist_ok=True)
+        facts = {
+            **self._instruction_facts(ticket),
+            "scratch directory (work here)": str(scratch),
+        }
+        outcome = await self._outcome_turns(ticket, facts, prompts.SCRATCH)
+        if outcome is not None:
+            return outcome.status, self._also_sent(outcome, outcome.text)
+        await asyncio.to_thread(
+            self._deficiency,
+            ticket,
+            deficiencies.MISSED_TURN,
+            "a scratch turn ended twice without an OUTCOME block",
+        )
+        return (
+            "failed",
+            "I could not finish that this time. Send it again, or say which repository "
+            "it needs if it is about code.",
+        )
 
     async def _instruction_work(self, ticket: Ticket) -> tuple[str, str, str | None]:
         """The work path: one worker on the named repository, `--ends-at done`, then the

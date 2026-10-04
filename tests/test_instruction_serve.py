@@ -1849,3 +1849,87 @@ def test_a_progress_line_naming_the_request_id_is_posted_without_it() -> None:
         "Dispatching your request in runtime.",
         "Reviewing your request.",
     ]
+
+
+# ── work that needs no repository, on a runner Papaya hosts ───────────────────
+
+
+def _scratch_turns(seen: list[test_serve.Turn]) -> FakeTurns:
+    def act(turn: test_serve.Turn) -> str:
+        seen.append(turn)
+        if turn.name == prompts.REPO_CHOICE:
+            assert "- work that needs no repository: runs here" in turn.prompt
+            return "Nothing here touches code.\nREPOSITORY: none"
+        assert turn.name == prompts.SCRATCH
+        assert turn.launch.env[instructions.PATH_ENV] == instructions.SCRATCH
+        return "OUTCOME: done\n```\nPython 3.12.4\nx86_64\n```"
+
+    return FakeTurns(act)
+
+
+def test_on_a_runner_work_that_needs_no_repository_runs_in_a_scratch_directory(
+    ppy_home, client_home, ready
+) -> None:
+    """Seen on staging: `run python3 --version` came back "Which repository should I work in?"."""
+    register(ppy_home, FRONT, BACK)
+
+    def dispatch(*_args: Any) -> None:
+        raise AssertionError("work that needs no repository dispatched a worker")
+
+    seen: list[test_serve.Turn] = []
+    turns, routes = _scratch_turns(seen), Routes()
+    harness = InstructionHarness(
+        FakeEvents([instruction_event("run python3 --version and uname -m", intent="work")])
+    )
+    the_runner = runner(turns, routes, scratch_work=True, instruction_dispatch=dispatch)
+    serve_until_released(harness, client_home, the_runner)
+    assert turns.names() == [prompts.REPO_CHOICE, prompts.SCRATCH]
+    scratch_line = next(
+        line for line in seen[1].prompt.splitlines() if line.startswith("- scratch directory")
+    )
+    scratch_dir = Path(scratch_line.split(": ", 1)[1])
+    assert scratch_dir.is_dir() and scratch_dir.name == "scratch"
+    assert classified()["scratch"] is True
+    replies = [reply.get("content") or reply.get("text") for reply in routes.replies()]
+    assert replies[0] == "On it."
+    assert "Python 3.12.4" in replies[-1]
+    assert routes.results()[-1]["status"] == "done"
+
+
+def test_on_a_persons_machine_none_is_not_an_answer_and_the_person_is_asked(
+    ppy_home, client_home, ready
+) -> None:
+    register(ppy_home, FRONT, BACK)
+
+    def act(turn: test_serve.Turn) -> str:
+        assert "work that needs no repository" not in turn.prompt
+        return "REPOSITORY: none"
+
+    turns, routes = FakeTurns(act), Routes()
+    harness = InstructionHarness(
+        FakeEvents([instruction_event("run python3 --version", intent="work")])
+    )
+    serve_until_released(harness, client_home, runner(turns, routes, scratch_work=False))
+    assert turns.names() == [prompts.REPO_CHOICE]
+    (reply,) = routes.replies()
+    assert f"{BACK} or {FRONT}?" in reply["content"]
+
+
+def test_a_runner_with_nothing_registered_runs_it_in_scratch_without_asking(
+    ppy_home, client_home, ready
+) -> None:
+    seen: list[test_serve.Turn] = []
+    turns, routes = _scratch_turns(seen), Routes()
+    harness = InstructionHarness(
+        FakeEvents([instruction_event("check which python is installed", intent="work")])
+    )
+    serve_until_released(harness, client_home, runner(turns, routes, scratch_work=True))
+    assert turns.names() == [prompts.SCRATCH]
+    assert routes.results()[-1]["status"] == "done"
+
+
+def test_the_scratch_turn_may_not_dispatch_or_approve() -> None:
+    refused = instructions.command_refusal(instructions.SCRATCH, ["dispatch", "runtime"])
+    assert refused is not None and "no repository" in refused
+    assert instructions.command_refusal(instructions.SCRATCH, ["capability", "approve", "3"])
+    assert instructions.command_refusal(instructions.SCRATCH, ["status"]) is None
