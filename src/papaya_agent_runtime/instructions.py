@@ -60,7 +60,12 @@ PATHS = (ANSWER, WORK, UNANSWERABLE)
 #: reads other people's work-item text and so may only look at repositories.
 ASK = "ask"
 CHOICE = "choice"
-TURN_PATHS = (*PATHS, ASK, CHOICE)
+#: Work that needs no repository, done by one turn in a scratch directory. Only where
+#: this runtime is a runner Papaya hosts (`cloud.CLOUD_RUNNER_ENV`): a sandbox, so work
+#: outside every repository touches nothing of the person's. On a person's own machine
+#: such work is still asked about (:func:`which_repository`).
+SCRATCH = "scratch"
+TURN_PATHS = (*PATHS, ASK, CHOICE, SCRATCH)
 
 #: The events an instruction ticket's task carries, in the order they happen.
 CLASSIFIED = "instruction_classified"
@@ -129,11 +134,14 @@ class Classification:
     unread: tuple[str, ...] = ()
     #: What the referenced work items say, for the choice turn: ``ref: title - text``.
     items: tuple[str, ...] = ()
+    #: A work path that needs no repository, run by one turn in a scratch directory
+    #: (:data:`SCRATCH`), never by a worker.
+    scratch: bool = False
 
     @property
     def choosing(self) -> bool:
         """A work path with no repository yet: the choice turn decides."""
-        return self.path == WORK and not self.repo and not self.spec
+        return self.path == WORK and not self.repo and not self.spec and not self.scratch
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +155,7 @@ class Classification:
             "candidates": list(self.candidates),
             "unregistered": list(self.unregistered),
             "unread": list(self.unread),
+            "scratch": self.scratch,
         }
 
 
@@ -353,6 +362,25 @@ def cannot_tell(found: Classification, why: str) -> Classification:
     )
 
 
+def in_scratch(found: Classification) -> Classification:
+    """A work path that needs no repository: one turn does it in a scratch directory."""
+    return replace(
+        found, scratch=True, reason="work that needs no repository, in a scratch directory"
+    )
+
+
+def said_no_repository(transcript: str) -> bool:
+    """Whether a choice turn's last `REPOSITORY:` line says the work needs none."""
+    from papaya_agent_runtime import prompts
+
+    said = None
+    for line in str(transcript or "").splitlines():
+        stripped = line.strip().lstrip("*_`> ")
+        if stripped.startswith(prompts.REPOSITORY_PREFIX):
+            said = stripped.removeprefix(prompts.REPOSITORY_PREFIX).strip().strip("`*.")
+    return (said or "").lower() == prompts.REPOSITORY_NONE
+
+
 def chosen(found: Classification, repo: str) -> Classification:
     return replace(found, repo=repo, reason=f"work in {repo}: chosen from the instruction")
 
@@ -496,9 +524,9 @@ LOOKING = "Looking…"
 LOOKING_AFTER = 20.0
 
 
-def on_it(repo: str) -> str:
+def on_it(repo: str | None) -> str:
     """The work path's acknowledgement, in the conversation, as soon as it is placed."""
-    return f"On it - working in {repo}."
+    return f"On it - working in {repo}." if repo else "On it."
 
 
 def setup_reason(problem: Any) -> str:
@@ -557,7 +585,21 @@ CHOICE_ALLOWED: dict[str, frozenset[str] | None] = {
     "memory": frozenset({"show"}),
     "version": None,
 }
-_ALLOWED = {ANSWER: ANSWER_ALLOWED, ASK: ASK_ALLOWED, CHOICE: CHOICE_ALLOWED}
+#: The scratch turn's commands: it does its task with the shell, not the control plane,
+#: so only the reads that say who and where this machine is.
+SCRATCH_ALLOWED: dict[str, frozenset[str] | None] = {
+    "status": None,
+    "memory": frozenset({"show", "path"}),
+    "health": None,
+    "doctor": None,
+    "version": None,
+}
+_ALLOWED = {
+    ANSWER: ANSWER_ALLOWED,
+    ASK: ASK_ALLOWED,
+    CHOICE: CHOICE_ALLOWED,
+    SCRATCH: SCRATCH_ALLOWED,
+}
 #: The work path's refusals: everything today's turns run, except approving a capability.
 WORK_REFUSED: frozenset[tuple[str, str]] = frozenset({("capability", "approve")})
 #: Commands the harness runs, not the turn: `.claude/settings.json` calls `ppy hook
@@ -598,6 +640,8 @@ def command_refusal(
             "never starts or steers a worker",
             ASK: "an asked question runs: it answers, and never approves, delivers or merges",
             CHOICE: "the repository-choice turn runs: it only looks at the registered repositories",
+            SCRATCH: "work that needs no repository runs: it does the task with the shell, "
+            "and never starts, steers or delivers a worker",
         }[path]
         if command not in table:
             return f"`ppy {command}` is not one {what}"
@@ -619,6 +663,8 @@ def turn_path(
     """The command set (:data:`PATH_ENV`) one of an instruction's turns runs under."""
     if choosing:
         return CHOICE
+    if found.scratch:
+        return SCRATCH
     asked = instruction is not None and instruction.intent == papaya_events.INTENT_ASK
     return ASK if found.path == ANSWER and asked else found.path
 
@@ -1012,6 +1058,7 @@ def classification_of(conn: sqlite3.Connection, task_id: int) -> Classification 
         candidates=tuple(str(c) for c in payload.get("candidates") or ()),
         unregistered=tuple(str(c) for c in payload.get("unregistered") or ()),
         unread=tuple(str(c) for c in payload.get("unread") or ()),
+        scratch=bool(payload.get("scratch")),
     )
 
 

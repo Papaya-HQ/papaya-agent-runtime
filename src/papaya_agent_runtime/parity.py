@@ -335,6 +335,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "TicketRunner._instruction_answer",
             "TicketRunner._answer_turns",
             "TicketRunner._instruction_work",
+            "TicketRunner._instruction_scratch",
             "TicketRunner._instruction_steps",
             "TicketRunner._say_once",
             "TicketRunner._note_said",

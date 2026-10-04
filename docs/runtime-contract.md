@@ -793,6 +793,18 @@ limit (never waited out while a person waits) - asks the person, and the questio
 the candidates and any unregistered URL and says a reply with the name is picked straight
 up. An item that could not be read is said in the question, never guessed around.
 
+**Work that needs no repository, on a runner Papaya hosts.** A runner (`ppy serve
+--cloud`, which sets `PPY_CLOUD_RUNNER`) is a sandbox, so work that reads and changes no
+repository's code - running a command, checking what is installed, a calculation - runs
+there in a scratch directory instead of being asked about. The choice turn is told it may
+answer `REPOSITORY: none` (and a runner with nothing registered skips the turn); the work
+then runs as one `scratch` turn (`prompts/scratch.md`) in `runs/<run id>/scratch`, on the
+`scratch` path (`ppy status`, `ppy memory show|path`, `ppy health`, `ppy doctor`,
+`ppy version`: it never dispatches, steers or delivers a worker), and ends with the same
+`OUTCOME:` block as the answer path. It says "On it." where the instruction was asked. On
+a person's own machine `none` is not an answer and nothing changes: work outside every
+repository would touch their machine, so they are asked which repository.
+
 **Seen being worked, in the conversation.** The moment the work path knows its
 repository it posts "On it - working in <repo>." where the instruction was asked. Every
 line a work item would get as a comment (dispatched, reviewing, sent back, blocked) is

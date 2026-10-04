@@ -37,6 +37,15 @@ The brief the worker gets is written by the runtime from the instruction; how br
 held to account is `{runtime_dir}/.agents/skills/brief-a-worker/SKILL.md` and
 `{runtime_dir}/.agents/skills/review-a-worker/SKILL.md`, which you need not read for this.
 
+## Work that needs no repository
+
+When the facts say `work that needs no repository: runs here`, this machine is a sandbox
+Papaya hosts, and work that reads and changes no repository's code (running a command,
+checking what is installed, a quick calculation, looking something up) runs in a scratch
+directory instead. For that work, and only that work, the answer is `REPOSITORY: none`.
+Work that reads or changes a repository's code is never `none`: choose, or say you cannot
+tell. Without that fact, `none` is not an answer here.
+
 ## End with the choice
 
 End your last message with one line, and nothing after it but an optional `RUNTIME:`
@@ -47,6 +56,10 @@ line:
 or, when neither layer gave you one confident answer:
 
     REPOSITORY: cannot tell
+
+or, only where the facts allow it, when the work needs no repository at all:
+
+    REPOSITORY: none
 
 `cannot tell` is a good answer: the person is then asked which, with the candidates
 named, and their one-word reply is picked straight up.
