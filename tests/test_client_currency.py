@@ -73,9 +73,24 @@ def on_path(monkeypatch):
     monkeypatch.setattr(papaya, "installed", lambda: CLIENT)
 
 
-REINSTALL = ["uv", "tool", "install", "--quiet", "--force", f"{papaya.CLIENT_PACKAGE}=={LOCKED}"]
+REINSTALL = [
+    "uv",
+    "tool",
+    "install",
+    "--quiet",
+    *papaya.UV_PYTHON,
+    "--force",
+    f"{papaya.CLIENT_PACKAGE}=={LOCKED}",
+]
 #: What a person is told to run by hand: the same, without `--quiet`.
-BY_HAND = ["uv", "tool", "install", "--force", f"{papaya.CLIENT_PACKAGE}=={LOCKED}"]
+BY_HAND = [
+    "uv",
+    "tool",
+    "install",
+    *papaya.UV_PYTHON,
+    "--force",
+    f"{papaya.CLIENT_PACKAGE}=={LOCKED}",
+]
 
 
 # ── the locked version ──────────────────────────────────────────────────────
@@ -149,7 +164,8 @@ def test_a_failed_reinstall_names_the_command_to_run(checkout, on_path) -> None:
     assert result["line"] == (
         "papaya-agent 0.17.0 is older than 0.18.2 and could not be updated "
         "(error: network unreachable): "
-        f"run uv tool install --force {papaya.CLIENT_PACKAGE}==0.18.2"
+        "run uv tool install --managed-python --python 3.13 "
+        f"--force {papaya.CLIENT_PACKAGE}==0.18.2"
     )
 
 
@@ -229,6 +245,7 @@ def test_doctor_updates_an_older_client_and_says_so(on_path, monkeypatch, tmp_pa
         "tool",
         "install",
         "--quiet",
+        *papaya.UV_PYTHON,
         "--force",
         f"{papaya.CLIENT_PACKAGE}=={locked}",
     ] in client.calls
@@ -250,8 +267,8 @@ def test_doctor_names_the_command_when_the_update_fails(on_path, monkeypatch, tm
     data = doctor.collect()
     assert data["papaya_client"]["state"] == "failed"
     assert (
-        "could not be updated (error: network unreachable): run uv tool install --force"
-        in doctor.render_text(data)
+        "could not be updated (error: network unreachable): "
+        "run uv tool install --managed-python --python 3.13 --force" in doctor.render_text(data)
     )
 
 
@@ -511,6 +528,20 @@ def test_every_uv_call_for_the_client_is_quiet(fresh_machine) -> None:
     assert papaya.client_env()[papaya.UV_NO_PROGRESS] == "1"
 
 
+def test_every_uv_call_for_the_client_names_a_managed_interpreter_of_this_series() -> None:
+    """Never the machine's default `python3`: one no wheel fits sends uv to build from source."""
+    series = (Path(__file__).resolve().parents[1] / ".python-version").read_text().strip()
+    assert ("--managed-python", "--python", series) == papaya.UV_PYTHON
+    for argv in (
+        list(papaya.UV_BOOTSTRAP),
+        list(papaya.UV_INSTALL),
+        papaya.uv_install_argv("0.18.2"),
+        papaya.uv_install_argv("0.18.2", force=True, quiet=False),
+    ):
+        at = argv.index("--managed-python")
+        assert argv[at : at + 3] == list(papaya.UV_PYTHON)
+
+
 def test_the_stand_in_uv_is_as_loud_as_the_real_one(fresh_machine) -> None:
     """Without the quiet setting the stub spills exactly what setup used to show."""
     proc = subprocess.run(
@@ -563,7 +594,8 @@ def test_a_failed_install_after_connect_keeps_what_uv_said(fresh_machine, monkey
     locked = papaya.locked_client_version()
     assert echo.getvalue().splitlines()[-1] == (
         f"papaya-agent {locked} could not be installed on your PATH ({said}): "
-        f"run uv tool install --force {papaya.CLIENT_PACKAGE}=={locked}"
+        "run uv tool install --managed-python --python 3.13 "
+        f"--force {papaya.CLIENT_PACKAGE}=={locked}"
     )
 
 

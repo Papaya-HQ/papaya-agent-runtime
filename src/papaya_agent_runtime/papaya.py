@@ -53,10 +53,16 @@ CLIENT_PACKAGE = "papaya-agent-client"
 #: "Installed N packages" lines. Errors still print, and the client's own output is
 #: untouched: `--quiet` belongs to uv, not to the tool it runs.
 UV_QUIET = "--quiet"
-UV_BOOTSTRAP = ("uv", "tool", "run", UV_QUIET, "--from", CLIENT_PACKAGE, CLI)
+#: The interpreter every uv call for the client runs under: a uv-managed CPython of
+#: this checkout's series (`.python-version`), never the person's default `python3`.
+#: Left to uv, that default can be one no wheel is built for (an Intel Python on Apple
+#: Silicon: cryptography 49 and later ship arm64-only macOS wheels), and uv then
+#: builds from source, which needs Rust and fails. The npm shim pins the same.
+UV_PYTHON = ("--managed-python", "--python", "3.13")
+UV_BOOTSTRAP = ("uv", "tool", "run", UV_QUIET, *UV_PYTHON, "--from", CLIENT_PACKAGE, CLI)
 #: What the shim does after a successful connect, done by hand on the `uv` path;
 #: :func:`uv_install_argv` adds the version this runtime locks.
-UV_INSTALL = ("uv", "tool", "install", UV_QUIET, CLIENT_PACKAGE)
+UV_INSTALL = ("uv", "tool", "install", UV_QUIET, *UV_PYTHON, CLIENT_PACKAGE)
 #: uv's progress bars, off for the npm shim's uv too, which `--quiet` cannot reach.
 UV_NO_PROGRESS = "UV_NO_PROGRESS"
 #: The client's answer when a choice is needed and nobody is at a terminal to make it:
@@ -509,8 +515,9 @@ def locked_client_version(root: str | Path | None = None) -> str | None:
 def uv_install_argv(
     version: str | None = None, *, force: bool = False, quiet: bool = True
 ) -> list[str]:
-    """`uv tool install --quiet [--force] papaya-agent-client==<locked>`; unpinned with no
-    lock. ``quiet=False`` is the command to hand a person, who wants to see it work."""
+    """`uv tool install --quiet --managed-python --python 3.13 [--force]
+    papaya-agent-client==<locked>`; unpinned with no lock. ``quiet=False`` is the
+    command to hand a person, who wants to see it work."""
     version = version or locked_client_version()
     spec = f"{CLIENT_PACKAGE}=={version}" if version else CLIENT_PACKAGE
     return [
@@ -518,6 +525,7 @@ def uv_install_argv(
         "tool",
         "install",
         *([UV_QUIET] if quiet else []),
+        *UV_PYTHON,
         *(["--force"] if force else []),
         spec,
     ]

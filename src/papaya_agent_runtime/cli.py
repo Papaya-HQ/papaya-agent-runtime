@@ -806,9 +806,10 @@ def _papaya_connect(args: argparse.Namespace) -> int:
     if result["ok"]:
         print(f"connected as {result['status']['addressed']}")
         if result.get("installed") is False:
+            by_hand = " ".join(papaya.uv_install_argv(quiet=False))
             print(
-                "note: connected, but `uv tool install papaya-agent-client` failed, so "
-                "`papaya-agent` is not on the PATH for the Claude Code plugin; run it by hand",
+                f"note: connected, but `{by_hand}` failed, so `papaya-agent` is not on the "
+                "PATH for the Claude Code plugin; run it by hand",
                 file=sys.stderr,
             )
         print(
