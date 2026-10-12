@@ -2179,7 +2179,7 @@ class Reporter:
         """
         pattern = deficiency.detail.strip("`")
         program = pattern[len("Bash(") : -len(":*)")] if pattern.startswith("Bash(") else ""
-        if program not in tool_learning.SAFE_FAMILY:
+        if tool_learning.family_kind(program, tool_learning.safe_family()) is None:
             return repo
         if deficiency.status != REPORTED or not deficiency.issue_url:
             return repo
