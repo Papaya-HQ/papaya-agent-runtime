@@ -130,7 +130,9 @@ it needs from you.
 
 It fast-forwards this checkout, rebuilds the environment when the lockfile changed,
 and tells you how to restart. A running `ppy serve` tells you when an update is
-available.
+available. `ppy serve` runs the Papaya client in-process, so after an update that
+moves the client (a new `papaya-agent-client` in `uv.lock`), stop `./bin/ppy serve`
+and start it again: until it restarts it keeps running the old client.
 
 ## Working on the runtime itself
 

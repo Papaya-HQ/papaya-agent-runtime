@@ -630,7 +630,7 @@ wheels = [
 
 [[package]]
 name = "papaya-agent-client"
-version = "0.19.4"
+version = "0.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastmcp" },
@@ -638,9 +638,9 @@ dependencies = [
     { name = "questionary" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/75/92/b0003efc421fab9bd68a511c4730df6b6667f22becf33654c06bd3969a52/papaya_agent_client-0.19.4.tar.gz", hash = "sha256:315e2f7a9976cdcbc58a2c5914283f435bdae6777f9f129dfb6887612cadbd73", size = 494209, upload-time = "2026-10-04T19:49:16.698Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/a4/9615414f03cb3932be990f478b7a55d0d9e5ce6e64d5192f81e13a69cda0/papaya_agent_client-0.22.0.tar.gz", hash = "sha256:900efda341a973a920883967aca77a7af1ec4bb61b732369641ab8517c5929fb", size = 609416, upload-time = "2026-10-12T01:53:56.733Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d8/d7/18fd92fc904be67065d35810a0b8349b98e133cc9d93bdd6bf7bb75ef310/papaya_agent_client-0.19.4-py3-none-any.whl", hash = "sha256:8022827891da20424234311b07de263dee07d894cedc846ff4464b1c0a1457e7", size = 238511, upload-time = "2026-10-04T19:49:14.695Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/9b/23c06894297c3f0d8aa261e99564ea547b30b8df0800b902696a00566f28/papaya_agent_client-0.22.0-py3-none-any.whl", hash = "sha256:7f70d668ce759a2832672c749b4f38b3c4c4de8d7053ad8d1e01873b4ecba580", size = 315981, upload-time = "2026-10-12T01:53:54.986Z" },
 ]
 
 [[package]]
@@ -659,7 +659,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "papaya-agent-client", specifier = ">=0.19.0,<0.20.0" },
+    { name = "papaya-agent-client", specifier = ">=0.22.0,<0.23.0" },
     { name = "questionary", specifier = ">=2.1.0,<3" },
 ]
 

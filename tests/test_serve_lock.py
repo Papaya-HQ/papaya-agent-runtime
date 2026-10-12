@@ -705,3 +705,31 @@ def test_a_serve_nobody_retired_exits_0(ppy_home, whose) -> None:
     assert serve.retired_status(_protocol_supervisor(buffer), stderr=io.StringIO()) == 0
     assert buffer.getvalue() == ""
     assert serve.retired_status(None, stderr=io.StringIO()) == 0
+
+
+def test_every_client_skip_reason_passes_through_serves_writer_untouched() -> None:
+    """Client 0.20.0 added `answered_elsewhere`; serve's writer must carry it as-is."""
+    from papaya_agent_client.supervisor import (
+        REASON_ANSWERED_ELSEWHERE,
+        SKIP_REASONS,
+        Supervisor,
+    )
+
+    stalled: list[str] = []
+    buffer = io.StringIO()
+    supervisor = Supervisor(
+        writer=serve.protocol_writer(buffer, on_stalled=stalled.append),
+        client_version="test",
+        agent={},
+        workspace={},
+        harness={},
+    )
+    assert REASON_ANSWERED_ELSEWHERE in SKIP_REASONS
+    for n, reason in enumerate(SKIP_REASONS):
+        supervisor.job_skipped(f"job-{n}", reason=reason)
+
+    messages = [json.loads(line) for line in buffer.getvalue().splitlines()]
+    skipped = [m for m in messages if m["type"] == "job.skipped"]
+    assert [m["reason"] for m in skipped] == list(SKIP_REASONS)
+    assert all("runtime" not in m for m in skipped)
+    assert stalled == []
