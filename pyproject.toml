@@ -25,8 +25,8 @@ requires-python = ">=3.13"
 # the client's listener loop in-process, so its cursor, reservations, renewals and
 # supervised-protocol writer are used as-is instead of reimplemented here. That
 # makes this a library API dependency, not a tool: pre-1.0 the minor is the
-# client's breaking-change unit, so the range is the current 0.19 line and moving
-# to 0.20 is a deliberate change with the import sites re-checked. 0.18.0 brought
+# client's breaking-change unit, so the range is the current 0.22 line and moving
+# to 0.23 is a deliberate change with the import sites re-checked. 0.18.0 brought
 # the embed builders' `extra_capabilities`, through which `ppy serve` advertises
 # `instruction_intents` (without it Papaya never routes a question to this
 # machine); 0.18.1 added `connect --quiet`, which `ppy setup` feature-detects,
@@ -35,9 +35,13 @@ requires-python = ">=3.13"
 # from a running event loop") and its `connect --quiet` did not silence request
 # logs; 0.18.2 fixes both and adds "Create your engineering agent". 0.18.3
 # passes the selected harness when creating that agent and fixes
-# Windows executable resolution, including runtime launcher hand-off. 0.19.0 is
-# the floor now: `ppy serve --cloud` embeds its `cloud_host` (the provider's port and
-# the sign-in terminal). `ppy setup`
+# Windows executable resolution, including runtime launcher hand-off. 0.19.0
+# brought `cloud_host`, which `ppy serve --cloud` embeds (the provider's port and
+# the sign-in terminal). 0.22.0 is the floor now: 0.20.0 gave `mcp passthrough`
+# a session log on Papaya's Sessions page (and `job.skipped` the reason
+# `answered_elsewhere`, which a host may ignore), 0.21.1 opens that log for a
+# harness the listener starts for one job, and 0.22.0's hooks ask the agent to
+# checkpoint, without which a session shows only "Started". `ppy setup`
 # reinstalls the person's own `papaya-agent` at the version locked here, so the
 # floor is what every setup hands out.
 #
@@ -45,7 +49,7 @@ requires-python = ">=3.13"
 # picker (an owner list, then a checkbox list with type-to-filter). It is imported
 # only there, so nothing else in the control plane may assume it.
 dependencies = [
-    "papaya-agent-client>=0.19.0,<0.20.0",
+    "papaya-agent-client>=0.22.0,<0.23.0",
     "questionary>=2.1.0,<3",
 ]
 
